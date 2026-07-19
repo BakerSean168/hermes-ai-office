@@ -8,7 +8,7 @@ This project is licensed under the [MIT License](LICENSE), so your contributions
 
 ### Prerequisites
 
-- [Node.js](https://nodejs.org/) (v22 recommended)
+- [Node.js](https://nodejs.org/) (use the version in [`.nvmrc`](.nvmrc), currently v22)
 - [VS Code](https://code.visualstudio.com/) (v1.105.0 or later)
 
 ### Setup
@@ -48,11 +48,20 @@ npm run verify:npm-package
 
 The verifier runs the production `prepack` build, creates a tarball outside the repository, installs that exact tarball into a temporary project, and exercises CLI help, the health endpoint, the standalone SPA, bundled assets, and default Hook ON setup. Temporary files and the child server are removed automatically; it never publishes to npm.
 
-### Release publishing
+### Maintainer release checklist
 
-A published GitHub Release coordinates VS Code Marketplace, Open VSX, and npm publishing from the matching tag. Before creating it, update `package.json`, `package-lock.json`, and `CHANGELOG.md`, and make the tag exactly `v<package.json version>`.
+A published GitHub Release coordinates publishing to the VS Code Marketplace, Open VSX, and npm through [`.github/workflows/publish-extension.yml`](.github/workflows/publish-extension.yml). Publishing is release-driven, not triggered by a push to `main` alone.
 
-The npm job uses npm trusted publishing (OIDC) for `pixel-agents-hq/pixel-agents` and `.github/workflows/publish-extension.yml`; it must not use a long-lived `NPM_TOKEN`. A manual workflow dispatch builds, installs, and uploads the candidate tarball for inspection but never publishes it. The package owner must configure the trusted publisher on npm before the first release from this workflow.
+One-time npm setup: configure the `pixel-agents` package's GitHub Actions [trusted publisher](https://docs.npmjs.com/trusted-publishers/) for `pixel-agents-hq/pixel-agents`, workflow `publish-extension.yml`, no environment, and allow `npm publish`.
+The GitHub-hosted workflow enforces Node >=22.14.0 and npm >=11.5.1 and uses OIDC (`id-token: write`); do not configure a long-lived publish token, and revoke any unused one.
+
+For each release:
+
+1. Update `CHANGELOG.md`, then set the same new version in the root `package.json` and both root-version fields in `package-lock.json`. The private workspace manifests are not released and do not receive the extension version.
+2. Run `npm ci`, `npm test`, and `npm run verify:npm-package`. Inspect the generated package if needed by manually dispatching **Publish Extension** in dry-run mode and downloading its `npm-package-*` artifact; manual dispatch never publishes to npm.
+3. Merge the release changes into `main` and wait for CI to pass.
+4. Create and publish a GitHub Release whose tag is exactly `v<package.json version>` and points to that commit on `main` (for example, `v1.4.0`). The npm job rejects a mismatched tag, ref, package identity, non-incrementing version, or changed tarball integrity.
+5. Confirm the Marketplace, Open VSX, and npm jobs succeeded, and verify the new npm version with `npm view pixel-agents version`.
 
 ## Development Workflow
 
@@ -88,7 +97,7 @@ Vite will print a local URL (typically `http://localhost:5173`) where the mocked
 
 ### Project Structure
 
-Pixel Agents is a four-package monorepo with strict layering. `core/` depends on nothing; `server/` and `webview-ui/` depend only on `core/`; `adapters/vscode/` depends on `core/` and `server/`.
+Pixel Agents uses a layered codebase. `core/` depends on nothing; `server/` and `webview-ui/` depend only on `core/`; `adapters/vscode/` depends on `core/` and `server/`.
 
 | Directory                   | Description                                                                                                                                                                                                                                           |
 | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -160,7 +169,7 @@ npm run test:server
 npm run test:webview
 ```
 
-Server tests (~200 tests across 13 files) cover `AgentStateStore` (typed mutations + events), `HookEventHandler` (routing, buffering, team gating), `SessionRouter` and `DismissalTracker`, `FileStateAdapter` (namespaced persistence), `migrateVsCodeState` (verify-before-clear), `teamUtils`, the Claude provider and its team extension, the hook installer, the HTTP server (lifecycle, auth, `/ws`, broadcast), and the hook script via a spawned-process integration test.
+Server tests cover `AgentStateStore` (typed mutations + events), `HookEventHandler` (routing, buffering, team gating), `SessionRouter` and `DismissalTracker`, `FileStateAdapter` (namespaced persistence), `migrateVsCodeState` (verify-before-clear), `teamUtils`, the Claude provider and its team extension, the hook installer, the HTTP server (lifecycle, auth, `/ws`, broadcast), and the hook script via a spawned-process integration test.
 
 `claude-hook.test.ts` requires the bundled hook at `dist/hooks/claude-hook.js`, so build before running it (or use `npm test` which builds first).
 
@@ -246,7 +255,7 @@ The auto-generated test inventory in `e2e/README.md` groups tests by `@area:` ta
    npm run e2e:inventory                # Regen e2e/README.md (must produce no git diff)
    npm run build                        # esbuild (extension + CLI + hooks) + Vite (webview)
    npm test                             # Server vitest + webview vitest
-   npm run e2e                          # Playwright (~48 tests, ~10 min)
+   npm run e2e                          # Full Playwright suite; inventory lives in e2e/README.md
    ```
    CI runs these same checks automatically on every PR. The AsyncAPI and e2e inventory drift checks fail the build on any diff — always regen + commit the result.
 4. Open a pull request against `main` with:

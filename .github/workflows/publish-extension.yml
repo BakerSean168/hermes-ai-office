@@ -17,12 +17,23 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Release Commit Is on Main
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tag must point to a commit on main."
+            exit 1
+          fi
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -37,29 +48,43 @@ jobs:
       - name: Check types and lint
         run: npm run check-types && npm run lint
 
-      - name: Publish to VS Code Marketplace
-        id: publish-vscode
+      - name: Package VSIX for Verification
+        id: package-vsix
+        uses: HaaLeo/publish-vscode-extension@v2
+        with:
+          pat: dry-run
+          registryUrl: https://marketplace.visualstudio.com
+          dryRun: true
+
+      - name: Verify VSIX Package and Extension Host
+        shell: bash
+        env:
+          VSIX_PATH: ${{ steps.package-vsix.outputs.vsixPath }}
+        run: xvfb-run -a node scripts/verify-vsix-package.mjs "$VSIX_PATH"
+
+      - name: Publish Verified VSIX to VS Code Marketplace
         uses: HaaLeo/publish-vscode-extension@v2
         with:
           pat: ${{ secrets.VSCE_PAT }}
           registryUrl: https://marketplace.visualstudio.com
+          extensionFile: ${{ steps.package-vsix.outputs.vsixPath }}
           skipDuplicate: true
-          dryRun: ${{ inputs.dry_run == 'true' }}
+          dryRun: ${{ inputs.dry_run }}
 
-      - name: Publish to Open VSX
+      - name: Publish Verified VSIX to Open VSX
         uses: HaaLeo/publish-vscode-extension@v2
         with:
           pat: ${{ secrets.OPEN_VSX_TOKEN }}
           registryUrl: https://open-vsx.org
-          extensionFile: ${{ steps.publish-vscode.outputs.vsixPath }}
+          extensionFile: ${{ steps.package-vsix.outputs.vsixPath }}
           skipDuplicate: true
-          dryRun: ${{ inputs.dry_run == 'true' }}
+          dryRun: ${{ inputs.dry_run }}
 
       - name: Upload VSIX to Release
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v3
         with:
-          files: ${{ steps.publish-vscode.outputs.vsixPath }}
+          files: ${{ steps.package-vsix.outputs.vsixPath }}
 
   publish-npm:
     name: Verify and Publish npm Package
@@ -71,6 +96,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify Release Commit Is on Main
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tag must point to a commit on main."
+            exit 1
+          fi
 
       - name: Setup Node for Trusted Publishing
         uses: actions/setup-node@v6

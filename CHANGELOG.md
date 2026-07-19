@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.4.0
+
+### Features
+
+- **Claude Code Agent Teams visualization** ([#218](https://github.com/pixel-agents-hq/pixel-agents/pull/218)) — Renders team leads and teammates as coordinated characters in both tmux and inline modes, with role labels, lead badges, token fuel gauges, tool activity, persistence, and coordinated cleanup. Builds on the early implementations in [#79](https://github.com/pixel-agents-hq/pixel-agents/pull/79) and [#177](https://github.com/pixel-agents-hq/pixel-agents/pull/177).
+- **Animated pets** ([#315](https://github.com/pixel-agents-hq/pixel-agents/pull/315)) — Adds Claudio and Gitcat to the layout editor, autonomous walking and idle animations, petting interactions, saved placement, and custom pets loaded from external asset directories. Reimplements and supersedes [#219](https://github.com/pixel-agents-hq/pixel-agents/pull/219) on the new architecture.
+- **Carpets and workspace Areas** ([#316](https://github.com/pixel-agents-hq/pixel-agents/pull/316)) — Adds three auto-tiling carpet styles with WYSIWYG color controls, paint/erase/eyedropper tools, undo, and persistence. Named Areas can be painted onto the office, mapped to workspace folders, and used to seat agents in the right part of the layout. Integrates the original carpet work from [#213](https://github.com/pixel-agents-hq/pixel-agents/pull/213) and Areas work from [#259](https://github.com/pixel-agents-hq/pixel-agents/pull/259).
+- **Optional startup automation** ([#221](https://github.com/pixel-agents-hq/pixel-agents/pull/221)) — Adds `pixel-agents.autoShowPanel` and `pixel-agents.autoSpawnAgent` settings to open the panel and launch an agent automatically when VS Code starts. Both remain off by default.
+
+### Standalone and Architecture
+
+- **Layered architecture and provider-ready core** ([#236](https://github.com/pixel-agents-hq/pixel-agents/pull/236), [#238](https://github.com/pixel-agents-hq/pixel-agents/pull/238), [#273](https://github.com/pixel-agents-hq/pixel-agents/pull/273), merged through [#275](https://github.com/pixel-agents-hq/pixel-agents/pull/275)) — Separates shared contracts, the runtime server, the VS Code adapter, and the webview; centralizes lifecycle state in `AgentRuntime` and `AgentStateStore`; and removes runtime VS Code dependencies from the server. Provider, adapter, transport, and state interfaces now give future clients and agent providers stable integration points.
+- **Standalone browser app and npm package** ([#273](https://github.com/pixel-agents-hq/pixel-agents/pull/273), [#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — `npx pixel-agents` starts a local Fastify server and browser office with WebSocket state delivery. The standalone UI now covers the core VS Code experience, including settings, diagnostics, asset reloads, layout import/export, Areas, carpets, and pets, while user state is centralized under `~/.pixel-agents/`.
+- **Multi-server hook discovery and fan-out** ([#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — Lets the VS Code extension and one or more standalone servers run together. Each server registers independently, Claude hook events fan out to every live server, and each surface adopts only the sessions in its configured scope.
+- **Published WebSocket protocol contract** ([#273](https://github.com/pixel-agents-hq/pixel-agents/pull/273)) — Makes `core/asyncapi.yaml` the authoritative AsyncAPI contract and generates the shared TypeScript message bindings with CI drift detection.
+
+### Fixes
+
+- **Agent and teammate lifecycle reliability** ([#287](https://github.com/pixel-agents-hq/pixel-agents/pull/287), [#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — Fixes idle/done state regressions, aligns teammate lifecycle behavior, and preserves agent tracking when terminals move between VS Code locations.
+- **Standalone server and development reliability** ([#316](https://github.com/pixel-agents-hq/pixel-agents/pull/316), [#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — Honors an explicit `--port`, restores browser-mock hot reload, adds connection-state feedback, and fixes Windows e2e startup behavior.
+- **Areas editor and seating polish** ([#316](https://github.com/pixel-agents-hq/pixel-agents/pull/316)) — Correctly seats agents from custom-named workspace folders, fits four Area cards per row, and prevents the folder picker from being clipped.
+
+### Testing and Release Infrastructure
+
+- **Comprehensive Playwright e2e suite** ([#287](https://github.com/pixel-agents-hq/pixel-agents/pull/287), [#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — Expands coverage across VS Code and standalone, hooks-on and hooks-off lifecycles, Agent Teams, pets, carpets, Areas, and multi-server behavior. Adds a deterministic mock Claude process, narrated run videos, an in-repo coverage inventory, and combined Allure reporting.
+- **Verified npm publishing pipeline** ([#344](https://github.com/pixel-agents-hq/pixel-agents/pull/344)) — Adds package-contract tests, installed-tarball smoke verification, release tag/version checks, and provenance-ready npm publishing for the standalone package.
+
+### Maintenance
+
+- **Move project links to `pixel-agents-hq`** ([#274](https://github.com/pixel-agents-hq/pixel-agents/pull/274)) — Updates repository, issue, and community links after the GitHub organization migration.
+- Dependency and release-action updates ([#224](https://github.com/pixel-agents-hq/pixel-agents/pull/224), [#225](https://github.com/pixel-agents-hq/pixel-agents/pull/225), [#226](https://github.com/pixel-agents-hq/pixel-agents/pull/226), [#227](https://github.com/pixel-agents-hq/pixel-agents/pull/227))
+
+### Contributors
+
+Thank you to the contributors who made this release possible:
+
+- [@itsManeka](https://github.com/itsManeka) — Animated pet system, bundled pet sprites, and pet interactions
+- [@NNTin](https://github.com/NNTin) — Carpet system and foundational Playwright e2e infrastructure
+- [@balgaly](https://github.com/balgaly) — Automatic panel display and agent startup settings
+- [@ErickGross-19](https://github.com/ErickGross-19), [@ZenidX](https://github.com/ZenidX) — Early Agent Teams implementations that informed the shipped design
+- [@pablodelucca](https://github.com/pablodelucca) — Workspace Areas, layout-editor polish, and watchable narrated e2e review
+- [@florintimbuc](https://github.com/florintimbuc) — Architecture refactor, Agent Teams integration, standalone and npm package, multi-server support, e2e expansion, and release coordination
+
 ## v1.3.0
 
 ### Features

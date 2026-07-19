@@ -25,6 +25,82 @@ export const CHANGELOG_REPO_URL = 'https://github.com/pixel-agents-hq/pixel-agen
 
 export const changelogEntries: ChangelogEntry[] = [
   {
+    version: '1.4',
+    sections: [
+      {
+        title: 'Features',
+        items: [
+          'Claude Code Agent Teams visualization with lead badges, role labels, token gauges, and coordinated lifecycle',
+          'Animated pets with saved placement, petting interactions, and external pet packs',
+          'Auto-tiling carpets with color controls, painting tools, undo, and persistence',
+          'Workspace Areas that map folders to office zones and guide agent seating',
+          'Optional settings to show the panel and spawn an agent automatically at startup',
+        ],
+      },
+      {
+        title: 'Standalone and Architecture',
+        items: [
+          'Run the browser office with npx pixel-agents',
+          'Layered architecture with a shared runtime, provider contracts, and transport adapters',
+          'Multi-server hook fan-out lets VS Code and standalone run together',
+          'Published AsyncAPI WebSocket contract with generated TypeScript bindings',
+        ],
+      },
+      {
+        title: 'Fixes',
+        items: [
+          'Preserve agent tracking across terminal moves and align teammate lifecycle behavior',
+          'Honor explicit standalone ports and restore browser-mock hot reload',
+          'Improve Areas seating for custom-named folders and polish editor layouts',
+        ],
+      },
+      {
+        title: 'Testing and Release Infrastructure',
+        items: [
+          'Comprehensive narrated Playwright e2e coverage for VS Code and standalone',
+          'Verified npm packaging and provenance-ready publishing pipeline',
+        ],
+      },
+    ],
+    contributors: [
+      {
+        name: '@itsManeka',
+        url: 'https://github.com/itsManeka',
+        description: 'Animated pet system, bundled pet sprites, and pet interactions',
+      },
+      {
+        name: '@NNTin',
+        url: 'https://github.com/NNTin',
+        description: 'Carpet system and foundational Playwright e2e infrastructure',
+      },
+      {
+        name: '@balgaly',
+        url: 'https://github.com/balgaly',
+        description: 'Automatic panel display and agent startup settings',
+      },
+      {
+        name: '@ErickGross-19',
+        url: 'https://github.com/ErickGross-19',
+        description: 'Early Agent Teams implementation that informed the shipped design',
+      },
+      {
+        name: '@ZenidX',
+        url: 'https://github.com/ZenidX',
+        description: 'Early Agent Teams implementation that informed the shipped design',
+      },
+      {
+        name: '@pablodelucca',
+        url: 'https://github.com/pablodelucca',
+        description: 'Workspace Areas, layout-editor polish, narrated e2e review',
+      },
+      {
+        name: '@florintimbuc',
+        url: 'https://github.com/florintimbuc',
+        description: 'Architecture, Agent Teams, standalone, multi-server, e2e, and release work',
+      },
+    ],
+  },
+  {
     version: '1.3',
     sections: [
       {
