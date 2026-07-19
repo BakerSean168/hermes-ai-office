@@ -45,6 +45,30 @@ jobs:
             | jq '[.[].assets[].download_count] | add // 0')
           echo "downloads=$TOTAL" >> "$GITHUB_OUTPUT"
 
+      - name: Fetch npm downloads
+        id: npm
+        shell: bash
+        run: |
+          START_DATE=$(curl --fail --silent --show-error 'https://registry.npmjs.org/pixel-agents' | jq -er '.time.created[0:10]')
+          END_DATE=$(curl --fail --silent --show-error 'https://api.npmjs.org/downloads/point/last-day/pixel-agents' | jq -er '.end')
+          TOTAL=0
+          CURSOR="$START_DATE"
+
+          while [[ "$CURSOR" < "$END_DATE" || "$CURSOR" == "$END_DATE" ]]; do
+            CHUNK_END=$(date -u -d "$CURSOR + 1 year - 1 day" +%F)
+            if [[ "$CHUNK_END" > "$END_DATE" ]]; then
+              CHUNK_END="$END_DATE"
+            fi
+
+            DOWNLOADS=$(curl --fail --silent --show-error \
+              "https://api.npmjs.org/downloads/point/$CURSOR:$CHUNK_END/pixel-agents" \
+              | jq -er '.downloads')
+            TOTAL=$((TOTAL + DOWNLOADS))
+            CURSOR=$(date -u -d "$CHUNK_END + 1 day" +%F)
+          done
+
+          echo "downloads=$TOTAL" >> "$GITHUB_OUTPUT"
+
       - name: Format install count
         id: format
         run: |
@@ -53,6 +77,19 @@ jobs:
             MSG="$(awk "BEGIN {printf \"%.1f\", $TOTAL / 1000}")k installs"
           else
             MSG="$TOTAL installs"
+          fi
+          echo "message=$MSG" >> "$GITHUB_OUTPUT"
+
+      - name: Format npm download count
+        id: format_npm
+        run: |
+          TOTAL=${{ steps.npm.outputs.downloads }}
+          if [ "$TOTAL" -ge 1000000 ]; then
+            MSG="$(awk "BEGIN {printf \"%.1f\", $TOTAL / 1000000}")M downloads"
+          elif [ "$TOTAL" -ge 1000 ]; then
+            MSG="$(awk "BEGIN {printf \"%.0f\", $TOTAL / 1000}")k downloads"
+          else
+            MSG="$TOTAL downloads"
           fi
           echo "message=$MSG" >> "$GITHUB_OUTPUT"
 
@@ -77,3 +114,15 @@ jobs:
           label: marketplaces
           message: ${{ steps.format.outputs.message }}
           color: '0183ff'
+
+      - name: Update npm downloads badge in gist
+        uses: schneegans/dynamic-badges-action@v1.8.0
+        with:
+          auth: ${{ secrets.GIST_SECRET }}
+          gistID: ${{ secrets.GIST_ID }}
+          filename: npm-downloads.json
+          label: npm
+          message: ${{ steps.format_npm.outputs.message }}
+          color: 'cb3837'
+          namedLogo: npm
+          logoColor: white
