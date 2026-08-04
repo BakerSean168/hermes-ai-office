@@ -13,6 +13,7 @@ import {
   startFileWatching,
 } from '../../server/src/fileWatcher.js';
 import { loadLayout } from '../../server/src/layoutPersistence.js';
+import { assignPaletteIfNeeded } from '../../server/src/paletteAssigner.js';
 import { CLAUDE_TERMINAL_NAME_PREFIX } from '../../server/src/providers/hook/claude/constants.js';
 import { claudeProvider } from '../../server/src/providers/index.js';
 import { cancelPermissionTimer, cancelWaitingTimer } from '../../server/src/timerManager.js';
@@ -119,6 +120,7 @@ export async function launchNewTerminal(
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   activeAgentIdRef.current = id;
   persistAgents();
@@ -388,8 +390,11 @@ export function restoreAgents(
       isTeamLead: p.agentName ? undefined : p.isTeamLead,
       leadAgentId: p.leadAgentId,
       teamUsesTmux: p.teamUsesTmux,
+      palette: p.palette,
+      hueShift: p.hueShift,
     };
 
+    assignPaletteIfNeeded(agent, store);
     store.set(p.id, agent);
     knownJsonlFiles.add(p.jsonlFile);
     if (isExternal) {

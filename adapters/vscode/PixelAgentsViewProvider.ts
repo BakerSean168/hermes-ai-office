@@ -116,6 +116,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         parentAgentId: agent.leadAgentId,
         teamName: agent.teamName,
         hooksOnly: agent.hooksOnly || undefined,
+        palette: agent.palette,
+        hueShift: agent.hueShift,
       });
     });
     this.store.on('agentRemoved', (id) => {

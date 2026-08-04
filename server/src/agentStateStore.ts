@@ -171,6 +171,8 @@ export class AgentStateStore {
         teamUsesTmux: agent.teamUsesTmux,
         backgroundAgentToolIds:
           agent.backgroundAgentToolIds.size > 0 ? [...agent.backgroundAgentToolIds] : undefined,
+        palette: agent.palette,
+        hueShift: agent.hueShift,
       });
     }
     this.adapter.saveAgents(persisted);

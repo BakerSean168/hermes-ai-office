@@ -88,3 +88,14 @@ export const LAYOUT_FILE_NAME = 'layout.json';
 export const LAYOUT_FILE_POLL_INTERVAL_MS = 2000;
 export const LAYOUT_REVISION_KEY = 'layoutRevision';
 export const CONFIG_FILE_NAME = 'config.json';
+
+// ── Avatar Customization ────────────────────────────────────
+/** Number of pre-colored bundled character palettes (char_0.png–char_5.png).
+ *  Mirrors `PALETTE_COUNT` in webview-ui/src/constants.ts; kept separate
+ *  because the server has no DOM/sprite access and cannot import the webview
+ *  constant. The two values must stay in sync. */
+export const PALETTE_COUNT = 6;
+/** Inclusive upper bound for a valid agent hue shift, in degrees. Used by
+ *  clientMessageHandler to guard saveAgentSeats payloads from a remote or
+ *  hand-edited source corrupting the stored values with out-of-range values. */
+export const HUE_SHIFT_MAX_DEG = 360;

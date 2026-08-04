@@ -265,7 +265,9 @@ export function useExtensionMessages(
             ch.agentName = teammateName;
           }
         } else {
-          os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
+          const palette = msg.palette as number | undefined;
+          const hueShift = msg.hueShift as number | undefined;
+          os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
           noteFolderName(folderName);
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
             os.setHeadless(id, true);

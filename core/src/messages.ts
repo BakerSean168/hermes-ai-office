@@ -72,6 +72,8 @@ export interface AgentCreated {
   id: number;
   folderName?: string;
   isExternal?: boolean;
+  palette?: number;
+  hueShift?: number;
 }
 
 export interface AgentClosed {

@@ -248,3 +248,185 @@ describe('clientMessageHandler: areas + carpet wire ordering', () => {
     });
   });
 });
+
+describe('clientMessageHandler: saveAgentSeats palette sync', () => {
+  let tempHome: string;
+  let originalHome: string | undefined;
+  let store: AgentStateStore;
+  let sent: Array<Record<string, unknown>>;
+  let ctx: ClientMessageContext;
+
+  function freshCtx(cache: AssetCache | null = null): ClientMessageContext {
+    return { store, cache };
+  }
+
+  beforeEach(() => {
+    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-cmh-seats-'));
+    originalHome = process.env.HOME;
+    process.env.HOME = tempHome;
+
+    store = new AgentStateStore();
+    store.setAdapter(new FileStateAdapter({ namespace: 'standalone' }));
+    sent = [];
+    ctx = freshCtx();
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    store.dispose();
+    fs.rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  it('syncs in-range palette/hueShift onto the matching AgentState', () => {
+    store.set(1, createTestAgent({ id: 1 }));
+    store.set(2, createTestAgent({ id: 2, palette: 0, hueShift: 0 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: {
+          '1': { palette: 4, hueShift: 120, seatId: 'seat-a' },
+          '2': { palette: 2, hueShift: 60, seatId: 'seat-b' },
+        },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(1)?.palette).toBe(4);
+    expect(store.get(1)?.hueShift).toBe(120);
+    expect(store.get(2)?.palette).toBe(2);
+    expect(store.get(2)?.hueShift).toBe(60);
+  });
+
+  it('drops an out-of-range palette and keeps the existing value', () => {
+    store.set(1, createTestAgent({ id: 1, palette: 1, hueShift: 10 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 99, hueShift: 50, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(1)?.palette).toBe(1);
+    // hueShift 50 is in range → still synced.
+    expect(store.get(1)?.hueShift).toBe(50);
+  });
+
+  it('drops a negative hue shift and keeps the existing value', () => {
+    store.set(1, createTestAgent({ id: 1, palette: 0, hueShift: 30 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 2, hueShift: -5, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    // palette 2 is in range → synced.
+    expect(store.get(1)?.palette).toBe(2);
+    expect(store.get(1)?.hueShift).toBe(30);
+  });
+
+  it('drops a non-integer palette and keeps the existing value', () => {
+    store.set(1, createTestAgent({ id: 1, palette: 5, hueShift: 0 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 2.5, hueShift: 90, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(1)?.palette).toBe(5);
+    expect(store.get(1)?.hueShift).toBe(90);
+  });
+
+  it('accepts the upper hue boundary (360) and lower palette boundary (0)', () => {
+    store.set(1, createTestAgent({ id: 1 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 0, hueShift: 360, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(1)?.palette).toBe(0);
+    expect(store.get(1)?.hueShift).toBe(360);
+  });
+
+  it('silently skips seat entries for unknown agent ids', () => {
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '999': { palette: 3, hueShift: 100, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(999)).toBeUndefined();
+  });
+
+  it('accepts palette 7 when the cache has 8 character sprites', () => {
+    // The guard reads ctx.cache?.characters?.characters.length instead
+    // of hardcoding PALETTE_COUNT. With 8 sprites, palette 7 is valid.
+    const cache: AssetCache = {
+      characters: {
+        characters: [
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+          { down: [[[]]], up: [[[]]], right: [[[]]] },
+        ],
+      },
+      pets: null,
+      floorTiles: null,
+      wallTiles: null,
+      carpetTiles: null,
+      furniture: null,
+      defaultLayout: null,
+    };
+    ctx = freshCtx(cache);
+    store.set(1, createTestAgent({ id: 1 }));
+
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 7, hueShift: 90, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+
+    expect(store.get(1)?.palette).toBe(7);
+    // palette 8 is still out of range for 8 sprites → dropped.
+    handleClientMessage(
+      {
+        type: 'saveAgentSeats',
+        seats: { '1': { palette: 8, hueShift: 90, seatId: null } },
+      },
+      (m) => sent.push(m),
+      ctx,
+    );
+    expect(store.get(1)?.palette).toBe(7);
+  });
+});

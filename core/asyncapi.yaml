@@ -181,6 +181,12 @@ components:
           type: string
         isExternal:
           type: boolean
+        palette:
+          type: integer
+          description: Server-assigned character palette index.
+        hueShift:
+          type: integer
+          description: Server-assigned hue shift in degrees (0-360).
 
     AgentClosed:
       description: An agent has been removed from the office.

@@ -1,3 +1,4 @@
+import { pickDiversePalette } from '../../../../core/src/paletteUtils.js';
 import {
   AUTO_ON_FACING_DEPTH,
   AUTO_ON_SIDE_DEPTH,
@@ -6,8 +7,6 @@ import {
   CHARACTER_SITTING_OFFSET_PX,
   DISMISS_BUBBLE_FAST_FADE_SEC,
   FURNITURE_ANIM_INTERVAL_SEC,
-  HUE_SHIFT_MIN_DEG,
-  HUE_SHIFT_RANGE_DEG,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
   MAX_PET_ID_LENGTH,
@@ -402,19 +401,7 @@ export class OfficeState {
       if (ch.isSubagent) continue;
       if (ch.palette < paletteCount) counts[ch.palette]++;
     }
-    const minCount = Math.min(...counts);
-    // Available = palettes at the minimum count (least used)
-    const available: number[] = [];
-    for (let i = 0; i < paletteCount; i++) {
-      if (counts[i] === minCount) available.push(i);
-    }
-    const palette = available[Math.floor(Math.random() * available.length)];
-    // First round (minCount === 0): no hue shift. Subsequent rounds: random ≥45°.
-    let hueShift = 0;
-    if (minCount > 0) {
-      hueShift = HUE_SHIFT_MIN_DEG + Math.floor(Math.random() * HUE_SHIFT_RANGE_DEG);
-    }
-    return { palette, hueShift };
+    return pickDiversePalette(paletteCount, counts);
   }
 
   addAgent(

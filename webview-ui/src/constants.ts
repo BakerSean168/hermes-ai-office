@@ -200,8 +200,6 @@ export const INACTIVE_SEAT_TIMER_MIN_SEC = 3.0;
 export const INACTIVE_SEAT_TIMER_RANGE_SEC = 2.0;
 /** Default/fallback palette count (bundled characters). Actual count comes from getLoadedCharacterCount(). */
 export const PALETTE_COUNT = 6;
-export const HUE_SHIFT_MIN_DEG = 45;
-export const HUE_SHIFT_RANGE_DEG = 271;
 export const AUTO_ON_FACING_DEPTH = 3;
 export const AUTO_ON_SIDE_DEPTH = 2;
 export const CHARACTER_HIT_HALF_WIDTH = 8;

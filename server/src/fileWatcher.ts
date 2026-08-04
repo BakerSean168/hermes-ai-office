@@ -44,6 +44,7 @@ import {
 } from './constants.js';
 import { seedContextUsage } from './contextUsage.js';
 import type { DismissalTracker } from './dismissalTracker.js';
+import { assignPaletteIfNeeded } from './paletteAssigner.js';
 import { pathsMatch } from './pathKey.js';
 import type { SubagentWatch } from './subagentWatch.js';
 import { cancelPermissionTimer, cancelWaitingTimer, clearAgentActivity } from './timerManager.js';
@@ -530,6 +531,7 @@ function adoptTerminalForFile(
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   activeAgentIdRef.current = id;
   persistAgents();
@@ -748,6 +750,12 @@ export function scanForTeammateFiles(
       teamUsesTmux: parentAgent?.teamUsesTmux,
     };
 
+    if (parentAgent?.palette !== undefined) {
+      agent.palette = parentAgent.palette;
+      agent.hueShift = parentAgent.hueShift ?? 0;
+    } else {
+      assignPaletteIfNeeded(agent, agents);
+    }
     agents.set(id, agent);
     persistAgents();
 
@@ -898,6 +906,12 @@ export function scanForBackgroundAgentFiles(
       spawnToolUseId: entry.toolUseId,
     };
 
+    if (lead.palette !== undefined) {
+      agent.palette = lead.palette;
+      agent.hueShift = lead.hueShift ?? 0;
+    } else {
+      assignPaletteIfNeeded(agent, agents);
+    }
     agents.set(id, agent);
 
     // Derived team: spawning a named agent makes the spawner a Lead, whether
@@ -1129,6 +1143,7 @@ export function adoptExternalSessionFromHook(
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };
+    assignPaletteIfNeeded(agent, agents);
     agents.set(id, agent);
     persistAgents();
     if (debug) {
@@ -1210,6 +1225,7 @@ function adoptExternalSession(
     maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
   };
 
+  assignPaletteIfNeeded(agent, agents);
   agents.set(id, agent);
   persistAgents();
 
