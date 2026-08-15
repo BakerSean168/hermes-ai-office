@@ -243,6 +243,29 @@ export function kanbanRunId(profileId: string, runId: number | undefined, taskId
     : `kanban:${profileId}:task:${taskId}`;
 }
 
+/** Map exact Hermes delegated role labels into the office domain vocabulary. */
+export function roleFromHermesHint(role: string | undefined): ExecutionNode['role'] | undefined {
+  switch ((role ?? '').trim().toLowerCase()) {
+    case 'orchestrator':
+      return 'ORCHESTRATOR';
+    case 'supervisor':
+      return 'SUPERVISOR';
+    case 'reviewer':
+      return 'REVIEWER';
+    case 'researcher':
+      return 'RESEARCHER';
+    case 'tester':
+      return 'TESTER';
+    case 'integrator':
+      return 'INTEGRATOR';
+    case 'executor':
+    case 'leaf':
+      return 'EXECUTOR';
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Convert live external OpenCode/Codex processes into execution nodes when no
  * existing Hermes/Kanban worker already owns the PID. Attribution prefers an
@@ -255,6 +278,8 @@ export function buildProcessNodes(
     ownedPids: ReadonlySet<number>;
     spawns: HermesSpawn[];
     now: number;
+    parentRunById?: ReadonlyMap<string, string>;
+    parentRoleById?: ReadonlyMap<string, ExecutionNode['role']>;
   },
 ): { nodes: ExecutionNode[]; edges: ExecutionEdge[] } {
   const nodes: ExecutionNode[] = [];
@@ -263,16 +288,28 @@ export function buildProcessNodes(
     if (opts.ownedPids.has(proc.pid)) continue;
     const runtime = (proc.runtime ?? '').trim().toLowerCase();
     if (runtime !== 'opencode' && runtime !== 'codex') continue;
-    const spawn = [...opts.spawns].reverse().find((candidate) => {
-      if ((candidate.runtime ?? '').trim().toLowerCase() !== runtime) return false;
-      if (candidate.cwd && proc.cwd && candidate.cwd !== proc.cwd) return false;
-      return true;
-    });
+    const reverseSpawns = [...opts.spawns].reverse();
+    const exactSpawn = reverseSpawns.find(
+      (candidate) =>
+        (candidate.runtime ?? '').trim().toLowerCase() === runtime &&
+        candidate.processId !== undefined &&
+        candidate.processId === proc.pid,
+    );
+    const spawn =
+      exactSpawn ??
+      reverseSpawns.find((candidate) => {
+        if ((candidate.runtime ?? '').trim().toLowerCase() !== runtime) return false;
+        // Never allow an observer record for a *different* PID to degrade into a
+        // cwd heuristic match. Only legacy records without processId may do so.
+        if (candidate.processId !== undefined) return false;
+        if (candidate.cwd && proc.cwd && candidate.cwd !== proc.cwd) return false;
+        return true;
+      });
     const profileId = spawn?.profileId || proc.profile_hint;
     if (!profileId || !opts.profileIds.has(profileId)) continue;
     const id = `process:${proc.pid}`;
     const parentId = spawn?.parentNodeId || undefined;
-    const runId = spawn?.runId || '';
+    const runId = spawn?.runId || (parentId ? opts.parentRunById?.get(parentId) : undefined) || '';
     nodes.push({
       id,
       profileId,
@@ -298,7 +335,8 @@ export function buildProcessNodes(
         runId,
         fromNodeId: parentId,
         toNodeId: id,
-        relation: 'SPAWNED',
+        relation:
+          opts.parentRoleById?.get(parentId) === 'SUPERVISOR' ? 'SUPERVISES' : 'SPAWNED',
       });
     }
   }
@@ -749,7 +787,9 @@ export class HermesProvider implements HookProvider {
         runId: spawn?.runId ?? '',
         parentId,
         type: inferNodeType(worker.runtime ?? ''),
-        role: supervisor ? 'SUPERVISOR' : inferNodeRole(worker.status ?? '', worker.action ?? ''),
+        role:
+          roleFromHermesHint(worker.role_hint) ??
+          (supervisor ? 'SUPERVISOR' : inferNodeRole(worker.status ?? '', worker.action ?? '')),
         runtime: worker.runtime,
         model: worker.model,
         taskTitle: worker.task,
@@ -867,11 +907,19 @@ export class HermesProvider implements HookProvider {
       if (node.processId !== undefined) ownedPids.add(node.processId);
     }
     const profileIds = new Set(this.orgStore.profiles.keys());
+    const parentRunById = new Map<string, string>();
+    const parentRoleById = new Map<string, ExecutionNode['role']>();
+    for (const node of this.orgStore.nodes.values()) {
+      if (node.runId) parentRunById.set(node.id, node.runId);
+      parentRoleById.set(node.id, node.role);
+    }
     const { nodes, edges } = buildProcessNodes(processes, {
       profileIds,
       ownedPids,
       spawns: this.spawns,
       now: Date.now(),
+      parentRunById,
+      parentRoleById,
     });
     for (const node of nodes) this.orgStore.upsertNode(node);
     for (const edge of edges) this.orgStore.upsertEdge(edge);

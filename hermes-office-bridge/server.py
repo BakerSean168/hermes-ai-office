@@ -27,6 +27,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KANBAN_DB = "/opt/data/kanban.db"
 KANBAN_DB_URI = "file:%s?mode=ro" % KANBAN_DB
 SPAWNS_FILE = os.path.join(BASE_DIR, "spawns.json")
+OBSERVER_EVENTS_FILE = os.path.join(BASE_DIR, "observer-events.jsonl")
 
 # 不需要转发给上游的 hop-by-hop 头
 HOP_BY_HOP = {
@@ -307,6 +308,159 @@ def read_kanban():
         return empty
 
 
+
+def _append_observer_event(event):
+    """Persist one bounded, already-sanitized observer event as JSONL."""
+    if not isinstance(event, dict):
+        raise ValueError("observer event must be an object")
+    if event.get("schema") != "hermes.office.observer.v1":
+        raise ValueError("unsupported observer schema")
+    allowed_events = {
+        "subagent_start",
+        "subagent_stop",
+        "runtime_spawn_requested",
+        "runtime_spawn_result",
+    }
+    if event.get("event") not in allowed_events:
+        raise ValueError("unsupported observer event")
+    # Defense in depth: reject unexpectedly large payloads even though the plugin
+    # already truncates goals and never sends raw runtime prompts/results.
+    raw = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    if len(raw.encode("utf-8")) > 16 * 1024:
+        raise ValueError("observer event too large")
+    with open(OBSERVER_EVENTS_FILE, "a", encoding="utf-8") as f:
+        f.write(raw + "\n")
+
+
+def _read_observer_events(limit=2000):
+    """Read the newest observer events without making telemetry availability critical."""
+    try:
+        with open(OBSERVER_EVENTS_FILE, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-limit:]
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        try:
+            event = json.loads(line)
+            if isinstance(event, dict):
+                out.append(event)
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return out
+
+
+def _observer_parent_by_child(events):
+    """child session id -> parent session id from exact subagent lifecycle hooks."""
+    parent = {}
+    for event in events:
+        if event.get("event") != "subagent_start":
+            continue
+        child = event.get("childSessionId")
+        par = event.get("parentSessionId")
+        if child and par:
+            parent[str(child)] = str(par)
+    return parent
+
+
+def _observer_role_by_child(events):
+    roles = {}
+    for event in events:
+        if event.get("event") != "subagent_start":
+            continue
+        child = event.get("childSessionId")
+        role = event.get("childRole")
+        if child and role:
+            roles[str(child)] = str(role)
+    return roles
+
+
+def _session_by_id(sessions):
+    return {str(s.get("id")): s for s in sessions if s.get("id")}
+
+
+def _profile_node_id(profile_id, session_id):
+    return "hermes:%s:%s" % (profile_id, session_id)
+
+
+def _observer_spawns(events, sessions, kanban):
+    """Project exact runtime hook telemetry into the legacy /api/spawns contract.
+
+    Correlation quality order:
+      1. processId from terminal post_tool_call result (exact live process)
+      2. current Hermes sessionId from hook identity (exact parent execution node)
+      3. profileId from the sessions API multiplex attribution
+      4. runId inherited from an active Kanban run owned by the same profile when
+         the parent session itself is a Kanban worker; otherwise left empty and
+         the Pixel Agents graph may inherit it from the parent node.
+    """
+    by_session = _session_by_id(sessions)
+    latest_by_corr = {}
+    for event in events:
+        if event.get("event") not in {"runtime_spawn_requested", "runtime_spawn_result"}:
+            continue
+        corr = str(event.get("correlationId") or event.get("toolCallId") or "")
+        if not corr:
+            continue
+        current = latest_by_corr.get(corr, {})
+        merged = dict(current)
+        merged.update(event)
+        latest_by_corr[corr] = merged
+
+    active_runs_by_profile = {}
+    for run in kanban.get("runs") or []:
+        status = str(run.get("status") or "").lower()
+        if status in {"completed", "done", "failed", "cancelled", "reclaimed"}:
+            continue
+        profile = run.get("profile")
+        if profile:
+            active_runs_by_profile.setdefault(str(profile), []).append(run)
+
+    out = []
+    now = time.time()
+    for event in latest_by_corr.values():
+        session_id = str(event.get("sessionId") or "")
+        session = by_session.get(session_id)
+        profile_id = _session_profile(session) if session else ""
+        controller = bool(session and _is_profile_controller(session))
+        parent_node_id = ""
+        if profile_id and session_id and not controller:
+            parent_node_id = _profile_node_id(profile_id, session_id)
+
+        run_id = ""
+        if session and (session.get("source") or "").lower() == "kanban" and profile_id:
+            candidates = active_runs_by_profile.get(profile_id) or []
+            if len(candidates) == 1:
+                run_id = "kanban:%s:%s" % (profile_id, candidates[0].get("id"))
+
+        observed_at = float(event.get("observedAt") or now)
+        # Requested events with no result are useful briefly, but don't leave a
+        # ghost spawn forever if a command was blocked/cancelled.
+        if now - observed_at > 6 * 3600:
+            continue
+        out.append(
+            {
+                "profileId": profile_id,
+                "runId": run_id,
+                "parentNodeId": parent_node_id,
+                "sessionId": session_id,
+                "toolCallId": str(event.get("toolCallId") or ""),
+                "correlationId": str(event.get("correlationId") or ""),
+                "runtime": str(event.get("runtime") or "unknown"),
+                "cwd": str(event.get("cwd") or ""),
+                "model": str(event.get("model") or ""),
+                "command": str(event.get("command") or ""),
+                "processId": event.get("processId"),
+                "processSessionId": str(event.get("processSessionId") or ""),
+                "resultStatus": str(event.get("resultStatus") or ""),
+                "success": event.get("success"),
+                "createdAt": int(observed_at),
+                "source": "hermes-observer",
+            }
+        )
+    return out
+
+
 def _kanban_summary(tasks):
     summary = {
         "total": len(tasks),
@@ -352,6 +506,9 @@ def build_board():
     kanban = read_kanban()
     kanban_tasks = kanban.get("tasks") or []
     kanban_by_team = _kanban_by_team(kanban_tasks)
+    observer_events = _read_observer_events()
+    observer_parent = _observer_parent_by_child(observer_events)
+    observer_roles = _observer_role_by_child(observer_events)
 
     # 只保留"活跃"或"近期活跃"的 session (避免历史 DONE 节点污染 Live Graph):
     # - is_active 的会话永远保留
@@ -420,7 +577,8 @@ def build_board():
                     "chat_id": s.get("chat_id"),
                     "thread_id": s.get("thread_id"),
                     "last_activity_at": s.get("last_activity_at"),
-                    "parent_id": s.get("parent_session_id") or None,
+                    "parent_id": s.get("parent_session_id") or observer_parent.get(str(s.get("id"))) or None,
+                    "role_hint": observer_roles.get(str(s.get("id"))) or None,
                     "process_id": _match_process(s.get("cwd"), _runtime(s), procs),
                     "workspace": s.get("cwd") or None,
                 }
@@ -489,7 +647,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "service": "hermes-office-bridge",
-                    "endpoints": ["/api/board", "/api/events", "/api/kanban", "/api/spawns"],
+                    "endpoints": ["/api/board", "/api/events", "/api/kanban", "/api/spawns", "/api/observer"],
                     "consumed_by": "pixel-agents office (port 3100)",
                 }
             )
@@ -625,12 +783,37 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
 
     # ---------- /api/spawns (RUNTIME_SPAWN_REQUESTED 记录) ----------
     def _serve_spawns(self):
+        # New source of truth: exact Hermes observer hooks. Keep legacy manual
+        # records as a fallback for older gateways / ad-hoc integrations.
+        try:
+            sessions = (_fetch_upstream("/api/profiles/sessions").get("sessions") or [])
+        except Exception:  # noqa: BLE001
+            sessions = []
+        observer = _observer_spawns(_read_observer_events(), sessions, read_kanban())
         try:
             with open(SPAWNS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                legacy = json.load(f)
         except Exception:  # noqa: BLE001
-            data = []
-        self._send_json({"spawns": data})
+            legacy = []
+        if not isinstance(legacy, list):
+            legacy = []
+        self._send_json({"spawns": legacy[-200:] + observer[-500:]})
+
+    def _post_observer(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > 16 * 1024:
+                self._send_json({"error": "invalid observer payload size"}, 400)
+                return
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            _append_observer_event(body)
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
+        except OSError:
+            self._send_json({"error": "cannot persist observer event"}, 500)
+            return
+        self._send_json({"ok": True}, 202)
 
     def _post_spawns(self):
         """记录一次 runtime spawn 请求 (Hermes 组长侧或被动检测写入)。"""
@@ -685,6 +868,8 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/spawns":
             self._post_spawns()
+        elif path == "/api/observer":
+            self._post_observer()
         else:
             self._send_json({"error": "not found"}, 404)
 

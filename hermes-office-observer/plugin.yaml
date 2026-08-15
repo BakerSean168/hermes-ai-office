@@ -1,0 +1,8 @@
+name: hermes-office-observer
+version: "0.1.0"
+description: Emit Hermes orchestration lifecycle telemetry to the local Hermes AI Office bridge.
+provides_hooks:
+  - subagent_start
+  - subagent_stop
+  - pre_tool_call
+  - post_tool_call

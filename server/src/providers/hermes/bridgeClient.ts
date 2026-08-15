@@ -44,6 +44,8 @@ export interface HermesWorker {
   offline?: boolean;
   /** Parent worker id (session parent chain) — enables multi-level trees. */
   parent_id?: string;
+  /** Exact delegated role from Hermes subagent_start observer hook when available. */
+  role_hint?: string;
   /** Process id reported by the bridge (may be absent → process matching). */
   process_id?: number;
   /** Working directory the worker is running in. */
@@ -128,6 +130,8 @@ export interface HermesSpawn {
   sessionId?: string;
   runtime: string;
   cwd?: string;
+  model?: string;
+  processId?: number;
   command?: string;
   createdAt: number;
 }

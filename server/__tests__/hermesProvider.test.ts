@@ -21,6 +21,7 @@ import {
   kanbanStateToNodeState,
   matchSpawnsToWorkers,
   resolveWorkerProcessId,
+  roleFromHermesHint,
   SPAWN_MATCH_WINDOW_SEC,
   spawnEdgeRelation,
   statusToToolName,
@@ -300,6 +301,16 @@ describe('kanban mapping', () => {
   });
 });
 
+describe('Hermes role hints', () => {
+  it('maps observer delegated roles into office roles', () => {
+    expect(roleFromHermesHint('orchestrator')).toBe('ORCHESTRATOR');
+    expect(roleFromHermesHint('supervisor')).toBe('SUPERVISOR');
+    expect(roleFromHermesHint('reviewer')).toBe('REVIEWER');
+    expect(roleFromHermesHint('leaf')).toBe('EXECUTOR');
+    expect(roleFromHermesHint('unknown')).toBeUndefined();
+  });
+});
+
 describe('process node mapping', () => {
   it('turns a live OpenCode process into an executor node attributed by cwd', () => {
     const result = buildProcessNodes(
@@ -325,6 +336,42 @@ describe('process node mapping', () => {
       processId: 321,
       model: 'ds-v4',
     });
+  });
+
+  it('prefers exact observer processId and inherits run/relation from the parent', () => {
+    const exact: HermesSpawn = {
+      profileId: 'memoflow',
+      parentNodeId: 'hermes:memoflow:child-1',
+      runtime: 'codex',
+      cwd: '/workspace/repos/memoflow',
+      processId: 888,
+      command: 'codex exec …',
+      createdAt: 100,
+    };
+    const ambiguousLegacy: HermesSpawn = {
+      profileId: 'memoflow',
+      runtime: 'codex',
+      cwd: '/workspace/repos/memoflow',
+      command: 'codex review',
+      createdAt: 101,
+    };
+    const result = buildProcessNodes(
+      [{ pid: 888, cwd: '/workspace/repos/memoflow', command: 'codex exec', runtime: 'codex' }],
+      {
+        profileIds: new Set(['memoflow']),
+        ownedPids: new Set(),
+        spawns: [exact, ambiguousLegacy],
+        now: 123,
+        parentRunById: new Map([['hermes:memoflow:child-1', 'kanban:memoflow:12']]),
+        parentRoleById: new Map([['hermes:memoflow:child-1', 'SUPERVISOR']]),
+      },
+    );
+    expect(result.nodes[0]).toMatchObject({
+      processId: 888,
+      parentId: 'hermes:memoflow:child-1',
+      runId: 'kanban:memoflow:12',
+    });
+    expect(result.edges[0]?.relation).toBe('SUPERVISES');
   });
 
   it('uses spawn metadata for parent/run and skips already-owned pids', () => {
