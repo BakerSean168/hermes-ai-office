@@ -12,6 +12,8 @@ import {
   MAX_PET_ID_LENGTH,
   PET_HIT_HALF_WIDTH,
   PET_HIT_HEIGHT,
+  PROFILE_AREA_COLORS,
+  PROFILE_AREA_SLOT_LABELS,
   WAITING_BUBBLE_DURATION_SEC,
 } from '../../constants.js';
 import { getAnimationFrames, getCatalogEntry, getOnStateType } from '../layout/furnitureCatalog.js';
@@ -85,6 +87,55 @@ export class OfficeState {
 
   setAreaMappings(mappings: Record<string, string[]>): void {
     this.areaMappings = mappings;
+  }
+
+  /**
+   * Ordered profile display names (Hermes). Used to re-label the layout's
+   * profile-zone slots (`P1`..`P7`) with real profile names so nameplates show
+   * the profile and `findFreeSeat` can match an agent's teamName to its zone.
+   */
+  private profileAreaNames: string[] = [];
+
+  /**
+   * Re-label the layout's profile zones with profile display names (Hermes).
+   *
+   * The bundled layout ships 7 zones labelled with stable slots (`P1`..`P7`).
+   * When the Hermes bridge reports its profiles, this rewrites `areas` (label →
+   * profile name, color preserved) and `areaTiles` (slot → profile name) so the
+   * office reads as "Default / MemoFlow / ..." zones. Idempotent across calls and
+   * a no-op when `names` is empty (Claude mode keeps the neutral slots).
+   */
+  applyProfileAreaNames(names: string[]): void {
+    const slots = PROFILE_AREA_SLOT_LABELS;
+    const prev: string[] =
+      this.profileAreaNames.length > 0 ? this.profileAreaNames : [...slots];
+    const next: string[] = names.length > 0 ? names : [...slots];
+
+    const rename = new Map<string, string>();
+    for (let i = 0; i < slots.length; i++) {
+      rename.set(prev[i] ?? slots[i], next[i] ?? slots[i]);
+    }
+
+    const areas = this.layout.areas ?? [];
+    const colorOf = (label: string): string => {
+      const found = areas.find((a) => a.label === label);
+      if (found) return found.color;
+      const slotIdx = slots.indexOf(label);
+      return slotIdx >= 0 ? PROFILE_AREA_COLORS[slotIdx] : PROFILE_AREA_COLORS[0];
+    };
+
+    const nonSlotAreas = areas.filter((a) => !prev.includes(a.label));
+    const rebuilt: { label: string; color: string }[] = [];
+    for (let i = 0; i < slots.length; i++) {
+      rebuilt.push({ label: next[i] ?? slots[i], color: colorOf(prev[i] ?? slots[i]) });
+    }
+    this.layout.areas = [...rebuilt, ...nonSlotAreas];
+
+    if (this.layout.areaTiles) {
+      this.layout.areaTiles = this.layout.areaTiles.map((t) => (t ? (rename.get(t) ?? t) : t));
+    }
+
+    this.profileAreaNames = next;
   }
 
   constructor(layout?: OfficeLayout) {
@@ -161,7 +212,7 @@ export class OfficeState {
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
       if (ch.seatId) continue;
-      const seatId = this.findFreeSeat(ch.folderName);
+      const seatId = this.findFreeSeat(ch.folderName, ch.teamName);
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
         ch.seatId = seatId;
@@ -214,6 +265,12 @@ export class OfficeState {
 
     // Reconcile pets against the layout roster (handles editor add/remove)
     this.rebuildPetsFromLayout(layout);
+
+    // Re-apply Hermes profile zone labels (a rebuild replaces this.layout, which
+    // may have been re-labelled by a prior applyProfileAreaNames).
+    if (this.profileAreaNames.length > 0) {
+      this.applyProfileAreaNames(this.profileAreaNames);
+    }
   }
 
   /** Move a character to a random walkable tile */
@@ -326,8 +383,11 @@ export class OfficeState {
   }
 
   /**
-   * 3-stage seat picker for top-level agents.
+   * 4-stage seat picker for top-level agents.
    *
+   *   Stage 0: If `teamName` is given (Hermes profile / Claude team), prefer
+   *            free seats whose tile is labelled with that team's Area — either
+   *            the label itself or `areaMappings[teamName]`.
    *   Stage 1: If `folderName` is given and `areaMappings[folderName]` lists
    *            Area labels, prefer free seats whose tile is labeled with one
    *            of those areas.
@@ -339,13 +399,27 @@ export class OfficeState {
    * preserves pre-Areas single-stage behavior (skips Stage 1; Stage 2 picks
    * unzoned seats from a layout without `areaTiles`, which is every seat).
    */
-  private findFreeSeat(folderName?: string): string | null {
+  private findFreeSeat(folderName?: string, teamName?: string): string | null {
     const electronicsTiles = this.buildElectronicsTileSet();
     const freeSeats: string[] = [];
     for (const [uid, seat] of this.seats) {
       if (!seat.assigned) freeSeats.push(uid);
     }
     if (freeSeats.length === 0) return null;
+
+    // Stage 0 — seats in the Area matching this agent's team (Hermes profiles).
+    if (teamName) {
+      const teamLabels = this.areaMappings[teamName] ?? [teamName];
+      if (teamLabels.length > 0) {
+        const wanted = new Set(teamLabels);
+        const inArea = freeSeats.filter((uid) => {
+          const label = this.seatZone(uid);
+          return label !== null && wanted.has(label);
+        });
+        const pick = this.pickFromSeats(inArea, electronicsTiles);
+        if (pick) return pick;
+      }
+    }
 
     const areaLabels = folderName ? this.areaMappings[folderName] : undefined;
 
@@ -412,6 +486,7 @@ export class OfficeState {
     skipSpawnEffect?: boolean,
     folderName?: string,
     nearAgentId?: number,
+    teamName?: string,
   ): void {
     if (this.characters.has(id)) return;
 
@@ -443,7 +518,7 @@ export class OfficeState {
       seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
     }
     if (!seatId) {
-      seatId = this.findFreeSeat(folderName);
+      seatId = this.findFreeSeat(folderName, teamName);
     }
 
     let ch: Character;
@@ -983,6 +1058,7 @@ export class OfficeState {
     isTeamLead?: boolean,
     leadAgentId?: number,
     teamUsesTmux?: boolean,
+    processId?: number,
   ): void {
     const ch = this.characters.get(id);
     if (!ch) return;
@@ -991,6 +1067,7 @@ export class OfficeState {
     ch.agentName = agentName;
     ch.isTeamLead = isTeamLead;
     ch.leadAgentId = leadAgentId;
+    ch.processId = processId;
     if (teamUsesTmux !== undefined) {
       ch.teamUsesTmux = teamUsesTmux;
     }
@@ -1013,6 +1090,13 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (!ch) return;
     ch.isHeadless = headless;
+  }
+
+  /** Set Hermes bridge runtime metadata (runtime + model) on a character. */
+  setAgentMeta(id: number, meta?: { runtime?: string; model?: string }): void {
+    const ch = this.characters.get(id);
+    if (!ch) return;
+    ch.meta = meta;
   }
 
   setAgentContext(id: number, contextTokens: number, maxContextTokens: number): void {

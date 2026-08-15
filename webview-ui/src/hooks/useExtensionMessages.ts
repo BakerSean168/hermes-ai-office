@@ -5,6 +5,7 @@ import type { ExistingAgentMeta, PendingAgent } from '../office/engine/existingA
 import { reconcileExistingAgents } from '../office/engine/existingAgents.js';
 import type { OfficeState } from '../office/engine/officeState.js';
 import { setGhostHeadlessAgents as setRendererGhostHeadlessAgents } from '../office/engine/renderer.js';
+import { setAreaProfileStatuses } from '../office/engine/renderer.js';
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
@@ -18,6 +19,7 @@ import {
 } from '../office/toolUtils.js';
 import type { OfficeLayout, ToolActivity } from '../office/types.js';
 import { setWallSprites } from '../office/wallTiles.js';
+import type { OrgState } from '../org/types.js';
 import { isBrowserRuntime, isE2E } from '../runtime.js';
 import { transport } from '../transport/index.js';
 
@@ -96,6 +98,8 @@ interface ExtensionMessageState {
   setAreaMappings: (m: Record<string, string[]>) => void;
   showAreas: boolean;
   setShowAreas: (v: boolean) => void;
+  // Hermes Organization view
+  orgState: OrgState | null;
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -137,6 +141,7 @@ export function useExtensionMessages(
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
   const [areaMappings, setAreaMappings] = useState<Record<string, string[]>>({});
   const [showAreas, setShowAreas] = useState(false);
+  const [orgState, setOrgState] = useState<OrgState | null>(null);
 
   // The renderer keeps its own module-level copy (read every rAF frame), so both
   // sources of truth move together — the persisted value on settingsLoaded and
@@ -267,7 +272,8 @@ export function useExtensionMessages(
         } else {
           const palette = msg.palette as number | undefined;
           const hueShift = msg.hueShift as number | undefined;
-          os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
+          const teamName = msg.teamName as string | undefined;
+          os.addAgent(id, palette, hueShift, undefined, undefined, folderName, undefined, teamName);
           noteFolderName(folderName);
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
             os.setHeadless(id, true);
@@ -682,10 +688,39 @@ export function useExtensionMessages(
           msg.isTeamLead as boolean | undefined,
           msg.leadAgentId as number | undefined,
           msg.teamUsesTmux as boolean | undefined,
+          msg.processId as number | undefined,
+        );
+        os.setAgentMeta(
+          id,
+          msg.meta as { runtime?: string; model?: string } | undefined,
         );
       } else if (msg.type === 'agentContextUsage') {
         const id = msg.id as number;
         os.setAgentContext(id, msg.contextTokens as number, msg.maxContextTokens as number);
+      } else if (msg.type === 'orgState') {
+        const profiles = (msg.profiles ?? []) as OrgState['profiles'];
+        setOrgState({
+          profiles,
+          runs: msg.runs as OrgState['runs'],
+          nodes: msg.nodes as OrgState['nodes'],
+          edges: msg.edges as OrgState['edges'],
+        });
+        // Re-label the office's profile zones with the Hermes profile names and
+        // feed the area nameplates their availability/workload status.
+        const names = profiles
+          .map((p) => p.displayName ?? p.profileId)
+          .filter((n): n is string => typeof n === 'string' && n.length > 0);
+        if (names.length > 0) {
+          os.applyProfileAreaNames(names);
+        }
+        const statuses: Record<string, { availability: string; workload: string }> = {};
+        for (const p of profiles) {
+          const key = p.displayName ?? p.profileId;
+          if (typeof key === 'string' && key.length > 0) {
+            statuses[key] = { availability: p.availability, workload: p.workload };
+          }
+        }
+        setAreaProfileStatuses(statuses);
       }
     };
     const unsubscribe = transport.onMessage(handler);
@@ -736,5 +771,6 @@ export function useExtensionMessages(
     setAreaMappings,
     showAreas,
     setShowAreas,
+    orgState,
   };
 }

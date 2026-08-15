@@ -23,6 +23,14 @@ export function isReadingTool(tool: string | null): boolean {
   return isReadingToolName(tool);
 }
 
+/** Tools that render the standing idle pose instead of a typing/reading
+ *  animation (Hermes "Wait" — the worker is idle, waiting on I/O). */
+const IDLE_TOOLS = new Set(['Wait']);
+
+export function isIdleTool(tool: string | null): boolean {
+  return tool !== null && IDLE_TOOLS.has(tool);
+}
+
 /** Pixel center of a tile */
 function tileCenter(col: number, row: number): { x: number; y: number } {
   return {
@@ -320,6 +328,9 @@ export function updateCharacter(
 export function getCharacterSprite(ch: Character, sprites: CharacterSprites): SpriteData {
   switch (ch.state) {
     case CharacterState.TYPE:
+      if (isIdleTool(ch.currentTool)) {
+        return sprites.walk[ch.dir][1];
+      }
       if (isReadingTool(ch.currentTool)) {
         return sprites.reading[ch.dir][ch.frame % 2];
       }

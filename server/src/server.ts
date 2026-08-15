@@ -18,6 +18,8 @@ import {
   SERVERS_DIR,
 } from './constants.js';
 import { createHttpServer } from './httpServer.js';
+import type { OrgStore } from './orgStore.js';
+import type { HermesProvider } from './providers/hermes/hermesProvider.js';
 import type { ServerConfig } from './serverConfig.js';
 import { isServerConfig, isServerTarget } from './serverConfig.js';
 
@@ -67,6 +69,8 @@ export class PixelAgentsServer {
     port?: number;
     staticDir?: string;
     assetCache?: AssetCache;
+    orgStore?: OrgStore;
+    hermesProvider?: HermesProvider;
     onSetHooksEnabled?: SetHooksEnabledSideEffect;
     onReloadAssets?: ReloadAssetsSideEffect;
   }): Promise<ServerConfig> {
@@ -103,6 +107,8 @@ export class PixelAgentsServer {
       runtime: options?.runtime,
       staticDir: options?.staticDir,
       assetCache: options?.assetCache,
+      orgStore: options?.orgStore,
+      hermesProvider: options?.hermesProvider,
       onHookEvent: (providerId, event) => this.callback?.(providerId, event),
       onSetHooksEnabled: options?.onSetHooksEnabled,
       onReloadAssets: options?.onReloadAssets,

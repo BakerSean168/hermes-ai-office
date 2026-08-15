@@ -28,6 +28,18 @@ import { CharacterState, TILE_SIZE } from '../types.js';
 // surfaces this label. Driven by Character.waitingAwaitingInput.
 const WAITING_INPUT_ACTIVITY_TEXT = 'Waiting for input';
 
+/** Display-name mapping for Hermes runtime ids (opencode→OpenCode, …). */
+const RUNTIME_DISPLAY_NAMES: Record<string, string> = {
+  opencode: 'OpenCode',
+  codex: 'Codex',
+  hermes: 'Hermes',
+};
+
+function runtimeDisplayName(runtime: string | undefined): string {
+  if (!runtime) return '';
+  return RUNTIME_DISPLAY_NAMES[runtime.trim().toLowerCase()] ?? runtime;
+}
+
 interface ToolOverlayProps {
   officeState: OfficeState;
   agents: number[];
@@ -203,9 +215,31 @@ export function ToolOverlay({
           dotColor = 'var(--color-status-active)';
         }
 
-        // Team info
-        const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
-        const hasExtraLines = !!(ch.folderName || teamRoleLabel);
+        // Team info — identity line is "<teamName> <agentName>" (Hermes:
+        // "Default #01"). A team lead badges "LEAD" instead of a role name.
+        const identityParts: string[] = [];
+        if (ch.isTeamLead) {
+          identityParts.push('LEAD');
+        } else {
+          if (ch.teamName) identityParts.push(ch.teamName);
+          if (ch.agentName) identityParts.push(ch.agentName);
+        }
+        const identityLabel = identityParts.length > 0 ? identityParts.join(' ') : null;
+
+        // Runtime + model line ("OpenCode · DeepSeek V4") — omitted when the
+        // agent has no model.
+        let metaLine: string | null = null;
+        if (ch.meta?.model) {
+          const runtime = ch.meta.runtime ? runtimeDisplayName(ch.meta.runtime) : '';
+          metaLine = runtime ? `${runtime} · ${ch.meta.model}` : ch.meta.model;
+        }
+
+        const hasExtraLines = !!(
+          ch.folderName ||
+          ch.processId !== undefined ||
+          identityLabel ||
+          metaLine
+        );
 
         // Context gauge. Every agent gets one — lead, teammate, adopted,
         // headless — as soon as it has taken a turn. Sub-agents never do: they
@@ -235,7 +269,7 @@ export function ToolOverlay({
                 />
               )}
               <div className="flex flex-col gap-0 overflow-hidden">
-                {teamRoleLabel && (
+                {identityLabel && (
                   <span
                     className="overflow-hidden text-ellipsis block leading-none"
                     style={{
@@ -244,7 +278,12 @@ export function ToolOverlay({
                       fontWeight: ch.isTeamLead ? 'bold' : undefined,
                     }}
                   >
-                    {teamRoleLabel}
+                    {identityLabel}
+                  </span>
+                )}
+                {metaLine && (
+                  <span className="text-2xs leading-none overflow-hidden text-ellipsis block text-text-muted">
+                    {metaLine}
                   </span>
                 )}
                 <span
@@ -259,6 +298,11 @@ export function ToolOverlay({
                 {ch.folderName && (
                   <span className="text-2xs leading-none overflow-hidden text-ellipsis block">
                     {ch.folderName}
+                  </span>
+                )}
+                {ch.processId !== undefined && (
+                  <span className="text-2xs leading-none overflow-hidden text-ellipsis block text-text-muted">
+                    PID {ch.processId}
                   </span>
                 )}
               </div>

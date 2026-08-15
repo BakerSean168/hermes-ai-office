@@ -23,6 +23,7 @@ import type {
 } from '../engine/renderer.js';
 import { renderFrame } from '../engine/renderer.js';
 import { getCatalogEntry, isRotatable } from '../layout/furnitureCatalog.js';
+import { computeFitView } from '../toolUtils.js';
 import { EditTool, TILE_SIZE } from '../types.js';
 import { computeNormalModeCursor } from './officeCanvasCursor.js';
 
@@ -313,6 +314,32 @@ export function OfficeCanvas({
     showAreas,
     activeAreaLabel,
   ]);
+
+  // Fit-to-content: on first mount, zoom so the office's non-VOID content fills
+  // ~75% of the viewport and center it. Runs once (and only once) — a user's
+  // subsequent zoom/pan is never overridden because `didFitRef` latches.
+  const didFitRef = useRef(false);
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const attemptFit = (): void => {
+      if (didFitRef.current) return;
+      const rect = container.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      const vw = Math.round(rect.width * dpr);
+      const vh = Math.round(rect.height * dpr);
+      if (vw <= 0 || vh <= 0) return;
+      const fit = computeFitView(officeState.getLayout(), vw, vh);
+      if (!fit) return;
+      didFitRef.current = true;
+      onZoomChange(fit.zoom);
+      panRef.current = { x: fit.panX, y: fit.panY };
+    };
+    attemptFit();
+    const observer = new ResizeObserver(attemptFit);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [officeState, onZoomChange, panRef]);
 
   // Convert CSS mouse coords to world (sprite pixel) coords
   const screenToWorld = useCallback(

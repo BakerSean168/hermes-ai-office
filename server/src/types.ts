@@ -61,6 +61,8 @@ export interface AgentState {
   // -- Agent Teams --
   teamName?: string;
   agentName?: string;
+  /** Hermes bridge runtime metadata (runtime + model) shown on the overlay. */
+  meta?: { runtime?: string; model?: string };
   /** True when teamName was read from the session's own record tags (tmux/
    *  inline teams, teammate sessions). Tag identity is authoritative: spawn-
    *  result re-latching (implicit-team generations on resume) only applies to

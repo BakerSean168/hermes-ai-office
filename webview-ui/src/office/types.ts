@@ -239,6 +239,11 @@ export interface Character {
   leadAgentId?: number;
   /** True when lead spawns teammates via tmux (run_in_background Agent calls) */
   teamUsesTmux?: boolean;
+  /** OS process id matched for this agent (Hermes bridge). Shown in the overlay. */
+  processId?: number;
+  /** Hermes bridge runtime metadata (runtime + model). Shown on the overlay's
+   *  second label line ("OpenCode · DeepSeek V4"). */
+  meta?: { runtime?: string; model?: string };
 
   // -- Context gauge --
   /** Tokens in the agent's context as of its newest turn; 0 until reported.

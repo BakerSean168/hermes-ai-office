@@ -13,6 +13,8 @@ interface BottomToolbarProps {
   isSettingsOpen: boolean;
   onToggleSettings: () => void;
   workspaceFolders: WorkspaceFolder[];
+  isOrgView: boolean;
+  onToggleOrgView: () => void;
 }
 
 export function BottomToolbar({
@@ -22,6 +24,8 @@ export function BottomToolbar({
   isSettingsOpen,
   onToggleSettings,
   workspaceFolders,
+  isOrgView,
+  onToggleOrgView,
 }: BottomToolbarProps) {
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
   const [isBypassMenuOpen, setIsBypassMenuOpen] = useState(false);
@@ -126,6 +130,13 @@ export function BottomToolbar({
         title="Edit office layout"
       >
         Layout
+      </Button>
+      <Button
+        variant={isOrgView ? 'active' : 'default'}
+        onClick={onToggleOrgView}
+        title="Show Organization (Hermes bridge)"
+      >
+        🌐 Org
       </Button>
       <Button
         variant={isSettingsOpen ? 'active' : 'default'}

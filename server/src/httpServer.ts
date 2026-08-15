@@ -14,6 +14,8 @@ import type {
 } from './clientMessageHandler.js';
 import { handleClientMessage } from './clientMessageHandler.js';
 import { HOOK_API_PREFIX, MAX_HOOK_BODY_SIZE } from './constants.js';
+import type { OrgStore } from './orgStore.js';
+import type { HermesProvider } from './providers/hermes/hermesProvider.js';
 import type { AgentState } from './types.js';
 
 /** Options for creating the HTTP + WebSocket server. */
@@ -34,6 +36,10 @@ export interface HttpServerOptions {
   staticDir?: string;
   /** Cached assets loaded at startup (standalone only) */
   assetCache?: AssetCache;
+  /** Hermes Organization graph store (present only when the Hermes bridge is enabled) */
+  orgStore?: OrgStore;
+  /** Hermes bridge provider (present only when the bridge is enabled) */
+  hermesProvider?: HermesProvider;
   /** Callback when a hook event is received */
   onHookEvent?: (providerId: string, event: Record<string, unknown>) => void;
   /** Invoked when setHooksEnabled is toggled via WebSocket. Standalone installs/uninstalls hooks here. */
@@ -195,6 +201,8 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
           store,
           runtime: options.runtime,
           cache: options.assetCache ?? null,
+          orgStore: options.orgStore,
+          hermesProvider: options.hermesProvider,
           onSetHooksEnabled: options.onSetHooksEnabled,
           onReloadAssets: options.onReloadAssets,
         });

@@ -6,6 +6,8 @@ import type { LoadedAssets, LoadedCharacterSprites, LoadedPetSprites } from './a
 import { readConfig, writeConfig } from './configPersistence.js';
 import { HUE_SHIFT_MAX_DEG, PALETTE_COUNT } from './constants.js';
 import { readLayoutFromFile, writeLayoutToFile } from './layoutPersistence.js';
+import type { OrgStore } from './orgStore.js';
+import type { HermesProvider } from './providers/hermes/hermesProvider.js';
 import { claudeProvider } from './providers/index.js';
 
 type WsSend = (message: Record<string, unknown>) => void;
@@ -39,6 +41,11 @@ export interface ClientMessageContext {
   onSetHooksEnabled?: SetHooksEnabledSideEffect;
   /** Reload assets after an external-asset-directory change. Needs the dist root, known only to cli.ts. */
   onReloadAssets?: ReloadAssetsSideEffect;
+  /** Hermes Organization graph store (present only when the Hermes bridge is enabled). */
+  orgStore?: OrgStore;
+  /** Hermes bridge provider (present only when the bridge is enabled). Supplies
+   *  its reading/subagent tool taxonomy to the providerCapabilities handshake. */
+  hermesProvider?: HermesProvider;
 }
 
 // ── Setting key constants (mirror adapters/vscode/constants.ts) ──
@@ -220,14 +227,20 @@ export function handleClientMessage(
 }
 
 function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
-  const { store, runtime, cache } = ctx;
+  const { store, runtime, cache, orgStore, hermesProvider } = ctx;
   const adapter = store.getAdapter();
 
   // 1. Provider capabilities (must arrive before any agent messages)
+  const readingTools = new Set<string>(claudeProvider.readingTools);
+  const subagentToolNames = new Set<string>(claudeProvider.subagentToolNames);
+  if (hermesProvider) {
+    for (const t of hermesProvider.readingTools) readingTools.add(t);
+    for (const t of hermesProvider.subagentToolNames) subagentToolNames.add(t);
+  }
   send({
     type: 'providerCapabilities',
-    readingTools: [...claudeProvider.readingTools],
-    subagentToolNames: [...claudeProvider.subagentToolNames],
+    readingTools: [...readingTools],
+    subagentToolNames: [...subagentToolNames],
   });
 
   // 2. Assets (from server cache, loaded at startup via pngjs)
@@ -340,4 +353,11 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   // exist once the layout flush creates them. Without this a reconnecting
   // client shows bare characters until each agent takes another turn.
   resendAgentActivity(send, store);
+
+  // 9. Hermes Organization graph snapshot (only when the bridge is enabled).
+  // Lets a reconnecting client paint the Org view without waiting for the
+  // next board frame.
+  if (orgStore) {
+    send({ type: 'orgState', ...orgStore.snapshot() });
+  }
 }

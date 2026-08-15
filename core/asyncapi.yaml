@@ -114,6 +114,8 @@ components:
         - $ref: '#/components/schemas/ExternalAssetDirectoriesUpdated'
         - $ref: '#/components/schemas/AreaMappingsLoaded'
         - $ref: '#/components/schemas/WorkspaceFolders'
+        # Organization (Hermes bridge)
+        - $ref: '#/components/schemas/OrgState'
         # Diagnostics
         - $ref: '#/components/schemas/AgentDiagnostics'
       discriminator: type
@@ -416,6 +418,23 @@ components:
           type: integer
         teamUsesTmux:
           type: boolean
+        processId:
+          type: integer
+        meta:
+          $ref: '#/components/schemas/AgentRuntimeMeta'
+
+    AgentRuntimeMeta:
+      description: |
+        Runtime metadata for a Hermes bridge agent (runtime id + model id).
+        Shown on the character overlay as the second label line
+        ("OpenCode · DeepSeek V4"); absent for non-Hermes providers.
+      type: object
+      additionalProperties: false
+      properties:
+        runtime:
+          type: string
+        model:
+          type: string
 
     AgentContextUsage:
       description: |
@@ -710,6 +729,35 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/WorkspaceFolder'
+
+    OrgState:
+      description: |
+        Snapshot of the Hermes Organization graph (profiles, runs, execution
+        nodes, edges). Sent once after `webviewReady` when the Hermes bridge is
+        enabled, then again on every bridge board frame. The nested shapes are
+        owned by the server org layer and opaque here.
+      type: object
+      additionalProperties: false
+      required: [type, profiles, runs, nodes, edges]
+      properties:
+        type:
+          const: orgState
+        profiles:
+          type: array
+          items:
+            type: object
+        runs:
+          type: array
+          items:
+            type: object
+        nodes:
+          type: array
+          items:
+            type: object
+        edges:
+          type: array
+          items:
+            type: object
 
     AgentDiagnostics:
       description: Connection diagnostics for all agents (response to requestDiagnostics).

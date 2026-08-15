@@ -89,6 +89,9 @@ export const ZOOM_LEVEL_HIDE_DELAY_MS = 2000;
 export const ZOOM_LEVEL_FADE_DURATION_SEC = 0.5;
 export const ZOOM_SCROLL_THRESHOLD = 50;
 export const PAN_MARGIN_FRACTION = 0.25;
+/** Fraction of the viewport the office content should occupy on first fit
+ *  (min(viewportW/contentW, viewportH/contentH) × this, leaving ~25% margin). */
+export const FIT_CONTENT_MARGIN = 0.75;
 
 // ── Editor ───────────────────────────────────────────────────
 export const UNDO_STACK_MAX_SIZE = 50;
@@ -145,6 +148,30 @@ export const AREA_LABEL_FALLBACK_COLOR = '#ffffff';
 export const AREA_LABEL_SHADOW_COLOR = '#000000';
 /** Drop-shadow alpha behind area labels. */
 export const AREA_LABEL_SHADOW_ALPHA = 0.6;
+
+// ── Profile Areas (Hermes office partition) ──────────────────
+/** Number of profile zones the default office layout is partitioned into. */
+export const PROFILE_AREA_COUNT = 7;
+/** Stable slot labels in the bundled layout's `areas`/`areaTiles`, one per zone. */
+export const PROFILE_AREA_SLOT_LABELS: readonly string[] = [
+  'P1',
+  'P2',
+  'P3',
+  'P4',
+  'P5',
+  'P6',
+  'P7',
+] as const;
+/** Distinct palette assigned to the profile zones by index (spec P1b). */
+export const PROFILE_AREA_COLORS: readonly string[] = [
+  '#ff6b6b',
+  '#4ecdc4',
+  '#45b7d1',
+  '#f9ca24',
+  '#6c5ce7',
+  '#00b894',
+  '#fd79a8',
+] as const;
 
 // ── VisualColorPicker (HSV wheel + brightness for carpets) ───
 export const VISUAL_COLOR_PICKER_SV_SIZE_PX = 180;
@@ -224,6 +251,37 @@ export const CONTEXT_GAUGE_BG = '#222';
 // ── Agent Teams ─────────────────────────────────────────────
 export const TEAM_LEAD_COLOR = '#ffd700';
 export const TEAM_ROLE_COLOR = '#66aaff';
+
+// ── Organization (Hermes) view ──────────────────────────────
+/** Status → chip color for Organization view nodes. BLOCKED red, DONE grey,
+ *  everything else a distinct hue. Kept in constants.ts (not components) so the
+ *  no-inline-colors ESLint rule stays satisfied. */
+export const ORG_STATE_COLORS: Record<string, string> = {
+  STARTING: '#54a0ff',
+  THINKING: '#3794ff',
+  CODING: '#1dd1a1',
+  TERMINAL: '#ffa502',
+  BROWSING: '#48dbfb',
+  TESTING: '#c58fff',
+  REVIEWING: '#54a0ff',
+  WAITING_IO: '#feca57',
+  NEEDS_INPUT: '#feca57',
+  BLOCKED: '#ff6b6b',
+  DONE: '#9aa0a6',
+  FAILED: '#ff2222',
+} as const;
+/** Badge color for a BLOCKED workload. */
+export const ORG_WORKLOAD_BLOCKED_COLOR = '#ff6b6b';
+/** Badge color for an EXECUTING workload. */
+export const ORG_WORKLOAD_EXECUTING_COLOR = '#1dd1a1';
+/** Badge color for a READY workload. */
+export const ORG_WORKLOAD_READY_COLOR = '#9aa0a6';
+/** Badge color for the ONLINE availability. */
+export const ORG_AVAILABILITY_ONLINE_COLOR = '#89d185';
+/** Badge color for the DEGRADED availability. */
+export const ORG_AVAILABILITY_DEGRADED_COLOR = '#feca57';
+/** Badge color for the OFFLINE availability. */
+export const ORG_AVAILABILITY_OFFLINE_COLOR = '#9aa0a6';
 
 // ── Pets ────────────────────────────────────────────────────────
 /** Walking speed in world pixels per second (matches character walk speed visually but slower). */

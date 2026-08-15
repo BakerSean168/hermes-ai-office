@@ -94,6 +94,21 @@ export function isGhostHeadlessAgentsEnabled(): boolean {
   return ghostHeadlessAgents;
 }
 
+// ── Profile area statuses ──────────────────────────────────────
+
+/**
+ * Area label → profile status, fed from the Hermes `orgState` broadcast so the
+ * office nameplates can show "ONLINE · EXECUTING" beside each profile name.
+ * Module state (read every rAF frame) like `ghostHeadlessAgents`.
+ */
+let areaProfileStatuses: Record<string, { availability: string; workload: string }> = {};
+
+export function setAreaProfileStatuses(
+  statuses: Record<string, { availability: string; workload: string }>,
+): void {
+  areaProfileStatuses = statuses;
+}
+
 // ── Render functions ────────────────────────────────────────────
 
 /**
@@ -281,6 +296,8 @@ export function renderAreaLabels(
     const cx = offsetX + (acc.sumX / acc.count + 0.5) * s;
     const cy = offsetY + (acc.sumY / acc.count + 0.5) * s;
 
+    const status = areaProfileStatuses[label];
+
     // Pixel-art drop shadow (1px right + down, no blur).
     ctx.globalAlpha = AREA_LABEL_SHADOW_ALPHA;
     ctx.fillStyle = AREA_LABEL_SHADOW_COLOR;
@@ -290,6 +307,22 @@ export function renderAreaLabels(
     ctx.globalAlpha = AREA_LABEL_ALPHA;
     ctx.fillStyle = colorMap.get(label) ?? AREA_LABEL_FALLBACK_COLOR;
     ctx.fillText(label, cx, cy);
+
+    // Profile status line ("ONLINE · EXECUTING") beneath the name when the
+    // Hermes bridge reported a status for this area.
+    if (status) {
+      const statusText = `${status.availability} · ${status.workload}`;
+      const statusFontSize = Math.max(fontSize * 0.6, AREA_LABEL_MIN_FONT_SIZE_PX);
+      ctx.font = `bold ${statusFontSize}px 'FS Pixel Sans'`;
+      const sy = cy + fontSize * 0.5 + statusFontSize * 0.5 + 2;
+      ctx.globalAlpha = AREA_LABEL_SHADOW_ALPHA;
+      ctx.fillStyle = AREA_LABEL_SHADOW_COLOR;
+      ctx.fillText(statusText, cx + 1, sy + 1);
+      ctx.globalAlpha = AREA_LABEL_ALPHA;
+      ctx.fillStyle = AREA_LABEL_FALLBACK_COLOR;
+      ctx.fillText(statusText, cx, sy);
+      ctx.font = `bold ${fontSize}px 'FS Pixel Sans'`;
+    }
   }
   ctx.restore();
 }

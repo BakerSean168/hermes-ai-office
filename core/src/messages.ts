@@ -36,6 +36,7 @@ export type ServerMessage =
   | ExternalAssetDirectoriesUpdated
   | AreaMappingsLoaded
   | WorkspaceFolders
+  | OrgState
   | AgentDiagnostics;
 
 export type ClientMessage =
@@ -176,6 +177,13 @@ export interface AgentTeamInfo {
   isTeamLead?: boolean;
   leadAgentId?: number;
   teamUsesTmux?: boolean;
+  processId?: number;
+  meta?: AgentRuntimeMeta;
+}
+
+export interface AgentRuntimeMeta {
+  runtime?: string;
+  model?: string;
 }
 
 export interface AgentContextUsage {
@@ -292,6 +300,14 @@ export interface WorkspaceFolders {
 export interface WorkspaceFolder {
   name: string;
   path: string;
+}
+
+export interface OrgState {
+  type: 'orgState';
+  profiles: Record<string, any>[];
+  runs: Record<string, any>[];
+  nodes: Record<string, any>[];
+  edges: Record<string, any>[];
 }
 
 export interface AgentDiagnostics {

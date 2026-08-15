@@ -19,10 +19,11 @@ import {
   loadAllPets,
 } from './assetReload.js';
 import type { AssetCache, ReloadAssetsSideEffect } from './clientMessageHandler.js';
-import { readConfig } from './configPersistence.js';
+import { readConfig, writeConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript } from './providers/index.js';
+import { OrgStore } from './orgStore.js';
+import { claudeProvider, copyHookScript, HermesProvider } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -110,12 +111,48 @@ async function main(): Promise<void> {
   const adapter = new FileStateAdapter({ namespace: 'standalone' });
   store.setAdapter(adapter);
 
+  // ── Hermes Organization layer (opt-in, off by default) ──
+  // Enabled when HERMES_BRIDGE_ENABLED=1 or when HERMES_BRIDGE_URL is set. When
+  // active, the HermesProvider subscribes to the hermes-office-bridge SSE stream
+  // and drives both the Organization graph (orgState) and worker characters.
+  const hermesEnabled =
+    process.env['HERMES_BRIDGE_ENABLED'] === '1' || !!process.env['HERMES_BRIDGE_URL'];
+  const orgStore = hermesEnabled ? new OrgStore() : null;
+  const hermesProvider = hermesEnabled
+    ? new HermesProvider({
+        store,
+        orgStore: orgStore!,
+        baseUrl: process.env['HERMES_BRIDGE_URL'] ?? 'http://127.0.0.1:8787',
+        // Persist the generated profile → Area mapping and turn the area overlay
+        // on so the 7 profile zones (nameplates + colored floors) are visible.
+        onAreaMappingsChanged: (mappings) => {
+          const cfg = readConfig();
+          cfg.standalone.areaMappings = mappings;
+          cfg.standalone.showAreas = true;
+          writeConfig(cfg);
+        },
+      })
+    : null;
+
+  // When the Hermes bridge is enabled, the office renders as profile zones — turn
+  // the area overlay on up front so it's enabled from the very first webviewReady.
+  if (hermesEnabled) {
+    const cfg = readConfig();
+    if (!cfg.standalone.showAreas) {
+      cfg.standalone.showAreas = true;
+      writeConfig(cfg);
+    }
+  }
+
   // ── Create server ──
   const server = new PixelAgentsServer();
 
   try {
     // Create runtime first (before server.start, so we can pass it in)
     const runtime = new AgentRuntime(store, claudeProvider);
+
+    // Subscribe the Hermes bridge as soon as the runtime is ready.
+    hermesProvider?.start();
 
     // Wire hook events: HTTP POST -> runtime -> hookEventHandler -> agents
     server.onHookEvent((providerId, event) => {
@@ -189,6 +226,8 @@ async function main(): Promise<void> {
       port: args.port,
       staticDir,
       assetCache,
+      orgStore: orgStore ?? undefined,
+      hermesProvider: hermesProvider ?? undefined,
       onSetHooksEnabled,
       onReloadAssets,
     });
@@ -229,6 +268,7 @@ async function main(): Promise<void> {
     // ── Graceful shutdown ──
     function shutdown(): void {
       console.log('\nShutting down...');
+      hermesProvider?.stop();
       runtime.dispose();
       server.stop();
       process.exit(0);
