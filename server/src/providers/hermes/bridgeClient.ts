@@ -50,6 +50,15 @@ export interface HermesWorker {
   workspace?: string;
 }
 
+export interface HermesController {
+  session_id?: string;
+  status?: string;
+  model?: string;
+  action?: string;
+  is_active?: boolean;
+  last_activity_at?: number;
+}
+
 export interface HermesTeam {
   name: string;
   display?: string;
@@ -58,6 +67,7 @@ export interface HermesTeam {
   mission?: string;
   elapsed_sec?: number;
   cost_usd?: number;
+  controller?: HermesController | null;
   workers: HermesWorker[];
 }
 
@@ -65,6 +75,9 @@ export interface HermesProcess {
   pid: number;
   cwd?: string;
   command?: string;
+  runtime?: string;
+  model?: string;
+  profile_hint?: string;
 }
 
 export interface HermesBoard {
@@ -91,9 +104,13 @@ export interface HermesKanbanLink {
 }
 
 export interface HermesKanbanRun {
+  id?: number;
   task_id?: string;
   profile?: string;
+  status?: string;
   worker_pid?: number;
+  last_heartbeat_at?: number;
+  started_at?: number;
 }
 
 export interface HermesKanban {

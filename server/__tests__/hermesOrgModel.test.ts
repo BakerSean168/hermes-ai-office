@@ -102,6 +102,15 @@ describe('orgModel', () => {
       const agg = aggregateProfile([{ status: 'idle' }], { kanbanActive: 1 });
       expect(agg.workload).toBe('EXECUTING');
     });
+    it('runtimeActive=1 → EXECUTING even when no Hermes worker is active', () => {
+      const agg = aggregateProfile([], { runtimeActive: 1 });
+      expect(agg.workload).toBe('EXECUTING');
+    });
+    it('active ProfileController affects workload without becoming a worker', () => {
+      expect(aggregateProfile([], { controllerStatus: 'coding' }).workload).toBe('EXECUTING');
+      expect(aggregateProfile([], { controllerStatus: 'planning' }).workload).toBe('PLANNING');
+      expect(aggregateProfile([], { controllerStatus: 'idle' }).workload).toBe('READY');
+    });
     it('kanbanBlocked>0 → BLOCKED even with no active workers', () => {
       const agg = aggregateProfile([{ status: 'idle' }], { kanbanActive: 1, kanbanBlocked: 1 });
       expect(agg.workload).toBe('BLOCKED');

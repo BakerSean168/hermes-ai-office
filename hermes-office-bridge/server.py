@@ -105,13 +105,50 @@ def _display_name(name):
 
 
 def _session_profile(session):
-    return session.get("profile") or session.get("profile_name") or "default"
+    """Resolve the effective multiplex profile for a Hermes session.
+
+    The sessions API exposes both the physical gateway profile (`profile`) and
+    the routed runtime profile (`profile_name`). Under multiplex routing the
+    physical gateway is often `default` even when the session actually belongs
+    to MemoFlow/BodySense/etc, so profile_name MUST win. origin_json is the
+    second source of truth for routed messaging sessions.
+    """
+    explicit = session.get("profile_name")
+    if explicit:
+        return explicit
+    try:
+        origin = json.loads(session.get("origin_json") or "{}")
+        routed = origin.get("profile")
+        if routed:
+            return routed
+    except Exception:  # noqa: BLE001
+        pass
+    return session.get("profile") or "default"
 
 
 def _runtime(session):
-    # 推断: billing_provider=opencode-go → "opencode"; 否则 "hermes"
-    provider = (session.get("billing_provider") or "").lower()
-    return "opencode" if provider == "opencode-go" else "hermes"
+    """Return the runtime that owns the session.
+
+    `/api/profiles/sessions` contains HERMES sessions. `billing_provider` only
+    describes where the model call was billed (e.g. opencode-go), not whether
+    an external OpenCode/Codex process exists. Treating billing_provider as the
+    runtime created fake OpenCode workers. External runtimes are discovered from
+    process/spawn telemetry instead.
+    """
+    explicit = (session.get("runtime") or session.get("agent_runtime") or "").strip().lower()
+    if explicit in {"opencode", "codex", "hermes", "terminal", "browser"}:
+        return explicit
+    return "hermes"
+
+
+def _is_profile_controller(session):
+    """Messaging root sessions are the Profile Controller, not office workers."""
+    if session.get("parent_session_id"):
+        return False
+    return (session.get("source") or "").lower() in {
+        "telegram", "discord", "slack", "whatsapp", "signal", "matrix",
+        "teams", "email", "imessage",
+    }
 
 
 def _cost_usd(session):
@@ -147,8 +184,28 @@ def _elapsed_sec(session, now):
         return 0
 
 
+def _runtime_from_command(command):
+    low = (command or "").lower()
+    if re.search(r"(^|[\s/])opencode(?:[\s]|$)", low):
+        return "opencode"
+    if re.search(r"(^|[\s/])codex(?:[\s]|$)", low):
+        return "codex"
+    return None
+
+
+def _model_from_command(command):
+    text = command or ""
+    m = re.search(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s]+)", text)
+    return m.group(1) if m else None
+
+
+def _profile_hint_from_cwd(cwd):
+    m = re.match(r"^/workspace/repos/([^/]+)(?:/|$)", cwd or "")
+    return m.group(1) if m else None
+
+
 def scan_processes():
-    """扫描 codex/opencode/agy/claude 进程, 附 pid/cwd/cmdline。找不到就返回空列表。"""
+    """Scan live external executor processes (OpenCode/Codex) with correlation hints."""
     procs = []
     try:
         out = subprocess.run(
@@ -158,24 +215,32 @@ def scan_processes():
             timeout=5,
         ).stdout
         for line in out.splitlines()[1:]:
-            low = line.lower()
-            if not any(k in low for k in ("codex", "opencode", "claude", "agy")):
-                continue
             parts = line.split(None, 10)
             if len(parts) < 11:
                 continue
-            pid = parts[1]
+            command = parts[10]
+            runtime = _runtime_from_command(command)
+            if not runtime:
+                continue
+            pid_text = parts[1]
             cwd = ""
             try:
-                cwd = os.readlink(f"/proc/{pid}/cwd")
+                cwd = os.readlink(f"/proc/{pid_text}/cwd")
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                pid = int(pid_text)
+            except ValueError:
+                continue
             procs.append(
                 {
                     "user": parts[0],
                     "pid": pid,
                     "cwd": cwd,
-                    "command": parts[10][:160],
+                    "command": command[:400],
+                    "runtime": runtime,
+                    "model": _model_from_command(command),
+                    "profile_hint": _profile_hint_from_cwd(cwd),
                 }
             )
     except Exception:  # noqa: BLE001
@@ -316,11 +381,19 @@ def build_board():
         sess_list.sort(key=lambda x: x.get("last_activity_at") or 0, reverse=True)
 
         workers = []
+        controller_sessions = [s for s in sess_list if _is_profile_controller(s)]
+        # Live organization graph only contains active execution sessions. Completed
+        # work is represented by Kanban Run history, not immortal DONE characters.
+        worker_sessions = [
+            s for s in sess_list
+            if not _is_profile_controller(s) and s.get("is_active")
+        ]
+        controller = controller_sessions[0] if controller_sessions else None
         active = 0
         blocked = 0
         cost = 0.0
         tokens = {"input": 0, "output": 0, "cache_read": 0}
-        for i, s in enumerate(sess_list):
+        for i, s in enumerate(worker_sessions):
             st = infer_status(s)
             if s.get("is_active"):
                 active += 1
@@ -353,8 +426,8 @@ def build_board():
                 }
             )
 
-        # mission / elapsed 取最近活跃 session
-        most_recent = sess_list[0] if sess_list else None
+        # mission / elapsed prefer worker activity; controller remains a service endpoint.
+        most_recent = worker_sessions[0] if worker_sessions else None
         mission = ""
         elapsed = 0
         if most_recent:
@@ -367,6 +440,14 @@ def build_board():
                 "display": _display_name(name),
                 "worker_total": len(workers),
                 "worker_active": active,
+                "controller": {
+                    "session_id": controller.get("id"),
+                    "status": infer_status(controller),
+                    "model": controller.get("model"),
+                    "action": controller.get("last_activity_description") or "",
+                    "is_active": bool(controller.get("is_active")),
+                    "last_activity_at": controller.get("last_activity_at"),
+                } if controller else None,
                 "queued": 0,
                 "blocked": blocked,
                 "mission": mission,

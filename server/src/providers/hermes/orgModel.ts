@@ -10,21 +10,9 @@
 
 export type ProfileAvailability = 'ONLINE' | 'DEGRADED' | 'OFFLINE';
 export type ProfileWorkload = 'READY' | 'PLANNING' | 'SUPERVISING' | 'EXECUTING' | 'BLOCKED';
-export type NodeType =
-  | 'HERMES_SUBAGENT'
-  | 'OPENCODE'
-  | 'CODEX'
-  | 'TERMINAL'
-  | 'BROWSER'
-  | 'OTHER';
+export type NodeType = 'HERMES_SUBAGENT' | 'OPENCODE' | 'CODEX' | 'TERMINAL' | 'BROWSER' | 'OTHER';
 export type NodeRole =
-  | 'SUPERVISOR'
-  | 'ORCHESTRATOR'
-  | 'EXECUTOR'
-  | 'REVIEWER'
-  | 'RESEARCHER'
-  | 'TESTER'
-  | 'INTEGRATOR';
+  'SUPERVISOR' | 'ORCHESTRATOR' | 'EXECUTOR' | 'REVIEWER' | 'RESEARCHER' | 'TESTER' | 'INTEGRATOR';
 export type NodeState =
   | 'STARTING'
   | 'THINKING'
@@ -214,6 +202,10 @@ export interface AggregateProfileOptions {
   kanbanActive?: number;
   /** Number of blocked kanban tasks for this profile. */
   kanbanBlocked?: number;
+  /** Number of live external runtime processes attributed to this profile. */
+  runtimeActive?: number;
+  /** Root/ProfileController activity. It affects workload but is never a worker node. */
+  controllerStatus?: string;
 }
 
 export function aggregateProfile(
@@ -238,11 +230,17 @@ export function aggregateProfile(
 
   const kanbanActive = opts?.kanbanActive ?? 0;
   const kanbanBlocked = opts?.kanbanBlocked ?? 0;
+  const runtimeActive = opts?.runtimeActive ?? 0;
+  const controllerStatus = (opts?.controllerStatus ?? '').trim().toLowerCase();
+  const controllerState = controllerStatus ? inferNodeState(controllerStatus) : 'DONE';
+  const controllerActive = isActiveState(controllerState);
 
   let workload: ProfileWorkload;
-  if (anyBlocked || kanbanBlocked > 0) {
+  if (anyBlocked || kanbanBlocked > 0 || controllerState === 'BLOCKED') {
     workload = 'BLOCKED';
-  } else if (anyActive || kanbanActive > 0) {
+  } else if (controllerStatus === 'planning') {
+    workload = 'PLANNING';
+  } else if (anyActive || kanbanActive > 0 || runtimeActive > 0 || controllerActive) {
     workload = 'EXECUTING';
   } else {
     workload = 'READY';

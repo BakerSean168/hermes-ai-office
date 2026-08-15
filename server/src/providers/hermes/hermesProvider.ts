@@ -39,6 +39,7 @@ import {
   isActiveState,
   type NodeState,
   type ProfileController,
+  type Run,
 } from './orgModel.js';
 
 // ── status → toolName (drives character animation) ───────────
@@ -235,6 +236,75 @@ export function resolveWorkerProcessId(
   return undefined;
 }
 
+/** Stable Run id for a concrete Hermes Kanban task run. */
+export function kanbanRunId(profileId: string, runId: number | undefined, taskId: string): string {
+  return runId !== undefined
+    ? `kanban:${profileId}:${runId}`
+    : `kanban:${profileId}:task:${taskId}`;
+}
+
+/**
+ * Convert live external OpenCode/Codex processes into execution nodes when no
+ * existing Hermes/Kanban worker already owns the PID. Attribution prefers an
+ * explicit spawn record, then the process cwd profile hint from the bridge.
+ */
+export function buildProcessNodes(
+  processes: HermesProcess[],
+  opts: {
+    profileIds: ReadonlySet<string>;
+    ownedPids: ReadonlySet<number>;
+    spawns: HermesSpawn[];
+    now: number;
+  },
+): { nodes: ExecutionNode[]; edges: ExecutionEdge[] } {
+  const nodes: ExecutionNode[] = [];
+  const edges: ExecutionEdge[] = [];
+  for (const proc of processes) {
+    if (opts.ownedPids.has(proc.pid)) continue;
+    const runtime = (proc.runtime ?? '').trim().toLowerCase();
+    if (runtime !== 'opencode' && runtime !== 'codex') continue;
+    const spawn = [...opts.spawns].reverse().find((candidate) => {
+      if ((candidate.runtime ?? '').trim().toLowerCase() !== runtime) return false;
+      if (candidate.cwd && proc.cwd && candidate.cwd !== proc.cwd) return false;
+      return true;
+    });
+    const profileId = spawn?.profileId || proc.profile_hint;
+    if (!profileId || !opts.profileIds.has(profileId)) continue;
+    const id = `process:${proc.pid}`;
+    const parentId = spawn?.parentNodeId || undefined;
+    const runId = spawn?.runId || '';
+    nodes.push({
+      id,
+      profileId,
+      runId,
+      parentId,
+      type: runtime === 'opencode' ? 'OPENCODE' : 'CODEX',
+      role: 'EXECUTOR',
+      runtime,
+      model: proc.model,
+      taskTitle: spawn?.command || proc.command,
+      state: 'TERMINAL',
+      processId: proc.pid,
+      workspace: proc.cwd,
+      currentTool: 'Terminal',
+      currentAction: proc.command,
+      startedAt: opts.now,
+      updatedAt: opts.now,
+      metadata: { processObserved: true, ...(spawn ? { spawnId: spawn } : {}) },
+    });
+    if (parentId) {
+      edges.push({
+        id: `${parentId}->${id}`,
+        runId,
+        fromNodeId: parentId,
+        toNodeId: id,
+        relation: 'SPAWNED',
+      });
+    }
+  }
+  return { nodes, edges };
+}
+
 // ── Spawn correlation ────────────────────────────────────────
 
 /** Time window (seconds) a spawn's `createdAt` may sit from a worker's last
@@ -369,7 +439,9 @@ export function buildKanbanNodes(
 ): KanbanBuildResult {
   const pidToTaskId = new Map<number, string>();
   const taskIdToPid = new Map<string, number>();
+  const taskIdToRun = new Map<string, HermesKanban['runs'][number]>();
   for (const run of kanban.runs) {
+    if (run.task_id) taskIdToRun.set(run.task_id, run);
     if (run.worker_pid !== undefined && run.task_id) {
       pidToTaskId.set(run.worker_pid, run.task_id);
       taskIdToPid.set(run.task_id, run.worker_pid);
@@ -379,14 +451,17 @@ export function buildKanbanNodes(
   const processPids = new Set(opts.processes.map((p) => p.pid));
   const nodes: ExecutionNode[] = [];
   for (const task of kanban.tasks) {
+    const terminalState = kanbanStateToNodeState(task.status);
+    if (terminalState === 'DONE' || terminalState === 'FAILED') continue;
     const profileId = task.assignee;
     if (!profileId) continue;
     if (!opts.profileIds.has(profileId)) continue;
     const pid = taskIdToPid.get(task.id);
+    const run = taskIdToRun.get(task.id);
     nodes.push({
       id: kanbanNodeId(task.id),
       profileId,
-      runId: `${profileId}:run`,
+      runId: kanbanRunId(profileId, run?.id, task.id),
       parentId: undefined,
       type: 'OTHER',
       role: 'EXECUTOR',
@@ -394,9 +469,16 @@ export function buildKanbanNodes(
       taskId: task.id,
       taskTitle: task.title,
       processId: pid !== undefined && processPids.has(pid) ? pid : undefined,
-      metadata: { kanban: true, priority: task.priority, workspace_path: task.workspace_path },
-      startedAt: opts.now,
+      metadata: {
+        kanban: true,
+        priority: task.priority,
+        workspace_path: task.workspace_path,
+        kanbanRunId: run?.id,
+        kanbanRunStatus: run?.status,
+      },
+      startedAt: run?.started_at ? run.started_at * 1000 : opts.now,
       updatedAt: opts.now,
+      lastHeartbeatAt: run?.last_heartbeat_at ? run.last_heartbeat_at * 1000 : undefined,
     });
   }
 
@@ -405,8 +487,9 @@ export function buildKanbanNodes(
     const parentId = link.parent_id;
     const childId = link.child_id;
     if (!parentId || !childId) continue;
+    const parentNode = nodes.find((n) => n.id === kanbanNodeId(parentId));
     const childNode = nodes.find((n) => n.id === kanbanNodeId(childId));
-    if (!childNode) continue;
+    if (!parentNode || !childNode) continue;
     edges.push({
       id: `${kanbanNodeId(parentId)}->${kanbanNodeId(childId)}`,
       runId: childNode.runId,
@@ -430,9 +513,10 @@ export function buildKanbanNodes(
  * [profile name]) and broadcast as `areaMappingsLoaded`. `names` preserves the
  * board's team order for the webview's zone re-labelling.
  */
-export function buildProfileAreaMappings(
-  teams: HermesTeam[],
-): { mappings: Record<string, string[]>; names: string[] } {
+export function buildProfileAreaMappings(teams: HermesTeam[]): {
+  mappings: Record<string, string[]>;
+  names: string[];
+} {
   const mappings: Record<string, string[]> = {};
   const names: string[] = [];
   for (const team of teams) {
@@ -595,6 +679,7 @@ export class HermesProvider implements HookProvider {
       this.syncTeam(team, board.processes ?? []);
     }
     this.applyKanban(board.processes ?? []);
+    this.applyObservedProcesses(board.processes ?? []);
   }
 
   private syncTeam(team: HermesTeam, processes: HermesProcess[]): void {
@@ -602,14 +687,24 @@ export class HermesProvider implements HookProvider {
     const now = Date.now();
 
     const kanbanTasks = this.kanban?.tasks.filter((t) => t.assignee === profileId) ?? [];
-    const kanbanActive = kanbanTasks.filter(
-      (t) => isActiveState(kanbanStateToNodeState(t.status)),
+    const kanbanActive = kanbanTasks.filter((t) =>
+      isActiveState(kanbanStateToNodeState(t.status)),
     ).length;
     const kanbanBlocked = kanbanTasks.filter(
       (t) => kanbanStateToNodeState(t.status) === 'BLOCKED',
     ).length;
 
-    const agg = aggregateProfile(team.workers, { kanbanActive, kanbanBlocked });
+    const runtimeActive = processes.filter(
+      (proc) =>
+        proc.profile_hint === profileId &&
+        (proc.runtime === 'opencode' || proc.runtime === 'codex'),
+    ).length;
+    const agg = aggregateProfile(team.workers, {
+      kanbanActive,
+      kanbanBlocked,
+      runtimeActive,
+      controllerStatus: team.controller?.status,
+    });
     const profile: ProfileController = {
       profileId,
       displayName: team.display ?? team.name,
@@ -690,9 +785,7 @@ export class HermesProvider implements HookProvider {
           : undefined;
       if (!parentId) continue;
       const parentRole = this.orgStore.nodes.get(parentId)?.role;
-      const relation = spawn
-        ? spawnEdgeRelation(spawn, parentRole)
-        : 'SPAWNED';
+      const relation = spawn ? spawnEdgeRelation(spawn, parentRole) : 'SPAWNED';
       this.orgStore.connect(parentId, sessionId, relation);
     }
   }
@@ -712,22 +805,46 @@ export class HermesProvider implements HookProvider {
       now: Date.now(),
     });
 
-    // Ensure a profile run exists for every profile that owns kanban nodes so
-    // the nodes hang off their profile's run (instead of the default "Active"
-    // bucket). title = profile display name; the run is created lazily and
-    // dropped on the next rebuild (orgStore.clear()) when the profile has no
-    // kanban tasks.
-    const runProfileIds = new Set(nodes.map((n) => n.profileId));
+    // Materialize real Kanban task-runs as first-class Run objects.
+    const taskById = new Map(kanban.tasks.map((task) => [task.id, task]));
     const now = Date.now();
-    for (const profileId of runProfileIds) {
-      const profile = this.orgStore.profiles.get(profileId);
+    for (const node of nodes) {
+      const task = node.taskId ? taskById.get(node.taskId) : undefined;
+      const run = node.taskId
+        ? kanban.runs.find((candidate) => candidate.task_id === node.taskId)
+        : undefined;
+      let status: Run['status'] = 'PLANNING';
+      switch ((run?.status ?? task?.status ?? '').toLowerCase()) {
+        case 'running':
+        case 'claimed':
+          status = 'RUNNING';
+          break;
+        case 'blocked':
+          status = 'BLOCKED';
+          break;
+        case 'done':
+        case 'completed':
+          status = 'COMPLETED';
+          break;
+        case 'failed':
+          status = 'FAILED';
+          break;
+        case 'cancelled':
+        case 'reclaimed':
+          status = 'CANCELLED';
+          break;
+        default:
+          status = 'PLANNING';
+          break;
+      }
       this.orgStore.upsertRun({
-        id: `${profileId}:run`,
-        profileId,
-        title: profile?.displayName ?? profileId,
-        status: 'RUNNING',
-        createdAt: now,
-        startedAt: now,
+        id: node.runId,
+        profileId: node.profileId,
+        title: task?.title ?? node.taskTitle ?? node.profileId,
+        status,
+        createdAt: node.startedAt || now,
+        startedAt: run?.started_at ? run.started_at * 1000 : undefined,
+        completedAt: task?.status === 'done' ? now : undefined,
       });
     }
 
@@ -739,6 +856,23 @@ export class HermesProvider implements HookProvider {
       }
     }
 
+    for (const node of nodes) this.orgStore.upsertNode(node);
+    for (const edge of edges) this.orgStore.upsertEdge(edge);
+  }
+
+  private applyObservedProcesses(processes: HermesProcess[]): void {
+    if (processes.length === 0) return;
+    const ownedPids = new Set<number>();
+    for (const node of this.orgStore.nodes.values()) {
+      if (node.processId !== undefined) ownedPids.add(node.processId);
+    }
+    const profileIds = new Set(this.orgStore.profiles.keys());
+    const { nodes, edges } = buildProcessNodes(processes, {
+      profileIds,
+      ownedPids,
+      spawns: this.spawns,
+      now: Date.now(),
+    });
     for (const node of nodes) this.orgStore.upsertNode(node);
     for (const edge of edges) this.orgStore.upsertEdge(edge);
   }
@@ -770,9 +904,7 @@ export class HermesProvider implements HookProvider {
     const num = node?.num;
     const agentName = num !== undefined ? `#${String(num).padStart(2, '0')}` : undefined;
     const meta =
-      node?.runtime || node?.model
-        ? { runtime: node?.runtime, model: node?.model }
-        : undefined;
+      node?.runtime || node?.model ? { runtime: node?.runtime, model: node?.model } : undefined;
     const agent: AgentState = {
       id,
       sessionId,

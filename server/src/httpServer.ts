@@ -86,6 +86,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   // ── Routes ──────────────────────────────────────────────────
 
   registerHealthRoute(app);
+  registerOrgRoutes(app, options);
   registerHookRoute(app, options);
   registerWebSocketRoute(app, options);
 
@@ -106,6 +107,19 @@ function registerHealthRoute(app: FastifyInstance): void {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     pid: process.pid,
   }));
+}
+
+// ── Organization read API ──────────────────────────────────────
+
+function registerOrgRoutes(app: FastifyInstance, options: HttpServerOptions): void {
+  if (!options.orgStore) return;
+
+  app.get('/api/org/snapshot', async () => options.orgStore!.snapshot());
+  app.get('/api/org/runs', async () => ({ runs: [...options.orgStore!.runs.values()] }));
+  app.get<{ Params: { runId: string } }>('/api/org/graph/:runId', async (request) => {
+    const runId = decodeURIComponent(request.params.runId);
+    return { runId, ...options.orgStore!.getGraph(runId) };
+  });
 }
 
 // ── Hook Events ────────────────────────────────────────────────

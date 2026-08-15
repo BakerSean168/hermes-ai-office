@@ -9,6 +9,7 @@ import type {
 } from '../src/providers/hermes/bridgeClient.js';
 import {
   buildKanbanNodes,
+  buildProcessNodes,
   buildProfileAreaMappings,
   diffBoard,
   formatHermesToolStatus,
@@ -232,7 +233,16 @@ describe('kanban mapping', () => {
         { id: 't2', title: 'Ship docs', assignee: 'memoflow', status: 'todo' },
       ],
       links: [{ parent_id: 't2', child_id: 't1' }],
-      runs: [{ task_id: 't1', profile: 'memoflow', worker_pid: 101 }],
+      runs: [
+        {
+          id: 7,
+          task_id: 't1',
+          profile: 'memoflow',
+          status: 'running',
+          worker_pid: 101,
+          started_at: 100,
+        },
+      ],
     };
     const result = buildKanbanNodes(kanban, {
       profileIds: new Set(['memoflow']),
@@ -243,7 +253,7 @@ describe('kanban mapping', () => {
     expect(result.nodes).toHaveLength(2);
     const t1 = result.nodes.find((n) => n.id === kanbanNodeId('t1'))!;
     expect(t1.parentId).toBeUndefined();
-    expect(t1.runId).toBe('memoflow:run');
+    expect(t1.runId).toBe('kanban:memoflow:7');
     expect(t1.type).toBe('OTHER');
     expect(t1.role).toBe('EXECUTOR');
     expect(t1.state).toBe('CODING');
@@ -259,6 +269,19 @@ describe('kanban mapping', () => {
 
     // worker_pid → task_id association for worker nodes
     expect(result.pidToTaskId.get(101)).toBe('t1');
+  });
+
+  it('skips completed tasks from the live graph', () => {
+    const result = buildKanbanNodes(
+      {
+        tasks: [{ id: 'done1', title: 'Old work', assignee: 'memoflow', status: 'done' }],
+        links: [],
+        runs: [{ id: 9, task_id: 'done1', profile: 'memoflow', status: 'done' }],
+      },
+      { profileIds: new Set(['memoflow']), processes: [], now: 0 },
+    );
+    expect(result.nodes).toHaveLength(0);
+    expect(result.edges).toHaveLength(0);
   });
 
   it('skips tasks whose assignee is not a known profile and unmatched pids', () => {
@@ -277,6 +300,66 @@ describe('kanban mapping', () => {
   });
 });
 
+describe('process node mapping', () => {
+  it('turns a live OpenCode process into an executor node attributed by cwd', () => {
+    const result = buildProcessNodes(
+      [
+        {
+          pid: 321,
+          cwd: '/workspace/repos/memoflow',
+          command: 'opencode run -m ds-v4',
+          runtime: 'opencode',
+          model: 'ds-v4',
+          profile_hint: 'memoflow',
+        },
+      ],
+      { profileIds: new Set(['memoflow']), ownedPids: new Set(), spawns: [], now: 123 },
+    );
+    expect(result.nodes).toHaveLength(1);
+    expect(result.nodes[0]).toMatchObject({
+      id: 'process:321',
+      profileId: 'memoflow',
+      type: 'OPENCODE',
+      role: 'EXECUTOR',
+      state: 'TERMINAL',
+      processId: 321,
+      model: 'ds-v4',
+    });
+  });
+
+  it('uses spawn metadata for parent/run and skips already-owned pids', () => {
+    const spawn: HermesSpawn = {
+      profileId: 'memoflow',
+      runId: 'run-9',
+      parentNodeId: 'hermes:memoflow:s1',
+      runtime: 'codex',
+      cwd: '/workspace/repos/memoflow',
+      command: 'codex review',
+      createdAt: 100,
+    };
+    const result = buildProcessNodes(
+      [{ pid: 777, cwd: '/workspace/repos/memoflow', command: 'codex review', runtime: 'codex' }],
+      { profileIds: new Set(['memoflow']), ownedPids: new Set(), spawns: [spawn], now: 123 },
+    );
+    expect(result.nodes[0]).toMatchObject({
+      parentId: 'hermes:memoflow:s1',
+      runId: 'run-9',
+      type: 'CODEX',
+    });
+    expect(result.edges[0]).toMatchObject({
+      fromNodeId: 'hermes:memoflow:s1',
+      toNodeId: 'process:777',
+      relation: 'SPAWNED',
+    });
+    expect(
+      buildProcessNodes(
+        [{ pid: 777, cwd: '/workspace/repos/memoflow', command: 'codex review', runtime: 'codex' }],
+        { profileIds: new Set(['memoflow']), ownedPids: new Set([777]), spawns: [spawn], now: 123 },
+      ).nodes,
+    ).toHaveLength(0);
+  });
+});
+
 describe('spawn correlation', () => {
   const spawn = (over: Partial<HermesSpawn>): HermesSpawn => ({
     profileId: 'memoflow',
@@ -288,7 +371,12 @@ describe('spawn correlation', () => {
   it('matches a worker to a spawn within the window on profile + runtime', () => {
     const matched = matchSpawnsToWorkers(
       [
-        { sessionId: 'hermes:memoflow:w1', profileId: 'memoflow', runtime: 'opencode', lastActivitySec: 1_000_100 },
+        {
+          sessionId: 'hermes:memoflow:w1',
+          profileId: 'memoflow',
+          runtime: 'opencode',
+          lastActivitySec: 1_000_100,
+        },
       ],
       [spawn({ createdAt: 1_000_000 })],
       1_000_100,
@@ -315,7 +403,12 @@ describe('spawn correlation', () => {
   it('skips spawns whose runtime disagrees with the worker', () => {
     const matched = matchSpawnsToWorkers(
       [
-        { sessionId: 'hermes:memoflow:w1', profileId: 'memoflow', runtime: 'opencode', lastActivitySec: 1_000_000 },
+        {
+          sessionId: 'hermes:memoflow:w1',
+          profileId: 'memoflow',
+          runtime: 'opencode',
+          lastActivitySec: 1_000_000,
+        },
       ],
       [spawn({ runtime: 'codex', createdAt: 1_000_000 })],
       1_000_000,
@@ -326,8 +419,18 @@ describe('spawn correlation', () => {
   it('assigns each spawn to at most one worker (first-come-first-serve)', () => {
     const matched = matchSpawnsToWorkers(
       [
-        { sessionId: 'hermes:memoflow:w1', profileId: 'memoflow', runtime: 'opencode', lastActivitySec: 1_000_000 },
-        { sessionId: 'hermes:memoflow:w2', profileId: 'memoflow', runtime: 'opencode', lastActivitySec: 1_000_000 },
+        {
+          sessionId: 'hermes:memoflow:w1',
+          profileId: 'memoflow',
+          runtime: 'opencode',
+          lastActivitySec: 1_000_000,
+        },
+        {
+          sessionId: 'hermes:memoflow:w2',
+          profileId: 'memoflow',
+          runtime: 'opencode',
+          lastActivitySec: 1_000_000,
+        },
       ],
       [spawn({ createdAt: 1_000_000 })],
       1_000_000,
@@ -338,7 +441,12 @@ describe('spawn correlation', () => {
   it('matches the nearest spawn when several are within the window', () => {
     const matched = matchSpawnsToWorkers(
       [
-        { sessionId: 'hermes:memoflow:w1', profileId: 'memoflow', runtime: 'opencode', lastActivitySec: 1_000_000 },
+        {
+          sessionId: 'hermes:memoflow:w1',
+          profileId: 'memoflow',
+          runtime: 'opencode',
+          lastActivitySec: 1_000_000,
+        },
       ],
       [spawn({ createdAt: 999_800 }), spawn({ createdAt: 999_950 })],
       1_000_000,
@@ -347,15 +455,17 @@ describe('spawn correlation', () => {
   });
 
   it('flags a worker as supervisor via delegation text or being a spawn parent', () => {
-    expect(isSupervisorWorker({ task: 'dispatch work', action: '' }, 'hermes:memoflow:w1', [])).toBe(true);
-    expect(isSupervisorWorker({ task: '', action: '派发任务' }, 'hermes:memoflow:w1', [])).toBe(true);
+    expect(
+      isSupervisorWorker({ task: 'dispatch work', action: '' }, 'hermes:memoflow:w1', []),
+    ).toBe(true);
+    expect(isSupervisorWorker({ task: '', action: '派发任务' }, 'hermes:memoflow:w1', [])).toBe(
+      true,
+    );
     expect(isSupervisorWorker({ task: '', action: 'idle' }, 'hermes:memoflow:w1', [])).toBe(false);
     expect(
-      isSupervisorWorker(
-        { task: '', action: 'idle' },
-        'hermes:memoflow:w1',
-        [spawn({ parentNodeId: 'hermes:memoflow:w1' })],
-      ),
+      isSupervisorWorker({ task: '', action: 'idle' }, 'hermes:memoflow:w1', [
+        spawn({ parentNodeId: 'hermes:memoflow:w1' }),
+      ]),
     ).toBe(true);
   });
 
@@ -449,7 +559,9 @@ describe('HermesProvider spawn correlation integration', () => {
     const provider = new HermesProvider({ store, orgStore, baseUrl: 'http://test', fetchImpl });
     provider.start();
     try {
-      await waitFor(() => orgStore.nodes.get('hermes:memoflow:w-exec')?.metadata?.spawnId !== undefined);
+      await waitFor(
+        () => orgStore.nodes.get('hermes:memoflow:w-exec')?.metadata?.spawnId !== undefined,
+      );
 
       const exec = orgStore.nodes.get('hermes:memoflow:w-exec')!;
       expect(exec.parentId).toBe('hermes:memoflow:w-super');
@@ -458,9 +570,7 @@ describe('HermesProvider spawn correlation integration', () => {
       const supervisor = orgStore.nodes.get('hermes:memoflow:w-super')!;
       expect(supervisor.role).toBe('SUPERVISOR');
 
-      const edge = orgStore
-        .snapshot()
-        .edges.find((e) => e.toNodeId === 'hermes:memoflow:w-exec')!;
+      const edge = orgStore.snapshot().edges.find((e) => e.toNodeId === 'hermes:memoflow:w-exec')!;
       expect(edge.fromNodeId).toBe('hermes:memoflow:w-super');
       expect(edge.relation).toBe('SUPERVISES');
     } finally {
@@ -516,9 +626,7 @@ describe('HermesProvider profile aggregation integration', () => {
           name: 'memoflow',
           display: 'MemoFlow',
           mission: 'Sync Engine v2',
-          workers: [
-            { id: 'w1', num: 1, runtime: 'opencode', status: 'coding', task: 'Wire API' },
-          ],
+          workers: [{ id: 'w1', num: 1, runtime: 'opencode', status: 'coding', task: 'Wire API' }],
         },
       ],
     };
@@ -553,9 +661,7 @@ describe('HermesProvider profile aggregation integration', () => {
 
   it('merges active kanban tasks into profile workload → EXECUTING', async () => {
     const board: HermesBoard = {
-      teams: [
-        { name: 'memoflow', display: 'MemoFlow', workers: [{ id: 'w1', status: 'idle' }] },
-      ],
+      teams: [{ name: 'memoflow', display: 'MemoFlow', workers: [{ id: 'w1', status: 'idle' }] }],
     };
     const kanban: HermesKanban = {
       tasks: [{ id: 't1', title: 'Wire API', assignee: 'memoflow', status: 'running' }],
@@ -575,10 +681,38 @@ describe('HermesProvider profile aggregation integration', () => {
       await waitFor(() => orgStore.profiles.get('memoflow')?.workload === 'EXECUTING');
       expect(orgStore.profiles.get('memoflow')!.workload).toBe('EXECUTING');
       expect(orgStore.nodes.has('kanban:t1')).toBe(true);
-      // kanban nodes hang off the profile run (runId = "<profile>:run"), and the
-      // run is upserted with the profile display name as its title.
-      expect(orgStore.nodes.get('kanban:t1')!.runId).toBe('memoflow:run');
-      expect(orgStore.runs.get('memoflow:run')?.title).toBe('MemoFlow');
+      // kanban nodes hang off a concrete task-run, not a synthetic profile run.
+      const runId = orgStore.nodes.get('kanban:t1')!.runId;
+      expect(runId).toBe('kanban:memoflow:task:t1');
+      expect(orgStore.runs.get(runId)?.title).toBe('Wire API');
+    } finally {
+      provider.stop();
+    }
+  });
+
+  it('marks the profile EXECUTING when the root controller is actively coding without creating a worker node', async () => {
+    const board: HermesBoard = {
+      teams: [
+        {
+          name: 'memoflow',
+          controller: { session_id: 'root1', status: 'coding', is_active: true },
+          workers: [],
+        },
+      ],
+    };
+    const store = new AgentStateStore();
+    const orgStore = new OrgStore();
+    const provider = new HermesProvider({
+      store,
+      orgStore,
+      baseUrl: 'http://test',
+      fetchImpl: makeFetchImpl(board, emptyKanban),
+    });
+    provider.start();
+    try {
+      await waitFor(() => orgStore.profiles.get('memoflow') !== undefined);
+      expect(orgStore.profiles.get('memoflow')!.workload).toBe('EXECUTING');
+      expect(orgStore.nodes.size).toBe(0);
     } finally {
       provider.stop();
     }
