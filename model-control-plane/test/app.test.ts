@@ -166,6 +166,17 @@ test('explicit supply catalog registration classifies gateway evidence without c
       body.offering.commercial_metadata_json.includes('opencode-go/deepseek-v4-flash'),
       true,
     );
+    const selectors = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/model-offerings/${body.offering.id}/runtime-selectors`,
+      headers: { 'idempotency-key': 'selectors-opencode-flash' },
+      payload: { runtimeSelectors: { OPENCODE: { model: 'opencode-go/deepseek-v4-flash' } } },
+    });
+    assert.equal(selectors.statusCode, 200);
+    assert.equal(
+      selectors.json().commercial_metadata_json.includes('opencode-go/deepseek-v4-flash'),
+      true,
+    );
     assert.equal(runtime.v2.listAppointments({ employeeId: body.employee.id }).length, 0);
 
     const replay = await runtime.app.inject({
@@ -185,17 +196,27 @@ test('explicit supply catalog registration classifies gateway evidence without c
       name: 'Development',
       externalProfileRef: 'coder',
     });
-    const position = runtime.v2.getOrCreatePosition({
-      workScopeId: String(scope.id),
-      slug: 'coding-executor',
-      name: 'Coding Executor',
-      kind: 'EXECUTOR',
-      runtimeKind: 'OPENCODE',
+    const positionResponse = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/positions/create',
+      headers: { 'idempotency-key': 'position-opencode-executor' },
+      payload: {
+        workScopeId: String(scope.id),
+        slug: 'coding-executor',
+        name: 'Coding Executor',
+        kind: 'EXECUTOR',
+        runtimeKind: 'OPENCODE',
+      },
     });
-    runtime.v2.getOrCreateCurrentAppointment({
-      employeeId: String(body.employee.id),
-      positionId: String(position.id),
+    assert.equal(positionResponse.statusCode, 200);
+    const position = positionResponse.json();
+    const appointmentResponse = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/appointments/create',
+      headers: { 'idempotency-key': 'appointment-opencode-flash' },
+      payload: { employeeId: String(body.employee.id), positionId: String(position.id) },
     });
+    assert.equal(appointmentResponse.statusCode, 200);
     const decision = await runtime.app.inject({
       method: 'POST',
       url: '/api/v2/commands/runtime-launch/resolve',

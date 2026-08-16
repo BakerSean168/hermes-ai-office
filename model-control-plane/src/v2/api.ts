@@ -737,6 +737,69 @@ export function registerV2Routes(
     }),
   );
 
+  app.post('/api/v2/commands/positions/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'position.create',
+      operation: () => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.workScopeId || !body.slug || !body.name || !body.kind) {
+          reply.code(400);
+          return { error: { code: 'POSITION_FIELDS_REQUIRED' } };
+        }
+        const scope = repository.db
+          .prepare('SELECT id FROM v2_work_scopes WHERE id=?')
+          .get(String(body.workScopeId));
+        if (!scope) {
+          reply.code(404);
+          return { error: { code: 'WORK_SCOPE_NOT_FOUND' } };
+        }
+        return repository.getOrCreatePosition({
+          workScopeId: String(body.workScopeId),
+          slug: String(body.slug),
+          name: String(body.name),
+          kind: String(body.kind),
+          runtimeKind: body.runtimeKind ? String(body.runtimeKind) : undefined,
+        });
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/appointments/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'appointment.create',
+      operation: () => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.employeeId || !body.positionId) {
+          reply.code(400);
+          return { error: { code: 'APPOINTMENT_FIELDS_REQUIRED' } };
+        }
+        const appointmentClass = String(body.appointmentClass ?? 'PRIMARY').toUpperCase();
+        if (!['PRIMARY', 'BACKUP', 'RESERVE'].includes(appointmentClass)) {
+          reply.code(400);
+          return { error: { code: 'APPOINTMENT_CLASS_INVALID' } };
+        }
+        if (!repository.listEmployees().some((item) => item.id === String(body.employeeId))) {
+          reply.code(404);
+          return { error: { code: 'EMPLOYEE_NOT_FOUND' } };
+        }
+        if (!repository.listPositions().some((item) => item.id === String(body.positionId))) {
+          reply.code(404);
+          return { error: { code: 'POSITION_NOT_FOUND' } };
+        }
+        return repository.getOrCreateCurrentAppointment({
+          employeeId: String(body.employeeId),
+          positionId: String(body.positionId),
+          appointmentClass: appointmentClass as 'PRIMARY' | 'BACKUP' | 'RESERVE',
+          priority: body.priority == null ? undefined : Number(body.priority),
+        });
+      },
+    }),
+  );
+
   app.post('/api/v2/commands/position-templates/create', async (request, reply) =>
     runCommand({
       request,
@@ -1289,6 +1352,37 @@ export function registerV2Routes(
         });
       },
     }),
+  );
+
+  app.post<{ Params: { offeringId: string } }>(
+    '/api/v2/commands/model-offerings/:offeringId/runtime-selectors',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'model-offering.runtime-selectors',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!body.runtimeSelectors || typeof body.runtimeSelectors !== 'object') {
+            reply.code(400);
+            return { error: { code: 'RUNTIME_SELECTOR_REQUIRED' } };
+          }
+          try {
+            return services.supply.setRuntimeSelectors(
+              request.params.offeringId,
+              body.runtimeSelectors as Record<string, unknown>,
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'RUNTIME_SELECTOR_UPDATE_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
   );
 
   app.post('/api/v2/commands/model-offerings/create', async (request, reply) =>
