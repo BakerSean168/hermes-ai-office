@@ -1,9 +1,14 @@
-"""Hermes AI Office observer plugin.
+"""Hermes AI Office native plugin.
 
-Emits a deliberately small, sanitized telemetry stream to hermes-office-bridge.
-The plugin never sends raw tool results or raw Codex/OpenCode prompts. Hooks are
-fail-open and delivery happens on a daemon thread so the user's Hermes session
-never waits on the dashboard.
+The plugin has two deliberately separate responsibilities:
+
+1. emit bounded orchestration/runtime telemetry for the Office projections;
+2. resolve an appointed Employee before Hermes launches OpenCode or Codex and,
+   when policy permits, inject the selected runtime model into the terminal call.
+
+The hook is fail-open in OBSERVE/PREFER mode and fail-closed only when the
+operator explicitly configures ENFORCE mode. Raw prompts, tool results, and
+provider credentials are never sent to the Office control plane.
 """
 
 from __future__ import annotations
@@ -12,24 +17,34 @@ import json
 import os
 import queue
 import re
+import shlex
 import threading
 import time
+import urllib.error
 import urllib.request
 from typing import Any
 
 _SCHEMA = "hermes.office.observer.v1"
-_ENDPOINT = os.environ.get(
+_OBSERVER_ENDPOINT = os.environ.get(
     "HERMES_OFFICE_OBSERVER_URL", "http://127.0.0.1:8787/api/observer"
 )
+_DEFAULT_POLICY_ENDPOINT = "http://127.0.0.1:8320/api/v2/commands/runtime-launch/resolve"
 _QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=1024)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _PENDING: dict[str, dict[str, Any]] = {}
 _PENDING_LOCK = threading.Lock()
+_CTX: Any = None
 
-_RUNTIME_RE = re.compile(r"(?:^|[\s/])(opencode|codex)(?=[\s]|$)", re.IGNORECASE)
-_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s]+)", re.IGNORECASE)
-_VERB_RE = re.compile(r"(?:^|[\s/])(?:opencode|codex)\s+([a-z][a-z0-9_-]*)", re.IGNORECASE)
+_RUNTIME_COMMAND_RE = re.compile(
+    r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+\s+)*"
+    r"(?:env\s+(?:[^\s;&|()]+\s+)*|nohup\s+|command\s+|timeout\s+[^\s;&|()]+\s+)?"
+    r"(?:[^\s;&|()]*/)?(?P<runtime>opencode|codex)(?=[\s;&|()]|$)",
+    re.IGNORECASE,
+)
+_MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s;&|]+)", re.IGNORECASE)
+_VERB_RE = re.compile(r"(?:^|[\s/])(opencode|codex)\s+([a-z][a-z0-9_-]*)", re.IGNORECASE)
 
 
 def _session_id(kwargs: dict[str, Any]) -> str:
@@ -40,9 +55,6 @@ def _correlation_key(tool_name: str, kwargs: dict[str, Any]) -> str:
     call_id = str(kwargs.get("tool_call_id") or "")
     if call_id:
         return call_id
-    # Plugin hooks are normally invoked pre/post on the same agent thread. This
-    # fallback keeps concurrent tool calls separate when the provider omitted a
-    # tool_call_id.
     return "%s:%s:%s:%s" % (
         _session_id(kwargs),
         str(kwargs.get("task_id") or ""),
@@ -52,38 +64,59 @@ def _correlation_key(tool_name: str, kwargs: dict[str, Any]) -> str:
 
 
 def _detect_runtime(command: str) -> str | None:
-    match = _RUNTIME_RE.search(command or "")
-    return match.group(1).lower() if match else None
+    match = _RUNTIME_COMMAND_RE.search(command or "")
+    return match.group("runtime").lower() if match else None
 
 
 def _model_from_command(command: str) -> str | None:
     match = _MODEL_RE.search(command or "")
     if not match:
         return None
-    return match.group(1).strip("'\"")[:120] or None
+    return match.group(1).strip("'\"")[:240] or None
 
 
 def _command_summary(command: str, runtime: str) -> str:
-    """Return a dashboard-safe command label without persisting the prompt."""
     verb_match = _VERB_RE.search(command or "")
-    verb = verb_match.group(1).lower() if verb_match else ""
-    allowed_verbs = {
-        "run",
-        "exec",
-        "review",
-        "resume",
-        "serve",
-        "agent",
-    }
+    verb = verb_match.group(2).lower() if verb_match else ""
+    allowed_verbs = {"run", "exec", "review", "resume", "serve", "agent"}
     parts = [runtime]
     if verb in allowed_verbs:
         parts.append(verb)
     model = _model_from_command(command)
     if model:
         parts.extend(["--model", model])
-    if len(command or "") > 0:
+    if command:
         parts.append("…")
     return " ".join(parts)
+
+
+def _config(key: str, default: Any) -> Any:
+    ctx = _CTX
+    if ctx is None:
+        return default
+    try:
+        return ctx.get_config(key, default)
+    except Exception:
+        return default
+
+
+def _policy_mode() -> str:
+    mode = str(_config("runtime_policy.mode", "prefer") or "prefer").strip().upper()
+    return mode if mode in {"OBSERVE", "PREFER", "ENFORCE"} else "PREFER"
+
+
+def _position_hint(runtime: str) -> str:
+    default = "coding-executor" if runtime == "opencode" else "codex-executor"
+    value = _config(f"runtime_policy.positions.{runtime}", default)
+    return str(value or default).strip()[:160]
+
+
+def _policy_endpoint() -> str:
+    value = _config("runtime_policy.endpoint", _DEFAULT_POLICY_ENDPOINT)
+    endpoint = str(value or _DEFAULT_POLICY_ENDPOINT).strip()
+    if not endpoint.startswith(("http://127.0.0.1:", "http://localhost:")):
+        return _DEFAULT_POLICY_ENDPOINT
+    return endpoint
 
 
 def _enqueue(event: dict[str, Any]) -> None:
@@ -93,7 +126,6 @@ def _enqueue(event: dict[str, Any]) -> None:
     try:
         _QUEUE.put_nowait(event)
     except queue.Full:
-        # Visualization must never back-pressure the agent.
         pass
 
 
@@ -103,7 +135,7 @@ def _delivery_loop() -> None:
         try:
             raw = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
             req = urllib.request.Request(
-                _ENDPOINT,
+                _OBSERVER_ENDPOINT,
                 data=raw,
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -111,7 +143,6 @@ def _delivery_loop() -> None:
             with urllib.request.urlopen(req, timeout=0.5) as response:
                 response.read(1)
         except Exception:
-            # Dashboard availability can never affect Hermes execution.
             pass
         finally:
             _QUEUE.task_done()
@@ -124,12 +155,11 @@ def _ensure_worker() -> None:
     with _WORKER_LOCK:
         if _WORKER_STARTED:
             return
-        thread = threading.Thread(
+        threading.Thread(
             target=_delivery_loop,
-            name="hermes-office-observer",
+            name="hermes-ai-office-observer",
             daemon=True,
-        )
-        thread.start()
+        ).start()
         _WORKER_STARTED = True
 
 
@@ -177,29 +207,161 @@ def _on_subagent_stop(**kwargs: Any) -> None:
     _enqueue(event)
 
 
-def _on_pre_tool_call(tool_name: str = "", args: dict[str, Any] | None = None, **kwargs: Any) -> None:
+def _resolve_runtime_policy(
+    runtime: str,
+    command: str,
+    args: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> dict[str, Any] | None:
+    ctx = _CTX
+    profile_name = "default"
+    if ctx is not None:
+        try:
+            profile_name = str(ctx.profile_name or "default")
+        except Exception:
+            pass
+    payload = {
+        "runtimeKind": runtime.upper(),
+        "policyMode": _policy_mode(),
+        "positionSlug": _position_hint(runtime),
+        "sessionId": _session_id(kwargs),
+        "taskId": str(kwargs.get("task_id") or ""),
+        "toolCallId": str(kwargs.get("tool_call_id") or ""),
+        "workdir": str(args.get("workdir") or args.get("cwd") or ""),
+        "commandName": _command_summary(command, runtime).replace(" …", ""),
+        "requestedModel": _model_from_command(command),
+        "metadata": {"profileName": profile_name, "source": "hermes-pre-tool-hook"},
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if payload["toolCallId"]:
+        headers["Idempotency-Key"] = "runtime-launch:%s" % payload["toolCallId"]
+    request = urllib.request.Request(_policy_endpoint(), data=raw, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=0.8) as response:
+            body = json.load(response)
+            return body if isinstance(body, dict) else None
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _replace_model_flag(command: str, model: str) -> str:
+    quoted = shlex.quote(model)
+    pattern = re.compile(
+        r"(?P<prefix>(?:^|\s)(?:-m|--model)(?:=|\s+))(?P<value>[^\s;&|]+)",
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: match.group("prefix") + quoted, command, count=1)
+
+
+def _prefix_runtime_executable(command: str, runtime: str, markers: str) -> str:
+    if not markers or "HERMES_OFFICE_DECISION_ID=" in command:
+        return command
+    pattern = re.compile(
+        rf"(?P<exe>(?:[^\s;&|]*/)?{re.escape(runtime)})\b",
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: markers + " " + match.group("exe"), command, count=1)
+
+
+def _inject_selection(command: str, runtime: str, decision: dict[str, Any]) -> str:
+    model = str(decision.get("selectedModel") or "").strip()
+    if not model:
+        return command
+    current = _model_from_command(command)
+    if current:
+        if current == model:
+            rewritten = command
+        else:
+            rewritten = _replace_model_flag(command, model)
+    elif runtime == "opencode":
+        pattern = re.compile(r"(?P<exe>(?:[^\s;&|]*/)?opencode)\s+(?P<verb>run)\b", re.IGNORECASE)
+        rewritten, count = pattern.subn(
+            lambda m: f"{m.group('exe')} {m.group('verb')} --model {shlex.quote(model)}",
+            command,
+            count=1,
+        )
+        if count == 0:
+            return command
+    else:
+        pattern = re.compile(r"(?P<exe>(?:[^\s;&|]*/)?codex)\b", re.IGNORECASE)
+        profile = str(decision.get("selectedProfile") or "").strip()
+        options = f" --model {shlex.quote(model)}"
+        if profile:
+            options += f" --profile {shlex.quote(profile)}"
+        rewritten, count = pattern.subn(lambda m: m.group("exe") + options, command, count=1)
+        if count == 0:
+            return command
+
+    marker_values = {
+        "HERMES_OFFICE_DECISION_ID": decision.get("id"),
+        "HERMES_OFFICE_POSITION_ID": (decision.get("position") or {}).get("id"),
+        "HERMES_OFFICE_EMPLOYEE_ID": (decision.get("employee") or {}).get("id"),
+        "HERMES_OFFICE_EMPLOYMENT_ID": (decision.get("employment") or {}).get("id"),
+    }
+    markers = " ".join(
+        f"{key}={shlex.quote(str(value))}" for key, value in marker_values.items() if value
+    )
+    return _prefix_runtime_executable(rewritten, runtime, markers)
+
+
+def _on_pre_tool_call(
+    tool_name: str = "", args: dict[str, Any] | None = None, **kwargs: Any
+) -> dict[str, Any] | None:
     if tool_name != "terminal":
-        return
-    args = args or {}
+        return None
+    args = dict(args or {})
     command = str(args.get("command") or "")
     runtime = _detect_runtime(command)
     if not runtime:
-        return
+        return None
+
+    decision = _resolve_runtime_policy(runtime, command, args, kwargs)
+    mode = _policy_mode()
     base = _base_event(kwargs)
     key = _correlation_key(tool_name, kwargs)
+    selected = decision or {}
     pending = {
         **base,
         "correlationId": key,
         "runtime": runtime,
         "cwd": str(args.get("workdir") or args.get("cwd") or ""),
-        "model": _model_from_command(command) or "",
+        "model": str(selected.get("selectedModel") or _model_from_command(command) or ""),
         "command": _command_summary(command, runtime),
         "background": bool(args.get("background")),
         "pty": bool(args.get("pty")),
+        "policyMode": mode,
+        "policyStatus": str(selected.get("status") or "UNAVAILABLE"),
+        "runtimeLaunchDecisionId": str(selected.get("id") or ""),
+        "positionId": str((selected.get("position") or {}).get("id") or ""),
+        "employeeId": str((selected.get("employee") or {}).get("id") or ""),
+        "employmentId": str((selected.get("employment") or {}).get("id") or ""),
     }
     with _PENDING_LOCK:
         _PENDING[key] = pending
     _enqueue({"event": "runtime_spawn_requested", **pending})
+
+    if decision is None:
+        if mode == "ENFORCE":
+            return {
+                "action": "block",
+                "message": "Hermes AI Office could not reach the runtime staffing policy service.",
+            }
+        return None
+    if decision.get("status") == "BLOCKED":
+        return {
+            "action": "block",
+            "message": "Hermes AI Office found no eligible employee for %s (%s)."
+            % (runtime, ", ".join(map(str, decision.get("reasons") or []))),
+        }
+    if decision.get("status") != "SELECTED" or mode == "OBSERVE":
+        return None
+    rewritten = _inject_selection(command, runtime, decision)
+    if rewritten == command:
+        return None
+    modified = dict(args)
+    modified["command"] = rewritten
+    return {"action": "modify", "args": modified}
 
 
 def _parse_tool_result(result: Any) -> dict[str, Any]:
@@ -226,7 +388,6 @@ def _on_post_tool_call(
     with _PENDING_LOCK:
         pending = _PENDING.pop(key, None)
     if pending is None:
-        # A plugin may have been hot-loaded between pre/post; recover from args.
         command = str((args or {}).get("command") or "")
         runtime = _detect_runtime(command)
         if not runtime:
@@ -247,19 +408,21 @@ def _on_post_tool_call(
         process_id = int(pid) if pid is not None else None
     except (TypeError, ValueError):
         process_id = None
-    event = {
-        "event": "runtime_spawn_result",
-        **pending,
-        "processId": process_id,
-        "processSessionId": str(parsed.get("session_id") or ""),
-        "resultStatus": str(kwargs.get("status") or parsed.get("status") or ""),
-        "success": str(kwargs.get("status") or "ok") == "ok",
-    }
-    _enqueue(event)
+    _enqueue(
+        {
+            "event": "runtime_spawn_result",
+            **pending,
+            "processId": process_id,
+            "processSessionId": str(parsed.get("session_id") or ""),
+            "resultStatus": str(kwargs.get("status") or parsed.get("status") or ""),
+            "success": str(kwargs.get("status") or "ok") == "ok",
+        }
+    )
 
 
 def register(ctx: Any) -> None:
-    """Register observer hooks; no tools or behavior-changing hooks are added."""
+    global _CTX
+    _CTX = ctx
     _ensure_worker()
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
