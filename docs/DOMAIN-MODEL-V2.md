@@ -4,6 +4,8 @@
 **Purpose:** Authoritative business model for the next architecture and data-model migration
 **Supersedes:** The earlier `Profile -> Position -> Model Worker = Channel × Model` model where this document conflicts with it
 
+**Implementation package:** [`implementation-v2/README.md`](implementation-v2/README.md) translates this model into architecture, persistence, API, event, workflow, projection, migration, roadmap, and verification contracts.
+
 ## 1. Executive model
 
 Hermes AI Office models an AI organization, not a collection of runtime processes.

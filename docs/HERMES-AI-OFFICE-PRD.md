@@ -464,28 +464,37 @@ Do not expand scope yet into:
 
 ## 14. Documentation hierarchy going forward
 
-Recommended documentation structure:
+The documentation hierarchy is now explicit:
 
-1. `docs/HERMES-AI-OFFICE-PRD.md` — product intent, domain, workflows, invariants.
-2. `docs/ARCHITECTURE.md` — runtime topology, state ownership, APIs, event flows, persistence.
-3. `docs/DOMAIN-MODEL.md` — precise entity schemas, lifecycle/state machines and identity rules.
-4. `docs/WORKFLOWS.md` — operator workflows and error/recovery behavior.
-5. `docs/ROADMAP.md` — milestones and product-level acceptance criteria.
-6. `SPEC-*` — implementation tickets/specifications derived from the above.
+1. [`HERMES-AI-OFFICE-PRD.md`](HERMES-AI-OFFICE-PRD.md) — product goals, user outcomes, scope and product invariants.
+2. [`DOMAIN-MODEL-V2.md`](DOMAIN-MODEL-V2.md) — authoritative business identity, lifecycle, staffing, execution, history and archival semantics.
+3. [`implementation-v2/README.md`](implementation-v2/README.md) — implementation-preparation package index.
+4. `implementation-v2/ARCHITECTURE.md` — service/state ownership and protected runtime boundaries.
+5. `implementation-v2/PERSISTENCE.md` — additive V2 schema and V1-to-V2 data mapping.
+6. `implementation-v2/API-CONTRACT.md` — `/api/v2` command/query contract and compatibility rules.
+7. `implementation-v2/EVENT-CONTRACT.md` — durable business events, ordering, replay and correlation.
+8. `implementation-v2/WORKFLOWS.md` — end-to-end business behavior and failure/recovery scenarios.
+9. `implementation-v2/PROJECTIONS.md` — Office/Organization/Operations/Workforce read models and animation semantics.
+10. `implementation-v2/MIGRATION.md` — non-destructive V1-to-V2 strangler migration and rollback.
+11. `implementation-v2/ROADMAP.md` — phased implementation sequence and execution-ready ticket boundaries.
+12. `implementation-v2/VERIFICATION.md` — acceptance evidence, migration reconciliation and regression matrix.
+13. `SPEC-*` — historical or narrowly scoped implementation specifications; they must not redefine V2 core terms.
 
-Implementation specs should reference the product/domain documents and should not redefine core terms independently.
+Implementation work should cite the exact authoritative document/section for every domain or compatibility decision instead of restating it ad hoc.
 
-## 15. Open decisions requiring product alignment
+## 15. Remaining bounded product decisions
 
-These questions materially affect the next architecture phase:
+The core domain shape is no longer blocked by these decisions. They should be resolved during the relevant implementation phase and recorded without changing Employee/Position/Employment identity semantics:
 
-1. Is a Position global across all Profiles, or can Profiles override/own their own Position definitions?
-2. Should Hermes always call logical Position aliases, or only selected critical paths at first?
-3. Is the Task entity owned by Hermes/kanban, or should the Office/control plane eventually own a separate durable task registry?
-4. How much automatic failover is allowed without operator approval for expensive or lower-quality Workers?
-5. What is the desired default objective order among quality, reliability, latency, prepaid quota utilization, and marginal cost?
-6. Should subscription allocation be primarily token-based, request-based, active-time-based, or configurable per contract?
-7. What historical retention period is required for Runs, usage, health and routing decisions?
-8. Which actions are operator-only versus allowed to Hermes autonomously (enable, disable, quarantine, assignment changes)?
+1. Exact capability score scales, confidence model, and how measured performance updates qualification evidence.
+2. Exact StaffingRule/StaffingConstraint selector DSL and precedence rules.
+3. Which Position classes require operator approval before L3/L4 Employee failover, especially when cost/trust changes materially.
+4. Default optimization objective order among quality, reliability, latency, prepaid quota utilization, and marginal cost.
+5. Subscription cost allocation policy by SupplyAgreement: token-based, request-based, active-time-based, or configurable.
+6. Retention/compaction duration for high-volume raw ActivityEvents and InvocationAttempt diagnostics; business history remains retained.
+7. Whether Task remains primarily Hermes/Kanban-owned or a later control-plane task registry becomes authoritative; Run/Duty attribution contracts must remain stable either way.
+8. Which supply/staffing commands Hermes may perform autonomously versus operator-only commands (for example quarantine, new Employment activation, Appointment changes).
+9. Whether RUN_SCOPED Positions are persisted immediately or provisionally materialized when a Run starts.
+10. Whether a future ModelInvocation may intentionally split work across multiple Employees beyond retry/failover.
 
 Until these are decided, implementation should preserve current behavior and avoid embedding assumptions that make these choices expensive to change.
