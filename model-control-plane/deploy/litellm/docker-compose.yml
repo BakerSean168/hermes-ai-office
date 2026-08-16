@@ -1,0 +1,40 @@
+name: hermes-litellm
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
+    container_name: hermes-litellm
+    platform: linux/arm64
+    network_mode: host
+    command:
+      - --config
+      - /app/config.yaml
+      - --host
+      - 127.0.0.1
+      - --port
+      - '4000'
+    env_file:
+      - ${HERMES_LITELLM_ENV_FILE:-/srv/hermes-personal/secrets/litellm.env}
+    environment:
+      HOME: /tmp
+      XDG_CACHE_HOME: /tmp/.cache
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s

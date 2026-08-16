@@ -1,0 +1,19 @@
+[Unit]
+Description=Hermes LiteLLM Reference Gateway
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/hermes-personal/workspace/repos/pixel-agents/model-control-plane/deploy/litellm
+Environment=HERMES_LITELLM_ENV_FILE=/srv/hermes-personal/secrets/litellm.env
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+ExecStartPost=/usr/bin/docker inspect --format={{.State.Status}} hermes-litellm
+ExecStop=/usr/bin/docker compose stop
+TimeoutStartSec=180
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target

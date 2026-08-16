@@ -1,0 +1,21 @@
+model_list:
+  - model_name: employment:bootstrap-coding-review
+    litellm_params:
+      model: openai/employment:bootstrap-coding-review
+      api_base: http://127.0.0.1:8317/v1
+      api_key: os.environ/CPA_DATA_API_KEY
+      timeout: 120
+      stream_timeout: 120
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 1
+  allowed_fails: 1
+  cooldown_time: 30
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
