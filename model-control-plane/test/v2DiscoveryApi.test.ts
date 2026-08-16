@@ -135,3 +135,73 @@ test('unknown gateway discovery returns a deterministic 404', async () => {
     await runtime.app.close();
   }
 });
+
+test('technical CPA channel names remain evidence and do not fabricate business identity', async () => {
+  class AmbiguousGateway implements GatewayExecutionPort, GatewayDiscoveryPort {
+    readonly gatewayId = 'cpa-compat';
+
+    async resolveRoute() {
+      return { route: null, routable: false, reasons: ['NOT_USED'], observedAt: Date.now() };
+    }
+
+    async getRouteHealth(_route: GatewayRouteRef): Promise<GatewayHealth> {
+      return 'healthy';
+    }
+
+    async discover() {
+      return {
+        gatewayId: this.gatewayId,
+        observedAt: 456,
+        routes: [
+          {
+            externalRouteRef: 'cpa/channel/planner-pool/model/planner-cheap',
+            protocol: 'openai-chat-completions' as const,
+            health: 'healthy' as const,
+            supplierModelHint: 'planner-cheap',
+            capabilities: [],
+            deployments: [],
+            metadata: { channelName: 'planner-pool', source: 'cpa-compat' },
+          },
+        ],
+      };
+    }
+  }
+
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa,
+    cpaUsage: usage,
+    initialSync: false,
+    gateways: new GatewayRegistry([new AmbiguousGateway()]),
+  });
+  try {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/internal/gateways/cpa-compat/discover',
+      payload: {},
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().createdEmployees, 0);
+    assert.ok(
+      response
+        .json()
+        .issues.some((issue: { code: string }) => issue.code === 'SUPPLIER_IDENTITY_MISSING'),
+    );
+
+    const workforce = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/workforce',
+    });
+    assert.equal(workforce.json().summary.employees, 0);
+
+    const channels = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/channels?gatewayId=cpa-compat',
+    });
+    assert.equal(channels.json().items.length, 1);
+    assert.equal(channels.json().items[0].supplierModelHint, 'planner-cheap');
+  } finally {
+    await runtime.app.close();
+  }
+});

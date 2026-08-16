@@ -92,7 +92,6 @@ function hints(gatewayId: string, evidence: GatewayRouteEvidence): IdentityHints
     evidence.supplierHint,
     metadata.supplierSlug,
     metadata.supplierName,
-    metadata.channelName,
   );
   const supplierSlug = rawSupplier ? slugify(rawSupplier) : undefined;
   const supplierName =
@@ -110,7 +109,6 @@ function hints(gatewayId: string, evidence: GatewayRouteEvidence): IdentityHints
     evidence.agreementHint,
     metadata.agreementRef,
     metadata.accountName,
-    metadata.channelName,
   );
   const agreementRef = rawAgreement ? `gateway:${gatewayId}:${slugify(rawAgreement)}` : undefined;
   const agreementName =
