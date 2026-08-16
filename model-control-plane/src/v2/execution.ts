@@ -377,6 +377,7 @@ export class HermesExecutionSyncService {
     positionId: string,
     activity: string,
     metadata: JsonRecord,
+    allowNewAfterClosed = true,
   ): { duty: V2Row; created: boolean } {
     const existing = row(
       this.#domain.db
@@ -386,12 +387,10 @@ export class HermesExecutionSyncService {
         )
         .get(runId, positionId),
     );
-    if (existing) {
-      if (['PLANNED', 'ACTIVE'].includes(String(existing.lifecycle))) {
-        this.#domain.db
-          .prepare(`UPDATE v2_duty_sessions SET lifecycle='ACTIVE',current_activity=? WHERE id=?`)
-          .run(activity, String(existing.id));
-      }
+    if (existing && ['PLANNED', 'ACTIVE'].includes(String(existing.lifecycle))) {
+      this.#domain.db
+        .prepare(`UPDATE v2_duty_sessions SET lifecycle='ACTIVE',current_activity=? WHERE id=?`)
+        .run(activity, String(existing.id));
       return {
         duty: row(
           this.#domain.db
@@ -400,6 +399,9 @@ export class HermesExecutionSyncService {
         )!,
         created: false,
       };
+    }
+    if (existing && !allowNewAfterClosed) {
+      return { duty: existing, created: false };
     }
     const timestamp = now();
     const id = newId('duty', timestamp);
@@ -539,6 +541,26 @@ export class HermesExecutionSyncService {
         eventType: 'STATE_CHANGED',
         occurredAt: observedAt,
         metadata: input.metadata,
+      });
+    }
+    if (!wasActive && lifecycle === 'ACTIVE') {
+      this.#recordActivity({
+        runId: input.runId,
+        dutyId: input.dutyId,
+        positionId: input.positionId,
+        runtimeSessionId: String(existing.id),
+        activity: input.state,
+        eventType: 'RUNTIME_REOPENED',
+        occurredAt: observedAt,
+        metadata: input.metadata,
+      });
+      this.#domain.emit({
+        type: 'runtime_session.opened',
+        entityType: 'RuntimeSession',
+        entityId: String(existing.id),
+        runId: input.runId,
+        dutySessionId: input.dutyId,
+        payload: { positionId: input.positionId, runtimeKind: input.runtimeKind, reopened: true },
       });
     }
     if (wasActive && lifecycle !== 'ACTIVE') {
@@ -711,10 +733,11 @@ export class HermesExecutionSyncService {
         .run(timestamp, timestamp, String(position.id));
       this.#domain.db
         .prepare(
-          `UPDATE v2_position_relations SET effective_to=?
+          `UPDATE v2_position_relations
+           SET effective_to=CASE WHEN effective_from>=? THEN effective_from+1 ELSE ? END
            WHERE effective_to IS NULL AND (from_position_id=? OR to_position_id=?)`,
         )
-        .run(timestamp, String(position.id), String(position.id));
+        .run(timestamp, timestamp, String(position.id), String(position.id));
       this.#domain.emit({
         type: 'position.retired',
         entityType: 'Position',
@@ -873,6 +896,7 @@ export class HermesExecutionSyncService {
             String(lead.id),
             profile.controllerState ?? profile.workload,
             { source: 'HERMES_ORG', profileController: true, profileId: profile.profileId },
+            !terminalRun(sourceRun.status),
           );
           if (dutyResult.created) result.dutiesCreated += 1;
           const lifecycle = terminalRun(sourceRun.status)
@@ -921,7 +945,8 @@ export class HermesExecutionSyncService {
           }
           const run = runByExternal.get(node.runId);
           const scope = scopeByProfile.get(node.profileId);
-          if (!run || !scope) {
+          const sourceRun = snapshot.runs.find((item) => item.id === node.runId);
+          if (!run || !scope || !sourceRun) {
             result.issues.push({
               code: 'NODE_RUN_UNRESOLVED',
               nodeId: node.id,
@@ -938,6 +963,7 @@ export class HermesExecutionSyncService {
             String(ensured.position.id),
             node.state,
             { source: 'HERMES_ORG', externalNodeId: node.id, taskId: node.taskId ?? null },
+            !terminalRun(sourceRun.status),
           );
           if (dutyResult.created) result.dutiesCreated += 1;
           const runtimeResult = this.#upsertRuntime({
@@ -983,10 +1009,7 @@ export class HermesExecutionSyncService {
           seenRuntimeIdsByRun.set(String(run.id), seen);
 
           const outcome = dutyOutcome(node.state);
-          if (
-            outcome &&
-            !terminalRun(snapshot.runs.find((item) => item.id === node.runId)?.status ?? 'RUNNING')
-          ) {
+          if (outcome && !terminalRun(sourceRun.status)) {
             this.#closeDutyWithoutFinalizingRun(
               String(dutyResult.duty.id),
               outcome,

@@ -211,8 +211,12 @@ export class OrganizationRepository {
       run = row(this.#domain.db.prepare('SELECT * FROM v2_runs WHERE id=?').get(input.originRunId));
       if (!run) throw new Error('RUN_NOT_FOUND');
       if (String(run.work_scope_id) !== input.workScopeId) throw new Error('RUN_SCOPE_MISMATCH');
-      if (!['QUEUED', 'PLANNING', 'RUNNING', 'BLOCKED', 'FINALIZING'].includes(String(run.status)))
+      if (
+        !input.allowTerminalRun &&
+        !['QUEUED', 'PLANNING', 'RUNNING', 'BLOCKED', 'FINALIZING'].includes(String(run.status))
+      ) {
         throw new Error('RUN_NOT_ACTIVE');
+      }
     }
     if (input.originRunId && input.externalPositionRef) {
       const byExternalRef = row(

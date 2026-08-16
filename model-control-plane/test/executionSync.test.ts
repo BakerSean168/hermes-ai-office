@@ -278,3 +278,66 @@ test('first sync can ingest an already terminal historical Run', async () => {
       .every((item) => item.lifecycle === 'RETIRED'),
   );
 });
+
+test('runtime reappearance after a transient missing snapshot opens a new Duty without duplicating the RuntimeSession', async () => {
+  const { repository, execution } = make();
+  await execution.sync(runningSnapshot());
+  const run = repository
+    .listRuns(20)
+    .find((item) => item.externalRunRef === 'hermes:interactive:development:profile-session-1');
+  assert.ok(run);
+  const missing = runningSnapshot();
+  missing.nodes = [missing.nodes[0]!];
+  missing.edges = [];
+  await execution.sync(missing);
+  const before = repository
+    .listDuties({ runId: String(run.id) })
+    .filter(
+      (duty) =>
+        duty.positionId ===
+        repository.listPositions().find((item) => item.externalPositionRef === 'node-review-1')?.id,
+    );
+  assert.equal(before.length, 1);
+  assert.equal(before[0]?.lifecycle, 'CANCELLED');
+
+  await execution.sync(runningSnapshot());
+  const reviewPosition = repository
+    .listPositions()
+    .find((item) => item.externalPositionRef === 'node-review-1');
+  assert.ok(reviewPosition);
+  const after = repository
+    .listDuties({ runId: String(run.id) })
+    .filter((duty) => duty.positionId === reviewPosition.id);
+  assert.equal(after.length, 2);
+  assert.equal(after.filter((duty) => duty.lifecycle === 'ACTIVE').length, 1);
+  const reviewRuntimes = execution
+    .listRuntimeSessions({ runId: String(run.id) })
+    .filter((runtime) => runtime.externalSessionRef === 'review-session-1');
+  assert.equal(reviewRuntimes.length, 1);
+  assert.equal(reviewRuntimes[0]?.lifecycle, 'ACTIVE');
+  assert.equal(
+    reviewRuntimes[0]?.dutySessionId,
+    after.find((duty) => duty.lifecycle === 'ACTIVE')?.id,
+  );
+});
+
+test('repeated terminal snapshots remain duty-idempotent', async () => {
+  const { repository, execution } = make();
+  const terminal = runningSnapshot();
+  terminal.runs[0]!.status = 'COMPLETED';
+  terminal.runs[0]!.completedAt = 2_000;
+  terminal.nodes = terminal.nodes.map((node) => ({
+    ...node,
+    state: 'DONE' as const,
+    updatedAt: 2_000,
+  }));
+  terminal.profiles[0]!.controllerState = 'DONE';
+  await execution.sync(terminal);
+  const run = repository
+    .listRuns(20)
+    .find((item) => item.externalRunRef === 'hermes:interactive:development:profile-session-1');
+  assert.ok(run);
+  const firstDutyCount = repository.listDuties({ runId: String(run.id) }).length;
+  await execution.sync(terminal);
+  assert.equal(repository.listDuties({ runId: String(run.id) }).length, firstDutyCount);
+});

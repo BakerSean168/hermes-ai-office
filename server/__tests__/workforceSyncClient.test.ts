@@ -1,5 +1,6 @@
-import assert from 'node:assert/strict';
-import test from 'node:test';
+import * as assert from 'node:assert/strict';
+
+import { test } from 'vitest';
 
 import type { OrgSnapshot } from '../src/orgStore.js';
 import { HermesWorkforceSyncClient } from '../src/providers/hermes/workforceSyncClient.js';
