@@ -3,12 +3,18 @@ export type GatewayProtocol =
 
 export type GatewayHealth = 'healthy' | 'degraded' | 'unhealthy' | 'unknown';
 
-export interface GatewayRouteRef {
+export interface GatewayBinding {
   gatewayId: string;
   employmentId: string;
   externalRouteRef: string;
   protocol: GatewayProtocol;
 }
+
+export interface GatewayBindingSource {
+  findByEmploymentId(employmentId: string): Promise<GatewayBinding | null>;
+}
+
+export interface GatewayRouteRef extends GatewayBinding {}
 
 export interface GatewayRouteResolution {
   route: GatewayRouteRef | null;
@@ -40,16 +46,11 @@ export interface GatewayDiscoverySnapshot {
   cursor?: string;
 }
 
-export interface GatewayUsageEvidence {
+interface GatewayUsageEvidenceBase {
   gatewayId: string;
-  gatewayRequestId: string;
   externalRouteRef: string;
-  externalDeploymentRef?: string;
   model?: string;
   provider?: string;
-  startedAt: number;
-  completedAt?: number;
-  status: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
@@ -57,9 +58,29 @@ export interface GatewayUsageEvidence {
   reasoningTokens: number;
   actualCost?: number;
   currency?: string;
-  errorClass?: string;
   metadata?: Record<string, unknown>;
 }
+
+export interface GatewayRequestUsageEvidence extends GatewayUsageEvidenceBase {
+  kind: 'request';
+  gatewayRequestId: string;
+  externalDeploymentRef?: string;
+  startedAt: number;
+  completedAt?: number;
+  status: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  errorClass?: string;
+}
+
+export interface GatewayAggregateUsageEvidence extends GatewayUsageEvidenceBase {
+  kind: 'aggregate';
+  aggregateKey: string;
+  window: string;
+  generatedAt: number;
+  requests: number;
+  failedRequests: number;
+}
+
+export type GatewayUsageEvidence = GatewayRequestUsageEvidence | GatewayAggregateUsageEvidence;
 
 export interface GatewayUsagePage {
   evidence: GatewayUsageEvidence[];
