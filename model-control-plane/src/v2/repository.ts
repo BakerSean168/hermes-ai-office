@@ -1493,9 +1493,7 @@ export class V2Repository {
           appointmentPriority: Number(value.appointment_priority ?? 0),
           qualified: true,
           eligible: lifecycleEligible,
-          reasons: lifecycleEligible
-            ? ['CURRENT_APPOINTMENT', 'FIRST_SLICE_STATIC_QUALIFICATION']
-            : ['EMPLOYEE_NOT_ACTIVE'],
+          reasons: lifecycleEligible ? ['CURRENT_APPOINTMENT'] : ['EMPLOYEE_NOT_ACTIVE'],
           routes: [],
         };
         byAppointment.set(appointmentId, candidate);
@@ -2963,12 +2961,14 @@ export class V2Repository {
       this.db
         .prepare(
           `SELECT p.*,ws.slug work_scope_slug,ws.name work_scope_name,
+                  rs.name requirement_set_name,rs.version requirement_set_version,
                   (SELECT COUNT(*) FROM v2_appointments a
                     WHERE a.position_id=p.id AND a.status='CURRENT' AND a.effective_to IS NULL) current_appointments,
                   (SELECT COUNT(*) FROM v2_duty_sessions d
                     WHERE d.position_id=p.id AND d.lifecycle='ACTIVE') current_duties
            FROM v2_positions p
            LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
+           LEFT JOIN v2_requirement_sets rs ON rs.id=p.requirement_set_id
            ORDER BY ws.name,p.name`,
         )
         .all(),
@@ -2979,6 +2979,13 @@ export class V2Repository {
       kind: value.kind,
       lifecycle: value.lifecycle,
       runtimeKind: value.runtime_kind,
+      requirementSet: value.requirement_set_id
+        ? {
+            id: value.requirement_set_id,
+            name: value.requirement_set_name,
+            version: Number(value.requirement_set_version ?? 1),
+          }
+        : null,
       workScope: value.work_scope_id
         ? { id: value.work_scope_id, slug: value.work_scope_slug, name: value.work_scope_name }
         : null,
@@ -3052,6 +3059,7 @@ export class V2Repository {
       effectiveFrom: value.effective_from,
       effectiveTo: value.effective_to,
       source: value.source,
+      sourceRuleId: value.source_rule_id,
       endedReason: value.ended_reason,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
     }));

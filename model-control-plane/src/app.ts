@@ -18,6 +18,7 @@ import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
+import { StaffingRepository } from './v2/staffing.js';
 import { SupplyRepository } from './v2/supply.js';
 import { UsageReconciliationService } from './v2/usageReconciliation.js';
 
@@ -136,7 +137,8 @@ export async function buildControlPlane(
   }
   const supply = new SupplyRepository(v2);
   const finance = new FinanceRepository(v2);
-  const dispatchService = new DispatchService(v2, gateways, supply);
+  const staffing = new StaffingRepository(v2);
+  const dispatchService = new DispatchService(v2, gateways, supply, staffing);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {
@@ -268,6 +270,7 @@ export async function buildControlPlane(
     usageReconciliationService,
     supply,
     finance,
+    staffing,
     idempotencyService,
   });
 

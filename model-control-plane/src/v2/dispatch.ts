@@ -1,6 +1,11 @@
 import type { GatewayRouteResolution } from '../gateway/ports.js';
 import { GatewayRegistry } from '../gateway/registry.js';
 import type { DispatchCandidate, V2Repository } from './repository.js';
+import {
+  StaffingRepository,
+  type ConstraintEvaluation,
+  type QualificationResult,
+} from './staffing.js';
 import { SupplyRepository, type CapacityState } from './supply.js';
 
 interface RouteResult {
@@ -22,6 +27,8 @@ interface CandidateResult {
   eligible: boolean;
   routable: boolean;
   reasons: string[];
+  qualification: QualificationResult;
+  constraints: ConstraintEvaluation;
   routes: RouteResult[];
 }
 
@@ -35,15 +42,18 @@ export class DispatchService {
   readonly #repository: V2Repository;
   readonly #gateways: GatewayRegistry;
   readonly #supply: SupplyRepository;
+  readonly #staffing: StaffingRepository;
 
   constructor(
     repository: V2Repository,
     gateways: GatewayRegistry,
     supply = new SupplyRepository(repository),
+    staffing = new StaffingRepository(repository),
   ) {
     this.#repository = repository;
     this.#gateways = gateways;
     this.#supply = supply;
+    this.#staffing = staffing;
   }
 
   async dispatchDuty(
@@ -72,7 +82,14 @@ export class DispatchService {
 
     for (const candidate of candidates) {
       const routeResults: RouteResult[] = [];
-      if (candidate.eligible) {
+      const qualification = this.#staffing.assessQualification(
+        candidate.employeeId,
+        String(duty.position_id),
+      );
+      const constraints = this.#staffing.evaluateConstraints(candidate.employeeId, dutySessionId);
+      const qualified = qualification.qualified;
+      const eligible = candidate.eligible && qualified && constraints.eligible;
+      if (eligible) {
         for (const route of candidate.routes) {
           const capacity = this.#supply.capacityForAgreement(route.supplyAgreementId);
           if (!capacity.available) {
@@ -134,14 +151,21 @@ export class DispatchService {
         appointmentId: candidate.appointmentId,
         appointmentClass: candidate.appointmentClass,
         appointmentPriority: candidate.appointmentPriority,
-        qualified: candidate.qualified,
-        eligible: candidate.eligible,
+        qualified,
+        eligible,
         routable,
         reasons: [
           ...candidate.reasons,
-          ...(candidate.routes.length === 0 ? ['NO_CURRENT_EMPLOYMENT_ROUTE'] : []),
-          ...(candidate.routes.length > 0 && !routable ? ['NO_HEALTHY_GATEWAY_ROUTE'] : []),
+          ...qualification.reasons,
+          ...constraints.hardReasons,
+          ...constraints.softReasons,
+          ...(eligible && candidate.routes.length === 0 ? ['NO_CURRENT_EMPLOYMENT_ROUTE'] : []),
+          ...(eligible && candidate.routes.length > 0 && !routable
+            ? ['NO_HEALTHY_GATEWAY_ROUTE']
+            : []),
         ],
+        qualification,
+        constraints,
         routes: routeResults,
       });
     }
@@ -149,7 +173,7 @@ export class DispatchService {
     const decision = this.#repository.recordDispatch({
       dutySessionId,
       trigger: options.trigger ?? 'DUTY_STARTED',
-      policyVersion: 'reference-v1',
+      policyVersion: 'qualification-capacity-v1',
       correlationId: options.correlationId,
       candidateResults,
       selected: selection

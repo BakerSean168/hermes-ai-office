@@ -11,6 +11,7 @@ import {
 import type { InvocationService } from './invocation.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
+import type { StaffingRepository, Requirement } from './staffing.js';
 import type { SupplyRepository } from './supply.js';
 import type { UsageReconciliationService } from './usageReconciliation.js';
 
@@ -30,6 +31,7 @@ export function registerV2Routes(
     usageReconciliationService?: UsageReconciliationService;
     supply?: SupplyRepository;
     finance?: FinanceRepository;
+    staffing?: StaffingRepository;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -204,6 +206,45 @@ export function registerV2Routes(
     }),
   );
 
+  app.get('/api/v2/capabilities', async () => ({
+    items: services.staffing?.listCapabilityDefinitions() ?? [],
+  }));
+
+  app.get('/api/v2/capability-claims', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.staffing?.listCapabilityClaims({
+          subjectType: typeof query.subjectType === 'string' ? query.subjectType : undefined,
+          subjectId: typeof query.subjectId === 'string' ? query.subjectId : undefined,
+        }) ?? [],
+    };
+  });
+
+  app.get('/api/v2/requirement-sets', async () => ({
+    items: services.staffing?.listRequirementSets() ?? [],
+  }));
+
+  app.get('/api/v2/qualification-assessments', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.staffing?.listQualificationAssessments({
+          employeeId: typeof query.employeeId === 'string' ? query.employeeId : undefined,
+          positionId: typeof query.positionId === 'string' ? query.positionId : undefined,
+          limit: Math.min(1_000, Math.max(1, number(query.limit, 100))),
+        }) ?? [],
+    };
+  });
+
+  app.get('/api/v2/staffing-rules', async () => ({
+    items: services.staffing?.listStaffingRules() ?? [],
+  }));
+
+  app.get('/api/v2/staffing-constraints', async () => ({
+    items: services.staffing?.listStaffingConstraints() ?? [],
+  }));
+
   app.get('/api/v2/usage-evidence', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
     return {
@@ -360,6 +401,280 @@ export function registerV2Routes(
           }
         },
       }),
+  );
+
+  app.post('/api/v2/commands/capabilities/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'capability.create',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.slug || !body.name || !body.valueType) {
+          reply.code(400);
+          return { error: { code: 'CAPABILITY_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.staffing.createCapabilityDefinition({
+            slug: String(body.slug),
+            name: String(body.name),
+            valueType: String(body.valueType) as 'NUMERIC' | 'BOOLEAN' | 'TEXT',
+            unit: body.unit ? String(body.unit) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'CAPABILITY_CREATE_FAILED';
+          reply.code(422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/capability-claims/add', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'capability-claim.add',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (
+          !body.subjectType ||
+          !body.subjectId ||
+          !body.capabilityId ||
+          body.value === undefined ||
+          !body.source
+        ) {
+          reply.code(400);
+          return { error: { code: 'CAPABILITY_CLAIM_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.staffing.addCapabilityClaim({
+            subjectType: String(body.subjectType) as
+              'SUPPLIER' | 'SUPPLIER_MODEL' | 'EMPLOYEE' | 'MODEL_OFFERING' | 'EMPLOYMENT',
+            subjectId: String(body.subjectId),
+            capabilityId: String(body.capabilityId),
+            value: body.value as number | boolean | string,
+            source: String(body.source) as
+              'DECLARED' | 'MEASURED' | 'MANUAL' | 'INFERRED' | 'IMPORTED',
+            confidence: body.confidence == null ? undefined : Number(body.confidence),
+            observedAt: body.observedAt == null ? undefined : Number(body.observedAt),
+            expiresAt: body.expiresAt == null ? undefined : Number(body.expiresAt),
+            evidence:
+              body.evidence && typeof body.evidence === 'object'
+                ? (body.evidence as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'CAPABILITY_CLAIM_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/requirement-sets/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'requirement-set.create',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.name || !Array.isArray(body.requirements)) {
+          reply.code(400);
+          return { error: { code: 'REQUIREMENT_SET_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.staffing.createRequirementSet({
+            name: String(body.name),
+            requirements: body.requirements as Requirement[],
+            version: body.version == null ? undefined : Number(body.version),
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'REQUIREMENT_SET_CREATE_FAILED';
+          reply.code(422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post<{ Params: { positionId: string } }>(
+    '/api/v2/commands/positions/:positionId/set-requirements',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'position.set-requirements',
+        operation: () => {
+          if (!services.staffing) {
+            reply.code(503);
+            return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.staffing.assignRequirementSet(
+              request.params.positionId,
+              body.requirementSetId === null
+                ? null
+                : body.requirementSetId
+                  ? String(body.requirementSetId)
+                  : null,
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'POSITION_REQUIREMENTS_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post('/api/v2/commands/qualifications/assess', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'qualification.assess',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.employeeId || !body.positionId) {
+          reply.code(400);
+          return { error: { code: 'EMPLOYEE_AND_POSITION_REQUIRED' } };
+        }
+        try {
+          return services.staffing.assessQualification(
+            String(body.employeeId),
+            String(body.positionId),
+          );
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'QUALIFICATION_ASSESSMENT_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/staffing-rules/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'staffing-rule.create',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.name) {
+          reply.code(400);
+          return { error: { code: 'STAFFING_RULE_NAME_REQUIRED' } };
+        }
+        return services.staffing.createStaffingRule({
+          name: String(body.name),
+          employeeSelector:
+            body.employeeSelector && typeof body.employeeSelector === 'object'
+              ? (body.employeeSelector as Record<string, unknown>)
+              : undefined,
+          positionSelector:
+            body.positionSelector && typeof body.positionSelector === 'object'
+              ? (body.positionSelector as Record<string, unknown>)
+              : undefined,
+          appointmentClass: body.appointmentClass
+            ? (String(body.appointmentClass) as 'PRIMARY' | 'BACKUP' | 'RESERVE')
+            : undefined,
+          priority: body.priority == null ? undefined : Number(body.priority),
+          effectiveFrom: body.effectiveFrom == null ? undefined : Number(body.effectiveFrom),
+          effectiveTo: body.effectiveTo == null ? undefined : Number(body.effectiveTo),
+          provenance:
+            body.provenance && typeof body.provenance === 'object'
+              ? (body.provenance as Record<string, unknown>)
+              : undefined,
+        });
+      },
+    }),
+  );
+
+  app.post<{ Params: { ruleId: string } }>(
+    '/api/v2/commands/staffing-rules/:ruleId/materialize',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'staffing-rule.materialize',
+        operation: () => {
+          if (!services.staffing) {
+            reply.code(503);
+            return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+          }
+          try {
+            return services.staffing.materializeStaffingRule(request.params.ruleId);
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'STAFFING_RULE_MATERIALIZE_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post('/api/v2/commands/staffing-constraints/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'staffing-constraint.create',
+      operation: () => {
+        if (!services.staffing) {
+          reply.code(503);
+          return { error: { code: 'STAFFING_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.name || !body.scopeType || !body.constraintType || !body.expression) {
+          reply.code(400);
+          return { error: { code: 'STAFFING_CONSTRAINT_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.staffing.createStaffingConstraint({
+            name: String(body.name),
+            scopeType: String(body.scopeType) as 'GLOBAL' | 'WORK_SCOPE' | 'POSITION',
+            scopeId: body.scopeId ? String(body.scopeId) : undefined,
+            constraintType: String(body.constraintType) as
+              'MAX_CONCURRENT_DUTIES' | 'SEPARATION_OF_DUTIES',
+            strength: body.strength ? (String(body.strength) as 'HARD' | 'SOFT') : undefined,
+            expression: body.expression as Record<string, unknown>,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'STAFFING_CONSTRAINT_CREATE_FAILED';
+          reply.code(422);
+          return { error: { code } };
+        }
+      },
+    }),
   );
 
   app.post('/api/v2/commands/plans/create', async (request, reply) =>
