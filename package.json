@@ -8,14 +8,20 @@
     "type": "git",
     "url": "https://github.com/pixel-agents-hq/pixel-agents"
   },
-  "workspaces": ["server", "webview-ui"],
+  "workspaces": [
+    "server",
+    "webview-ui",
+    "model-control-plane"
+  ],
   "icon": "icon.png",
   "license": "MIT",
   "engines": {
     "node": ">=20",
     "vscode": "^1.105.0"
   },
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "categories": [
     "Other"
   ],
