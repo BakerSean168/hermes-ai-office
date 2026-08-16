@@ -5,11 +5,10 @@
   "scripts": {
     "start": "node dist/main.js",
     "test": "tsx --test test/*.test.mjs test/*.test.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "check-types": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/main.ts",
-    "bootstrap:v2-reference": "tsx src/v2/bootstrapReference.ts",
-    "bootstrap:v2-reference:prod": "node dist/v2/bootstrapReference.js"
+    "clean": "rm -rf dist"
   },
   "dependencies": {
     "fastify": "^5.8.5"

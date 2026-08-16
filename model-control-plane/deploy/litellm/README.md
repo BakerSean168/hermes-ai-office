@@ -9,14 +9,14 @@ This deployment is the V2 reference implementation of the gateway ports. It is d
 - Uses CPA as a temporary downstream compatibility upstream; existing production traffic remains on CPA.
 - Does not require PostgreSQL or Redis for the first vertical slice.
 
-Build the control-plane package, then create/reconcile the reference Employee/Employment and bind the generated route without committing host-specific IDs:
+Build the control-plane package, then bind an **already existing CURRENT Employment**. Gateway deployment never creates Supplier, Employee, Agreement, Appointment, or Employment identity:
 
 ```bash
 npm run build --workspace @hermes/model-control-plane
 sudo ./configure-reference-route.sh
 ```
 
-The script is idempotent. It stores the non-secret generated route name beside the gateway secrets in the protected runtime env file, updates the CPA compatibility alias, restarts LiteLLM, and verifies the model list before retiring the previous reference alias.
+Set `V2_REFERENCE_EMPLOYMENT_ID` for a new binding. If a current `employment:*` reference route is already present in the protected env file, the script may reuse that ID. The script validates the Employment against the V2 database, stores only the non-secret route name beside the gateway secrets, updates the CPA alias, restarts LiteLLM, and verifies the model list before retiring the previous reference alias. It never bootstraps business identity from a channel or model name.
 
 Operational commands:
 
