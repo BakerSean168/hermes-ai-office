@@ -552,7 +552,7 @@ export class V2Repository {
     if (!['SCHEDULED', 'CURRENT', 'SUSPENDED'].includes(String(existing.status))) {
       throw new Error('EMPLOYMENT_NOT_ENDABLE');
     }
-    const timestamp = now();
+    const timestamp = Math.max(now(), Number(existing.effective_from) + 1);
     return this.transaction(() => {
       this.db
         .prepare(
@@ -859,7 +859,7 @@ export class V2Repository {
     if (!['SCHEDULED', 'CURRENT', 'SUSPENDED'].includes(String(existing.status))) {
       throw new Error('APPOINTMENT_NOT_ENDABLE');
     }
-    const timestamp = now();
+    const timestamp = Math.max(now(), Number(existing.effective_from) + 1);
     return this.transaction(() => {
       this.db
         .prepare(
@@ -2117,6 +2117,39 @@ export class V2Repository {
         this.db
           .prepare('UPDATE v2_runs SET status=?,completed_at=?,updated_at=? WHERE id=?')
           .run(outcome, timestamp, timestamp, String(duty.run_id));
+        const runScopedPositions = rows(
+          this.db
+            .prepare(
+              `SELECT id FROM v2_positions
+               WHERE origin_run_id=? AND lifecycle_policy='RUN_SCOPED'
+                 AND lifecycle IN ('PLANNED','ACTIVE','PAUSED')`,
+            )
+            .all(String(duty.run_id)),
+        );
+        for (const position of runScopedPositions) {
+          this.db
+            .prepare(
+              `UPDATE v2_appointments
+               SET status='ENDED',
+                   effective_to=CASE WHEN effective_from>=? THEN effective_from+1 ELSE ? END,
+                   ended_reason=?,updated_at=?
+               WHERE position_id=? AND status IN ('SCHEDULED','CURRENT','SUSPENDED') AND effective_to IS NULL`,
+            )
+            .run(timestamp, timestamp, `RUN_${outcome}`, timestamp, String(position.id));
+          this.db
+            .prepare(
+              `UPDATE v2_positions SET lifecycle='RETIRED',retired_at=?,updated_at=? WHERE id=?`,
+            )
+            .run(timestamp, timestamp, String(position.id));
+          this.emit({
+            type: 'position.retired',
+            entityType: 'Position',
+            entityId: String(position.id),
+            correlationId: input.correlationId,
+            runId: String(duty.run_id),
+            payload: { reason: `RUN_${outcome}` },
+          });
+        }
         this.emit({
           type:
             outcome === 'COMPLETED'
@@ -2962,6 +2995,8 @@ export class V2Repository {
         .prepare(
           `SELECT p.*,ws.slug work_scope_slug,ws.name work_scope_name,
                   rs.name requirement_set_name,rs.version requirement_set_version,
+                  rd.slug role_slug,rd.name role_name,
+                  pt.slug template_slug,pt.name template_name,
                   (SELECT COUNT(*) FROM v2_appointments a
                     WHERE a.position_id=p.id AND a.status='CURRENT' AND a.effective_to IS NULL) current_appointments,
                   (SELECT COUNT(*) FROM v2_duty_sessions d
@@ -2969,6 +3004,8 @@ export class V2Repository {
            FROM v2_positions p
            LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
            LEFT JOIN v2_requirement_sets rs ON rs.id=p.requirement_set_id
+           LEFT JOIN v2_role_definitions rd ON rd.id=p.role_id
+           LEFT JOIN v2_position_templates pt ON pt.id=p.template_id
            ORDER BY ws.name,p.name`,
         )
         .all(),
@@ -2979,6 +3016,15 @@ export class V2Repository {
       kind: value.kind,
       lifecycle: value.lifecycle,
       runtimeKind: value.runtime_kind,
+      runtimePolicy: decode<JsonRecord>(value.runtime_policy_json, {}),
+      lifecyclePolicy: value.lifecycle_policy,
+      originRunId: value.origin_run_id,
+      role: value.role_id
+        ? { id: value.role_id, slug: value.role_slug, name: value.role_name }
+        : null,
+      template: value.template_id
+        ? { id: value.template_id, slug: value.template_slug, name: value.template_name }
+        : null,
       requirementSet: value.requirement_set_id
         ? {
             id: value.requirement_set_id,

@@ -9,6 +9,7 @@ import {
   type IdempotencyService,
 } from './idempotency.js';
 import type { InvocationService } from './invocation.js';
+import type { OrganizationRepository } from './organization.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
 import type { StaffingRepository, Requirement } from './staffing.js';
@@ -32,6 +33,7 @@ export function registerV2Routes(
     supply?: SupplyRepository;
     finance?: FinanceRepository;
     staffing?: StaffingRepository;
+    organization?: OrganizationRepository;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -204,6 +206,29 @@ export function registerV2Routes(
     async (request) => ({
       items: services.finance?.performanceByPosition(request.params.employeeId) ?? [],
     }),
+  );
+
+  app.get('/api/v2/roles', async () => ({
+    items: services.organization?.listRoles() ?? [],
+  }));
+
+  app.get('/api/v2/position-templates', async () => ({
+    items: services.organization?.listPositionTemplates() ?? [],
+  }));
+
+  app.get('/api/v2/position-relations', async () => ({
+    items: services.organization?.listPositionRelations() ?? [],
+  }));
+
+  app.get(
+    '/api/v2/projections/organization',
+    async () =>
+      services.organization?.topology() ?? {
+        roles: [],
+        templates: [],
+        positions: [],
+        relations: [],
+      },
   );
 
   app.get('/api/v2/capabilities', async () => ({
@@ -401,6 +426,167 @@ export function registerV2Routes(
           }
         },
       }),
+  );
+
+  app.post('/api/v2/commands/roles/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'role.create',
+      operation: () => {
+        if (!services.organization) {
+          reply.code(503);
+          return { error: { code: 'ORGANIZATION_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.slug || !body.name) {
+          reply.code(400);
+          return { error: { code: 'ROLE_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.organization.createRole({
+            slug: String(body.slug),
+            name: String(body.name),
+            purpose: body.purpose ? String(body.purpose) : undefined,
+            defaultRequirementSetId: body.defaultRequirementSetId
+              ? String(body.defaultRequirementSetId)
+              : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'ROLE_CREATE_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/position-templates/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'position-template.create',
+      operation: () => {
+        if (!services.organization) {
+          reply.code(503);
+          return { error: { code: 'ORGANIZATION_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.slug || !body.name || !body.roleId || !body.lifecyclePolicy) {
+          reply.code(400);
+          return { error: { code: 'POSITION_TEMPLATE_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.organization.createPositionTemplate({
+            slug: String(body.slug),
+            name: String(body.name),
+            roleId: String(body.roleId),
+            runtimePolicy:
+              body.runtimePolicy && typeof body.runtimePolicy === 'object'
+                ? (body.runtimePolicy as Record<string, unknown>)
+                : undefined,
+            defaultRequirementSetId: body.defaultRequirementSetId
+              ? String(body.defaultRequirementSetId)
+              : undefined,
+            lifecyclePolicy: String(body.lifecyclePolicy) as 'STANDING' | 'RUN_SCOPED',
+            defaultRelations: Array.isArray(body.defaultRelations)
+              ? (body.defaultRelations as Record<string, unknown>[])
+              : undefined,
+            defaultConstraints: Array.isArray(body.defaultConstraints)
+              ? (body.defaultConstraints as Record<string, unknown>[])
+              : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'POSITION_TEMPLATE_CREATE_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/positions/instantiate', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'position.instantiate',
+      operation: () => {
+        if (!services.organization) {
+          reply.code(503);
+          return { error: { code: 'ORGANIZATION_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.templateId || !body.workScopeId) {
+          reply.code(400);
+          return { error: { code: 'POSITION_INSTANTIATE_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.organization.instantiatePosition({
+            templateId: String(body.templateId),
+            workScopeId: String(body.workScopeId),
+            name: body.name ? String(body.name) : undefined,
+            slug: body.slug ? String(body.slug) : undefined,
+            originRunId: body.originRunId ? String(body.originRunId) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'POSITION_INSTANTIATE_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/position-relations/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'position-relation.create',
+      operation: () => {
+        if (!services.organization) {
+          reply.code(503);
+          return { error: { code: 'ORGANIZATION_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.fromPositionId || !body.toPositionId || !body.relationType) {
+          reply.code(400);
+          return { error: { code: 'POSITION_RELATION_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.organization.createPositionRelation({
+            fromPositionId: String(body.fromPositionId),
+            toPositionId: String(body.toPositionId),
+            relationType: String(body.relationType) as
+              'SUPERVISES' | 'DELEGATES_TO' | 'REVIEWS' | 'DEPENDS_ON' | 'ESCALATES_TO',
+            source: body.source
+              ? (String(body.source) as 'MANUAL' | 'TEMPLATE' | 'POLICY' | 'MIGRATION')
+              : undefined,
+            effectiveFrom: body.effectiveFrom == null ? undefined : Number(body.effectiveFrom),
+            effectiveTo: body.effectiveTo == null ? undefined : Number(body.effectiveTo),
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'POSITION_RELATION_CREATE_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
   );
 
   app.post('/api/v2/commands/capabilities/create', async (request, reply) =>

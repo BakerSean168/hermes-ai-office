@@ -23,6 +23,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '004_supply_capacity',
     '005_finance_evaluation',
     '006_qualification_staffing',
+    '007_organization_topology',
   ]);
   assert.deepEqual(second.skipped, [
     '001_spine',
@@ -31,6 +32,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '004_supply_capacity',
     '005_finance_evaluation',
     '006_qualification_staffing',
+    '007_organization_topology',
   ]);
   const tables = tableNames(db);
   assert.ok(tables.includes('providers'));
@@ -58,6 +60,9 @@ test('V2 schema migration is additive and idempotent', () => {
   assert.ok(tables.includes('v2_qualification_assessments'));
   assert.ok(tables.includes('v2_staffing_rules'));
   assert.ok(tables.includes('v2_staffing_constraints'));
+  assert.ok(tables.includes('v2_role_definitions'));
+  assert.ok(tables.includes('v2_position_templates'));
+  assert.ok(tables.includes('v2_position_relations'));
 });
 
 test('V2 migration checksums make edited history fail loudly', () => {
