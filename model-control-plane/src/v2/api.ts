@@ -10,6 +10,7 @@ import {
 import type { InvocationService } from './invocation.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
+import type { UsageReconciliationService } from './usageReconciliation.js';
 
 function number(value: unknown, fallback: number): number {
   const parsed = Number(value);
@@ -24,6 +25,7 @@ export function registerV2Routes(
     invocationService?: InvocationService;
     lifecycleService?: WorkforceLifecycleService;
     discoveryService?: GatewayDiscoveryService;
+    usageReconciliationService?: UsageReconciliationService;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -117,6 +119,27 @@ export function registerV2Routes(
       items: repository.listDiscoveryRuns(
         typeof query.gatewayDbId === 'string' ? query.gatewayDbId : undefined,
         limit,
+      ),
+    };
+  });
+
+  app.get('/api/v2/usage-evidence', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items: repository.listGatewayUsageEvidence({
+        gatewaySlug: typeof query.gatewayId === 'string' ? query.gatewayId : undefined,
+        kind: typeof query.kind === 'string' ? query.kind : undefined,
+        limit: Math.min(1_000, Math.max(1, number(query.limit, 200))),
+      }),
+    };
+  });
+
+  app.get('/api/v2/usage-reconciliation-runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items: repository.listUsageReconciliationRuns(
+        typeof query.gatewayId === 'string' ? query.gatewayId : undefined,
+        Math.min(500, Math.max(1, number(query.limit, 50))),
       ),
     };
   });
@@ -288,6 +311,44 @@ export function registerV2Routes(
         error: {
           code: error instanceof Error ? error.message : 'GATEWAY_DISCOVERY_FAILED',
         },
+      };
+    }
+  });
+
+  app.post<{ Params: { gatewayId: string } }>(
+    '/api/v2/internal/gateways/:gatewayId/reconcile-usage',
+    async (request, reply) => {
+      if (!services.usageReconciliationService) {
+        reply.code(503);
+        return { error: { code: 'USAGE_RECONCILIATION_SERVICE_UNAVAILABLE' } };
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      try {
+        return await services.usageReconciliationService.reconcile(
+          request.params.gatewayId,
+          typeof body.cursor === 'string' ? body.cursor : undefined,
+        );
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'USAGE_RECONCILIATION_FAILED';
+        reply.code(
+          code === 'GATEWAY_USAGE_UNAVAILABLE' || code === 'GATEWAY_NOT_REGISTERED' ? 404 : 502,
+        );
+        return { error: { code } };
+      }
+    },
+  );
+
+  app.post('/api/v2/internal/gateways/reconcile-usage', async (_request, reply) => {
+    if (!services.usageReconciliationService) {
+      reply.code(503);
+      return { error: { code: 'USAGE_RECONCILIATION_SERVICE_UNAVAILABLE' } };
+    }
+    try {
+      return { items: await services.usageReconciliationService.reconcileAll() };
+    } catch (error) {
+      reply.code(502);
+      return {
+        error: { code: error instanceof Error ? error.message : 'USAGE_RECONCILIATION_FAILED' },
       };
     }
   });

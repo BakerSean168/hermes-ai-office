@@ -1,6 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 
-import type { GatewayBinding, GatewayBindingSource, GatewayProtocol } from '../gateway/ports.js';
+import type {
+  GatewayAggregateUsageEvidence,
+  GatewayBinding,
+  GatewayBindingSource,
+  GatewayProtocol,
+  GatewayRequestUsageEvidence,
+  GatewayUsageEvidence,
+} from '../gateway/ports.js';
 import { newId } from './ids.js';
 
 interface JsonRecord {
@@ -158,6 +165,24 @@ export interface DiscoveryRunSummary {
   createdEmployments: number;
   createdBindings: number;
   issues: unknown[];
+}
+
+export interface UsageReconciliationSummary {
+  evidenceCount: number;
+  requestMatched: number;
+  requestUnmatched: number;
+  requestUsageCreated: number;
+  requestMismatched: number;
+  aggregateCount: number;
+  issues: unknown[];
+  nextCursor?: string;
+}
+
+export interface RequestUsageReconciliationResult {
+  status: 'MATCHED' | 'USAGE_CREATED' | 'MISMATCH' | 'UNMATCHED';
+  attemptId?: string;
+  usageEntryId?: string;
+  differences?: Record<string, { ledger: number | string; evidence: number | string }>;
 }
 
 export interface BootstrapReferenceInput {
@@ -2429,6 +2454,395 @@ export class V2Repository {
         this.db.prepare('SELECT * FROM v2_discovery_runs WHERE id=?').get(discoveryRunId),
       )!;
     });
+  }
+
+  upsertGatewayUsageEvidence(gatewayId: string, evidence: GatewayUsageEvidence): Row {
+    const timestamp = now();
+    const evidenceKind = evidence.kind === 'request' ? 'REQUEST' : 'AGGREGATE';
+    const evidenceKey =
+      evidence.kind === 'request' ? evidence.gatewayRequestId : evidence.aggregateKey;
+    const existing = row(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_gateway_usage_evidence
+           WHERE gateway_id=? AND evidence_kind=? AND evidence_key=?`,
+        )
+        .get(gatewayId, evidenceKind, evidenceKey),
+    );
+    const values = {
+      externalDeploymentRef:
+        evidence.kind === 'request' ? (evidence.externalDeploymentRef ?? null) : null,
+      gatewayRequestId: evidence.kind === 'request' ? evidence.gatewayRequestId : null,
+      window: evidence.kind === 'aggregate' ? evidence.window : null,
+      generatedAt: evidence.kind === 'aggregate' ? evidence.generatedAt : null,
+      startedAt: evidence.kind === 'request' ? evidence.startedAt : null,
+      completedAt: evidence.kind === 'request' ? (evidence.completedAt ?? null) : null,
+      requestStatus: evidence.kind === 'request' ? evidence.status : null,
+      errorClass: evidence.kind === 'request' ? (evidence.errorClass ?? null) : null,
+      requests: evidence.kind === 'aggregate' ? evidence.requests : 1,
+      failedRequests:
+        evidence.kind === 'aggregate'
+          ? evidence.failedRequests
+          : evidence.status === 'failed'
+            ? 1
+            : 0,
+    };
+    if (!existing) {
+      const id = newId('uev', timestamp);
+      this.db
+        .prepare(
+          `INSERT INTO v2_gateway_usage_evidence(
+             id,gateway_id,evidence_kind,evidence_key,external_route_ref,gateway_request_id,
+             external_deployment_ref,model,provider,window,generated_at,started_at,completed_at,
+             request_status,error_class,requests,failed_requests,input_tokens,output_tokens,
+             cache_read_tokens,cache_write_tokens,reasoning_tokens,actual_cost,currency,metadata_json,
+             first_seen_at,last_seen_at,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          gatewayId,
+          evidenceKind,
+          evidenceKey,
+          evidence.externalRouteRef,
+          values.gatewayRequestId,
+          values.externalDeploymentRef,
+          evidence.model ?? null,
+          evidence.provider ?? null,
+          values.window,
+          values.generatedAt,
+          values.startedAt,
+          values.completedAt,
+          values.requestStatus,
+          values.errorClass,
+          values.requests,
+          values.failedRequests,
+          Math.max(0, Math.round(evidence.inputTokens)),
+          Math.max(0, Math.round(evidence.outputTokens)),
+          Math.max(0, Math.round(evidence.cacheReadTokens)),
+          Math.max(0, Math.round(evidence.cacheWriteTokens)),
+          Math.max(0, Math.round(evidence.reasoningTokens)),
+          evidence.actualCost ?? 0,
+          evidence.currency ?? 'USD',
+          encode(evidence.metadata),
+          timestamp,
+          timestamp,
+          timestamp,
+          timestamp,
+        );
+      return row(this.db.prepare('SELECT * FROM v2_gateway_usage_evidence WHERE id=?').get(id))!;
+    }
+    this.db
+      .prepare(
+        `UPDATE v2_gateway_usage_evidence SET
+           external_route_ref=?,gateway_request_id=?,external_deployment_ref=?,model=?,provider=?,
+           window=?,generated_at=?,started_at=?,completed_at=?,request_status=?,error_class=?,
+           requests=?,failed_requests=?,input_tokens=?,output_tokens=?,cache_read_tokens=?,
+           cache_write_tokens=?,reasoning_tokens=?,actual_cost=?,currency=?,metadata_json=?,
+           last_seen_at=?,updated_at=? WHERE id=?`,
+      )
+      .run(
+        evidence.externalRouteRef,
+        values.gatewayRequestId,
+        values.externalDeploymentRef,
+        evidence.model ?? null,
+        evidence.provider ?? null,
+        values.window,
+        values.generatedAt,
+        values.startedAt,
+        values.completedAt,
+        values.requestStatus,
+        values.errorClass,
+        values.requests,
+        values.failedRequests,
+        Math.max(0, Math.round(evidence.inputTokens)),
+        Math.max(0, Math.round(evidence.outputTokens)),
+        Math.max(0, Math.round(evidence.cacheReadTokens)),
+        Math.max(0, Math.round(evidence.cacheWriteTokens)),
+        Math.max(0, Math.round(evidence.reasoningTokens)),
+        evidence.actualCost ?? 0,
+        evidence.currency ?? 'USD',
+        encode(evidence.metadata),
+        timestamp,
+        timestamp,
+        String(existing.id),
+      );
+    return row(
+      this.db
+        .prepare('SELECT * FROM v2_gateway_usage_evidence WHERE id=?')
+        .get(String(existing.id)),
+    )!;
+  }
+
+  reconcileRequestUsageEvidence(
+    gatewayId: string,
+    evidence: GatewayRequestUsageEvidence,
+  ): RequestUsageReconciliationResult {
+    const attempt = row(
+      this.db
+        .prepare(
+          `SELECT a.*,i.run_id,i.duty_session_id,i.logical_position_id,
+                  e.supplier_id,e.supplier_model_id,g.slug gateway_slug,
+                  COALESCE(b.protocol,'unknown') gateway_protocol
+           FROM v2_invocation_attempts a
+           JOIN v2_model_invocations i ON i.id=a.invocation_id
+           JOIN v2_employees e ON e.id=a.employee_id
+           JOIN v2_gateways g ON g.id=a.gateway_id
+           LEFT JOIN v2_gateway_bindings b ON b.id=a.gateway_binding_id
+           WHERE a.gateway_id=? AND a.gateway_request_id=?
+           ORDER BY a.started_at DESC LIMIT 1`,
+        )
+        .get(gatewayId, evidence.gatewayRequestId),
+    );
+    if (!attempt) return { status: 'UNMATCHED' };
+
+    if (!attempt.external_deployment_ref && evidence.externalDeploymentRef) {
+      this.db
+        .prepare('UPDATE v2_invocation_attempts SET external_deployment_ref=? WHERE id=?')
+        .run(evidence.externalDeploymentRef, String(attempt.id));
+    }
+
+    const existingUsage = row(
+      this.db
+        .prepare('SELECT * FROM v2_usage_entries WHERE invocation_attempt_id=?')
+        .get(String(attempt.id)),
+    );
+    if (!existingUsage) {
+      const context: InvocationContext = {
+        dutySessionId: String(attempt.duty_session_id),
+        runId: String(attempt.run_id),
+        positionId: String(attempt.logical_position_id),
+        staffingSegmentId: '',
+        employeeId: String(attempt.employee_id),
+        employmentId: String(attempt.employment_id),
+        supplyAgreementId: String(attempt.supply_agreement_id),
+        supplierId: String(attempt.supplier_id),
+        supplierModelId: String(attempt.supplier_model_id),
+        gatewayDbId: gatewayId,
+        gatewayId: String(attempt.gateway_slug),
+        gatewayBindingId: String(attempt.gateway_binding_id ?? ''),
+        externalRouteRef: String(attempt.external_route_ref),
+        protocol: String(attempt.gateway_protocol) as GatewayProtocol,
+      };
+      const usage = this.recordUsage({
+        attemptId: String(attempt.id),
+        context,
+        source: `gateway-reconciliation:${String(attempt.gateway_slug)}`,
+        usage: {
+          inputTokens: evidence.inputTokens,
+          outputTokens: evidence.outputTokens,
+          cacheReadTokens: evidence.cacheReadTokens,
+          cacheWriteTokens: evidence.cacheWriteTokens,
+          reasoningTokens: evidence.reasoningTokens,
+          actualCost: evidence.actualCost,
+          currency: evidence.currency,
+        },
+        metadata: {
+          reconciled: true,
+          gatewayRequestId: evidence.gatewayRequestId,
+          externalDeploymentRef: evidence.externalDeploymentRef ?? null,
+          evidenceStartedAt: evidence.startedAt,
+          evidenceCompletedAt: evidence.completedAt ?? null,
+        },
+      });
+      return {
+        status: 'USAGE_CREATED',
+        attemptId: String(attempt.id),
+        usageEntryId: String(usage.id),
+      };
+    }
+
+    const differences: Record<string, { ledger: number | string; evidence: number | string }> = {};
+    const compareNumber = (name: string, ledger: unknown, observed: number): void => {
+      const left = Number(ledger ?? 0);
+      if (left !== observed) differences[name] = { ledger: left, evidence: observed };
+    };
+    compareNumber('inputTokens', existingUsage.input_tokens, evidence.inputTokens);
+    compareNumber('outputTokens', existingUsage.output_tokens, evidence.outputTokens);
+    compareNumber('cacheReadTokens', existingUsage.cache_read_tokens, evidence.cacheReadTokens);
+    compareNumber('cacheWriteTokens', existingUsage.cache_write_tokens, evidence.cacheWriteTokens);
+    compareNumber('reasoningTokens', existingUsage.reasoning_tokens, evidence.reasoningTokens);
+    if (evidence.actualCost !== undefined) {
+      const ledger = Number(existingUsage.actual_cost ?? 0);
+      if (Math.abs(ledger - evidence.actualCost) > 1e-9) {
+        differences.actualCost = { ledger, evidence: evidence.actualCost };
+      }
+    }
+    if (evidence.currency && String(existingUsage.currency) !== evidence.currency) {
+      differences.currency = {
+        ledger: String(existingUsage.currency),
+        evidence: evidence.currency,
+      };
+    }
+    return {
+      status: Object.keys(differences).length ? 'MISMATCH' : 'MATCHED',
+      attemptId: String(attempt.id),
+      usageEntryId: String(existingUsage.id),
+      ...(Object.keys(differences).length ? { differences } : {}),
+    };
+  }
+
+  startUsageReconciliationRun(gatewayId: string, cursor?: string): Row {
+    const timestamp = now();
+    const id = newId('urec', timestamp);
+    this.db
+      .prepare(
+        `INSERT INTO v2_usage_reconciliation_runs(id,gateway_id,cursor,started_at,status,metadata_json)
+         VALUES(?,?,?,?,?,?)`,
+      )
+      .run(id, gatewayId, cursor ?? null, timestamp, 'RUNNING', '{}');
+    this.emit({
+      type: 'gateway.usage_reconciliation.started',
+      entityType: 'UsageReconciliationRun',
+      entityId: id,
+      actorRef: `gateway:${gatewayId}`,
+      payload: { gatewayId, cursor: cursor ?? null },
+    });
+    return row(this.db.prepare('SELECT * FROM v2_usage_reconciliation_runs WHERE id=?').get(id))!;
+  }
+
+  completeUsageReconciliationRun(
+    reconciliationRunId: string,
+    summary: UsageReconciliationSummary,
+  ): Row {
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_usage_reconciliation_runs SET completed_at=?,status='COMPLETED',next_cursor=?,
+             evidence_count=?,request_matched=?,request_unmatched=?,request_usage_created=?,
+             request_mismatched=?,aggregate_count=?,issues_json=? WHERE id=?`,
+        )
+        .run(
+          timestamp,
+          summary.nextCursor ?? null,
+          summary.evidenceCount,
+          summary.requestMatched,
+          summary.requestUnmatched,
+          summary.requestUsageCreated,
+          summary.requestMismatched,
+          summary.aggregateCount,
+          encode(summary.issues),
+          reconciliationRunId,
+        );
+      this.emit({
+        type: 'gateway.usage_reconciliation.completed',
+        entityType: 'UsageReconciliationRun',
+        entityId: reconciliationRunId,
+        payload: summary,
+      });
+      return row(
+        this.db
+          .prepare('SELECT * FROM v2_usage_reconciliation_runs WHERE id=?')
+          .get(reconciliationRunId),
+      )!;
+    });
+  }
+
+  failUsageReconciliationRun(reconciliationRunId: string, errorCode: string): Row {
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_usage_reconciliation_runs
+           SET completed_at=?,status='FAILED',error_code=? WHERE id=?`,
+        )
+        .run(timestamp, errorCode, reconciliationRunId);
+      this.emit({
+        type: 'gateway.usage_reconciliation.failed',
+        entityType: 'UsageReconciliationRun',
+        entityId: reconciliationRunId,
+        payload: { errorCode },
+      });
+      return row(
+        this.db
+          .prepare('SELECT * FROM v2_usage_reconciliation_runs WHERE id=?')
+          .get(reconciliationRunId),
+      )!;
+    });
+  }
+
+  listGatewayUsageEvidence(
+    filters: { gatewaySlug?: string; kind?: string; limit?: number } = {},
+  ): Row[] {
+    const kind = filters.kind?.toUpperCase();
+    const limit = Math.min(1_000, Math.max(1, filters.limit ?? 200));
+    return rows(
+      this.db
+        .prepare(
+          `SELECT e.*,g.slug gateway_slug,g.display_name gateway_name
+           FROM v2_gateway_usage_evidence e JOIN v2_gateways g ON g.id=e.gateway_id
+           WHERE (? IS NULL OR g.slug=?) AND (? IS NULL OR e.evidence_kind=?)
+           ORDER BY e.last_seen_at DESC LIMIT ?`,
+        )
+        .all(
+          filters.gatewaySlug ?? null,
+          filters.gatewaySlug ?? null,
+          kind ?? null,
+          kind ?? null,
+          limit,
+        ),
+    ).map((value) => ({
+      id: value.id,
+      gatewayId: value.gateway_id,
+      gatewaySlug: value.gateway_slug,
+      gatewayName: value.gateway_name,
+      kind: String(value.evidence_kind).toLowerCase(),
+      evidenceKey: value.evidence_key,
+      externalRouteRef: value.external_route_ref,
+      gatewayRequestId: value.gateway_request_id,
+      externalDeploymentRef: value.external_deployment_ref,
+      model: value.model,
+      provider: value.provider,
+      window: value.window,
+      generatedAt: value.generated_at,
+      startedAt: value.started_at,
+      completedAt: value.completed_at,
+      status: value.request_status,
+      errorClass: value.error_class,
+      requests: Number(value.requests ?? 0),
+      failedRequests: Number(value.failed_requests ?? 0),
+      inputTokens: Number(value.input_tokens ?? 0),
+      outputTokens: Number(value.output_tokens ?? 0),
+      cacheReadTokens: Number(value.cache_read_tokens ?? 0),
+      cacheWriteTokens: Number(value.cache_write_tokens ?? 0),
+      reasoningTokens: Number(value.reasoning_tokens ?? 0),
+      actualCost: Number(value.actual_cost ?? 0),
+      currency: value.currency,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+      firstSeenAt: value.first_seen_at,
+      lastSeenAt: value.last_seen_at,
+    }));
+  }
+
+  listUsageReconciliationRuns(gatewaySlug?: string, limit = 50): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT r.*,g.slug gateway_slug,g.display_name gateway_name
+           FROM v2_usage_reconciliation_runs r JOIN v2_gateways g ON g.id=r.gateway_id
+           WHERE (? IS NULL OR g.slug=?) ORDER BY r.started_at DESC LIMIT ?`,
+        )
+        .all(gatewaySlug ?? null, gatewaySlug ?? null, Math.min(500, Math.max(1, limit))),
+    ).map((value) => ({
+      id: value.id,
+      gatewayId: value.gateway_id,
+      gatewaySlug: value.gateway_slug,
+      gatewayName: value.gateway_name,
+      cursor: value.cursor,
+      nextCursor: value.next_cursor,
+      startedAt: value.started_at,
+      completedAt: value.completed_at,
+      status: value.status,
+      evidenceCount: Number(value.evidence_count ?? 0),
+      requestMatched: Number(value.request_matched ?? 0),
+      requestUnmatched: Number(value.request_unmatched ?? 0),
+      requestUsageCreated: Number(value.request_usage_created ?? 0),
+      requestMismatched: Number(value.request_mismatched ?? 0),
+      aggregateCount: Number(value.aggregate_count ?? 0),
+      issues: decode<unknown[]>(value.issues_json, []),
+      errorCode: value.error_code,
+    }));
   }
 
   listChannels(gatewaySlug?: string): Row[] {

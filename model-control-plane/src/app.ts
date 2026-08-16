@@ -17,6 +17,7 @@ import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
+import { UsageReconciliationService } from './v2/usageReconciliation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -173,6 +174,7 @@ export async function buildControlPlane(
       baseUrlHint: env.CPA_BASE_URL,
     },
   });
+  const usageReconciliationService = new UsageReconciliationService(v2, gateways);
   const listeners = new Set<EventSender>();
   const timers = new Set<NodeJS.Timeout>();
 
@@ -259,6 +261,7 @@ export async function buildControlPlane(
     invocationService,
     lifecycleService,
     discoveryService,
+    usageReconciliationService,
     idempotencyService,
   });
 
@@ -545,23 +548,45 @@ export async function buildControlPlane(
   await seed();
   function startAllBackgroundJobs(): () => void {
     const stopLegacy = startBackgroundJobs();
-    if (env.MODEL_CP_V2_DISCOVERY === '0') return stopLegacy;
-    const intervalMs = Math.max(10_000, Number(env.MODEL_CP_V2_DISCOVERY_INTERVAL_MS ?? 60_000));
-    let stopped = false;
-    const reconcile = async (): Promise<void> => {
-      try {
-        await discoveryService.reconcileAll();
-      } catch (error) {
-        app.log.warn({ err: error }, 'V2 gateway discovery reconciliation failed');
-      }
-    };
-    void reconcile();
-    const timer = setInterval(() => void reconcile(), intervalMs);
+    const extraTimers: NodeJS.Timeout[] = [];
+    if (env.MODEL_CP_V2_DISCOVERY !== '0') {
+      const intervalMs = Math.max(10_000, Number(env.MODEL_CP_V2_DISCOVERY_INTERVAL_MS ?? 60_000));
+      const reconcileDiscovery = async (): Promise<void> => {
+        try {
+          await discoveryService.reconcileAll();
+        } catch (error) {
+          app.log.warn({ err: error }, 'V2 gateway discovery reconciliation failed');
+        }
+      };
+      void reconcileDiscovery();
+      const timer = setInterval(() => void reconcileDiscovery(), intervalMs);
+      timer.unref();
+      extraTimers.push(timer);
+    }
+    if (env.MODEL_CP_V2_USAGE_RECONCILIATION !== '0') {
+      const intervalMs = Math.max(
+        60_000,
+        Number(env.MODEL_CP_V2_USAGE_RECONCILIATION_INTERVAL_MS ?? 300_000),
+      );
+      const reconcileUsage = async (): Promise<void> => {
+        try {
+          await usageReconciliationService.reconcileAll();
+        } catch (error) {
+          app.log.warn({ err: error }, 'V2 gateway usage reconciliation failed');
+        }
+      };
+      const timer = setTimeout(() => {
+        void reconcileUsage();
+        const recurring = setInterval(() => void reconcileUsage(), intervalMs);
+        recurring.unref();
+        extraTimers.push(recurring);
+      }, 5_000);
+      timer.unref();
+      extraTimers.push(timer);
+    }
     return () => {
-      stopped = true;
-      clearInterval(timer);
+      for (const timer of extraTimers) clearInterval(timer);
       stopLegacy();
-      void stopped;
     };
   }
 
