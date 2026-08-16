@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import type { DispatchService } from './dispatch.js';
 import type { GatewayDiscoveryService } from './discovery.js';
+import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
 import type { FinanceRepository } from './finance.js';
 import {
   IdempotencyConflictError,
@@ -34,6 +35,7 @@ export function registerV2Routes(
     finance?: FinanceRepository;
     staffing?: StaffingRepository;
     organization?: OrganizationRepository;
+    executionSync?: HermesExecutionSyncService;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -207,6 +209,50 @@ export function registerV2Routes(
       items: services.finance?.performanceByPosition(request.params.employeeId) ?? [],
     }),
   );
+
+  app.get('/api/v2/runtime-sessions', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.executionSync?.listRuntimeSessions({
+          runId: typeof query.runId === 'string' ? query.runId : undefined,
+          activeOnly: query.activeOnly === '1' || query.activeOnly === 'true',
+          limit: Math.min(2_000, Math.max(1, number(query.limit, 500))),
+        }) ?? [],
+    };
+  });
+
+  app.get('/api/v2/runtime-edges', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.executionSync?.listRuntimeEdges(
+          typeof query.runId === 'string' ? query.runId : undefined,
+          Math.min(5_000, Math.max(1, number(query.limit, 1_000))),
+        ) ?? [],
+    };
+  });
+
+  app.get('/api/v2/activity-events', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.executionSync?.listActivityEvents(
+          typeof query.runId === 'string' ? query.runId : undefined,
+          Math.min(5_000, Math.max(1, number(query.limit, 500))),
+        ) ?? [],
+    };
+  });
+
+  app.get('/api/v2/execution-sync-runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.executionSync?.listSyncRuns(
+          Math.min(1_000, Math.max(1, number(query.limit, 100))),
+        ) ?? [],
+    };
+  });
 
   app.get('/api/v2/roles', async () => ({
     items: services.organization?.listRoles() ?? [],
@@ -427,6 +473,30 @@ export function registerV2Routes(
         },
       }),
   );
+
+  app.post('/api/v2/internal/hermes/sync', async (request, reply) => {
+    if (!services.executionSync) {
+      reply.code(503);
+      return { error: { code: 'EXECUTION_SYNC_SERVICE_UNAVAILABLE' } };
+    }
+    const body = (request.body ?? {}) as Partial<HermesOrgSnapshotInput>;
+    if (
+      !Array.isArray(body.profiles) ||
+      !Array.isArray(body.runs) ||
+      !Array.isArray(body.nodes) ||
+      !Array.isArray(body.edges)
+    ) {
+      reply.code(400);
+      return { error: { code: 'HERMES_ORG_SNAPSHOT_REQUIRED' } };
+    }
+    try {
+      return await services.executionSync.sync(body as HermesOrgSnapshotInput);
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'HERMES_EXECUTION_SYNC_FAILED';
+      reply.code(422);
+      return { error: { code } };
+    }
+  });
 
   app.post('/api/v2/commands/roles/create', async (request, reply) =>
     runCommand({

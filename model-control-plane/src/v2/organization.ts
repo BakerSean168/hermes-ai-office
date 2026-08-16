@@ -182,6 +182,8 @@ export class OrganizationRepository {
     name?: string;
     slug?: string;
     originRunId?: string;
+    externalPositionRef?: string;
+    allowTerminalRun?: boolean;
     metadata?: JsonRecord;
   }): V2Row {
     const template = row(
@@ -211,6 +213,14 @@ export class OrganizationRepository {
       if (String(run.work_scope_id) !== input.workScopeId) throw new Error('RUN_SCOPE_MISMATCH');
       if (!['QUEUED', 'PLANNING', 'RUNNING', 'BLOCKED', 'FINALIZING'].includes(String(run.status)))
         throw new Error('RUN_NOT_ACTIVE');
+    }
+    if (input.originRunId && input.externalPositionRef) {
+      const byExternalRef = row(
+        this.#domain.db
+          .prepare(`SELECT * FROM v2_positions WHERE origin_run_id=? AND external_position_ref=?`)
+          .get(input.originRunId, input.externalPositionRef),
+      );
+      if (byExternalRef) return byExternalRef;
     }
     const runtimePolicy = decode<JsonRecord>(template.runtime_policy_json, {});
     const runtimeKind = runtimePolicy.kind ? String(runtimePolicy.kind) : null;
@@ -243,8 +253,8 @@ export class OrganizationRepository {
           `INSERT INTO v2_positions(
              id,work_scope_id,slug,name,kind,lifecycle,runtime_kind,requirements_json,metadata_json,
              created_at,updated_at,requirement_set_id,role_id,template_id,lifecycle_policy,origin_run_id,
-             runtime_policy_json)
-           VALUES(?,?,?,?,?,'ACTIVE',?,?,?,?,?,?,?,?,?,?,?)`,
+             runtime_policy_json,external_position_ref)
+           VALUES(?,?,?,?,?,'ACTIVE',?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -265,6 +275,7 @@ export class OrganizationRepository {
           lifecyclePolicy,
           input.originRunId ?? null,
           encode(runtimePolicy),
+          input.externalPositionRef ?? null,
         );
       this.#domain.emit({
         type: 'position.instantiated',

@@ -678,7 +678,15 @@ export class V2Repository {
 
   getOrCreateWorkScope(input: { slug: string; name: string; externalProfileRef?: string }): Row {
     const existing = row(
-      this.db.prepare('SELECT * FROM v2_work_scopes WHERE slug=?').get(input.slug),
+      input.externalProfileRef
+        ? this.db
+            .prepare(
+              `SELECT * FROM v2_work_scopes
+               WHERE external_profile_ref=? OR slug=?
+               ORDER BY CASE WHEN external_profile_ref=? THEN 0 ELSE 1 END LIMIT 1`,
+            )
+            .get(input.externalProfileRef, input.slug, input.externalProfileRef)
+        : this.db.prepare('SELECT * FROM v2_work_scopes WHERE slug=?').get(input.slug),
     );
     if (existing) return existing;
     const timestamp = now();
@@ -3019,6 +3027,7 @@ export class V2Repository {
       runtimePolicy: decode<JsonRecord>(value.runtime_policy_json, {}),
       lifecyclePolicy: value.lifecycle_policy,
       originRunId: value.origin_run_id,
+      externalPositionRef: value.external_position_ref,
       role: value.role_id
         ? { id: value.role_id, slug: value.role_slug, name: value.role_name }
         : null,
