@@ -507,6 +507,44 @@ export class SupplyRepository {
     }));
   }
 
+  setRuntimeSelectors(offeringId: string, runtimeSelectors: JsonRecord): V2Row {
+    const existing = row(
+      this.#domain.db.prepare('SELECT * FROM v2_model_offerings WHERE id=?').get(offeringId),
+    );
+    if (!existing) throw new Error('MODEL_OFFERING_NOT_FOUND');
+    const current = decode<JsonRecord>(existing.commercial_metadata_json, {});
+    const normalized: JsonRecord = {};
+    for (const runtimeKind of ['OPENCODE', 'CODEX']) {
+      const value = runtimeSelectors[runtimeKind];
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const selector = value as JsonRecord;
+      const model = typeof selector.model === 'string' ? selector.model.trim() : '';
+      if (!model || model.length > 240) continue;
+      const profile = typeof selector.profile === 'string' ? selector.profile.trim() : '';
+      const provider = typeof selector.provider === 'string' ? selector.provider.trim() : '';
+      normalized[runtimeKind] = {
+        model,
+        ...(profile ? { profile: profile.slice(0, 120) } : {}),
+        ...(provider ? { provider: provider.slice(0, 120) } : {}),
+      };
+    }
+    if (Object.keys(normalized).length === 0) throw new Error('RUNTIME_SELECTOR_REQUIRED');
+    const next = { ...current, runtimeSelectors: normalized };
+    const timestamp = now();
+    this.#domain.db
+      .prepare('UPDATE v2_model_offerings SET commercial_metadata_json=?,updated_at=? WHERE id=?')
+      .run(encode(next), timestamp, offeringId);
+    this.#domain.emit({
+      type: 'model_offering.runtime_selectors.changed',
+      entityType: 'ModelOffering',
+      entityId: offeringId,
+      payload: { runtimeKinds: Object.keys(normalized) },
+    });
+    return row(
+      this.#domain.db.prepare('SELECT * FROM v2_model_offerings WHERE id=?').get(offeringId),
+    )!;
+  }
+
   registerCatalogEntry(input: {
     supplier: { slug: string; name: string };
     supplierModel: { key: string; name: string };
@@ -521,6 +559,7 @@ export class SupplyRepository {
       externalRouteRef: string;
       activateBinding?: boolean;
     };
+    runtimeSelectors?: JsonRecord;
   }): V2Row {
     return this.#domain.transaction(() => {
       const supplier = this.#domain.getOrCreateSupplier(input.supplier.slug, input.supplier.name);
@@ -554,12 +593,15 @@ export class SupplyRepository {
         });
         this.assignPlanToAgreement(String(agreement.id), String(plan.id));
       }
-      const offering = this.getOrCreateModelOffering({
+      let offering = this.getOrCreateModelOffering({
         supplierId: String(supplier.id),
         supplierModelId: String(supplierModel.id),
         planId: plan ? String(plan.id) : undefined,
         supplyAgreementId: String(agreement.id),
       });
+      if (input.runtimeSelectors && Object.keys(input.runtimeSelectors).length > 0) {
+        offering = this.setRuntimeSelectors(String(offering.id), input.runtimeSelectors);
+      }
       this.assignOfferingToEmployment(String(employment.id), String(offering.id));
 
       let channel: V2Row | null = null;

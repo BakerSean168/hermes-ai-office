@@ -26,6 +26,7 @@ import { runV2Migrations } from './v2/migrations.js';
 import { OrganizationRepository } from './v2/organization.js';
 import { OfficeProjectionService } from './v2/projections.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
+import { RuntimePolicyService } from './v2/runtimePolicy.js';
 import { StaffingRepository } from './v2/staffing.js';
 import { SupplyRepository } from './v2/supply.js';
 import { UsageReconciliationService } from './v2/usageReconciliation.js';
@@ -88,6 +89,7 @@ export async function buildControlPlane(
     finance,
   });
   const dispatchService = new DispatchService(v2, gateways, supply, staffing);
+  const runtimePolicy = new RuntimePolicyService(v2, supply, staffing);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {
@@ -168,6 +170,7 @@ export async function buildControlPlane(
     incidentProjection,
     maintenance,
     idempotencyService,
+    runtimePolicy,
   });
 
   app.get('/api/health', async () => ({

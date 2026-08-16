@@ -144,6 +144,7 @@ test('explicit supply catalog registration classifies gateway evidence without c
       supplierModel: { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
       plan: { slug: 'go', name: 'OpenCode Go', commercialType: 'SUBSCRIPTION' },
       agreement: { externalAccountRef: 'opencode-go-primary', name: 'OpenCode Go / Primary' },
+      runtimeSelectors: { OPENCODE: { model: 'opencode-go/deepseek-v4-flash' } },
       gatewayRoute: {
         gatewaySlug: 'cpa-compat',
         externalRouteRef: 'cpa/channel/opencode-go/model/deepseek-v4-flash',
@@ -161,6 +162,10 @@ test('explicit supply catalog registration classifies gateway evidence without c
     assert.equal(body.employee.displayName, 'DeepSeek V4 Flash @ OpenCode');
     assert.equal(body.plan.name, 'OpenCode Go');
     assert.equal(body.binding, null);
+    assert.equal(
+      body.offering.commercial_metadata_json.includes('opencode-go/deepseek-v4-flash'),
+      true,
+    );
     assert.equal(runtime.v2.listAppointments({ employeeId: body.employee.id }).length, 0);
 
     const replay = await runtime.app.inject({
@@ -174,6 +179,47 @@ test('explicit supply catalog registration classifies gateway evidence without c
     assert.equal(replay.json().employee.id, body.employee.id);
     assert.equal(runtime.v2.listEmployees().length, 1);
     assert.equal(runtime.v2.listAppointments().length, 0);
+
+    const scope = runtime.v2.getOrCreateWorkScope({
+      slug: 'development',
+      name: 'Development',
+      externalProfileRef: 'coder',
+    });
+    const position = runtime.v2.getOrCreatePosition({
+      workScopeId: String(scope.id),
+      slug: 'coding-executor',
+      name: 'Coding Executor',
+      kind: 'EXECUTOR',
+      runtimeKind: 'OPENCODE',
+    });
+    runtime.v2.getOrCreateCurrentAppointment({
+      employeeId: String(body.employee.id),
+      positionId: String(position.id),
+    });
+    const decision = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/runtime-launch/resolve',
+      headers: { 'idempotency-key': 'runtime-opencode-tool-1' },
+      payload: {
+        runtimeKind: 'OPENCODE',
+        policyMode: 'PREFER',
+        positionSlug: 'coding-executor',
+        workScopeSlug: 'development',
+        sessionId: 'session-1',
+        toolCallId: 'tool-1',
+        commandName: 'opencode run',
+      },
+    });
+    assert.equal(decision.statusCode, 200);
+    assert.equal(decision.json().status, 'SELECTED');
+    assert.equal(decision.json().employee.id, body.employee.id);
+    assert.equal(decision.json().selectedModel, 'opencode-go/deepseek-v4-flash');
+    const decisions = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/runtime-launch-decisions?limit=10',
+    });
+    assert.equal(decisions.statusCode, 200);
+    assert.equal(decisions.json().items[0].toolCallId, 'tool-1');
 
     const projection = await runtime.app.inject({
       method: 'GET',

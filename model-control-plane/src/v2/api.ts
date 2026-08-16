@@ -16,6 +16,7 @@ import type { OrganizationRepository } from './organization.js';
 import type { OfficeProjectionService } from './projections.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
+import type { RuntimePolicyService, RuntimeKind, RuntimePolicyMode } from './runtimePolicy.js';
 import type { StaffingRepository, Requirement } from './staffing.js';
 import type { SupplyRepository } from './supply.js';
 import type { UsageReconciliationService } from './usageReconciliation.js';
@@ -43,6 +44,7 @@ export function registerV2Routes(
     incidentProjection?: IncidentProjectionService;
     maintenance?: MaintenanceService;
     idempotencyService?: IdempotencyService;
+    runtimePolicy?: RuntimePolicyService;
   } = {},
 ): void {
   const runCommand = async <T>(input: {
@@ -128,6 +130,14 @@ export function registerV2Routes(
       ),
     };
   });
+  app.get('/api/v2/runtime-launch-decisions', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.runtimePolicy?.list(Math.min(500, Math.max(1, number(query.limit, 100)))) ?? [],
+    };
+  });
+
   app.get('/api/v2/discovery-runs', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
     const limit = Math.min(500, Math.max(1, number(query.limit, 50)));
@@ -1125,6 +1135,47 @@ export function registerV2Routes(
     }),
   );
 
+  app.post('/api/v2/commands/runtime-launch/resolve', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'runtime-launch.resolve',
+      operation: () => {
+        if (!services.runtimePolicy) {
+          reply.code(503);
+          return { error: { code: 'RUNTIME_POLICY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const runtimeKind = String(body.runtimeKind ?? '').toUpperCase();
+        const policyMode = String(body.policyMode ?? 'PREFER').toUpperCase();
+        if (!['OPENCODE', 'CODEX'].includes(runtimeKind)) {
+          reply.code(400);
+          return { error: { code: 'RUNTIME_KIND_INVALID' } };
+        }
+        if (!['OBSERVE', 'PREFER', 'ENFORCE'].includes(policyMode)) {
+          reply.code(400);
+          return { error: { code: 'RUNTIME_POLICY_MODE_INVALID' } };
+        }
+        return services.runtimePolicy.resolve({
+          runtimeKind: runtimeKind as RuntimeKind,
+          policyMode: policyMode as RuntimePolicyMode,
+          positionSlug: body.positionSlug ? String(body.positionSlug) : undefined,
+          workScopeSlug: body.workScopeSlug ? String(body.workScopeSlug) : undefined,
+          sessionId: body.sessionId ? String(body.sessionId) : undefined,
+          taskId: body.taskId ? String(body.taskId) : undefined,
+          toolCallId: body.toolCallId ? String(body.toolCallId) : undefined,
+          workdir: body.workdir ? String(body.workdir) : undefined,
+          commandName: body.commandName ? String(body.commandName) : undefined,
+          requestedModel: body.requestedModel ? String(body.requestedModel) : undefined,
+          metadata:
+            body.metadata && typeof body.metadata === 'object'
+              ? (body.metadata as Record<string, unknown>)
+              : undefined,
+        });
+      },
+    }),
+  );
+
   app.post('/api/v2/commands/supply-catalog/register', async (request, reply) =>
     runCommand({
       request,
@@ -1141,6 +1192,7 @@ export function registerV2Routes(
         const agreement = body.agreement as Record<string, unknown> | undefined;
         const plan = body.plan as Record<string, unknown> | undefined;
         const gatewayRoute = body.gatewayRoute as Record<string, unknown> | undefined;
+        const runtimeSelectors = body.runtimeSelectors as Record<string, unknown> | undefined;
         if (
           !supplier?.slug ||
           !supplier.name ||
@@ -1186,6 +1238,10 @@ export function registerV2Routes(
                     : undefined,
                 }
               : undefined,
+            runtimeSelectors:
+              runtimeSelectors && typeof runtimeSelectors === 'object'
+                ? runtimeSelectors
+                : undefined,
             gatewayRoute: gatewayRoute
               ? {
                   gatewaySlug: String(gatewayRoute.gatewaySlug),
