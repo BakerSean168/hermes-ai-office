@@ -15,6 +15,7 @@ For the next implementation phase:
 - use opaque IDs such as `emp_<ULID>`;
 - store timestamps as integer epoch milliseconds or one consistently selected unit;
 - avoid raw secrets entirely;
+- do not mirror LiteLLM/CPA internal configuration databases; persist only safe gateway references/evidence needed by the business model;
 - use JSON only for extensible metadata/evidence, not for relationships that require joins or constraints.
 
 Recommended schema namespace is table-prefix based because SQLite has no schemas:
@@ -192,7 +193,6 @@ valid_to?
 fixed_cost?
 currency?
 billing_period?
-secret_ref?               // opaque reference only; preferably adapter-owned
 metadata_json
 created_at
 updated_at
@@ -200,7 +200,7 @@ ended_at?
 archived_at?
 ```
 
-`secret_ref` must never contain raw API key material.
+No provider credential or gateway secret reference is required in this business table. Gateway-owned credential/configuration stays in the gateway or external secret manager.
 
 ### `v2_model_offerings`
 
@@ -263,16 +263,36 @@ Recommended constraints:
 - prevent duplicate overlapping CURRENT Employment for the exact same employee/agreement unless a real business case requires it;
 - historical rows are closed, not overwritten.
 
+### `v2_gateways`
+
+Registry of gateway adapters known to the domain service. This stores safe connection/reference metadata only, never provider credentials.
+
+```text
+id PK
+slug UNIQUE
+kind                      // LITELLM | CPA | DIRECT | OTHER
+display_name
+base_url_hint?            // non-secret administrative hint only
+capabilities_json
+lifecycle                 // ACTIVE | DEGRADED | DISABLED | RETIRED
+last_seen_at?
+metadata_json
+created_at
+updated_at
+```
+
 ### `v2_channels`
+
+Safe projection of a physical gateway route/deployment. It is not the gateway configuration source of truth.
 
 ```text
 id PK
 supply_agreement_id FK
-external_channel_ref?
+gateway_id FK
+external_route_ref
 name
 protocol
-endpoint_hint?
-secret_ref?
+endpoint_hint?            // non-secret only
 lifecycle                 // DISABLED | ENABLED | QUARANTINED | ARCHIVED
 health                    // UNKNOWN | HEALTHY | DEGRADED | UNHEALTHY
 last_test_json?
@@ -281,9 +301,10 @@ last_checked_at?
 metadata_json
 created_at
 updated_at
+UNIQUE(gateway_id, external_route_ref)
 ```
 
-A derived relation determines which Employees are reachable through a Channel by joining agreement -> Employment.
+A derived relation determines which Employees are reachable through a Channel by joining agreement -> Employment. V2 does not mirror LiteLLM/CPA provider credentials, retry configuration, or full deployment configuration.
 
 ### `v2_capacity_pools`
 
@@ -559,7 +580,10 @@ attempt_number
 employee_id FK
 employment_id FK
 supply_agreement_id FK
-channel_id FK
+channel_id FK?
+gateway_id FK?
+gateway_request_ref?
+gateway_deployment_ref?
 model_offering_id FK?
 outcome
 error_class?
@@ -587,7 +611,8 @@ supply_agreement_id FK
 model_definition_id FK
 supplier_model_id FK
 model_offering_id FK?
-channel_id FK
+channel_id FK?
+gateway_id FK?
 input_tokens
 output_tokens
 cache_read_tokens

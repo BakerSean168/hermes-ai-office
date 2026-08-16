@@ -111,6 +111,7 @@ STAFFING_CONSTRAINT_FAILED
 EMPLOYEE_NOT_ROUTABLE
 NO_STAFFABLE_EMPLOYEE
 NO_ROUTABLE_EMPLOYMENT
+GATEWAY_UNAVAILABLE
 CHANNEL_UNAVAILABLE
 CAPACITY_EXHAUSTED
 UPSTREAM_FAILURE
@@ -142,7 +143,7 @@ At minimum:
 - open/close DutySession;
 - dispatch;
 - record invocation/usage;
-- channel onboarding/action commands.
+- gateway-admin commands when an optional GatewayAdminPort is exposed.
 
 The server stores `(idempotency_key, command_type, normalized_request_hash, response_ref)` for a bounded retention period. Reusing a key with a different payload returns `409 IDEMPOTENCY_CONFLICT`.
 
@@ -225,6 +226,7 @@ GET /api/v2/employees/:employeeId/evaluations
 GET /api/v2/employees/:employeeId/stats
 GET /api/v2/supply-agreements
 GET /api/v2/supply-agreements/:agreementId
+GET /api/v2/gateways
 GET /api/v2/channels
 GET /api/v2/capacity-pools
 ```
@@ -265,6 +267,7 @@ must distinguish:
 ```text
 GET /api/v2/positions/:positionId/candidates
 GET /api/v2/positions/:positionId/qualification?employeeId=emp_...
+GET /api/v2/employments/:employmentId/gateway-route
 ```
 
 Candidate response must expose three independent dimensions:
@@ -357,22 +360,11 @@ POST /api/v2/commands/employments/:employmentId/end
 POST /api/v2/commands/employees/:employeeId/retire
 POST /api/v2/commands/employees/:employeeId/archive
 
-POST /api/v2/commands/channels/onboard
-POST /api/v2/commands/channels/:channelId/test
-POST /api/v2/commands/channels/:channelId/enable
-POST /api/v2/commands/channels/:channelId/disable
-POST /api/v2/commands/channels/:channelId/quarantine
 ```
 
-`channels/onboard` may accept credential material, but the V2 API handler must stream it to the gateway-management boundary and exclude it from:
+Gateway administration is **not required** as part of the core `/api/v2` business API. Operators may use LiteLLM/CPA native administration. If a future operator workflow justifies a unified UI, expose an isolated adapter-specific GatewayAdminPort facade rather than generic domain CRUD.
 
-- request logs;
-- persisted command body;
-- event payloads;
-- error details;
-- projections.
-
-If safely guaranteeing this is difficult, keep secret-bearing onboarding on the existing dedicated admin path until a hardened V2 handler exists.
+Any such admin handler must keep credential material out of request logs, persisted command bodies, events, errors, and projections.
 
 ## 12. Command endpoints — Staffing
 
@@ -445,17 +437,22 @@ These endpoints require loopback/authenticated service access, not the Pixel bro
 
 ## 14. Discovery and reconciliation endpoints
 
-Adapters need explicit commands:
+Gateway/runtime adapters need explicit infrastructure endpoints:
 
 ```text
-POST /api/v2/internal/adapters/cpa/discover
-POST /api/v2/internal/adapters/cpa/usage-sync
+POST /api/v2/internal/gateways/:gatewayId/discover
+POST /api/v2/internal/gateways/:gatewayId/usage-sync
+POST /api/v2/internal/gateways/:gatewayId/health-sync
 POST /api/v2/internal/reconcile/employments
 POST /api/v2/internal/reconcile/appointments
-POST /api/v2/internal/reconcile/routes
+POST /api/v2/internal/reconcile/gateway-routes
 ```
 
+The endpoint names are gateway-neutral. LiteLLM and CPA implementations sit behind adapter IDs; core API schemas must not contain CPA-specific fields.
+
 Each reconciliation returns counts and emitted event IDs. Reconciliation must be idempotent.
+
+The business API never asks a gateway to choose another Employee. Route reconciliation may only bind one selected Employment to business-equivalent physical gateway routes.
 
 ## 15. Projection endpoints
 

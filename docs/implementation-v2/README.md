@@ -7,25 +7,27 @@ This directory translates Domain Model V2 into concrete engineering contracts. I
 
 ## Document map
 
-| Document                                 | Purpose                                                                        | Primary consumers           |
-| ---------------------------------------- | ------------------------------------------------------------------------------ | --------------------------- |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)     | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers    |
-| [`PERSISTENCE.md`](PERSISTENCE.md)       | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work       |
-| [`API-CONTRACT.md`](API-CONTRACT.md)     | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend         |
-| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md) | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers        |
-| [`WORKFLOWS.md`](WORKFLOWS.md)           | end-to-end business flows and failure behavior                                 | product + engineering       |
-| [`PROJECTIONS.md`](PROJECTIONS.md)       | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer |
-| [`MIGRATION.md`](MIGRATION.md)           | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners            |
-| [`ROADMAP.md`](ROADMAP.md)               | phased execution plan and ticket boundaries                                    | implementation agents       |
-| [`VERIFICATION.md`](VERIFICATION.md)     | acceptance evidence and regression matrix                                      | reviewers + release checks  |
+| Document                                     | Purpose                                                                        | Primary consumers            |
+| -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)         | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
+| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md) | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
+| [`PERSISTENCE.md`](PERSISTENCE.md)           | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
+| [`API-CONTRACT.md`](API-CONTRACT.md)         | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
+| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)     | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
+| [`WORKFLOWS.md`](WORKFLOWS.md)               | end-to-end business flows and failure behavior                                 | product + engineering        |
+| [`PROJECTIONS.md`](PROJECTIONS.md)           | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
+| [`MIGRATION.md`](MIGRATION.md)               | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
+| [`ROADMAP.md`](ROADMAP.md)                   | phased execution plan and ticket boundaries                                    | implementation agents        |
+| [`VERIFICATION.md`](VERIFICATION.md)         | acceptance evidence and regression matrix                                      | reviewers + release checks   |
 
 ## Authority rules
 
 1. Domain identity and lifecycle rules come from `DOMAIN-MODEL-V2.md`.
 2. Product goals and user-facing outcomes come from `HERMES-AI-OFFICE-PRD.md`.
 3. This package may make engineering decisions only where they do not contradict those two documents.
-4. Existing `/api/v1`, Pixel Office routes, bridge SSE, CPA/gatewayctl secret boundaries, and current service ports are protected compatibility contracts until explicitly retired.
-5. Existing data is evidence. Migration must preserve observed history rather than invent precision that was never captured.
+4. Existing `/api/v1`, Pixel Office routes, bridge SSE, current CPA/gatewayctl behavior, and current service ports are protected **migration compatibility contracts**, not north-star dependencies.
+5. Gateway-neutral V2 boundaries and the LiteLLM reference strategy are defined in `GATEWAY-STRATEGY.md`.
+6. Existing data is evidence. Migration must preserve observed history rather than invent precision that was never captured.
 
 ## Current-system baseline
 
@@ -48,7 +50,7 @@ events
 external_usage_snapshots
 ```
 
-The deployed HTTP surface is `/api/v1/*`, including workforce snapshot, worker/assignment CRUD, resolve, CPA sync, usage sync, stats, events, and channel actions.
+The deployed HTTP surface is `/api/v1/*`, including workforce snapshot, worker/assignment CRUD, resolve, CPA sync, usage sync, stats, events, and channel actions. This is the **current-state baseline only**. V2 core contracts name generic gateway concepts rather than CPA-specific ones.
 
 The V2 documents therefore assume a compatibility period in which:
 

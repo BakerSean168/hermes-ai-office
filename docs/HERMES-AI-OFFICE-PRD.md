@@ -2,7 +2,7 @@
 
 Status: Draft v0.1 for business alignment
 Date: 2026-08-16
-Scope: Hermes AI Office, Model Control Plane, and their integration with Hermes runtimes and CPA
+Scope: Hermes AI Office, the AI Workforce Domain Service, Hermes runtimes, and replaceable model gateways
 
 > **Domain model authority:** [`DOMAIN-MODEL-V2.md`](DOMAIN-MODEL-V2.md) is the authoritative domain specification for identity, staffing, execution, supply, history, routing, and archival semantics. Where older terminology in this PRD conflicts with Domain Model V2—especially `Profile -> Position`, `Model Worker = Channel × Model`, `Assignment`, and `Execution Node`—Domain Model V2 supersedes it. This PRD remains authoritative for product goals, workflows, and scope.
 
@@ -63,37 +63,40 @@ It owns:
 
 Hermes is the source of truth for what work is actually being executed.
 
-### 4.2 Model data plane — CPA
+### 4.2 Model transport plane — replaceable Gateway
 
-CPA owns forwarding model requests to upstream providers.
+Model transport is infrastructure behind a **Gateway Port**. It is not a product-domain identity.
+
+The gateway owns generic transport concerns such as:
+
+- provider credentials and authentication;
+- provider protocol/request transformation;
+- streaming transport;
+- physical request forwarding;
+- retry/load balancing among business-equivalent deployments inside one selected Employment route;
+- generic gateway rate limits/budgets/physical usage evidence where supported.
+
+V2 is gateway-neutral. **LiteLLM Proxy is the reference implementation** because it already provides broad provider normalization, OpenAI-compatible APIs, routing, and usage/spend infrastructure. **CPA is the current compatibility adapter**, not a north-star architectural dependency. Special providers may remain behind CPA or another adapter when useful.
+
+The gateway must not silently select another Employee or cross an Employment boundary; those are business decisions.
+
+### 4.3 AI Workforce Domain Service
+
+The V2 domain service owns organizational workforce policy and durable business state. It is the evolution of the currently named Model Control Plane, with a deliberately smaller infrastructure scope.
 
 It owns:
 
-- upstream protocol adaptation;
-- provider credentials and auth pools;
-- request forwarding;
-- provider-specific retry/session behavior;
-- low-level model aliases and routing primitives.
+- WorkScopes, Roles, PositionTemplates, Positions and relations;
+- Suppliers, SupplierModels, durable Employees and Employment history;
+- capabilities, qualifications and requirements;
+- StaffingRules, Appointments, constraints and DispatchDecisions;
+- DutySessions, StaffingSegments and runtime correlation;
+- business route policy that chooses an Employment for a selected Employee;
+- InvocationAttempt correlation and business Usage attribution;
+- allocated cost, market value, career statistics and audit history;
+- gateway-independent events and projections.
 
-CPA should not become the product-level source of truth for organizational roles, business cost allocation, or workforce semantics.
-
-### 4.3 Model control plane
-
-The Model Control Plane owns model workforce policy and durable business state.
-
-It owns:
-
-- provider/channel registry;
-- model definitions;
-- model workers;
-- contracts, quotas and pricing;
-- health and eligibility;
-- positions and assignments;
-- routing policy and resolution;
-- usage attribution and accounting;
-- control-plane event history.
-
-It translates business policy into CPA routing actions through an adapter such as `gatewayctl`.
+It deliberately does **not** own a generic provider gateway, provider credential vault, protocol transformation, generic retries, or deployment load balancing. Those capabilities are consumed through Gateway Ports.
 
 ### 4.4 Hermes AI Office
 
@@ -364,7 +367,7 @@ The following rules are stable product contracts; the detailed architecture inva
 5. Employment, Appointment, actual StaffingSegment, and runtime identity are separate facts.
 6. Current work is derived from active DutySessions/StaffingSegments, not from Appointment alone.
 7. An Employee may be appointed while temporarily dormant/unroutable.
-8. CPA remains the model request data plane; the control plane manages workforce/policy and never requires the Office to handle raw provider secrets.
+8. Model transport is provided through a replaceable Gateway Port; LiteLLM is the V2 reference gateway and CPA is a compatibility adapter. The Office never handles raw provider secrets.
 9. Hermes remains authoritative for execution observations; the Office is a projection/control surface rather than an execution database.
 10. Usage remains attributable to Employee career and to the concrete Employment/Agreement/Channel actually used.
 11. Historical Appointment, Employment, Staffing, Run, Usage, and Evaluation records are retained for audit/statistics.
@@ -457,10 +460,10 @@ Do not expand scope yet into:
 - arbitrary workflow builders;
 - autonomous financial purchasing;
 - replacing Hermes orchestration;
-- replacing CPA request forwarding;
+- replacing generic gateway infrastructure already provided by LiteLLM or another selected gateway;
 - a full billing platform;
 - complex game mechanics unrelated to operational understanding;
-- multiple control planes before the CPA adapter path is mature.
+- multiple competing business-domain control planes; gateway adapters are intentionally replaceable.
 
 ## 14. Documentation hierarchy going forward
 

@@ -6,12 +6,12 @@ These workflows validate that the domain model closes over real product behavior
 
 ## 2. Workflow A — Discover an existing supplier workforce
 
-Scenario: CPA already contains OpenCode Go routes and exposes DeepSeek V4 Flash.
+Scenario: a GatewayDiscoveryPort (current CPA adapter or LiteLLM reference adapter) reports OpenCode Go routes exposing DeepSeek V4 Flash.
 
 ### Flow
 
 ```text
-CPA discovery
+Gateway discovery
   -> identify Supplier(OpenCode)
   -> identify SupplierModel(OpenCode / DeepSeek V4 Flash)
   -> get-or-create stable Employee
@@ -44,7 +44,7 @@ EMPLOYED
 1 current employment
 ```
 
-not two separate employees for two CPA routes.
+not two separate employees for two gateway routes.
 
 ## 3. Workflow B — Stop subscription and later re-subscribe
 
@@ -167,7 +167,7 @@ UI options include:
 
 The projection choice does not change domain identity or concurrency.
 
-## 7. Workflow F — Channel fails but Employee remains the same
+## 7. Workflow F — Gateway deployment fails but Employee remains the same
 
 Initial route:
 
@@ -179,11 +179,11 @@ Invocation 1
     Channel A
 ```
 
-Channel A fails.
+Physical route/deployment A fails.
 
-### L1 failover
+### G1 gateway-local failover
 
-If Channel B belongs to the same Employment and can reach E-014:
+If another business-equivalent deployment/Channel B belongs to the same Employment and can reach E-014, the gateway may select it:
 
 ```text
 Attempt 1 -> FAILED
@@ -209,7 +209,7 @@ E-014
 
 A shared CapacityPool under Employment A becomes exhausted.
 
-### L2 failover
+### B2 business Employment failover
 
 ```text
 next InvocationAttempt
@@ -276,21 +276,33 @@ PositionTemplate: Research Subagent
 
 The Subagent runtime is not the Employee.
 
-## 12. Workflow K — Add a new supplier channel safely
+## 12. Workflow K — Add or discover a supplier route safely
 
-Operator provides endpoint/protocol/credential.
+Gateway administration is optional to the core product. Two valid operator paths exist.
 
-### Flow
+### Path 1 — native gateway administration (preferred first implementation)
+
+```text
+operator configures LiteLLM / CPA using gateway-native secure tooling
+ -> gateway validates route/deployment
+ -> GatewayDiscoveryPort observes safe metadata
+ -> Supplier/SupplierModel/Offering reconciliation
+ -> Employment/Channel routability reconciliation
+ -> Office shows normalized business state
+```
+
+This path requires **no secret-bearing V2 business endpoint**.
+
+### Path 2 — optional unified Office administration
+
+Only if a real operator workflow justifies it:
 
 ```text
 operator command
- -> secret-bearing boundary
- -> gatewayctl creates disabled CPA channel
- -> channel test
- -> discovery
- -> Supplier/SupplierModel/Offering reconciliation
- -> Employment/Channel routability reconciliation
- -> explicit enable
+ -> isolated GatewayAdminPort adapter
+ -> gateway creates/tests route
+ -> GatewayDiscoveryPort observes result
+ -> V2 reconciles safe business projection
 ```
 
 ### Safety
@@ -298,14 +310,43 @@ operator command
 Credential must never appear in:
 
 - V2 business tables;
-- events;
-- browser storage;
-- logs;
+- business events;
+- browser persistence;
+- application logs;
+- projection payloads;
 - error payloads.
 
-Failure leaves Channel visible but disabled/quarantined with reason.
+Failure is represented as gateway route evidence; it never creates/changes Employee identity by itself.
 
-## 13. Workflow L — Cost and token attribution
+## 13. Workflow L — Physical retry versus business failover
+
+Initial state:
+
+```text
+Position -> Employee E-014 -> Employment B -> employment:empl_B
+```
+
+### Gateway-local failure
+
+LiteLLM/another gateway may retry or choose another business-equivalent deployment inside `employment:empl_B`.
+
+```text
+Employment B
+ -> deployment B1 fails
+ -> deployment B2 succeeds
+```
+
+Employee, Employment, Appointment, and StaffingSegment remain unchanged. Physical attempt/deployment evidence is recorded when observable.
+
+### Employment failover
+
+If Employment B is no longer routable, the gateway must return failure/unroutable evidence rather than silently using Employment C. Hermes business route policy then chooses Employment C and records that decision.
+
+### Employee failover
+
+If E-014 has no permitted Employment, DispatchDecision may select E-022. This closes the old StaffingSegment and opens a new one. The gateway never makes this decision.
+
+## 14. Workflow M — Cost and token attribution
 
 Successful model request:
 
@@ -342,7 +383,7 @@ allocatedCost
 marketValue
 ```
 
-## 14. Workflow M — Employee dossier history
+## 15. Workflow N — Employee dossier history
 
 Employee page must answer:
 
@@ -359,7 +400,7 @@ Employee page must answer:
 
 No answer should require interpreting raw Channel rows as separate people.
 
-## 15. Workflow N — Archive without losing history
+## 16. Workflow O — Archive without losing history
 
 ### Employee archive
 
@@ -386,12 +427,12 @@ Hide from current office/organization by default but preserve all Run/Position h
 
 Credential may be destroyed while retaining non-secret historical metadata and Usage references.
 
-## 16. Workflow O — Reconciliation after restart
+## 17. Workflow P — Reconciliation after restart
 
 On service start:
 
 1. load canonical V2 facts;
-2. resume/perform CPA discovery;
+2. resume/perform GatewayDiscoveryPort reconciliation;
 3. reconcile SupplierModels/Employees without duplicating identity;
 4. reconcile current Employments;
 5. reconcile current Appointment materialization from StaffingRules;
@@ -399,7 +440,7 @@ On service start:
 7. do not fabricate closure of duties solely because no live runtime feed has arrived yet;
 8. publish fresh projections.
 
-## 17. Workflow P — No routable employee
+## 18. Workflow Q — No routable employee
 
 If a DutySession has candidates but none is routable:
 
@@ -412,14 +453,14 @@ UI -> explicit staffing incident
 
 Never silently fall back to an unrelated raw model.
 
-## 18. Workflow acceptance checklist
+## 19. Workflow acceptance checklist
 
 The model is considered workflow-complete when automated tests can demonstrate:
 
 - same Employee survives subscription gaps;
 - one Employee has multiple concurrent Appointments and duties;
-- Channel failover does not change Employee;
-- Employment failover for same Employee does not change staffing history;
+- gateway-local G0/G1 retry/deployment switch does not change Employee or Employment;
+- B2 Employment failover for the same Employee does not change StaffingSegment history;
 - Employee replacement creates sequential StaffingSegments;
 - usage attributes to the actual attempt route;
 - appointed-but-never-worked remains distinguishable;

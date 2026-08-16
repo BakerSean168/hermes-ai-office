@@ -24,7 +24,7 @@ Run -> DutySession -> StaffingSegment -> Employee
 Invocation -> Attempt -> Employment + Channel
 ```
 
-without breaking the current Office, CPA routing, usage history, or secret boundary.
+without breaking the current Office, current CPA production routing, usage history, or secret boundary. CPA is treated as migration evidence/compatibility infrastructure, not as a V2 architectural prerequisite.
 
 ## 2. Migration strategy
 
@@ -42,6 +42,18 @@ Phase G: legacy tables retained read-only until explicit cleanup
 
 Do not perform a one-shot destructive schema rewrite.
 
+### Gateway migration is independent from business-data migration
+
+Do not require a "CPA -> LiteLLM database migration" before V2 can exist. Instead:
+
+```text
+current CPA -> CPA Gateway Adapter ----\
+                                      -> normalized V2 gateway evidence
+LiteLLM     -> LiteLLM Gateway Adapter-/
+```
+
+A controlled V2 Position may use LiteLLM while other production traffic remains on CPA. Business tables never encode which gateway is permanent.
+
 ## 3. Protected baseline
 
 Before migration code lands, capture:
@@ -51,7 +63,7 @@ Before migration code lands, capture:
 - `/api/v1/dashboard/workforce` fixture;
 - current `/api/model/workforce` fixture;
 - current logical position aliases;
-- CPA channel inventory without secrets;
+- current gateway/CPA route inventory without secrets;
 - existing usage aggregate totals by worker/channel/model;
 - current test commands/results.
 
@@ -210,9 +222,9 @@ Totals before/after migration must reconcile by:
 - model;
 - time window.
 
-## 13. Step 10 — Introduce V2 discovery reconciliation
+## 13. Step 10 — Introduce gateway-neutral discovery reconciliation
 
-CPA discovery writes/reconciles V2 SupplierModel/Employee/Employment/Channel facts.
+`GatewayDiscoveryPort` writes/reconciles V2 SupplierModel/Employee/Employment/Channel facts. The first production evidence may come from CPA; the reference V2 adapter is LiteLLM. Both must normalize through the same contract.
 
 Identity tests must prove repeated sync is idempotent.
 
@@ -246,7 +258,7 @@ For the selected position:
 - create ModelInvocation;
 - record InvocationAttempts with Employee/Employment/Channel;
 - record UsageEntry;
-- compare totals with current CPA/V1 trackers.
+- compare totals with current gateway/provider evidence and the CPA/V1 aggregate baseline during migration.
 
 Do not cut over accounting until reconciliation is demonstrated.
 
@@ -304,16 +316,31 @@ Recommended flags:
 
 ```text
 MODEL_CP_V2_SCHEMA=1
-MODEL_CP_V2_DISCOVERY=1
+MODEL_CP_V2_GATEWAY_DISCOVERY=1
 MODEL_CP_V2_READS=1
 MODEL_CP_V2_STAFFING_POSITION_IDS=...
 MODEL_CP_V2_INVOCATION_LEDGER=1
+MODEL_CP_V2_GATEWAY_IDS=litellm-reference,cpa-compat
 MODEL_CP_V2_COMPAT_PROJECTION=1
 ```
 
 Prefer persisted migration/cutover records for permanent state; environment flags are operational controls, not historical evidence.
 
-## 20. Data reconciliation checks
+## 20. Gateway cutover rules
+
+Gateway cutover is a deployment decision after adapter parity, not a domain migration step.
+
+A position/employment route may move from CPA to LiteLLM only when:
+
+- request/stream protocol behavior is characterized;
+- usage/deployment evidence can be correlated;
+- gateway retry is constrained to the selected Employment;
+- rollback to the previous gateway route is tested;
+- Employee/Employment/Appointment IDs remain unchanged.
+
+Special CPA-only subscription routes may remain behind the CPA adapter or be exposed as an upstream behind LiteLLM. No business-table rewrite is required.
+
+## 21. Data reconciliation checks
 
 After each migration batch:
 
@@ -337,7 +364,7 @@ V2 channel projection
 
 Differences must be explainable by documented deduplication or semantic split.
 
-## 21. Migration finding classes
+## 22. Migration finding classes
 
 ```text
 IDENTITY_AMBIGUITY
@@ -351,14 +378,14 @@ UNMAPPED_CHANNEL
 
 Migration should surface these as reports, not silently guess.
 
-## 22. Migration completion criteria
+## 23. Migration completion criteria
 
 V1 can be considered ready for retirement only when:
 
 1. all current UI/API consumers have V2 or compatibility coverage;
 2. V2 identity sync is stable and idempotent;
 3. staffing/routing is V2 authoritative for all intended positions;
-4. request-level accounting reconciles sufficiently with provider/CPA totals;
+4. request-level accounting reconciles sufficiently with the selected gateway/provider evidence; CPA totals remain one migration baseline while CPA is active;
 5. V1 writes are disabled;
 6. historical V1 data remains queryable or migrated with documented precision;
 7. rollback procedure has been tested before final cleanup.

@@ -394,12 +394,12 @@ Projection payloads include:
 generatedAt
 sourceFreshness.runtime
 sourceFreshness.controlPlane
-sourceFreshness.cpa
+sourceFreshness.gateway
 ```
 
 If runtime source is stale, Office should show telemetry stale instead of marking Employee idle/completed.
 
-If CPA health source is stale, routability may be `UNKNOWN` rather than `AVAILABLE`.
+If gateway health/usage evidence is stale, routability may be `UNKNOWN` rather than `AVAILABLE`. The projection exposes the gateway source separately so LiteLLM/CPA-specific freshness never becomes business identity.
 
 ## 12. Incident projection
 

@@ -2,7 +2,7 @@
 
 > **Domain migration note:** This README describes the currently deployed Model Control Plane implementation. The authoritative north-star business model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md). In V2, the legacy `Worker = Channel × ModelDefinition` identity becomes a compatibility projection; durable employee identity is `Employee = Supplier × SupplierModel`. SupplyAgreement/Employment describe the commercial periods through which that employee can work, while `Channel` is only an access route. Existing APIs remain protected during migration.
 
-The Model Control Plane is the source of truth for model workforce identity, routing policy, accounting, quota, and events. It is deliberately separate from both the model data plane (currently CLIProxyAPI/CPA) and Pixel Agents visualization.
+The currently deployed Model Control Plane is the source of truth for V1 model workforce state. The V2 north star narrows this service into a gateway-neutral AI Workforce Domain Service: it owns organizational identity, staffing, business route policy, attribution, and projections while generic model transport is delegated through Gateway Ports.
 
 ## Domain model
 
@@ -28,12 +28,12 @@ Identity invariant: a model name is not a Worker. `deepseek-v4-flash` through tw
 
 ## Ownership boundaries
 
-- **CPA / future gateways (data plane):** forward model requests, provider protocol adaptation, provider-specific retry/session behavior.
+- **Gateway Port (transport infrastructure):** forward model requests, normalize provider protocols, keep credentials, and handle physical retry/load-balancing within an approved Employment route. LiteLLM Proxy is the V2 reference implementation; CPA is the current compatibility adapter.
 - **Model Control Plane:** registry, contracts, quotas, health, assignments, policy scoring, usage attribution, event history, dashboard projection.
 - **Pixel Agents:** visualization plus a thin management facade. It consumes the dashboard projection/SSE and forwards explicit admin actions to the Control Plane; it never reads CPA secrets or the SQLite database.
 - **Hermes/Codex/OpenCode clients:** should converge on stable logical Positions/aliases rather than duplicating provider credentials.
 
-The CPA integration is an adapter, not a core dependency. A future LiteLLM/New API adapter can implement the same discovery/usage boundary without changing Pixel Agents. CPA lifecycle mutations remain behind `gatewayctl`, including audited logical-model alias binding.
+The CPA integration is an adapter, not a core dependency. V2 uses explicit gateway ports and treats **LiteLLM Proxy as the reference gateway implementation**. CPA remains behind a compatibility adapter and may also be used behind LiteLLM for special subscription/provider protocols when that reduces complexity. Current CPA lifecycle mutations remain behind `gatewayctl` until migration retires them.
 
 ## Scheduling
 

@@ -485,7 +485,6 @@ SupplyAgreement {
   fixedCost?
   currency?
   billingPeriod?
-  secretRef?          // never raw secret
   createdAt
   endedAt?
   archivedAt?
@@ -501,7 +500,7 @@ ACTIVE/SUSPENDED -> TERMINATED
 EXPIRED/TERMINATED -> ARCHIVED
 ```
 
-SupplyAgreement is a purchasing/accounting identity, not an Employee identity.
+SupplyAgreement is a purchasing/accounting identity, not an Employee identity. Provider credentials and gateway secrets are not part of this business aggregate; they remain gateway/secret-manager concerns.
 
 A renewal may continue the same agreement or create a new agreement record depending on the external contract/account semantics. Either choice must not create a new Employee when the Supplier and SupplierModel are unchanged.
 
@@ -677,9 +676,11 @@ A Channel is a technical route, not an employee identity or employment identity.
 
 Examples:
 
-- one CPA upstream configuration
-- one OAuth route
-- one API base URL / credential route
+- one LiteLLM deployment under an Employment-scoped model group;
+- one CPA upstream exposed by the compatibility adapter;
+- another gateway-specific physical route.
+
+Channel is a **safe business projection of a gateway route**, not a copy of gateway configuration. Credentials and full provider configuration stay in the gateway/secret manager.
 
 Suggested fields:
 
@@ -687,10 +688,11 @@ Suggested fields:
 Channel {
   id
   supplyAgreementId
+  gatewayId
+  externalRouteRef
   name
   protocol
-  endpointRef
-  secretRef
+  endpointHint?       // non-secret only
   lifecycle
   health
   latencyStats
@@ -1497,12 +1499,12 @@ Important rules:
 
 ## 15. Hermes model discovery and routing workflow
 
-Hermes should not need to understand raw provider credentials or CPA internals.
+Hermes should not need to understand raw provider credentials or gateway internals.
 
 Target flow:
 
 ```text
-Supplier adapters / CPA discovery
+Supplier adapters / GatewayDiscoveryPort
         |
         v
 SupplierModel / Employee / SupplyAgreement / Employment / ModelOffering / Channel / CapacityPool registry
@@ -1523,7 +1525,7 @@ StaffingSegment
 stable logical Position route
         |
         v
-CPA / gateway
+GatewayExecutionPort (reference: LiteLLM; compatibility: CPA)
         |
         v
 InvocationAttempt(s)
@@ -1829,7 +1831,7 @@ Preserve legacy profile slug as an external reference and transitional API field
 
 Current model-control-plane Positions become Position records, but their semantics must expand from "logical model alias" to organizational jobs.
 
-During migration, a compatibility alias may continue to map one Position to `position:<slug>` in CPA.
+During migration, a compatibility alias may continue to map one Position to `position:<slug>` in the current CPA adapter. The north-star gateway route is Employment-scoped and does not delegate staffing to the gateway.
 
 ### 23.3 Current `Worker = Channel × ModelDefinition`
 
@@ -1892,7 +1894,7 @@ Until explicitly retired, preserve:
 
 - Pixel Office HTTP endpoints used by the current web UI;
 - existing Hermes bridge endpoints and SSE behavior;
-- CPA/gatewayctl secret-handling boundary;
+- current CPA/gatewayctl secret-handling boundary while that compatibility adapter remains active;
 - stable `position:*` logical aliases where currently published;
 - current dashboard projection shape through an adapter where feasible;
 - historical cost/accounting data;
@@ -1920,6 +1922,8 @@ For the next architecture phase, this document treats the following as decisions
 13. **Quota/concurrency may be shared through CapacityPool.**
 14. **Archive preserves business history.**
 15. **UI/animation is a projection over domain facts.**
+16. **Gateway implementation is infrastructure:** LiteLLM is the reference adapter; CPA is compatibility/current-state only.
+17. **Domain chooses Employee and Employment; a gateway may only choose business-equivalent physical routes inside the selected Employment.**
 
 ## 26. Remaining bounded decisions
 
@@ -1940,7 +1944,7 @@ The next code phase should **not** rewrite the UI first.
 The safest vertical slice is:
 
 ```text
-existing CPA discovery
+existing gateway evidence (initially CPA; reference target LiteLLM)
   -> Supplier / SupplierModel / stable Employee identity
   -> SupplyAgreement / Employment / ModelOffering / Channel projection
   -> one existing Position

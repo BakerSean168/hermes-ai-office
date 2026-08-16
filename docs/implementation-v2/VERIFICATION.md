@@ -74,26 +74,27 @@ For every decision verify:
 
 ## 6. Failover verification
 
-### L0 same route retry
+### G0 gateway retry within selected Employment route
 
 Expected:
 
 - same Employee;
 - same Employment;
-- same Channel;
-- second InvocationAttempt;
+- same selected Employment route;
+- same or another physical attempt according to gateway telemetry;
 - StaffingSegment unchanged.
 
-### L1 Channel switch
+### G1 gateway deployment/Channel switch within selected Employment
 
 Expected:
 
 - same Employee;
 - same Employment;
-- different Channel;
-- StaffingSegment unchanged.
+- different business-equivalent physical deployment/Channel;
+- StaffingSegment unchanged;
+- gateway did not cross Employment.
 
-### L2 Employment switch
+### B2 business Employment switch
 
 Expected:
 
@@ -102,7 +103,7 @@ Expected:
 - StaffingSegment unchanged;
 - usage attributed to new Employment.
 
-### L3 Employee replacement
+### B3 business Employee replacement
 
 Expected:
 
@@ -167,12 +168,27 @@ Scan responses/logs/events/database fixtures for:
 
 - API keys;
 - authorization headers;
-- raw CPA management credentials;
+- raw provider credentials or gateway management credentials (including CPA/LiteLLM secrets);
 - secret-bearing full URLs if considered sensitive.
 
 No secret may appear.
 
-## 10. Event verification
+## 10. Gateway adapter contract verification
+
+Run the same normalized contract suite against LiteLLM reference fixtures and CPA compatibility fixtures. Verify:
+
+1. discovery normalizes to stable Supplier/SupplierModel evidence;
+2. route refs are opaque and gateway-specific only at the adapter boundary;
+3. the selected Employment route cannot silently fall back to another Employment;
+4. the gateway cannot silently select another Employee;
+5. same-Employment deployment retry/load-balancing is observable enough to attribute the physical attempt;
+6. token/latency/provider-cost evidence is normalized without double calculation;
+7. streaming/cancellation behavior used by Hermes clients is characterized;
+8. secrets never enter business DB/events/projections/log fixtures;
+9. gateway outage changes routability, not Employee/Appointment identity;
+10. swapping the adapter does not require business-data migration.
+
+## 11. Event verification
 
 Test:
 
@@ -186,7 +202,7 @@ Test:
 8. no secret payloads;
 9. schema version present.
 
-## 11. Migration verification
+## 12. Migration verification
 
 ### Counts are not enough
 
@@ -216,7 +232,7 @@ by legacy and V2 dimensions.
 
 Differences require a documented reason.
 
-## 12. Projection verification
+## 13. Projection verification
 
 Golden fixtures for:
 
@@ -229,7 +245,7 @@ Golden fixtures for:
 
 Projection rebuild from canonical facts must produce equivalent output.
 
-## 13. Restart verification
+## 14. Restart verification
 
 Simulate service restart while:
 
@@ -246,7 +262,7 @@ Expected:
 - runtime activity may become stale but not falsely completed;
 - event replay resumes correctly.
 
-## 14. Archive verification
+## 15. Archive verification
 
 ### Employee archive
 
@@ -264,7 +280,7 @@ Expected:
 - credential no longer retrievable;
 - historical Channel/Usage references remain non-secret.
 
-## 15. Performance targets for next phase
+## 16. Performance targets for next phase
 
 These are guardrails rather than contractual SLAs:
 
@@ -275,7 +291,7 @@ These are guardrails rather than contractual SLAs:
 
 Record actual benchmark baselines before setting hard numeric targets.
 
-## 16. Release evidence checklist
+## 17. Release evidence checklist
 
 For each migrated vertical slice attach:
 
@@ -288,7 +304,7 @@ For each migrated vertical slice attach:
 - screenshot/manual UI evidence when visualization changes;
 - rollback command/procedure exercised or reviewed.
 
-## 17. Completion gate for first V2 vertical slice
+## 18. Completion gate for first V2 vertical slice
 
 The first slice is not complete until all are true:
 

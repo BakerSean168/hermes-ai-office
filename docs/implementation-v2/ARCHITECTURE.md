@@ -2,35 +2,56 @@
 
 ## 1. Objective
 
-The target architecture makes Hermes AI Office an organizational control surface over four authoritative business contexts while leaving CPA as the model-request data plane and Hermes runtimes as execution engines.
+The target architecture makes Hermes AI Office an organizational control surface over four authoritative business contexts while treating model transport as a replaceable infrastructure port.
+
+**Current production deployment is not a north-star constraint.** CPA is the currently deployed gateway and therefore matters to migration/rollback. LiteLLM Proxy is the reference gateway for V2 because it can absorb generic provider/protocol/routing infrastructure. Either can be replaced without changing Employee, Employment, Appointment, DutySession, or Usage business identity.
 
 The architecture must answer, without ambiguous identity translation:
 
 1. Which Positions exist and what do they require?
 2. Which durable Employees exist and through which Employments can they currently work?
 3. Who is appointed, who is working now, and why was that Employee selected?
-4. Which concrete Employment/Agreement/Channel handled every physical model attempt?
+4. Which concrete Employment and gateway route handled every model attempt?
 5. How does usage roll up to Employee career, procurement period, Position, WorkScope, and Run?
+
+See [Gateway Strategy](GATEWAY-STRATEGY.md) for the gateway-neutral boundary and LiteLLM reference mapping.
 
 ## 2. North-star service boundaries
 
 ```text
-                         +---------------------------+
-                         |     Hermes AI Office      |
-                         | UI + thin command facade  |
-                         +-------------+-------------+
-                                       |
-                         queries/events|commands
-                                       v
-+------------------+     +-------------+-------------+      +------------------+
-| Hermes execution | --> | Model / Org Control Plane| ---> | CPA / gatewayctl |
-| Bridge/runtime   |     | V2 domain + projections  |      | request data plane|
-+------------------+     +-------------+-------------+      +------------------+
-       |                           |                              |
-       | runtime observations      | durable state                | provider calls
-       v                           v                              v
- Activity adapters          SQLite V2 store               external suppliers
+                          +---------------------------+
+                          |     Hermes AI Office      |
+                          | UI + thin command facade  |
+                          +-------------+-------------+
+                                        |
+                          queries/events|commands
+                                        v
++-------------------+     +-------------+-------------+
+| Hermes execution  | --> | AI Workforce Domain     |
+| Bridge/runtime    |     | V2 state + projections  |
++-------------------+     +-------------+-------------+
+        |                           |
+        | runtime observations      | Gateway Ports
+        v                           v
+ Activity adapters          +-------+-------------------+
+                            | Gateway Adapter            |
+                            | reference: LiteLLM Proxy   |
+                            | compat: CPA                |
+                            +------------+---------------+
+                                         |
+                                         v
+                                   model providers
 ```
+
+Optional special-provider topology:
+
+```text
+AI Workforce Domain -> LiteLLM -> CPA -> special subscription/provider
+```
+
+Neither topology changes business identities.
+
+## 3. Ownership boundaries
 
 ### Hermes execution plane owns
 
@@ -42,28 +63,28 @@ The architecture must answer, without ambiguous identity translation:
 
 It does **not** own Employee identity, supplier procurement, appointment policy, or accounting truth.
 
-### V2 Control Plane owns
+### AI Workforce Domain Service owns
 
 Organization:
 
-- WorkScope
-- RoleDefinition
-- PositionTemplate
-- Position
-- PositionRelation
+- WorkScope;
+- RoleDefinition;
+- PositionTemplate;
+- Position;
+- PositionRelation.
 
-Workforce supply:
+Workforce:
 
-- Supplier
-- SupplierModel
-- ModelDefinition mapping
-- Plan
-- SupplyAgreement
-- ModelOffering
-- Employee
-- Employment
-- Channel metadata/health policy
-- CapacityPool
+- Supplier;
+- SupplierModel;
+- ModelDefinition mapping;
+- Plan;
+- SupplyAgreement;
+- ModelOffering;
+- Employee;
+- Employment;
+- safe gateway/Channel references;
+- CapacityPool business facts when the gateway/provider exposes them.
 
 Staffing:
 
@@ -73,7 +94,7 @@ Staffing:
 - StaffingConstraint;
 - DispatchDecision.
 
-Execution ledger:
+Execution/ledger:
 
 - DutySession;
 - StaffingSegment;
@@ -81,104 +102,132 @@ Execution ledger:
 - InvocationAttempt;
 - UsageEntry;
 - Evaluation;
-- normalized runtime references received from Hermes.
+- normalized runtime and gateway references.
 
-### CPA / gatewayctl owns
+The service does **not** implement provider protocol translation, generic retries, generic deployment load balancing, provider credential storage, or a generic AI gateway.
 
-- secret-bearing upstream credentials;
+### Gateway owns
+
+Through `GatewayExecutionPort` / `GatewayDiscoveryPort` / `GatewayUsagePort`:
+
+- secret-bearing provider credentials;
 - request forwarding;
-- protocol adaptation;
-- provider-specific retry/session behavior that must happen below the business layer;
-- concrete upstream configuration lifecycle;
-- logical alias publication mechanism.
+- provider request/response transformation;
+- provider protocol normalization;
+- streaming transport behavior;
+- same-Employment retry/load-balancing across business-equivalent deployments;
+- generic gateway auth/rate limits/budget enforcement when enabled;
+- physical request usage/latency/provider-cost evidence it observes.
 
-The control plane may command CPA through `gatewayctl`, but it must never become a second secret store.
+Gateway administration is an **optional** `GatewayAdminPort`. The AI workforce product must function if operators administer LiteLLM/CPA through their native tooling.
 
 ### Pixel Office owns
 
 - human-facing projections;
 - animation state derived from business/runtime facts;
-- explicit operator commands;
+- explicit operator business commands;
 - navigation and explanation.
 
-It owns no canonical business lifecycle.
+It owns no canonical lifecycle and never receives raw provider credentials.
 
-## 3. Ownership matrix
+## 4. Ownership matrix
 
-| State transition             | Authoritative owner                       | Consumers             |
-| ---------------------------- | ----------------------------------------- | --------------------- |
-| SupplierModel discovered     | Control Plane supply adapter              | staffing, UI          |
-| Employment starts/ends       | Control Plane                             | dispatch, finance, UI |
-| Appointment starts/ends      | Control Plane staffing                    | dispatch, UI          |
-| Task/Run observed            | Hermes adapter or task integration        | Control Plane, UI     |
-| DutySession opens/closes     | Control Plane execution domain            | UI, accounting        |
-| Employee selected for duty   | Dispatch engine                           | UI, audit             |
-| StaffingSegment opens/closes | Control Plane                             | UI, history           |
-| RuntimeSession starts/ends   | Hermes/runtime adapter                    | Control Plane, UI     |
-| Channel health changes       | CPA adapter/control plane health          | dispatch, UI          |
-| InvocationAttempt happens    | request/usage adapter                     | ledger, UI            |
-| Usage recorded               | Control Plane ledger                      | statistics, UI        |
-| animation state changes      | projection from ActivityEvent/DutySession | UI only               |
+| State transition                   | Authoritative owner                       | Consumers                    |
+| ---------------------------------- | ----------------------------------------- | ---------------------------- |
+| SupplierModel identity reconciled  | Workforce adapter/domain                  | staffing, UI                 |
+| Employment starts/ends             | Workforce domain                          | route policy, finance, UI    |
+| Appointment starts/ends            | Staffing domain                           | dispatch, UI                 |
+| Task/Run observed                  | Hermes adapter/task integration           | domain, UI                   |
+| DutySession opens/closes           | Execution domain                          | UI, accounting               |
+| Employee selected for duty         | Dispatch engine                           | UI, audit                    |
+| Employment selected for invocation | Business route policy                     | gateway adapter, audit       |
+| physical deployment selected       | Gateway                                   | usage adapter, observability |
+| StaffingSegment opens/closes       | Execution domain                          | UI, history                  |
+| RuntimeSession starts/ends         | Hermes/runtime adapter                    | domain, UI                   |
+| gateway route health changes       | Gateway adapter                           | routability, UI              |
+| InvocationAttempt happens          | Gateway usage/correlation adapter         | ledger, UI                   |
+| UsageEntry recorded                | Hermes ledger                             | statistics, UI               |
+| animation state changes            | projection from ActivityEvent/DutySession | UI only                      |
 
-No state transition should have two authoritative writers.
+No transition has two authoritative writers.
 
-## 4. Request path
+## 5. Model request path
 
-Target model-call path:
+North-star path:
 
 ```text
 RuntimeSession
-  -> logical Position route
-  -> current DutySession context
-  -> Employee already staffing duty OR dispatch resolution
-  -> choose routable Employment
-  -> choose compatible healthy Channel
-  -> publish/resolve CPA route
-  -> CPA forwards request
-  -> InvocationAttempt recorded
-  -> UsageEntry recorded
+  -> Position / current DutySession
+  -> Employee already staffing duty OR DispatchDecision
+  -> business route policy chooses Employment
+  -> GatewayExecutionPort resolves employment:<employment-id>
+  -> gateway chooses equivalent physical deployment/channel
+  -> provider request
+  -> gateway usage/result evidence
+  -> InvocationAttempt correlation
+  -> UsageEntry business attribution
 ```
 
-The system separates two decisions:
+Two business decisions stay above the gateway:
 
 ```text
-staffing decision: which Employee owns this duty?
-routing decision: through which Employment + Channel does this invocation reach that Employee?
+staffing: which Employee owns this duty?
+commercial route: which Employment may be used for this invocation?
 ```
 
-Changing Employment/Channel for the same Employee does not require changing StaffingSegment.
-
-## 5. Runtime event path
+One physical decision stays below:
 
 ```text
-Hermes / Codex / OpenCode runtime observation
-    -> Hermes Office Bridge / provider adapter
+gateway routing: which equivalent deployment/channel within that Employment handles the request?
+```
+
+Changing physical deployment never changes StaffingSegment. Changing Employment for the same Employee also leaves StaffingSegment intact but creates a distinct InvocationAttempt route fact. Changing Employee requires redispatch and a new StaffingSegment.
+
+## 6. Gateway route identity
+
+Recommended generated logical route:
+
+```text
+employment:<employment-id>
+```
+
+A gateway route can contain multiple deployments only when they are business-equivalent under that Employment.
+
+Do **not** build gateway groups that silently mix:
+
+- different Employees;
+- unrelated Employments;
+- fallback models with different staffing meaning.
+
+`position:*` remains a domain/client compatibility identity, not permission for the gateway to make staffing decisions. Current CPA position aliases remain valid during migration only.
+
+## 7. Runtime event path
+
+```text
+Hermes / Codex / OpenCode observation
+    -> Hermes Office Bridge/runtime adapter
     -> normalized RuntimeObservation
-    -> correlate to Run + DutySession + RuntimeSession
+    -> correlate Run + DutySession + RuntimeSession
     -> append ActivityEvent
-    -> update current projection
-    -> emit V2 business/projection event
+    -> update projection
+    -> emit V2 event
     -> Pixel Office animation
 ```
 
-The bridge may remain a compatibility source during migration. Long term, normalized runtime observations should not encode supplier/model staffing identity that belongs to the control plane.
+Gateway events are a separate source:
 
-## 6. Read/write architecture
+```text
+LiteLLM / CPA / future gateway evidence
+    -> GatewayUsagePort / GatewayDiscoveryPort
+    -> normalized GatewayObservation
+    -> InvocationAttempt / Channel projection / UsageEntry
+```
 
-Use command/query separation at the API level even if both are implemented in one process initially.
+Do not infer runtime work state from gateway traffic alone.
 
-Commands:
+## 8. Read/write architecture
 
-- change canonical state;
-- validate invariants;
-- append events;
-- return authoritative result IDs.
-
-Queries:
-
-- read canonical entities or purpose-built projections;
-- never perform hidden state mutation;
-- may aggregate across contexts.
+Use command/query separation even if one Node process hosts V2 initially.
 
 Recommended internal modules:
 
@@ -191,90 +240,84 @@ model-control-plane/src/v2/
   execution/
   ledger/
   projections/
-  adapters/
+  gateways/
+    ports/
+    litellm/
+    cpa/
   api/
   events/
   migrations/
 ```
 
-This is a target boundary, not a requirement to create all directories on day one.
+The `gateways/` boundary is deliberately infrastructure-facing; no LiteLLM/CPA identifier appears in core domain types except as an opaque external reference.
 
-## 7. Logical routing boundary
+## 9. Persistence boundary
 
-Clients should increasingly target stable Position identities/aliases, not provider/model credentials.
+SQLite remains acceptable for the next domain phase because the service is single-host and business write volume is modest.
 
-```text
-position:<position-slug>
-```
+V2 persistence stores:
 
-remains a compatibility-friendly logical alias. Internally the control plane resolves:
+- canonical business identity/history;
+- opaque gateway/route/deployment references needed for reconciliation;
+- immutable business events and usage attribution.
 
-```text
-Position
- -> DutySession / Appointment context
- -> Employee
- -> Employment
- -> Channel
- -> CPA concrete upstream
-```
+It does **not** become a mirror of LiteLLM/CPA internal configuration databases and does not store provider credentials.
 
-If a Position currently has no routable Employee, the result must be an explicit `UNROUTABLE` outcome with reasons; it must not silently pick an unrelated raw model.
+Short transactions cover atomic business transitions. Long gateway/provider calls never hold DB transactions open.
 
-## 8. Failure containment
+## 10. Failure containment
 
-### Control Plane unavailable
+### Domain service unavailable
 
-- existing CPA routes may continue serving previously published aliases if safe;
-- no new staffing/policy mutations occur;
-- UI shows control-plane degraded rather than inventing stale health;
-- runtime execution state remains independently observable through Hermes/Bridge.
+- gateway can continue serving already-resolved Employment routes where safe;
+- no new staffing/Appointment business mutation occurs;
+- UI marks domain state degraded;
+- Hermes runtime telemetry remains independently observable.
 
-### CPA unavailable
+### Reference gateway unavailable
 
-- Employees may remain appointed;
-- Employees become operationally unroutable through affected routes;
-- open duties may remain visible but model invocations fail or trigger approved failover;
-- no Employee/Appointment history is deleted.
+- Employee and Appointment history remain intact;
+- affected Employments become unroutable/unknown from current evidence;
+- open DutySessions remain visible;
+- invocation can fail or trigger an approved B2+ business failover;
+- no staffing/history row is deleted.
+
+### One gateway adapter unavailable
+
+Other gateway adapters may remain usable if the selected Employee has a permitted Employment through them. The adapter failure itself never creates a new Employee identity.
 
 ### Bridge/runtime feed unavailable
 
-- canonical organization/supply/staffing state stays intact;
-- current activity projection becomes stale/unknown;
-- do not mark duties complete merely because telemetry disappeared.
+- organization/supply/staffing history remains intact;
+- current activity becomes stale/unknown;
+- duties are not marked complete merely because telemetry disappeared.
 
-## 9. Concurrency and transaction boundary
+## 11. Protected compatibility contracts
 
-SQLite remains acceptable for the next phase because the control plane is single-host and write volume is modest. Use short explicit transactions around state transitions that must be atomic.
+Until explicitly retired:
 
-Atomic examples:
-
-- create Employment + emit `employment.started`;
-- create DispatchDecision + open StaffingSegment;
-- close StaffingSegment + open replacement segment during failover;
-- record InvocationAttempt + UsageEntry when usage is available synchronously.
-
-Long external calls such as channel tests must not hold database transactions open.
-
-## 10. Protected contracts
-
-Until migration explicitly retires them:
-
-- `127.0.0.1:8320` remains the Model Control Plane service boundary;
+- `127.0.0.1:8320` remains the current service boundary;
 - `/api/v1/*` keeps current behavior;
-- Pixel backend `/api/model/*` continues to serve current UI;
-- Hermes bridge `8787` contracts remain available;
-- CPA lifecycle mutations remain behind `gatewayctl`;
-- no raw secret enters V2 business tables or event payloads;
+- Pixel backend `/api/model/*` keeps current behavior;
+- Hermes Bridge `8787` contracts remain available;
+- current CPA `8317` may continue serving production traffic during migration;
+- CPA secret mutations remain behind the existing safe boundary while CPA is active;
 - current `position:*` aliases remain valid where already published;
-- current usage/accounting records remain queryable.
+- historical V1 usage/accounting remains queryable.
 
-## 11. Architecture decisions
+These are migration constraints, not north-star architecture choices.
 
-1. V2 is an additive migration, not an in-place reinterpretation of V1 rows.
-2. `/api/v2` is the canonical future API boundary.
-3. Employee identity is stable across supply periods.
-4. Employment and Appointment are separate temporal facts.
-5. DutySession and StaffingSegment are the bridge between organization and runtime work.
-6. InvocationAttempt is the bridge between staffing identity and physical routing/accounting.
-7. UI reads projections; it does not join raw tables itself.
-8. Events are append-only facts with replayable sequence numbers.
+## 12. Architecture decisions
+
+1. V2 is gateway-neutral.
+2. LiteLLM Proxy is the reference gateway implementation; CPA is a compatibility adapter.
+3. The business service does not reimplement generic AI gateway capabilities.
+4. V2 is an additive migration, not an in-place reinterpretation of V1 rows.
+5. `/api/v2` is the canonical future business API boundary.
+6. Employee identity is stable across supply periods and gateway changes.
+7. Employment and Appointment are independent temporal facts.
+8. Domain chooses Employee and Employment; gateway chooses only business-equivalent physical deployments under the selected Employment.
+9. DutySession/StaffingSegment bridge organization and runtime work.
+10. InvocationAttempt bridges business identity to physical gateway evidence.
+11. UI reads projections; it does not join raw tables or gateway admin state itself.
+12. Events are append-only facts with replayable sequence numbers.

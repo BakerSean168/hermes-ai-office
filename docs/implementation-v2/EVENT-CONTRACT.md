@@ -15,6 +15,7 @@ Good:
 
 ```text
 employment.ended
+gateway.health.changed
 channel.health.changed
 staffing_segment.started
 capacity.exhausted
@@ -44,7 +45,7 @@ capacity.exhausted
   },
   "actor": {
     "kind": "SYSTEM",
-    "ref": "cpa-discovery"
+    "ref": "gateway:litellm-reference"
   },
   "payload": {}
 }
@@ -231,7 +232,18 @@ employment.ended
 
 If another current Employment remains, state after may remain `EMPLOYED`.
 
-### Channel
+### Gateway and Channel
+
+Gateway events describe normalized adapter availability, not provider business identity:
+
+```text
+gateway.discovered
+gateway.health.changed
+gateway.disabled
+gateway.retired
+```
+
+Channel events describe safe route/deployment projections:
 
 ```text
 channel.discovered
@@ -378,7 +390,10 @@ attemptNumber
 employeeId
 employmentId
 supplyAgreementId
-channelId
+gatewayId?
+channelId?
+gatewayRequestRef?
+gatewayDeploymentRef?
 ```
 
 ### `usage.recorded`
