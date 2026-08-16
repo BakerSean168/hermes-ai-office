@@ -525,7 +525,7 @@ Stop and create a focused decision if implementation would:
 - make the Node domain service proxy LLM streaming traffic;
 - require Postgres/Redis solely because LiteLLM supports them;
 - require automatic LiteLLM admin/config mutation before the first slice;
-- break `/api/v1` without compatibility evidence;
+- reintroduce `/api/v1` or legacy Worker/Assignment authority without an explicit new product decision;
 - invent historical precision unavailable in current data;
 - implement deferred domain richness without a real use case.
 
@@ -533,4 +533,4 @@ Stop and create a focused decision if implementation would:
 
 The V2 north-star domain and control plane are implemented through migration `010_maintenance`, including gateway-neutral execution, persistent idempotency, supply/capacity, finance/evaluation, capability/qualification/staffing policy, organization topology, Hermes RuntimeSession projection, purpose-built Office projections, replayable incidents and safe retention maintenance.
 
-The remaining roadmap item is an **operational V1 retirement cutover**, not another business-domain rewrite. Production intentionally remains `DUAL_RUN` while CPA V1 synchronization, `position:*` alias ownership and protected V1 consumers still exist. The machine-readable readiness decision is `GET /api/v2/compatibility/status`. See `IMPLEMENTATION-STATUS.md` for the exact deployed state and cutover rule.
+The **V1 retirement cutover is complete**. Production now runs the V2-only control plane and Office facade; legacy CPA synchronization, `position:*` alias ownership, V1 routes and the transition compatibility gate have been removed. The old SQLite tables remain historical evidence only. The roadmap now continues as ordinary V2 capability work rather than compatibility retirement.

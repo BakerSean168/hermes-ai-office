@@ -199,7 +199,7 @@ Do **not** build gateway groups that silently mix:
 - unrelated Employments;
 - fallback models with different staffing meaning.
 
-`position:*` remains a domain/client compatibility identity, not permission for the gateway to make staffing decisions. Current CPA position aliases remain valid during migration only.
+During migration, `position:*` was a client compatibility identity rather than permission for the gateway to make staffing decisions. Those CPA compatibility aliases are now retired; current routing is Employment-scoped while Position staffing remains domain-owned.
 
 ## 7. Runtime event path
 
@@ -302,7 +302,7 @@ Until explicitly retired:
 - Hermes Bridge `8787` contracts remain available;
 - current CPA `8317` may continue serving production traffic during migration;
 - CPA secret mutations remain behind the existing safe boundary while CPA is active;
-- current `position:*` aliases remain valid where already published;
+- migration-era `position:*` aliases are retired; current gateway bindings are Employment-scoped;
 - historical V1 usage/accounting remains queryable.
 
 These are migration constraints, not north-star architecture choices.

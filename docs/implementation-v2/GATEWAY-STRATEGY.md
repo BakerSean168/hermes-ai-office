@@ -165,7 +165,7 @@ Do not create one LiteLLM model group containing deployments for different Emplo
 
 `position:*` remains a product/domain logical identity. It should not be implemented as a static gateway fallback group that is allowed to select arbitrary Employees.
 
-Current `position:*` aliases in CPA remain a compatibility mechanism during migration.
+The migration-era CPA `position:*` aliases were retired on 2026-08-16. Current physical routing uses Employment-scoped bindings/aliases; Position staffing decisions remain in the V2 domain and are never delegated to a static gateway fallback group.
 
 ## 8. Gateway ports
 

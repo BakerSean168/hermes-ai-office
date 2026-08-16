@@ -1,78 +1,64 @@
 # Hermes AI Office V2 — Implementation Documentation
 
-**Status:** deployed V2 implementation + active compatibility/cutover package
+**Status:** deployed V2-only production architecture; V1 runtime compatibility retired on 2026-08-16
 **Authority:** subordinate to [`../DOMAIN-MODEL-V2.md`](../DOMAIN-MODEL-V2.md) for domain semantics and [`../HERMES-AI-OFFICE-PRD.md`](../HERMES-AI-OFFICE-PRD.md) for product goals.
 
-This directory translates Domain Model V2 into concrete engineering contracts. It is intentionally split by concern so implementation work can change one boundary without redefining the whole product.
+This directory records both the current engineering contracts and the historical migration plan that produced them. Statements in migration/first-slice sections that say “V1 remains authoritative” describe completed migration phases, not current production behavior.
 
 ## Document map
 
-| Document                                               | Purpose                                                                        | Primary consumers            |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------ | ---------------------------- |
-| [`IMPLEMENTATION-STATUS.md`](IMPLEMENTATION-STATUS.md) | deployed capabilities, migration level, compatibility state, remaining cutover | operators, reviewers         |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)                   | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
-| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)           | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
-| [`TECH-STACK.md`](TECH-STACK.md)                       | concrete language, database, API, gateway, deployment and test stack decisions | implementation owners        |
-| [`FIRST-VERTICAL-SLICE.md`](FIRST-VERTICAL-SLICE.md)   | smallest execution-ready V2 business spine and batch sequence                  | implementation agents        |
-| [`PERSISTENCE.md`](PERSISTENCE.md)                     | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
-| [`API-CONTRACT.md`](API-CONTRACT.md)                   | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
-| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)               | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
-| [`WORKFLOWS.md`](WORKFLOWS.md)                         | end-to-end business flows and failure behavior                                 | product + engineering        |
-| [`PROJECTIONS.md`](PROJECTIONS.md)                     | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
-| [`MIGRATION.md`](MIGRATION.md)                         | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
-| [`ROADMAP.md`](ROADMAP.md)                             | phased execution plan and ticket boundaries                                    | implementation agents        |
-| [`VERIFICATION.md`](VERIFICATION.md)                   | acceptance evidence and regression matrix                                      | reviewers + release checks   |
+| Document                                               | Purpose                                             | Current interpretation                             |
+| ------------------------------------------------------ | --------------------------------------------------- | -------------------------------------------------- |
+| [`IMPLEMENTATION-STATUS.md`](IMPLEMENTATION-STATUS.md) | deployed capabilities and release evidence          | **current production truth**                       |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)                   | service boundaries, ownership and control/data flow | current, with historical migration notes           |
+| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)           | gateway-neutral ports and CPA/LiteLLM boundaries    | current                                            |
+| [`TECH-STACK.md`](TECH-STACK.md)                       | language, database, API, deployment and test stack  | current decisions + completed migration notes      |
+| [`PERSISTENCE.md`](PERSISTENCE.md)                     | V2 schema, temporal records, retention              | current                                            |
+| [`API-CONTRACT.md`](API-CONTRACT.md)                   | `/api/v2` commands, queries, errors, idempotency    | current                                            |
+| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)               | event envelope, ordering, replay and SSE            | current                                            |
+| [`WORKFLOWS.md`](WORKFLOWS.md)                         | end-to-end business flows and failure behavior      | current                                            |
+| [`PROJECTIONS.md`](PROJECTIONS.md)                     | Office/workforce read models and dossiers           | current                                            |
+| [`MIGRATION.md`](MIGRATION.md)                         | legacy-to-V2 migration and rollback plan            | historical plan + completed cutover record         |
+| [`FIRST-VERTICAL-SLICE.md`](FIRST-VERTICAL-SLICE.md)   | first implementation slice                          | historical implementation plan                     |
+| [`ROADMAP.md`](ROADMAP.md)                             | phased execution plan                               | completed V1-retirement milestone + future V2 work |
+| [`VERIFICATION.md`](VERIFICATION.md)                   | acceptance and regression evidence                  | current release gate                               |
 
-## Authority rules
+## Current production baseline
 
-1. Domain identity and lifecycle rules come from `DOMAIN-MODEL-V2.md`.
-2. Product goals and user-facing outcomes come from `HERMES-AI-OFFICE-PRD.md`.
-3. This package may make engineering decisions only where they do not contradict those two documents.
-4. Existing `/api/v1`, Pixel Office routes, bridge SSE, current CPA/gatewayctl behavior, and current service ports are protected **migration compatibility contracts**, not north-star dependencies.
-5. Gateway-neutral V2 boundaries and the LiteLLM reference strategy are defined in `GATEWAY-STRATEGY.md`.
-6. Existing data is evidence. Migration must preserve observed history rather than invent precision that was never captured.
-
-## Current-system baseline
-
-The deployed control plane currently uses SQLite tables centered on:
+The running control plane is V2-only:
 
 ```text
-providers
-channels
-model_definitions
-workers                  // legacy Channel x Model business identity
-profiles
-positions
-assignments
-quotas
-contracts
-prices
-runs
-usage_ledger
-events
-external_usage_snapshots
+Hermes Bridge / OrgStore
+        │ normalized latest-wins execution snapshots
+        ▼
+AI Workforce Control Plane
+        ├── Organization
+        ├── Workforce Supply
+        ├── Staffing
+        ├── Execution + Usage
+        ├── Finance + Evaluation
+        └── Incident / Maintenance projections
+        │
+        ├── LiteLLM Gateway port
+        └── CPA Gateway port (route/health/usage evidence only)
+
+Pixel Office
+        └── explicit /api/model/v2/* read + SSE facade
 ```
 
-The deployed HTTP surface now includes both the protected `/api/v1/*` compatibility contract and authoritative `/api/v2/*` business/read contracts. Pixel Office exposes selected V2 read models through explicit `/api/model/v2/*` facade routes while retaining its V1 compatibility facade. Gateway-neutral V2 contracts name generic gateway concepts rather than CPA-specific ones.
+Production has no V1 HTTP routes, V1 Office facade, V1 CPA synchronization loop, V1 `position:*` alias reconciliation loop, or `ControlPlaneStore` runtime. Fresh databases are created exclusively by checksum-verified V2 migrations.
 
-The production system is therefore in the intended compatibility period in which:
+The pre-V2 tables still physically exist in the long-lived production SQLite file as historical evidence. They are not dropped, read, written, or created for a fresh V2 database.
 
-```text
-legacy V1 model + projections
-          coexist with
-V2 domain tables + /api/v2 + V2 events
-```
+## Protected operational boundaries
 
-The migration plan decides when each read/write path becomes authoritative.
+- Hermes Bridge SSE and normalized OrgStore execution facts remain the runtime observation source.
+- `/api/v2/*` is the business/control API.
+- `/api/model/v2/*` is the Office read/SSE facade.
+- CPA credentials and physical route administration remain outside the business domain, behind `gatewayctl` / the model-gateway management workflow.
+- Existing durable V2 gateway/binding IDs are preserved across adapter refactors.
+- Historical business evidence is retained rather than destructively normalized.
 
-## Definition of implementation-ready
+## Release rule
 
-The project is ready to begin V2 code work when this package is internally consistent on:
-
-- canonical IDs and state ownership;
-- table/record boundaries and temporal semantics;
-- command/query/API responsibilities;
-- event ordering and replay;
-- complete vertical workflow for one Position and one Employee;
-- compatibility strategy for V1 clients;
-- rollback and verification evidence.
+A production batch is complete only after tests/build, secret scan, commit/push, SQLite backup when persistence/cutover risk exists, service restart, live V2 checks, identity invariants, retired-route assertions where relevant, and SQLite integrity/foreign-key verification.

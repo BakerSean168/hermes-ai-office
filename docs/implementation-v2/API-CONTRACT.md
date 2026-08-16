@@ -528,10 +528,10 @@ V2 API design is implemented correctly when:
 5. one logical invocation exposes multiple physical attempts;
 6. usage identifies the exact Employment/Agreement/Channel used;
 7. browser projections never contain secrets;
-8. `/api/v1` compatibility tests remain green during migration.
+8. retired `/api/v1` and old Office compatibility routes remain unavailable after cutover.
 
 ## Implemented API addendum — V2 control/read surface
 
-The deployed API includes V2 workforce/organization/execution/finance/staffing reads and commands, Hermes normalized execution sync, replayable incident projection, maintenance policy/runs, and `GET /api/v2/compatibility/status`. Pixel Office proxies selected V2 read models through explicit `/api/model/v2/*` facade routes while existing V1/model compatibility contracts remain protected.
+The deployed API is V2-only: workforce/organization/execution/finance/staffing reads and commands, Hermes normalized execution sync, replayable incident projection, maintenance policy/runs, and V2 event SSE. Pixel Office proxies selected read models through explicit `/api/model/v2/*` facade routes. `/api/v1/*`, the transition compatibility-status endpoint, and the old Office management facade are retired and return 404.
 
 Command endpoints that can create external or durable effects use persistent idempotency. Runtime sync is an internal normalized projection endpoint and never accepts runtime model names as Employee identity.

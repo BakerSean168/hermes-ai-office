@@ -200,24 +200,50 @@ Automatic maintenance currently touches only:
 
 Deployments use a maintenance dry-run first. The normal background interval is daily.
 
-## 9. V1 compatibility and retirement state
+## 9. V1 retirement state
 
-V1 is intentionally still present as a compatibility layer. It is **not** business authority for V2 concepts.
+V1 runtime compatibility was retired in production on 2026-08-16 after the V2 business model, execution sync, gateway discovery, Office projections, incident projection and maintenance path were already deployed and healthy.
 
-`GET /api/v2/compatibility/status` is the machine-readable cutover gate.
+The retirement removed:
 
-The production mode is currently expected to be `DUAL_RUN`, because:
+- `ControlPlaneStore` and the legacy Provider/Channel/Worker/Assignment runtime model;
+- all `/api/v1/*` routes and legacy V1 SSE;
+- the former `/api/v2/compatibility/status` transition gate;
+- Pixel Office `/api/model/workforce`, `/api/model/config`, `/api/model/events` and `/api/model/admin/*` compatibility facade;
+- the legacy Channel/Worker/Assignment/Quota/Contract/Price management UI;
+- CPA → V1 synchronization and assignment reconciliation;
+- automatic `position:*` alias ownership/reconciliation;
+- legacy `server.mjs`, `store.mjs`, `domain.mjs` and their characterization suites;
+- legacy schema creation from `openDb()`.
 
-- CPA discovery/sync still maintains the V1 Provider/Channel/Worker compatibility model;
-- `position:*` aliases are still reconciled through the compatibility control plane;
-- `/api/v1/*` and `/api/model/*` remain protected consumer contracts;
-- V1 Worker (`Channel × Model`) is semantically different from V2 Employee and must never be numerically equated.
+The three old CPA aliases `position:hermes-brain`, `position:codex-general`, and `position:coding-review` were explicitly removed after the V2-only service restarted. The active `employment:*` V2 route remained intact. Observation for longer than the retired 60-second sync cadence confirmed the old aliases did not reappear.
 
-Retirement becomes permissible only when **all** blockers are removed, all technical gates are green, every protected consumer has migrated, and explicit cutover approval is present.
+The durable V2 gateway slug `cpa-compat` remains unchanged to preserve existing V2 foreign keys/bindings. Its name is now only an external reference; it does not imply a live V1 Worker compatibility model.
 
-This means keeping V1 today is an intentional safe architecture state, not an unfinished V2 domain implementation.
+## 10. Historical data retention after retirement
 
-## 10. Verification gate used for every batch
+Retirement removed code and public contracts, **not evidence**.
+
+Before cutover an online SQLite backup was created at:
+
+```text
+/srv/hermes-personal/backups/model-control-plane/pre-v1-retirement-20260816T123818Z.sqlite
+```
+
+The pre-V2 tables remain physically present in the long-lived production database for rollback archaeology/historical evidence, but no running source reads or writes them. Their row counts were unchanged across cutover, including:
+
+- providers: 1
+- channels: 6
+- model definitions: 13
+- workers: 16
+- positions: 3
+- assignments: 36
+- legacy events: 81,669
+- external usage snapshots: 7
+
+A fresh database does not create those tables. `openDb()` now only opens SQLite/applies pragmas; migrations `001_spine` through `010_maintenance` are the sole schema owner.
+
+## 11. Verification gate used for every batch
 
 A batch is releasable only after:
 
@@ -227,37 +253,34 @@ A batch is releasable only after:
 4. production build;
 5. `git diff --check` and pre-commit secret scan;
 6. Git commit + push;
-7. SQLite backup before migration;
+7. SQLite backup before migration/cutover risk;
 8. service restart and health/migration assertion;
 9. direct V2 and Office proxy read checks;
 10. workforce identity invariants;
 11. SQLite integrity and foreign-key checks;
 12. browser verification for material UI changes where Playwright is available.
 
-## 11. Remaining work classification
+## 12. V1-retirement production verification — 2026-08-16
 
-There is no remaining hidden first-slice stub in the V2 business model that requires inventing a new identity model.
+The cutover was verified against the running oracle2 services:
 
-Remaining work is operational cutover, not another V2 rewrite:
+- `hermes-model-control-plane.service`, `hermes-office.service`, and `hermes-office-bridge.service` remained active;
+- MCP root health now declares `apiVersion: 2`, and `/api/v2/health` reports migrations through `010_maintenance`;
+- `/api/v1/snapshot`, `/api/v1/dashboard/workforce`, and the old compatibility-status endpoint return 404;
+- Office unknown `/api/*` paths no longer fall through to `index.html`, so retired `/api/model/workforce`, `/api/model/config`, `/api/model/events`, and `/api/model/admin/*` return JSON 404;
+- Hermes execution synchronization continued after cutover with completed sync runs and no issues;
+- V2 Workforce continued to report exactly one durable Employee/Employment;
+- V2 gateway discovery remained healthy for both `cpa-compat` and `litellm-reference`;
+- the three old `position:*` CPA aliases were removed and remained absent after more than 60 seconds, while the `employment:*` route remained present;
+- V1 systemd sync/alias environment variables and the Office admin environment variable were removed;
+- a production-source audit found no `/api/v1`, old Office facade, `ControlPlaneStore`, legacy sync/alias environment variables, or compatibility-audit implementation references;
+- legacy SQLite table row counts were identical before and after cutover;
+- `PRAGMA integrity_check` returned `ok` and `PRAGMA foreign_key_check` returned no rows.
 
-- migrate remaining V1/CPA compatibility consumers when their replacements are proven;
-- intentionally disable V1 sync/alias ownership only after the compatibility endpoint reports no blockers;
-- perform the final V1 public-contract retirement as a separately approved release.
+Final automated gates for the retirement release were MCP **86/86**, Webview **55/55**, Server **461/461**, and package-contract **7/7**, plus TypeScript checks, lint (with only the pre-existing App hook warning), production builds, generated-file drift checks, `git diff --check`, and gitleaks.
 
-Until then, dual-run is the correct production state.
+The host still has no Chrome/Chromium executable for Playwright, so this release does not claim a browser screenshot pass. UI acceptance is based on the Webview suite, production build and live HTTP facade behavior.
 
-## 12. Production verification snapshot — 2026-08-16
+## 13. Remaining work classification
 
-The 008–010 release was verified against the running oracle2 services after an online SQLite backup:
-
-- `hermes-model-control-plane.service`, `hermes-office.service`, and `hermes-office-bridge.service` are active;
-- `/api/v2/health` reports all ten checksum-verified migrations through `010_maintenance`;
-- HermesProvider continuously forwards normalized OrgStore snapshots and completed `ExecutionSyncRun` records are observed;
-- seven Hermes Profiles were projected into WorkScopes/Profile Lead Positions while the durable Employee count remained exactly one, proving runtime/model hints did not create employees;
-- the Office facade returns JSON for `/api/model/v2/projections/office` and `/api/model/v2/incidents` rather than falling through to the SPA;
-- Incident projection checkpoint refresh is part of compatibility-status evaluation, so the technical checkpoint gate is evaluated against a current projection;
-- the maintenance release check was executed with `dryRun=true` and reported zero deletions/repairs;
-- `PRAGMA integrity_check` returned `ok` and `PRAGMA foreign_key_check` returned no rows;
-- `GET /api/v2/compatibility/status` reports every technical gate green while the intentional V1 blockers remain, so production correctly stays `DUAL_RUN`.
-
-Webview unit tests (55), server tests (460), package-contract tests (7), MCP tests (97), TypeScript checks, lint, production builds, generated-file drift checks, and gitleaks all passed during the release sequence. The host does not currently have a Chrome/Chromium binary installed for Playwright, so this release does **not** claim a new browser screenshot pass; UI acceptance is limited to the automated Webview suite, production build, and live HTTP facade checks.
+There is no live V1 compatibility runtime left to retire. Future work is normal V2 product evolution: richer supply discovery, additional staffing policy, evaluation/analytics, gateway adapters, and UI ergonomics. Reintroducing a V1 Worker/Assignment authority path or a generic Office gateway-admin proxy would be an architectural regression.

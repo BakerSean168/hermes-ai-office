@@ -1,5 +1,7 @@
 # Migration Plan V1 -> V2
 
+> **Historical phase note (2026-08-16):** references below to V1 being authoritative or dual-run describe the migration stage at the time. Production has since completed V1 retirement; see `IMPLEMENTATION-STATUS.md`.
+
 ## 1. Migration objective
 
 Move from the deployed V1 identity model:
@@ -395,4 +397,4 @@ V1 can be considered ready for retirement only when:
 
 ## Current migration/cutover state — 2026-08-16
 
-Additive V2 schema migrations 001–010 are deployed. V1 remains in `DUAL_RUN` compatibility mode by design. `GET /api/v2/compatibility/status` is the cutover gate and reports blockers rather than comparing V1 Worker one-to-one with V2 Employee. V1 must not be disabled until CPA sync/position-alias ownership and protected consumers have migrated and explicit retirement approval is present.
+Additive V2 schema migrations 001–010 are deployed and the V1 cutover is complete. V1 runtime code/routes, V1 CPA synchronization, Office compatibility/admin proxies and old `position:*` aliases have been retired. Existing pre-V2 SQLite tables are retained unchanged as historical evidence only; fresh databases are V2-only. Earlier sections describing dual-run are the completed migration procedure, not the current state.

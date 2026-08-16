@@ -1,5 +1,7 @@
 # First Vertical Slice — Implementation Plan
 
+> **Historical phase note (2026-08-16):** references below to V1 being authoritative or dual-run describe the migration stage at the time. Production has since completed V1 retirement; see `IMPLEMENTATION-STATUS.md`.
+
 ## 1. Goal
 
 Prove the new architecture with the smallest real path that exercises durable Employee identity, Employment routing, actual work, LiteLLM transport, and usage attribution **without replacing current CPA production routing**.

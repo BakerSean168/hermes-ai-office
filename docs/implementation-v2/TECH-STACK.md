@@ -96,12 +96,7 @@ The deployed control plane is currently a small ESM JavaScript package. V2 adds 
 
 Recommended migration:
 
-1. capture V1 endpoint/database behavior with characterization tests;
-2. add a strict `model-control-plane/tsconfig.json`;
-3. convert the small existing package from `.mjs` to `.ts` without changing behavior;
-4. compile to `model-control-plane/dist/`;
-5. switch systemd from `src/server.mjs` to `dist/server.js` only after fixture parity;
-6. build V2 modules on that typed foundation.
+This migration is complete. The control plane is a typed TypeScript package compiled into `model-control-plane/dist/`; production runs `dist/main.js`. The former `src/server.mjs`, `src/store.mjs`, and `src/domain.mjs` compatibility implementation was removed after V2 parity and cutover verification.
 
 Do not run TypeScript loaders in production. Production should run compiled JavaScript with the pinned Node runtime.
 

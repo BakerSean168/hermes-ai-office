@@ -1895,7 +1895,7 @@ Until explicitly retired, preserve:
 - Pixel Office HTTP endpoints used by the current web UI;
 - existing Hermes bridge endpoints and SSE behavior;
 - current CPA/gatewayctl secret-handling boundary while that compatibility adapter remains active;
-- stable `position:*` logical aliases where currently published;
+- stable V2 Employment/gateway binding identities currently published; migration-era CPA `position:*` aliases are retired;
 - current dashboard projection shape through an adapter where feasible;
 - historical cost/accounting data;
 - current service deployment ports and loopback boundaries;
