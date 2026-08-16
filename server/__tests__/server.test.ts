@@ -320,7 +320,22 @@ describe('PixelAgentsServer', () => {
     expect(remaining.some((e) => e.port === standaloneConfig.port)).toBe(false);
   });
 
-  // 21. Unknown route returns 404
+  it('standalone SPA fallback never turns unknown API routes into HTML 200s', async () => {
+    const staticDir = path.join(tmpBase, 'webview');
+    fs.mkdirSync(staticDir, { recursive: true });
+    fs.writeFileSync(path.join(staticDir, 'index.html'), '<!doctype html><title>office</title>');
+    const config = await server.start({ embedded: false, staticDir });
+
+    const page = await fetch(`http://127.0.0.1:${config.port}/organization`);
+    expect(page.status).toBe(200);
+    expect(await page.text()).toContain('<title>office</title>');
+
+    const api = await fetch(`http://127.0.0.1:${config.port}/api/model/workforce`);
+    expect(api.status).toBe(404);
+    expect(api.headers.get('content-type')).toContain('application/json');
+  });
+
+  // Unknown route returns 404 in embedded mode.
   it('unknown route returns 404', async () => {
     const config = await server.start();
     const res = await fetch(`http://127.0.0.1:${config.port}/random/path`);

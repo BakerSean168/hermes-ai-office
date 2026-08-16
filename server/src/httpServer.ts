@@ -77,8 +77,14 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
       root: options.staticDir,
       prefix: '/',
     });
-    // HTML5 history fallback: serve index.html for unmatched routes
-    app.setNotFoundHandler((_req, reply) => {
+    // HTML5 history fallback applies only to browser navigation. Unknown API
+    // paths must remain real 404s so retired/invalid contracts cannot masquerade
+    // as successful HTML responses.
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith('/api/')) {
+        reply.code(404).send({ error: 'not-found' });
+        return;
+      }
       reply.sendFile('index.html');
     });
   }
