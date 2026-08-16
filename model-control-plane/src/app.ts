@@ -5,11 +5,14 @@ import { fileURLToPath } from 'node:url';
 import { CpaAdapter } from './adapters/cpa.mjs';
 import { CpaUsageAdapter } from './adapters/cpaUsage.mjs';
 import { openDb } from './db.mjs';
+import { CpaCompatibilityGateway } from './gateway/cpaCompatibility.js';
 import { EnvFileBearerTokenProvider, LiteLlmGateway } from './gateway/liteLlm.js';
 import { GatewayRegistry } from './gateway/registry.js';
 import { ControlPlaneStore } from './store.mjs';
 import { registerV2Routes } from './v2/api.js';
 import { DispatchService } from './v2/dispatch.js';
+import { GatewayDiscoveryService } from './v2/discovery.js';
+import { IdempotencyService } from './v2/idempotency.js';
 import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { runV2Migrations } from './v2/migrations.js';
@@ -131,6 +134,9 @@ export async function buildControlPlane(
   const dispatchService = new DispatchService(v2, gateways);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
+  const idempotencyService = new IdempotencyService(db, {
+    ttlMs: Number(env.MODEL_CP_V2_IDEMPOTENCY_TTL_MS ?? 24 * 60 * 60 * 1_000),
+  });
   const cpa: LegacyCpaPort =
     options.cpa ??
     (new CpaAdapter({
@@ -143,6 +149,30 @@ export async function buildControlPlane(
       baseUrl: env.CPA_BASE_URL ?? 'http://127.0.0.1:8317',
       keyFile: env.CPA_MANAGEMENT_KEY_FILE ?? '/opt/cpa/.mgmt_password',
     });
+
+  if (!options.gateways && env.MODEL_CP_V2_CPA_DISCOVERY !== '0') {
+    gateways.register(
+      new CpaCompatibilityGateway({
+        gatewayId: env.CPA_GATEWAY_ID ?? 'cpa-compat',
+        statusSource: cpa,
+        usageSource: cpaUsage,
+        bindings: new RepositoryGatewayBindingSource(v2, env.CPA_GATEWAY_ID ?? 'cpa-compat'),
+        usageRange: env.MODEL_CP_USAGE_RANGE ?? '30d',
+      }),
+    );
+  }
+  const discoveryService = new GatewayDiscoveryService(v2, gateways, {
+    [env.LITELLM_GATEWAY_ID ?? 'litellm-reference']: {
+      kind: 'LITELLM',
+      displayName: 'LiteLLM Reference Gateway',
+      baseUrlHint: env.LITELLM_BASE_URL,
+    },
+    [env.CPA_GATEWAY_ID ?? 'cpa-compat']: {
+      kind: 'CPA',
+      displayName: 'CPA Compatibility Gateway',
+      baseUrlHint: env.CPA_BASE_URL,
+    },
+  });
   const listeners = new Set<EventSender>();
   const timers = new Set<NodeJS.Timeout>();
 
@@ -224,7 +254,13 @@ export async function buildControlPlane(
     return event;
   };
 
-  registerV2Routes(app, v2, { dispatchService, invocationService, lifecycleService });
+  registerV2Routes(app, v2, {
+    dispatchService,
+    invocationService,
+    lifecycleService,
+    discoveryService,
+    idempotencyService,
+  });
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -457,8 +493,8 @@ export async function buildControlPlane(
     }
   }
 
-  function startBackgroundJobs(): void {
-    if (timers.size > 0) return;
+  function startBackgroundJobs(): () => void {
+    if (timers.size > 0) return () => {};
     const syncInterval = Number(env.MODEL_CP_SYNC_INTERVAL_MS ?? 60_000);
     if (syncInterval > 0) {
       const timer = setInterval(async () => {
@@ -494,6 +530,10 @@ export async function buildControlPlane(
       timer.unref();
       timers.add(timer);
     }
+    return () => {
+      for (const timer of timers) clearInterval(timer);
+      timers.clear();
+    };
   }
 
   app.addHook('onClose', async () => {
@@ -503,5 +543,37 @@ export async function buildControlPlane(
   });
 
   await seed();
-  return { app, store, v2, gateways, dbFile, host, port, refreshCpa, startBackgroundJobs };
+  function startAllBackgroundJobs(): () => void {
+    const stopLegacy = startBackgroundJobs();
+    if (env.MODEL_CP_V2_DISCOVERY === '0') return stopLegacy;
+    const intervalMs = Math.max(10_000, Number(env.MODEL_CP_V2_DISCOVERY_INTERVAL_MS ?? 60_000));
+    let stopped = false;
+    const reconcile = async (): Promise<void> => {
+      try {
+        await discoveryService.reconcileAll();
+      } catch (error) {
+        app.log.warn({ err: error }, 'V2 gateway discovery reconciliation failed');
+      }
+    };
+    void reconcile();
+    const timer = setInterval(() => void reconcile(), intervalMs);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+      stopLegacy();
+      void stopped;
+    };
+  }
+
+  return {
+    app,
+    store,
+    v2,
+    gateways,
+    dbFile,
+    host,
+    port,
+    refreshCpa,
+    startBackgroundJobs: startAllBackgroundJobs,
+  };
 }

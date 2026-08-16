@@ -1,6 +1,12 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import type { DispatchService } from './dispatch.js';
+import type { GatewayDiscoveryService } from './discovery.js';
+import {
+  IdempotencyConflictError,
+  IdempotencyInProgressError,
+  type IdempotencyService,
+} from './idempotency.js';
 import type { InvocationService } from './invocation.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
@@ -17,8 +23,50 @@ export function registerV2Routes(
     dispatchService?: DispatchService;
     invocationService?: InvocationService;
     lifecycleService?: WorkforceLifecycleService;
+    discoveryService?: GatewayDiscoveryService;
+    idempotencyService?: IdempotencyService;
   } = {},
 ): void {
+  const runCommand = async <T>(input: {
+    request: FastifyRequest;
+    reply: FastifyReply;
+    commandType: string;
+    operation: () => Promise<T> | T;
+  }): Promise<T | { error: { code: string } }> => {
+    const header = input.request.headers['idempotency-key'];
+    const key = Array.isArray(header) ? header[0] : header;
+    if (!services.idempotencyService) return input.operation();
+    try {
+      const outcome = await services.idempotencyService.execute({
+        key,
+        commandType: input.commandType,
+        request: {
+          params: input.request.params ?? {},
+          body: input.request.body ?? null,
+        },
+        operation: async () => {
+          const body = await input.operation();
+          return { statusCode: input.reply.statusCode, body };
+        },
+      });
+      input.reply.code(outcome.statusCode);
+      if (outcome.replayed) input.reply.header('Idempotency-Replayed', 'true');
+      return outcome.body as T;
+    } catch (error) {
+      if (error instanceof IdempotencyConflictError) {
+        input.reply.code(409);
+        return { error: { code: 'IDEMPOTENCY_CONFLICT' } };
+      }
+      if (error instanceof IdempotencyInProgressError) {
+        input.reply.code(409);
+        return { error: { code: 'IDEMPOTENCY_IN_PROGRESS' } };
+      }
+      const code = error instanceof Error ? error.message : 'IDEMPOTENCY_FAILED';
+      input.reply.code(code === 'IDEMPOTENCY_KEY_TOO_LONG' ? 400 : 500);
+      return { error: { code } };
+    }
+  };
+
   app.get('/api/v2/health', async () => ({
     status: 'ok',
     service: 'hermes-ai-workforce-domain',
@@ -54,6 +102,24 @@ export function registerV2Routes(
   app.get('/api/v2/appointments', async () => ({ items: repository.listAppointments() }));
   app.get('/api/v2/positions', async () => ({ items: repository.listPositions() }));
   app.get('/api/v2/gateways', async () => ({ items: repository.listGateways() }));
+  app.get('/api/v2/channels', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items: repository.listChannels(
+        typeof query.gatewayId === 'string' ? query.gatewayId : undefined,
+      ),
+    };
+  });
+  app.get('/api/v2/discovery-runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const limit = Math.min(500, Math.max(1, number(query.limit, 50)));
+    return {
+      items: repository.listDiscoveryRuns(
+        typeof query.gatewayDbId === 'string' ? query.gatewayDbId : undefined,
+        limit,
+      ),
+    };
+  });
 
   app.get('/api/v2/runs', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
@@ -98,72 +164,133 @@ export function registerV2Routes(
     };
   });
 
-  app.post('/api/v2/commands/runs/create', async (request, reply) => {
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    if (!body.workScopeId || !body.title) {
-      reply.code(400);
-      return { error: { code: 'WORK_SCOPE_AND_TITLE_REQUIRED' } };
-    }
-    try {
-      return repository.createRun({
-        workScopeId: String(body.workScopeId),
-        title: String(body.title),
-        externalRunRef: body.externalRunRef ? String(body.externalRunRef) : undefined,
-        metadata:
-          body.metadata && typeof body.metadata === 'object'
-            ? (body.metadata as Record<string, unknown>)
-            : undefined,
-      });
-    } catch (error) {
-      reply.code(422);
-      return { error: { code: error instanceof Error ? error.message : 'RUN_CREATE_FAILED' } };
-    }
-  });
+  app.post('/api/v2/commands/runs/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'run.create',
+      operation: () => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.workScopeId || !body.title) {
+          reply.code(400);
+          return { error: { code: 'WORK_SCOPE_AND_TITLE_REQUIRED' } };
+        }
+        try {
+          return repository.createRun({
+            workScopeId: String(body.workScopeId),
+            title: String(body.title),
+            externalRunRef: body.externalRunRef ? String(body.externalRunRef) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          reply.code(422);
+          return {
+            error: { code: error instanceof Error ? error.message : 'RUN_CREATE_FAILED' },
+          };
+        }
+      },
+    }),
+  );
 
-  app.post('/api/v2/commands/duties/open', async (request, reply) => {
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    if (!body.runId || !body.positionId) {
-      reply.code(400);
-      return { error: { code: 'RUN_AND_POSITION_REQUIRED' } };
-    }
-    try {
-      return repository.openDuty({
-        runId: String(body.runId),
-        positionId: String(body.positionId),
-        activity: body.activity ? String(body.activity) : undefined,
-        metadata:
-          body.metadata && typeof body.metadata === 'object'
-            ? (body.metadata as Record<string, unknown>)
-            : undefined,
-      });
-    } catch (error) {
-      reply.code(422);
-      return { error: { code: error instanceof Error ? error.message : 'DUTY_OPEN_FAILED' } };
-    }
-  });
+  app.post('/api/v2/commands/duties/open', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'duty.open',
+      operation: () => {
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.runId || !body.positionId) {
+          reply.code(400);
+          return { error: { code: 'RUN_AND_POSITION_REQUIRED' } };
+        }
+        try {
+          return repository.openDuty({
+            runId: String(body.runId),
+            positionId: String(body.positionId),
+            activity: body.activity ? String(body.activity) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          reply.code(422);
+          return {
+            error: { code: error instanceof Error ? error.message : 'DUTY_OPEN_FAILED' },
+          };
+        }
+      },
+    }),
+  );
 
   app.post<{ Params: { dutySessionId: string } }>(
     '/api/v2/commands/duties/:dutySessionId/dispatch',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'duty.dispatch',
+        operation: async () => {
+          if (!services.dispatchService) {
+            reply.code(503);
+            return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            const result = await services.dispatchService.dispatchDuty(
+              request.params.dutySessionId,
+              {
+                trigger: body.trigger ? String(body.trigger) : undefined,
+                correlationId: body.correlationId ? String(body.correlationId) : undefined,
+              },
+            );
+            if (!result.selected) reply.code(422);
+            return result;
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'DISPATCH_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { gatewayId: string } }>(
+    '/api/v2/internal/gateways/:gatewayId/discover',
     async (request, reply) => {
-      if (!services.dispatchService) {
+      if (!services.discoveryService) {
         reply.code(503);
-        return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
+        return { error: { code: 'GATEWAY_DISCOVERY_SERVICE_UNAVAILABLE' } };
       }
-      const body = (request.body ?? {}) as Record<string, unknown>;
       try {
-        const result = await services.dispatchService.dispatchDuty(request.params.dutySessionId, {
-          trigger: body.trigger ? String(body.trigger) : undefined,
-          correlationId: body.correlationId ? String(body.correlationId) : undefined,
-        });
-        if (!result.selected) reply.code(422);
-        return result;
+        return await services.discoveryService.reconcile(request.params.gatewayId);
       } catch (error) {
-        const code = error instanceof Error ? error.message : 'DISPATCH_FAILED';
-        reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+        const code = error instanceof Error ? error.message : 'GATEWAY_DISCOVERY_FAILED';
+        reply.code(code === 'GATEWAY_DISCOVERY_UNAVAILABLE' ? 404 : 502);
         return { error: { code } };
       }
     },
   );
+
+  app.post('/api/v2/internal/gateways/discover', async (_request, reply) => {
+    if (!services.discoveryService) {
+      reply.code(503);
+      return { error: { code: 'GATEWAY_DISCOVERY_SERVICE_UNAVAILABLE' } };
+    }
+    try {
+      return { items: await services.discoveryService.reconcileAll() };
+    } catch (error) {
+      reply.code(502);
+      return {
+        error: {
+          code: error instanceof Error ? error.message : 'GATEWAY_DISCOVERY_FAILED',
+        },
+      };
+    }
+  });
 
   const lifecycleError = (error: unknown): { status: number; code: string } => {
     const code = error instanceof Error ? error.message : 'LIFECYCLE_COMMAND_FAILED';
@@ -251,66 +378,83 @@ export function registerV2Routes(
 
   app.post<{ Params: { dutySessionId: string } }>(
     '/api/v2/commands/duties/:dutySessionId/redispatch',
-    async (request, reply) => {
-      if (!services.dispatchService) {
-        reply.code(503);
-        return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      try {
-        const result = await services.dispatchService.dispatchDuty(request.params.dutySessionId, {
-          trigger: body.trigger ? String(body.trigger) : 'OPERATOR_REDISPATCH',
-          correlationId: body.correlationId ? String(body.correlationId) : undefined,
-        });
-        if (!result.selected) reply.code(422);
-        return result;
-      } catch (error) {
-        const code = error instanceof Error ? error.message : 'REDISPATCH_FAILED';
-        reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
-        return { error: { code } };
-      }
-    },
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'duty.redispatch',
+        operation: async () => {
+          if (!services.dispatchService) {
+            reply.code(503);
+            return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            const result = await services.dispatchService.dispatchDuty(
+              request.params.dutySessionId,
+              {
+                trigger: body.trigger ? String(body.trigger) : 'OPERATOR_REDISPATCH',
+                correlationId: body.correlationId ? String(body.correlationId) : undefined,
+              },
+            );
+            if (!result.selected) reply.code(422);
+            return result;
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'REDISPATCH_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
   );
 
   app.post<{ Params: { dutySessionId: string } }>(
     '/api/v2/internal/duties/:dutySessionId/invoke',
-    async (request, reply) => {
-      if (!services.invocationService) {
-        reply.code(503);
-        return { error: { code: 'INVOCATION_SERVICE_UNAVAILABLE' } };
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      if (typeof body.input !== 'string' || !body.input.trim()) {
-        reply.code(400);
-        return { error: { code: 'INVOCATION_INPUT_REQUIRED' } };
-      }
-      try {
-        return await services.invocationService.invokeDuty(
-          request.params.dutySessionId,
-          body.input,
-          {
-            maxOutputTokens: body.maxOutputTokens
-              ? Math.max(1, Math.min(8_192, Number(body.maxOutputTokens)))
-              : undefined,
-            correlationId: body.correlationId ? String(body.correlationId) : undefined,
-            runtimeSessionRef: body.runtimeSessionRef ? String(body.runtimeSessionRef) : undefined,
-            completeDuty: body.completeDuty !== false,
-          },
-        );
-      } catch (error) {
-        const code = error instanceof Error ? error.message : 'INVOCATION_FAILED';
-        if (code.endsWith('_NOT_FOUND')) reply.code(404);
-        else if (code === 'INVOCATION_INPUT_REQUIRED') reply.code(400);
-        else if (
-          code.startsWith('GATEWAY_') ||
-          code.startsWith('LITELLM_') ||
-          code === 'EMPLOYMENT_ROUTE_UNAVAILABLE'
-        ) {
-          reply.code(502);
-        } else reply.code(422);
-        return { error: { code } };
-      }
-    },
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'duty.invoke',
+        operation: async () => {
+          if (!services.invocationService) {
+            reply.code(503);
+            return { error: { code: 'INVOCATION_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (typeof body.input !== 'string' || !body.input.trim()) {
+            reply.code(400);
+            return { error: { code: 'INVOCATION_INPUT_REQUIRED' } };
+          }
+          try {
+            return await services.invocationService.invokeDuty(
+              request.params.dutySessionId,
+              body.input,
+              {
+                maxOutputTokens: body.maxOutputTokens
+                  ? Math.max(1, Math.min(8_192, Number(body.maxOutputTokens)))
+                  : undefined,
+                correlationId: body.correlationId ? String(body.correlationId) : undefined,
+                runtimeSessionRef: body.runtimeSessionRef
+                  ? String(body.runtimeSessionRef)
+                  : undefined,
+                completeDuty: body.completeDuty !== false,
+              },
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'INVOCATION_FAILED';
+            if (code.endsWith('_NOT_FOUND')) reply.code(404);
+            else if (code === 'INVOCATION_INPUT_REQUIRED') reply.code(400);
+            else if (
+              code.startsWith('GATEWAY_') ||
+              code.startsWith('LITELLM_') ||
+              code === 'EMPLOYMENT_ROUTE_UNAVAILABLE'
+            ) {
+              reply.code(502);
+            } else reply.code(422);
+            return { error: { code } };
+          }
+        },
+      }),
   );
 
   app.get('/api/v2/projections/workforce', async () => repository.workforceProjection());

@@ -127,6 +127,39 @@ export interface RecordDispatchInput {
   reasons?: string[];
 }
 
+export interface ChannelObservationInput {
+  gatewayId: string;
+  supplyAgreementId?: string;
+  externalRouteRef: string;
+  name: string;
+  protocol: GatewayProtocol;
+  health: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN';
+  lifecycle?: 'ENABLED' | 'DISABLED' | 'QUARANTINED' | 'ARCHIVED';
+  supplierHint?: string;
+  supplierModelHint?: string;
+  capabilities?: string[];
+  metadata?: JsonRecord;
+  observedAt: number;
+}
+
+export interface ChannelObservationResult {
+  channel: Row;
+  created: boolean;
+  healthChanged: boolean;
+  previousHealth?: string;
+}
+
+export interface DiscoveryRunSummary {
+  routeCount: number;
+  createdSuppliers: number;
+  createdSupplierModels: number;
+  createdEmployees: number;
+  createdAgreements: number;
+  createdEmployments: number;
+  createdBindings: number;
+  issues: unknown[];
+}
+
 export interface BootstrapReferenceInput {
   supplierSlug: string;
   supplierName: string;
@@ -2129,13 +2162,346 @@ export class V2Repository {
     }));
   }
 
+  findSupplierBySlug(slug: string): Row | null {
+    return row(this.db.prepare('SELECT * FROM v2_suppliers WHERE slug=?').get(slug));
+  }
+
+  findSupplierModel(supplierId: string, supplierModelKey: string): Row | null {
+    return row(
+      this.db
+        .prepare('SELECT * FROM v2_supplier_models WHERE supplier_id=? AND supplier_model_key=?')
+        .get(supplierId, supplierModelKey),
+    );
+  }
+
+  findEmployee(supplierId: string, supplierModelId: string): Row | null {
+    return row(
+      this.db
+        .prepare('SELECT * FROM v2_employees WHERE supplier_id=? AND supplier_model_id=?')
+        .get(supplierId, supplierModelId),
+    );
+  }
+
+  findAgreementByExternalRef(supplierId: string, externalAccountRef: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_supply_agreements
+           WHERE supplier_id=? AND external_account_ref=? ORDER BY created_at LIMIT 1`,
+        )
+        .get(supplierId, externalAccountRef),
+    );
+  }
+
+  findUniqueActiveAgreementForSupplier(supplierId: string): Row | null {
+    const values = rows(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_supply_agreements
+           WHERE supplier_id=? AND lifecycle='ACTIVE'
+           ORDER BY created_at`,
+        )
+        .all(supplierId),
+    );
+    return values.length === 1 ? values[0]! : null;
+  }
+
+  findCurrentEmployment(employeeId: string, supplyAgreementId: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_employments
+           WHERE employee_id=? AND supply_agreement_id=?
+             AND status='CURRENT' AND effective_to IS NULL
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(employeeId, supplyAgreementId),
+    );
+  }
+
+  findGatewayBySlug(slug: string): Row | null {
+    return row(this.db.prepare('SELECT * FROM v2_gateways WHERE slug=?').get(slug));
+  }
+
+  findGatewayBindingByRoute(gatewaySlug: string, externalRouteRef: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT b.*,g.slug gateway_slug,em.supply_agreement_id,em.employee_id
+           FROM v2_gateway_bindings b
+           JOIN v2_gateways g ON g.id=b.gateway_id
+           JOIN v2_employments em ON em.id=b.employment_id
+           WHERE g.slug=? AND b.external_route_ref=? AND b.lifecycle='ACTIVE'
+           ORDER BY b.priority DESC,b.created_at LIMIT 1`,
+        )
+        .get(gatewaySlug, externalRouteRef),
+    );
+  }
+
+  findGatewayBinding(
+    employmentId: string,
+    gatewayId: string,
+    externalRouteRef: string,
+  ): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_gateway_bindings
+           WHERE employment_id=? AND gateway_id=? AND external_route_ref=?`,
+        )
+        .get(employmentId, gatewayId, externalRouteRef),
+    );
+  }
+
+  markGatewaySeen(gatewayId: string, observedAt: number): void {
+    this.db
+      .prepare('UPDATE v2_gateways SET last_seen_at=?,updated_at=? WHERE id=?')
+      .run(observedAt, observedAt, gatewayId);
+  }
+
+  upsertChannelObservation(input: ChannelObservationInput): ChannelObservationResult {
+    const existing = row(
+      this.db
+        .prepare('SELECT * FROM v2_channels WHERE gateway_id=? AND external_route_ref=?')
+        .get(input.gatewayId, input.externalRouteRef),
+    );
+    const timestamp = now();
+    if (!existing) {
+      const id = newId('chn', timestamp);
+      this.db
+        .prepare(
+          `INSERT INTO v2_channels(id,gateway_id,supply_agreement_id,external_route_ref,name,protocol,lifecycle,health,supplier_hint,supplier_model_hint,capabilities_json,metadata_json,first_seen_at,last_seen_at,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.gatewayId,
+          input.supplyAgreementId ?? null,
+          input.externalRouteRef,
+          input.name,
+          input.protocol,
+          input.lifecycle ?? 'ENABLED',
+          input.health,
+          input.supplierHint ?? null,
+          input.supplierModelHint ?? null,
+          encode(input.capabilities ?? []),
+          encode(input.metadata),
+          input.observedAt,
+          input.observedAt,
+          timestamp,
+          timestamp,
+        );
+      this.emit({
+        type: 'channel.discovered',
+        entityType: 'Channel',
+        entityId: id,
+        actorRef: `gateway:${input.gatewayId}`,
+        payload: {
+          externalRouteRef: input.externalRouteRef,
+          health: input.health,
+          supplierHint: input.supplierHint ?? null,
+          supplierModelHint: input.supplierModelHint ?? null,
+        },
+      });
+      return {
+        channel: row(this.db.prepare('SELECT * FROM v2_channels WHERE id=?').get(id))!,
+        created: true,
+        healthChanged: false,
+      };
+    }
+    const previousHealth = String(existing.health);
+    this.db
+      .prepare(
+        `UPDATE v2_channels
+         SET supply_agreement_id=COALESCE(?,supply_agreement_id),name=?,protocol=?,lifecycle=?,health=?,
+             supplier_hint=COALESCE(?,supplier_hint),supplier_model_hint=COALESCE(?,supplier_model_hint),
+             capabilities_json=?,metadata_json=?,last_seen_at=?,updated_at=?
+         WHERE id=?`,
+      )
+      .run(
+        input.supplyAgreementId ?? null,
+        input.name,
+        input.protocol,
+        input.lifecycle ?? String(existing.lifecycle),
+        input.health,
+        input.supplierHint ?? null,
+        input.supplierModelHint ?? null,
+        encode(input.capabilities ?? []),
+        encode(input.metadata),
+        input.observedAt,
+        timestamp,
+        String(existing.id),
+      );
+    const healthChanged = previousHealth !== input.health;
+    if (healthChanged) {
+      this.emit({
+        type: 'channel.health.changed',
+        entityType: 'Channel',
+        entityId: String(existing.id),
+        actorRef: `gateway:${input.gatewayId}`,
+        payload: {
+          externalRouteRef: input.externalRouteRef,
+          previousHealth,
+          health: input.health,
+        },
+      });
+    }
+    return {
+      channel: row(
+        this.db.prepare('SELECT * FROM v2_channels WHERE id=?').get(String(existing.id)),
+      )!,
+      created: false,
+      healthChanged,
+      previousHealth,
+    };
+  }
+
+  startDiscoveryRun(gatewayId: string, observedAt: number): Row {
+    const timestamp = now();
+    const id = newId('disc', timestamp);
+    this.db
+      .prepare(
+        `INSERT INTO v2_discovery_runs(id,gateway_id,observed_at,started_at,status,metadata_json)
+         VALUES(?,?,?,?,?,?)`,
+      )
+      .run(id, gatewayId, observedAt, timestamp, 'RUNNING', '{}');
+    this.emit({
+      type: 'gateway.discovery.started',
+      entityType: 'DiscoveryRun',
+      entityId: id,
+      actorRef: `gateway:${gatewayId}`,
+      payload: { gatewayId, observedAt },
+    });
+    return row(this.db.prepare('SELECT * FROM v2_discovery_runs WHERE id=?').get(id))!;
+  }
+
+  completeDiscoveryRun(discoveryRunId: string, summary: DiscoveryRunSummary): Row {
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_discovery_runs
+           SET completed_at=?,status='COMPLETED',route_count=?,created_suppliers=?,
+               created_supplier_models=?,created_employees=?,created_agreements=?,
+               created_employments=?,created_bindings=?,issues_json=?
+           WHERE id=?`,
+        )
+        .run(
+          timestamp,
+          summary.routeCount,
+          summary.createdSuppliers,
+          summary.createdSupplierModels,
+          summary.createdEmployees,
+          summary.createdAgreements,
+          summary.createdEmployments,
+          summary.createdBindings,
+          encode(summary.issues),
+          discoveryRunId,
+        );
+      this.emit({
+        type: 'gateway.discovery.completed',
+        entityType: 'DiscoveryRun',
+        entityId: discoveryRunId,
+        payload: summary,
+      });
+      return row(
+        this.db.prepare('SELECT * FROM v2_discovery_runs WHERE id=?').get(discoveryRunId),
+      )!;
+    });
+  }
+
+  failDiscoveryRun(discoveryRunId: string, errorCode: string): Row {
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_discovery_runs
+           SET completed_at=?,status='FAILED',error_code=? WHERE id=?`,
+        )
+        .run(timestamp, errorCode, discoveryRunId);
+      this.emit({
+        type: 'gateway.discovery.failed',
+        entityType: 'DiscoveryRun',
+        entityId: discoveryRunId,
+        payload: { errorCode },
+      });
+      return row(
+        this.db.prepare('SELECT * FROM v2_discovery_runs WHERE id=?').get(discoveryRunId),
+      )!;
+    });
+  }
+
+  listChannels(gatewaySlug?: string): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT c.*,g.slug gateway_slug,g.display_name gateway_name,
+                  a.name agreement_name
+           FROM v2_channels c
+           JOIN v2_gateways g ON g.id=c.gateway_id
+           LEFT JOIN v2_supply_agreements a ON a.id=c.supply_agreement_id
+           WHERE (? IS NULL OR g.slug=?)
+           ORDER BY g.display_name,c.name`,
+        )
+        .all(gatewaySlug ?? null, gatewaySlug ?? null),
+    ).map((value) => ({
+      id: value.id,
+      gatewayId: value.gateway_id,
+      gatewaySlug: value.gateway_slug,
+      gatewayName: value.gateway_name,
+      supplyAgreementId: value.supply_agreement_id,
+      agreementName: value.agreement_name,
+      externalRouteRef: value.external_route_ref,
+      name: value.name,
+      protocol: value.protocol,
+      lifecycle: value.lifecycle,
+      health: value.health,
+      supplierHint: value.supplier_hint,
+      supplierModelHint: value.supplier_model_hint,
+      capabilities: decode<string[]>(value.capabilities_json, []),
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+      firstSeenAt: value.first_seen_at,
+      lastSeenAt: value.last_seen_at,
+    }));
+  }
+
+  listDiscoveryRuns(gatewayId?: string, limit = 50): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_discovery_runs
+           WHERE (? IS NULL OR gateway_id=?)
+           ORDER BY started_at DESC,rowid DESC LIMIT ?`,
+        )
+        .all(gatewayId ?? null, gatewayId ?? null, limit),
+    ).map((value) => ({
+      id: value.id,
+      gatewayId: value.gateway_id,
+      observedAt: value.observed_at,
+      startedAt: value.started_at,
+      completedAt: value.completed_at,
+      status: value.status,
+      routeCount: Number(value.route_count ?? 0),
+      createdSuppliers: Number(value.created_suppliers ?? 0),
+      createdSupplierModels: Number(value.created_supplier_models ?? 0),
+      createdEmployees: Number(value.created_employees ?? 0),
+      createdAgreements: Number(value.created_agreements ?? 0),
+      createdEmployments: Number(value.created_employments ?? 0),
+      createdBindings: Number(value.created_bindings ?? 0),
+      issues: decode<unknown[]>(value.issues_json, []),
+      errorCode: value.error_code,
+    }));
+  }
+
   listGateways(): Row[] {
     return rows(
       this.db
         .prepare(
           `SELECT g.*,
                   (SELECT COUNT(*) FROM v2_gateway_bindings b
-                    WHERE b.gateway_id=g.id AND b.lifecycle='ACTIVE') active_bindings
+                    WHERE b.gateway_id=g.id AND b.lifecycle='ACTIVE') active_bindings,
+                  (SELECT COUNT(*) FROM v2_channels c
+                    WHERE c.gateway_id=g.id AND c.lifecycle!='ARCHIVED') route_count
            FROM v2_gateways g ORDER BY g.display_name`,
         )
         .all(),
@@ -2147,6 +2513,7 @@ export class V2Repository {
       lifecycle: value.lifecycle,
       baseUrlHint: value.base_url_hint,
       activeBindings: Number(value.active_bindings ?? 0),
+      routeCount: Number(value.route_count ?? 0),
       lastSeenAt: value.last_seen_at,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
     }));

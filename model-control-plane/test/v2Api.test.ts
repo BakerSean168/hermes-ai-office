@@ -112,6 +112,7 @@ test('V2 employee dossier returns deterministic not-found error', async () => {
 
 class ApiFakeGateway implements GatewayExecutionPort, GatewayInvocationPort {
   readonly gatewayId = 'litellm-reference';
+  calls = 0;
 
   async resolveRoute(employmentId: string) {
     return {
@@ -132,6 +133,7 @@ class ApiFakeGateway implements GatewayExecutionPort, GatewayInvocationPort {
   }
 
   async invoke(request: GatewayInvocationRequest) {
+    this.calls += 1;
     return {
       gatewayRequestId: 'api_call',
       externalDeploymentRef: 'api_deployment',
@@ -152,13 +154,14 @@ class ApiFakeGateway implements GatewayExecutionPort, GatewayInvocationPort {
 }
 
 test('V2 command API opens a Run, Duty and dispatches current Employee', async () => {
+  const gateway = new ApiFakeGateway();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
     logger: false,
     cpa,
     cpaUsage: usage,
     initialSync: false,
-    gateways: new GatewayRegistry([new ApiFakeGateway()]),
+    gateways: new GatewayRegistry([gateway]),
   });
   const seeded = runtime.v2.bootstrapReference(reference);
 
@@ -203,17 +206,40 @@ test('V2 command API opens a Run, Duty and dispatches current Employee', async (
     });
     assert.equal(duties.json().items[0].currentStaffing.employeeId, seeded.employeeId);
 
+    const invocationPayload = {
+      input: 'Review the API test change.',
+      correlationId: 'corr_api_test',
+    };
     const invokeResponse = await runtime.app.inject({
       method: 'POST',
       url: `/api/v2/internal/duties/${duty.id}/invoke`,
-      payload: {
-        input: 'Review the API test change.',
-        correlationId: 'corr_api_test',
-      },
+      headers: { 'Idempotency-Key': 'invoke-api-1' },
+      payload: invocationPayload,
     });
     assert.equal(invokeResponse.statusCode, 200);
     assert.equal(invokeResponse.json().outputText, 'API_REVIEW_OK');
     assert.equal(invokeResponse.json().usage.inputTokens, 12);
+
+    const replay = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/internal/duties/${duty.id}/invoke`,
+      headers: { 'Idempotency-Key': 'invoke-api-1' },
+      payload: invocationPayload,
+    });
+    assert.equal(replay.statusCode, 200);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+    assert.equal(replay.json().invocationId, invokeResponse.json().invocationId);
+    assert.equal(replay.json().usageEntryId, invokeResponse.json().usageEntryId);
+    assert.equal(gateway.calls, 1);
+
+    const conflict = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/internal/duties/${duty.id}/invoke`,
+      headers: { 'Idempotency-Key': 'invoke-api-1' },
+      payload: { ...invocationPayload, input: 'A different request.' },
+    });
+    assert.equal(conflict.statusCode, 409);
+    assert.equal(conflict.json().error.code, 'IDEMPOTENCY_CONFLICT');
 
     const completedDuties = await runtime.app.inject({
       method: 'GET',

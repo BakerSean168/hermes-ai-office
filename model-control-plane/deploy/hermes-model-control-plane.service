@@ -19,6 +19,9 @@ Environment=MODEL_CP_SYNC_INTERVAL_MS=60000
 Environment=MODEL_CP_HEALTH_CHECK_INTERVAL_MS=1800000
 Environment=MODEL_CP_MANAGE_POSITION_ALIASES=1
 Environment=MODEL_CP_V2_LITELLM=1
+Environment=MODEL_CP_V2_DISCOVERY=1
+Environment=MODEL_CP_V2_DISCOVERY_INTERVAL_MS=60000
+Environment=CPA_GATEWAY_ID=cpa-compat
 Environment=LITELLM_GATEWAY_ID=litellm-reference
 Environment=LITELLM_BASE_URL=http://127.0.0.1:4000
 Environment=LITELLM_ENV_FILE=/srv/hermes-personal/secrets/litellm.env

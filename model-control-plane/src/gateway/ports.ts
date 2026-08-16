@@ -135,9 +135,26 @@ export interface GatewayDiscoveryPort {
   discover(cursor?: string): Promise<GatewayDiscoverySnapshot>;
 }
 
+export function supportsGatewayDiscovery(
+  gateway: GatewayExecutionPort,
+): gateway is GatewayExecutionPort & GatewayDiscoveryPort {
+  return (
+    'discover' in gateway &&
+    typeof (gateway as Partial<GatewayDiscoveryPort>).discover === 'function'
+  );
+}
+
 export interface GatewayUsagePort {
   readonly gatewayId: string;
   pullUsage(cursor?: string): Promise<GatewayUsagePage>;
+}
+
+export function supportsGatewayUsage(
+  gateway: GatewayExecutionPort,
+): gateway is GatewayExecutionPort & GatewayUsagePort {
+  return (
+    'pullUsage' in gateway && typeof (gateway as Partial<GatewayUsagePort>).pullUsage === 'function'
+  );
 }
 
 export type GatewayPort = GatewayExecutionPort &
