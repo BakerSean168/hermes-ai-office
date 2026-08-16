@@ -110,7 +110,12 @@
      pixel font (the Canvas office keeps the pixel font). */
   .org-sans,
   .org-sans * {
-    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif !important;
+    font-family:
+      system-ui,
+      -apple-system,
+      'Segoe UI',
+      Roboto,
+      sans-serif !important;
   }
 
   /* Horizontal carousel for editor items */

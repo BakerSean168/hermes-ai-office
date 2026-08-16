@@ -107,8 +107,7 @@ export class OfficeState {
    */
   applyProfileAreaNames(names: string[]): void {
     const slots = PROFILE_AREA_SLOT_LABELS;
-    const prev: string[] =
-      this.profileAreaNames.length > 0 ? this.profileAreaNames : [...slots];
+    const prev: string[] = this.profileAreaNames.length > 0 ? this.profileAreaNames : [...slots];
     const next: string[] = names.length > 0 ? names : [...slots];
 
     const rename = new Map<string, string>();

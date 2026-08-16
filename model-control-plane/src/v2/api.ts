@@ -3,14 +3,18 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { DispatchService } from './dispatch.js';
 import type { GatewayDiscoveryService } from './discovery.js';
 import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
+import type { CompatibilityAuditService } from './compatibility.js';
 import type { FinanceRepository } from './finance.js';
 import {
   IdempotencyConflictError,
   IdempotencyInProgressError,
   type IdempotencyService,
 } from './idempotency.js';
+import type { IncidentProjectionService } from './incidents.js';
 import type { InvocationService } from './invocation.js';
+import type { MaintenanceService } from './maintenance.js';
 import type { OrganizationRepository } from './organization.js';
+import type { OfficeProjectionService } from './projections.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
 import type { StaffingRepository, Requirement } from './staffing.js';
@@ -36,6 +40,10 @@ export function registerV2Routes(
     staffing?: StaffingRepository;
     organization?: OrganizationRepository;
     executionSync?: HermesExecutionSyncService;
+    officeProjection?: OfficeProjectionService;
+    incidentProjection?: IncidentProjectionService;
+    maintenance?: MaintenanceService;
+    compatibility?: CompatibilityAuditService;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -208,6 +216,184 @@ export function registerV2Routes(
     async (request) => ({
       items: services.finance?.performanceByPosition(request.params.employeeId) ?? [],
     }),
+  );
+
+  app.get(
+    '/api/v2/projections/office',
+    async () =>
+      services.officeProjection?.office() ?? {
+        projectionVersion: 2,
+        generatedAt: Date.now(),
+        summary: {},
+        positions: [],
+        relations: [],
+        activeRuns: [],
+        activeDuties: [],
+        activeRuntimeSessions: [],
+        workforce: { employees: [], summary: {} },
+      },
+  );
+
+  app.get('/api/v2/incidents', async (request) => {
+    services.incidentProjection?.projectIncremental();
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.incidentProjection?.listIncidents({
+          lifecycle: typeof query.lifecycle === 'string' ? query.lifecycle : undefined,
+          runId: typeof query.runId === 'string' ? query.runId : undefined,
+          positionId: typeof query.positionId === 'string' ? query.positionId : undefined,
+          limit: Math.min(5_000, Math.max(1, number(query.limit, 200))),
+        }) ?? [],
+    };
+  });
+
+  app.get<{ Params: { incidentId: string } }>(
+    '/api/v2/incidents/:incidentId',
+    async (request, reply) => {
+      services.incidentProjection?.projectIncremental();
+      const incident = services.incidentProjection?.getIncident(request.params.incidentId);
+      if (!incident) {
+        reply.code(404);
+        return { error: { code: 'INCIDENT_NOT_FOUND' } };
+      }
+      return incident;
+    },
+  );
+
+  app.get('/api/v2/projection-checkpoints/incidents', async () => {
+    services.incidentProjection?.projectIncremental();
+    return { checkpoint: services.incidentProjection?.checkpoint() ?? null };
+  });
+
+  app.post('/api/v2/internal/projections/incidents/rebuild', async (_request, reply) => {
+    if (!services.incidentProjection) {
+      reply.code(503);
+      return { error: { code: 'INCIDENT_PROJECTION_UNAVAILABLE' } };
+    }
+    return services.incidentProjection.rebuild();
+  });
+
+  app.post<{ Params: { incidentId: string } }>(
+    '/api/v2/commands/incidents/:incidentId/acknowledge',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'incident.acknowledge',
+        operation: () => {
+          if (!services.incidentProjection) {
+            reply.code(503);
+            return { error: { code: 'INCIDENT_PROJECTION_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.incidentProjection.acknowledge(
+              request.params.incidentId,
+              body.note == null ? undefined : String(body.note),
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'INCIDENT_ACKNOWLEDGE_FAILED';
+            reply.code(code === 'INCIDENT_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { incidentId: string } }>(
+    '/api/v2/commands/incidents/:incidentId/resolve',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'incident.resolve',
+        operation: () => {
+          if (!services.incidentProjection) {
+            reply.code(503);
+            return { error: { code: 'INCIDENT_PROJECTION_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.incidentProjection.resolve(
+              request.params.incidentId,
+              body.note == null ? undefined : String(body.note),
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'INCIDENT_RESOLVE_FAILED';
+            reply.code(code === 'INCIDENT_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.get('/api/v2/maintenance/policy', async () => ({
+    policy: services.maintenance?.retentionPolicy() ?? null,
+  }));
+  app.get('/api/v2/maintenance-runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.maintenance?.listRuns(Math.min(1_000, Math.max(1, number(query.limit, 100)))) ??
+        [],
+    };
+  });
+  app.get('/api/v2/maintenance/status', async () => ({
+    policy: services.maintenance?.retentionPolicy() ?? null,
+    recentRuns: services.maintenance?.listRuns(20) ?? [],
+  }));
+  app.post('/api/v2/internal/maintenance/run', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'maintenance.run',
+      operation: () => {
+        if (!services.maintenance) {
+          reply.code(503);
+          return { error: { code: 'MAINTENANCE_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        return services.maintenance.run({
+          dryRun: body.dryRun === true,
+          at: body.at == null ? undefined : Number(body.at),
+          staleSyncAfterMs:
+            body.staleSyncAfterMs == null ? undefined : Number(body.staleSyncAfterMs),
+        });
+      },
+    }),
+  );
+
+  app.get('/api/v2/compatibility/status', async (_request, reply) => {
+    if (!services.compatibility) {
+      reply.code(503);
+      return { error: { code: 'COMPATIBILITY_AUDIT_UNAVAILABLE' } };
+    }
+    return services.compatibility.status();
+  });
+
+  app.get<{ Params: { positionId: string } }>(
+    '/api/v2/projections/positions/:positionId/dossier',
+    async (request, reply) => {
+      const dossier = services.officeProjection?.positionDossier(request.params.positionId);
+      if (!dossier) {
+        reply.code(404);
+        return { error: { code: 'POSITION_NOT_FOUND' } };
+      }
+      return dossier;
+    },
+  );
+
+  app.get<{ Params: { runId: string } }>(
+    '/api/v2/projections/runs/:runId/dossier',
+    async (request, reply) => {
+      const dossier = services.officeProjection?.runDossier(request.params.runId);
+      if (!dossier) {
+        reply.code(404);
+        return { error: { code: 'RUN_NOT_FOUND' } };
+      }
+      return dossier;
+    },
   );
 
   app.get('/api/v2/runtime-sessions', async (request) => {

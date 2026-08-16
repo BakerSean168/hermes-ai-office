@@ -12,13 +12,17 @@ import { ControlPlaneStore } from './store.mjs';
 import { registerV2Routes } from './v2/api.js';
 import { DispatchService } from './v2/dispatch.js';
 import { GatewayDiscoveryService } from './v2/discovery.js';
+import { CompatibilityAuditService } from './v2/compatibility.js';
 import { HermesExecutionSyncService } from './v2/execution.js';
 import { FinanceRepository } from './v2/finance.js';
+import { IncidentProjectionService } from './v2/incidents.js';
+import { MaintenanceService } from './v2/maintenance.js';
 import { IdempotencyService } from './v2/idempotency.js';
 import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { OrganizationRepository } from './v2/organization.js';
+import { OfficeProjectionService } from './v2/projections.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
 import { StaffingRepository } from './v2/staffing.js';
 import { SupplyRepository } from './v2/supply.js';
@@ -118,6 +122,7 @@ export async function buildControlPlane(
   if (env.MODEL_CP_V2_SCHEMA !== '0') runV2Migrations(db);
   const store = new ControlPlaneStore(db);
   const v2 = new V2Repository(db);
+  const compatibility = new CompatibilityAuditService(v2, store, env);
   const gateways = options.gateways ?? new GatewayRegistry();
   if (
     !options.gateways &&
@@ -142,6 +147,15 @@ export async function buildControlPlane(
   const staffing = new StaffingRepository(v2);
   const organization = new OrganizationRepository(v2);
   const executionSync = new HermesExecutionSyncService(v2, organization);
+  const incidentProjection = new IncidentProjectionService(v2);
+  const maintenance = new MaintenanceService(v2);
+  const officeProjection = new OfficeProjectionService({
+    domain: v2,
+    organization,
+    execution: executionSync,
+    staffing,
+    finance,
+  });
   const dispatchService = new DispatchService(v2, gateways, supply, staffing);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
@@ -277,8 +291,17 @@ export async function buildControlPlane(
     staffing,
     organization,
     executionSync,
+    officeProjection,
+    incidentProjection,
+    maintenance,
+    compatibility,
     idempotencyService,
   });
+  try {
+    incidentProjection.projectIncremental();
+  } catch (error) {
+    app.log.warn({ err: error }, 'initial incident projection failed');
+  }
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -522,6 +545,30 @@ export async function buildControlPlane(
           app.log.warn({ err: error }, 'periodic CPA sync failed');
         }
       }, syncInterval);
+      timer.unref();
+      timers.add(timer);
+    }
+    const incidentInterval = Number(env.MODEL_CP_INCIDENT_PROJECTION_INTERVAL_MS ?? 5_000);
+    if (incidentInterval > 0) {
+      const timer = setInterval(() => {
+        try {
+          incidentProjection.projectIncremental();
+        } catch (error) {
+          app.log.warn({ err: error }, 'periodic incident projection failed');
+        }
+      }, incidentInterval);
+      timer.unref();
+      timers.add(timer);
+    }
+    const maintenanceInterval = Number(env.MODEL_CP_MAINTENANCE_INTERVAL_MS ?? 86_400_000);
+    if (maintenanceInterval > 0) {
+      const timer = setInterval(() => {
+        try {
+          maintenance.run();
+        } catch (error) {
+          app.log.warn({ err: error }, 'periodic V2 maintenance failed');
+        }
+      }, maintenanceInterval);
       timer.unref();
       timers.add(timer);
     }

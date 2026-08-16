@@ -10,7 +10,9 @@ import {
   ORG_WORKLOAD_READY_COLOR,
 } from '../constants.js';
 import type { OrgNode, OrgProfile, OrgRun, OrgState } from '../org/types.js';
+import { IncidentPanel } from './IncidentPanel';
 import { ModelWorkforcePanel } from './ModelWorkforcePanel.js';
+import { OfficePositionPanel } from './OfficePositionPanel';
 
 interface OrgViewProps {
   orgState: OrgState | null;
@@ -295,6 +297,8 @@ export function OrgView({ orgState, onClose }: OrgViewProps) {
       <div className="flex-1 overflow-auto p-6">
         <div className="mb-6">
           <ModelWorkforcePanel />
+          <OfficePositionPanel />
+          <IncidentPanel />
         </div>
         {blocks.length === 0 ? (
           <div className="text-base text-text-muted">
