@@ -369,6 +369,7 @@ export function registerV2Routes(
       reply.code(503);
       return { error: { code: 'COMPATIBILITY_AUDIT_UNAVAILABLE' } };
     }
+    services.incidentProjection?.projectIncremental();
     return services.compatibility.status();
   });
 
