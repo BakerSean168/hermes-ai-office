@@ -54,6 +54,11 @@ test('typed app factory preserves V1 health and workforce routes', async () => {
       employed: 0,
       dormant: 0,
       currentDuties: 0,
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      actualCost: 0,
+      marketValue: 0,
     });
 
     const workforce = await runtime.app.inject({
