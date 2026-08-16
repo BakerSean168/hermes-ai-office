@@ -98,6 +98,11 @@ test('workforce projection and event history are derived from canonical facts', 
   assert.equal(projection.employees[0]?.id, seeded.employeeId);
   assert.equal(projection.gateways[0]?.slug, 'litellm-reference');
   assert.equal(projection.gateways[0]?.activeBindings, 1);
+  assert.equal(projection.employees[0]?.currentAppointments.length, 1);
+  assert.equal(projection.employees[0]?.currentAppointments[0].positionSlug, 'coding-review');
+  assert.deepEqual(projection.employees[0]?.currentWork, []);
+  assert.equal(projection.employees[0]?.career.usage.requests, 0);
+  assert.equal(projection.summary.requests, 0);
 
   const events = repository.eventsAfter(0, 100);
   assert.ok(events.some((event) => event.type === 'employee.discovered'));

@@ -1,0 +1,77 @@
+import { createServer, type Server } from 'node:http';
+
+import Fastify from 'fastify';
+import { expect, it } from 'vitest';
+
+import { registerModelControlPlaneRoutes } from '../src/httpServer.js';
+
+async function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') reject(new Error('missing test address'));
+      else resolve(address.port);
+    });
+  });
+}
+
+it('Pixel backend proxies V2 workforce and employee dossier without exposing upstream URL', async () => {
+  const upstream = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/api/v2/projections/workforce') {
+      response.end(
+        JSON.stringify({
+          projectionVersion: 2,
+          summary: { employees: 1, employed: 1, currentDuties: 0 },
+          employees: [{ id: 'emp_1', displayName: 'DeepSeek @ Planner Pool' }],
+          gateways: [],
+        }),
+      );
+      return;
+    }
+    if (request.url === '/api/v2/projections/employees/emp_1/dossier') {
+      response.end(
+        JSON.stringify({
+          identity: { id: 'emp_1', displayName: 'DeepSeek @ Planner Pool' },
+          cooperation: { state: 'EMPLOYED' },
+        }),
+      );
+      return;
+    }
+    response.writeHead(404).end(JSON.stringify({ error: 'not-found' }));
+  });
+  const port = await listen(upstream);
+  const previousUrl = process.env.MODEL_CONTROL_PLANE_URL;
+  process.env.MODEL_CONTROL_PLANE_URL = `http://127.0.0.1:${port}`;
+  const app = Fastify();
+  registerModelControlPlaneRoutes(app);
+
+  try {
+    const workforce = await app.inject({ method: 'GET', url: '/api/model/v2/workforce' });
+    expect(workforce.statusCode).toBe(200);
+    expect(workforce.json().employees[0].id).toBe('emp_1');
+    expect(JSON.stringify(workforce.json())).not.toContain(String(port));
+
+    const dossier = await app.inject({
+      method: 'GET',
+      url: '/api/model/v2/employees/emp_1/dossier',
+    });
+    expect(dossier.statusCode).toBe(200);
+    expect(dossier.json().cooperation.state).toBe('EMPLOYED');
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/api/model/v2/employees/emp_missing/dossier',
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().error).toBe('model-control-plane-v2-employee-not-found');
+  } finally {
+    if (previousUrl === undefined) delete process.env.MODEL_CONTROL_PLANE_URL;
+    else process.env.MODEL_CONTROL_PLANE_URL = previousUrl;
+    await app.close();
+    await new Promise<void>((resolve, reject) =>
+      upstream.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});

@@ -137,7 +137,7 @@ async function modelControlPlaneRequest(
   return { ok: response.ok, status: response.status, body: responseBody };
 }
 
-function registerModelControlPlaneRoutes(app: FastifyInstance): void {
+export function registerModelControlPlaneRoutes(app: FastifyInstance): void {
   const baseUrl = modelControlPlaneUrl();
   if (!baseUrl) return;
   const adminEnabled = process.env['MODEL_CONTROL_PLANE_ADMIN'] === '1';
@@ -157,6 +157,45 @@ function registerModelControlPlaneRoutes(app: FastifyInstance): void {
       return { error: 'model-control-plane-unavailable', message: String(error) };
     }
   });
+
+  app.get('/api/model/v2/workforce', async (_request, reply) => {
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/projections/workforce`);
+      if (!response.ok) {
+        reply.code(502);
+        return { error: 'model-control-plane-v2-unavailable', status: response.status };
+      }
+      return await response.json();
+    } catch (error) {
+      reply.code(502);
+      return { error: 'model-control-plane-v2-unavailable', message: String(error) };
+    }
+  });
+
+  app.get<{ Params: { employeeId: string } }>(
+    '/api/model/v2/employees/:employeeId/dossier',
+    async (request, reply) => {
+      try {
+        const response = await fetch(
+          `${baseUrl}/api/v2/projections/employees/${encodeURIComponent(request.params.employeeId)}/dossier`,
+        );
+        if (!response.ok) {
+          reply.code(response.status === 404 ? 404 : 502);
+          return {
+            error:
+              response.status === 404
+                ? 'model-control-plane-v2-employee-not-found'
+                : 'model-control-plane-v2-unavailable',
+            status: response.status,
+          };
+        }
+        return await response.json();
+      } catch (error) {
+        reply.code(502);
+        return { error: 'model-control-plane-v2-unavailable', message: String(error) };
+      }
+    },
+  );
 
   if (adminEnabled) {
     app.patch<{
@@ -267,6 +306,55 @@ function registerModelControlPlaneRoutes(app: FastifyInstance): void {
         reply
           .code(502)
           .send({ error: 'model-control-plane-events-unavailable', message: String(error) });
+      }
+    }
+  });
+  app.get('/api/model/v2/events', async (request, reply) => {
+    const controller = new AbortController();
+    request.raw.on('close', () => controller.abort());
+    try {
+      const lastEventId = request.headers['last-event-id'];
+      const response = await fetch(`${baseUrl}/api/v2/events`, {
+        signal: controller.signal,
+        headers: typeof lastEventId === 'string' ? { 'Last-Event-ID': lastEventId } : undefined,
+      });
+      if (!response.ok || !response.body) {
+        reply.code(502).send({ error: 'model-control-plane-v2-events-unavailable' });
+        return;
+      }
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() ?? '';
+        for (const chunk of chunks) {
+          const id = chunk
+            .split('\n')
+            .find((line) => line.startsWith('id: '))
+            ?.slice(4);
+          const data = chunk.split('\n').filter((line) => line.startsWith('data: '));
+          for (const line of data) {
+            if (id) reply.raw.write(`id: ${id}\n`);
+            reply.raw.write(`data: ${line.slice(6)}\n\n`);
+          }
+        }
+      }
+      reply.raw.end();
+    } catch (error) {
+      if (!controller.signal.aborted && !reply.raw.headersSent) {
+        reply
+          .code(502)
+          .send({ error: 'model-control-plane-v2-events-unavailable', message: String(error) });
       }
     }
   });
