@@ -1125,6 +1125,84 @@ export function registerV2Routes(
     }),
   );
 
+  app.post('/api/v2/commands/supply-catalog/register', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'supply-catalog.register',
+      operation: () => {
+        if (!services.supply) {
+          reply.code(503);
+          return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const supplier = body.supplier as Record<string, unknown> | undefined;
+        const supplierModel = body.supplierModel as Record<string, unknown> | undefined;
+        const agreement = body.agreement as Record<string, unknown> | undefined;
+        const plan = body.plan as Record<string, unknown> | undefined;
+        const gatewayRoute = body.gatewayRoute as Record<string, unknown> | undefined;
+        if (
+          !supplier?.slug ||
+          !supplier.name ||
+          !supplierModel?.key ||
+          !supplierModel.name ||
+          !agreement?.externalAccountRef ||
+          !agreement.name
+        ) {
+          reply.code(400);
+          return { error: { code: 'SUPPLY_CATALOG_IDENTITY_REQUIRED' } };
+        }
+        if (
+          plan &&
+          (!plan.slug ||
+            !plan.name ||
+            (plan.commercialType != null &&
+              !['FREE', 'SUBSCRIPTION', 'PREPAID', 'METERED', 'SPONSORED', 'OTHER'].includes(
+                String(plan.commercialType),
+              )))
+        ) {
+          reply.code(400);
+          return { error: { code: 'SUPPLY_CATALOG_PLAN_INVALID' } };
+        }
+        if (gatewayRoute && (!gatewayRoute.gatewaySlug || !gatewayRoute.externalRouteRef)) {
+          reply.code(400);
+          return { error: { code: 'SUPPLY_CATALOG_GATEWAY_ROUTE_INVALID' } };
+        }
+        try {
+          return services.supply.registerCatalogEntry({
+            supplier: { slug: String(supplier.slug), name: String(supplier.name) },
+            supplierModel: { key: String(supplierModel.key), name: String(supplierModel.name) },
+            agreement: {
+              externalAccountRef: String(agreement.externalAccountRef),
+              name: String(agreement.name),
+            },
+            plan: plan
+              ? {
+                  slug: String(plan.slug),
+                  name: String(plan.name),
+                  commercialType: plan.commercialType
+                    ? (String(plan.commercialType) as
+                        'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER')
+                    : undefined,
+                }
+              : undefined,
+            gatewayRoute: gatewayRoute
+              ? {
+                  gatewaySlug: String(gatewayRoute.gatewaySlug),
+                  externalRouteRef: String(gatewayRoute.externalRouteRef),
+                  activateBinding: gatewayRoute.activateBinding === true,
+                }
+              : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'SUPPLY_CATALOG_REGISTER_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
   app.post('/api/v2/commands/plans/create', async (request, reply) =>
     runCommand({
       request,

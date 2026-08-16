@@ -87,6 +87,15 @@ type SupplyProjection = {
   }>;
   unmappedInfrastructure: {
     count: number;
+    groups: Array<{
+      gatewaySlug: string;
+      gatewayName: string;
+      channelName: string;
+      health: string[];
+      supplierHints: string[];
+      modelHints: string[];
+      routes: Array<{ id: string; externalRouteRef: string; protocol: string; health: string }>;
+    }>;
     channels: Array<{
       id: string;
       name: string;
@@ -301,11 +310,38 @@ export function SupplierPanel() {
           business bindings · {projection.summary.unmappedChannels} unmapped technical routes
         </div>
         {projection.unmappedInfrastructure.count > 0 ? (
-          <div className="mt-3 border-l-2 border-warning pl-3 text-xs text-text-muted">
-            {projection.unmappedInfrastructure.count} gateway route
-            {projection.unmappedInfrastructure.count === 1 ? '' : 's'} currently have no
-            SupplyAgreement mapping. They remain technical evidence and are intentionally not shown
-            as employees or suppliers.
+          <div className="mt-3">
+            <div className="border-l-2 border-warning pl-3 text-xs text-text-muted">
+              {projection.unmappedInfrastructure.count} gateway route
+              {projection.unmappedInfrastructure.count === 1 ? '' : 's'} currently have no
+              SupplyAgreement mapping. They remain technical evidence and are intentionally not
+              shown as employees or suppliers.
+            </div>
+            <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+              {projection.unmappedInfrastructure.groups.map((group) => (
+                <div
+                  className="border border-border p-3"
+                  key={`${group.gatewaySlug}:${group.channelName}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">{group.channelName}</div>
+                      <div className="text-xs text-text-muted">{group.gatewayName}</div>
+                    </div>
+                    <div className="text-xs text-text-muted">{group.health.join(' / ')}</div>
+                  </div>
+                  <div className="mt-2 text-xs text-text-muted">
+                    Models: {group.modelHints.length > 0 ? group.modelHints.join(', ') : 'unknown'}
+                  </div>
+                  <div className="mt-1 text-xs text-text-muted">
+                    Commercial identity:{' '}
+                    {group.supplierHints.length > 0
+                      ? group.supplierHints.join(', ')
+                      : 'unclassified'}
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         ) : null}
       </div>

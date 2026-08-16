@@ -111,3 +111,79 @@ test('V2 gateway discovery replaces legacy CPA synchronization', async () => {
     await runtime.app.close();
   }
 });
+
+test('explicit supply catalog registration classifies gateway evidence without creating an Appointment', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    const gateway = runtime.v2.getOrCreateGateway({
+      slug: 'cpa-compat',
+      kind: 'CPA',
+      displayName: 'CPA Gateway',
+    });
+    runtime.v2.upsertChannelObservation({
+      gatewayId: String(gateway.id),
+      externalRouteRef: 'cpa/channel/opencode-go/model/deepseek-v4-flash',
+      name: 'opencode-go',
+      protocol: 'openai-chat-completions',
+      health: 'DEGRADED',
+      supplierModelHint: 'deepseek-v4-flash',
+      capabilities: [],
+      metadata: { source: 'test-gateway-evidence' },
+      observedAt: Date.now(),
+    });
+
+    const payload = {
+      supplier: { slug: 'opencode', name: 'OpenCode' },
+      supplierModel: { key: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
+      plan: { slug: 'go', name: 'OpenCode Go', commercialType: 'SUBSCRIPTION' },
+      agreement: { externalAccountRef: 'opencode-go-primary', name: 'OpenCode Go / Primary' },
+      gatewayRoute: {
+        gatewaySlug: 'cpa-compat',
+        externalRouteRef: 'cpa/channel/opencode-go/model/deepseek-v4-flash',
+        activateBinding: false,
+      },
+    };
+    const first = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/supply-catalog/register',
+      headers: { 'idempotency-key': 'catalog-opencode-flash' },
+      payload,
+    });
+    assert.equal(first.statusCode, 200);
+    const body = first.json();
+    assert.equal(body.employee.displayName, 'DeepSeek V4 Flash @ OpenCode');
+    assert.equal(body.plan.name, 'OpenCode Go');
+    assert.equal(body.binding, null);
+    assert.equal(runtime.v2.listAppointments({ employeeId: body.employee.id }).length, 0);
+
+    const replay = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/supply-catalog/register',
+      headers: { 'idempotency-key': 'catalog-opencode-flash' },
+      payload,
+    });
+    assert.equal(replay.statusCode, 200);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+    assert.equal(replay.json().employee.id, body.employee.id);
+    assert.equal(runtime.v2.listEmployees().length, 1);
+    assert.equal(runtime.v2.listAppointments().length, 0);
+
+    const projection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    const supply = projection.json();
+    assert.equal(supply.suppliers[0].name, 'OpenCode');
+    assert.equal(supply.suppliers[0].agreements[0].channels[0].name, 'opencode-go');
+    assert.equal(supply.summary.unmappedChannels, 0);
+  } finally {
+    await runtime.app.close();
+  }
+});

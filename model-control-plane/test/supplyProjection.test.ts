@@ -106,4 +106,9 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
   assert.equal((agreement.capacityPools as unknown[]).length, 1);
   assert.equal((agreement.channels as Array<Record<string, unknown>>)[0]?.name, 'OpenCode Go');
   assert.equal((projection.unmappedInfrastructure as Record<string, unknown>).count, 1);
+  const groups = (projection.unmappedInfrastructure as { groups: Array<Record<string, unknown>> })
+    .groups;
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0]?.channelName, 'Technical route only');
+  assert.deepEqual(groups[0]?.modelHints, []);
 });

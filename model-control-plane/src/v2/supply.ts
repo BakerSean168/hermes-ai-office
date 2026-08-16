@@ -1,3 +1,4 @@
+import type { GatewayProtocol } from '../gateway/ports.js';
 import { newId } from './ids.js';
 import type { V2Repository, V2Row } from './repository.js';
 
@@ -506,6 +507,134 @@ export class SupplyRepository {
     }));
   }
 
+  registerCatalogEntry(input: {
+    supplier: { slug: string; name: string };
+    supplierModel: { key: string; name: string };
+    agreement: { externalAccountRef: string; name: string };
+    plan?: {
+      slug: string;
+      name: string;
+      commercialType?: 'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER';
+    };
+    gatewayRoute?: {
+      gatewaySlug: string;
+      externalRouteRef: string;
+      activateBinding?: boolean;
+    };
+  }): V2Row {
+    return this.#domain.transaction(() => {
+      const supplier = this.#domain.getOrCreateSupplier(input.supplier.slug, input.supplier.name);
+      const supplierModel = this.#domain.getOrCreateSupplierModel({
+        supplierId: String(supplier.id),
+        supplierModelKey: input.supplierModel.key,
+        displayName: input.supplierModel.name,
+      });
+      const employee = this.#domain.getOrCreateEmployee({
+        supplierId: String(supplier.id),
+        supplierModelId: String(supplierModel.id),
+        displayName: `${input.supplierModel.name} @ ${input.supplier.name}`,
+      });
+      const agreement = this.#domain.getOrCreateAgreement({
+        supplierId: String(supplier.id),
+        externalAccountRef: input.agreement.externalAccountRef,
+        name: input.agreement.name,
+      });
+      const employment = this.#domain.getOrCreateCurrentEmployment({
+        employeeId: String(employee.id),
+        supplyAgreementId: String(agreement.id),
+      });
+
+      let plan: V2Row | null = null;
+      if (input.plan) {
+        plan = this.getOrCreatePlan({
+          supplierId: String(supplier.id),
+          slug: input.plan.slug,
+          name: input.plan.name,
+          commercialType: input.plan.commercialType,
+        });
+        this.assignPlanToAgreement(String(agreement.id), String(plan.id));
+      }
+      const offering = this.getOrCreateModelOffering({
+        supplierId: String(supplier.id),
+        supplierModelId: String(supplierModel.id),
+        planId: plan ? String(plan.id) : undefined,
+        supplyAgreementId: String(agreement.id),
+      });
+      this.assignOfferingToEmployment(String(employment.id), String(offering.id));
+
+      let channel: V2Row | null = null;
+      let binding: V2Row | null = null;
+      if (input.gatewayRoute) {
+        const gateway = this.#domain.findGatewayBySlug(input.gatewayRoute.gatewaySlug);
+        if (!gateway) throw new Error('GATEWAY_NOT_FOUND');
+        channel =
+          this.#domain
+            .listChannels(input.gatewayRoute.gatewaySlug)
+            .find((item) => item.externalRouteRef === input.gatewayRoute!.externalRouteRef) ?? null;
+        if (!channel) throw new Error('GATEWAY_CHANNEL_NOT_FOUND');
+        const protocol = String(channel.protocol ?? 'unknown') as GatewayProtocol;
+        this.#domain.upsertChannelObservation({
+          gatewayId: String(channel.gatewayId),
+          supplyAgreementId: String(agreement.id),
+          externalRouteRef: String(channel.externalRouteRef),
+          name: String(channel.name),
+          protocol,
+          health: String(channel.health) as 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY' | 'UNKNOWN',
+          lifecycle: String(channel.lifecycle) as 'ENABLED' | 'DISABLED',
+          supplierHint: input.supplier.slug,
+          supplierModelHint: input.supplierModel.key,
+          capabilities: Array.isArray(channel.capabilities) ? channel.capabilities.map(String) : [],
+          metadata: {
+            ...(channel.metadata && typeof channel.metadata === 'object'
+              ? (channel.metadata as JsonRecord)
+              : {}),
+            commercialClassification: 'EXPLICIT_V2_CATALOG',
+          },
+          observedAt: Number(channel.lastSeenAt ?? now()),
+        });
+        if (input.gatewayRoute.activateBinding) {
+          binding = this.#domain.getOrCreateGatewayBinding({
+            employmentId: String(employment.id),
+            gatewayId: String(gateway.id),
+            externalRouteRef: input.gatewayRoute.externalRouteRef,
+            protocol,
+          });
+        }
+      }
+
+      this.#domain.emit({
+        type: 'supply.catalog.registered',
+        entityType: 'Employment',
+        entityId: String(employment.id),
+        payload: {
+          supplierId: supplier.id,
+          supplierModelId: supplierModel.id,
+          employeeId: employee.id,
+          agreementId: agreement.id,
+          planId: plan?.id ?? null,
+          offeringId: offering.id,
+          gatewayRoute: input.gatewayRoute ?? null,
+        },
+      });
+
+      return {
+        supplier,
+        supplierModel,
+        employee: this.#domain.listEmployees().find((item) => item.id === employee.id) ?? employee,
+        agreement: this.listSupplyAgreements(String(supplier.id)).find(
+          (item) => item.id === agreement.id,
+        ),
+        employment: this.#domain
+          .listEmployments(String(employee.id))
+          .find((item) => item.id === employment.id),
+        plan,
+        offering,
+        channel,
+        binding,
+      };
+    });
+  }
+
   projection(): V2Row {
     const suppliers = rows(
       this.#domain.db
@@ -663,6 +792,50 @@ export class SupplyRepository {
     });
 
     const unmappedChannels = channels.filter((channel) => channel.supplyAgreementId == null);
+    const unmappedGroups = [
+      ...new Set(
+        unmappedChannels.map(
+          (channel) => `${String(channel.gatewaySlug)}\u0000${String(channel.name)}`,
+        ),
+      ),
+    ]
+      .map((key) => {
+        const [gatewaySlug = '', channelName = ''] = key.split('\u0000');
+        const groupChannels = unmappedChannels.filter(
+          (channel) => channel.gatewaySlug === gatewaySlug && channel.name === channelName,
+        );
+        return {
+          gatewaySlug,
+          gatewayName: groupChannels[0]?.gatewayName,
+          channelName,
+          health: [...new Set(groupChannels.map((channel) => String(channel.health)))],
+          supplierHints: [
+            ...new Set(
+              groupChannels
+                .map((channel) => channel.supplierHint)
+                .filter((value): value is string => typeof value === 'string' && value.length > 0),
+            ),
+          ],
+          modelHints: [
+            ...new Set(
+              groupChannels
+                .map((channel) => channel.supplierModelHint)
+                .filter((value): value is string => typeof value === 'string' && value.length > 0),
+            ),
+          ],
+          routes: groupChannels.map((channel) => ({
+            id: channel.id,
+            externalRouteRef: channel.externalRouteRef,
+            protocol: channel.protocol,
+            health: channel.health,
+          })),
+        };
+      })
+      .sort(
+        (a, b) =>
+          String(a.gatewayName).localeCompare(String(b.gatewayName)) ||
+          a.channelName.localeCompare(b.channelName),
+      );
     return {
       projectionVersion: 2,
       generatedAt: now(),
@@ -670,6 +843,7 @@ export class SupplyRepository {
       gateways,
       unmappedInfrastructure: {
         channels: unmappedChannels,
+        groups: unmappedGroups,
         count: unmappedChannels.length,
       },
       summary: {
