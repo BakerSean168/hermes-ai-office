@@ -400,7 +400,7 @@ Allocated Subscription Cost
 Market Value
 ```
 
-## 11. Staleness
+## 12. Staleness
 
 Projection payloads include:
 
@@ -415,7 +415,7 @@ If runtime source is stale, Office should show telemetry stale instead of markin
 
 If gateway health/usage evidence is stale, routability may be `UNKNOWN` rather than `AVAILABLE`. The projection exposes the gateway source separately so LiteLLM/CPA-specific freshness never becomes business identity.
 
-## 12. Incident projection
+## 13. Incident projection
 
 Create an explicit incident read model rather than forcing users to infer problems.
 
@@ -438,18 +438,11 @@ Suggested incident shape:
 
 Incidents may initially be derived rather than persisted.
 
-## 13. V1 projection compatibility
+## 14. Retired V1 projection compatibility
 
-During migration, build a compatibility adapter that can project V2 into the existing `/api/v1/dashboard/workforce` shape.
+This section is historical. During migration a compatibility projection preserved the former V1 workforce shape. That runtime adapter and its public `/api/v1/*`/old Office facade routes were retired on 2026-08-16. Historical V1 database evidence remains retained, but current product projections are V2-only.
 
-Rules:
-
-- legacy `workerId` stays legacy-compatible;
-- V2 Employee IDs may appear only in new optional metadata until V1 is retired;
-- current Pixel UI must not be forced to understand Employment before its V2 migration;
-- V1 projection tests snapshot current field meanings.
-
-## 14. Projection acceptance criteria
+## 15. Projection acceptance criteria
 
 1. One Employee appears consistently across supplier plans/channels.
 2. Current Appointment and current work are visually distinguishable.
@@ -461,4 +454,4 @@ Rules:
 
 ## Implemented projection addendum
 
-Purpose-built projections now include Workforce, Office, Position dossier, Run dossier and Incident. Office Position status deliberately distinguishes `WORKING` from `RUNTIME_ACTIVE_UNATTRIBUTED`; runtime evidence without a StaffingSegment never counts as staffed work.
+Purpose-built projections now include Workforce, Supply/HR, Office, Position dossier, Run dossier and Incident. Office Position status deliberately distinguishes `WORKING` from `RUNTIME_ACTIVE_UNATTRIBUTED`; runtime evidence without a StaffingSegment never counts as staffed work.
