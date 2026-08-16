@@ -17,6 +17,7 @@ import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
+import { SupplyRepository } from './v2/supply.js';
 import { UsageReconciliationService } from './v2/usageReconciliation.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -132,7 +133,8 @@ export async function buildControlPlane(
       }),
     );
   }
-  const dispatchService = new DispatchService(v2, gateways);
+  const supply = new SupplyRepository(v2);
+  const dispatchService = new DispatchService(v2, gateways, supply);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {
@@ -262,6 +264,7 @@ export async function buildControlPlane(
     lifecycleService,
     discoveryService,
     usageReconciliationService,
+    supply,
     idempotencyService,
   });
 

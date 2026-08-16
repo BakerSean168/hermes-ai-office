@@ -10,6 +10,7 @@ import {
 import type { InvocationService } from './invocation.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
+import type { SupplyRepository } from './supply.js';
 import type { UsageReconciliationService } from './usageReconciliation.js';
 
 function number(value: unknown, fallback: number): number {
@@ -26,6 +27,7 @@ export function registerV2Routes(
     lifecycleService?: WorkforceLifecycleService;
     discoveryService?: GatewayDiscoveryService;
     usageReconciliationService?: UsageReconciliationService;
+    supply?: SupplyRepository;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -120,6 +122,44 @@ export function registerV2Routes(
         typeof query.gatewayDbId === 'string' ? query.gatewayDbId : undefined,
         limit,
       ),
+    };
+  });
+
+  app.get('/api/v2/supply-agreements', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.supply?.listSupplyAgreements(
+          typeof query.supplierId === 'string' ? query.supplierId : undefined,
+        ) ?? [],
+    };
+  });
+  app.get('/api/v2/plans', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.supply?.listPlans(
+          typeof query.supplierId === 'string' ? query.supplierId : undefined,
+        ) ?? [],
+    };
+  });
+  app.get('/api/v2/model-offerings', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.supply?.listModelOfferings({
+          supplierId: typeof query.supplierId === 'string' ? query.supplierId : undefined,
+          agreementId: typeof query.agreementId === 'string' ? query.agreementId : undefined,
+        }) ?? [],
+    };
+  });
+  app.get('/api/v2/capacity-pools', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.supply?.listCapacityPools(
+          typeof query.agreementId === 'string' ? query.agreementId : undefined,
+        ) ?? [],
     };
   });
 
@@ -275,6 +315,173 @@ export function registerV2Routes(
           } catch (error) {
             const code = error instanceof Error ? error.message : 'DISPATCH_FAILED';
             reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post('/api/v2/commands/plans/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'plan.create',
+      operation: () => {
+        if (!services.supply) {
+          reply.code(503);
+          return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.supplierId || !body.slug || !body.name) {
+          reply.code(400);
+          return { error: { code: 'SUPPLIER_SLUG_AND_NAME_REQUIRED' } };
+        }
+        return services.supply.getOrCreatePlan({
+          supplierId: String(body.supplierId),
+          slug: String(body.slug),
+          name: String(body.name),
+          commercialType: body.commercialType
+            ? (String(body.commercialType) as
+                'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER')
+            : undefined,
+          terms:
+            body.terms && typeof body.terms === 'object'
+              ? (body.terms as Record<string, unknown>)
+              : undefined,
+        });
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/model-offerings/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'model-offering.create',
+      operation: () => {
+        if (!services.supply) {
+          reply.code(503);
+          return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.supplierId || !body.supplierModelId) {
+          reply.code(400);
+          return { error: { code: 'SUPPLIER_AND_MODEL_REQUIRED' } };
+        }
+        return services.supply.getOrCreateModelOffering({
+          supplierId: String(body.supplierId),
+          supplierModelId: String(body.supplierModelId),
+          planId: body.planId ? String(body.planId) : undefined,
+          supplyAgreementId: body.supplyAgreementId ? String(body.supplyAgreementId) : undefined,
+          advertisedCapabilities: Array.isArray(body.advertisedCapabilities)
+            ? body.advertisedCapabilities.map(String)
+            : undefined,
+          protocolOptions: Array.isArray(body.protocolOptions)
+            ? body.protocolOptions.map(String)
+            : undefined,
+          commercialMetadata:
+            body.commercialMetadata && typeof body.commercialMetadata === 'object'
+              ? (body.commercialMetadata as Record<string, unknown>)
+              : undefined,
+        });
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/capacity-pools/upsert', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'capacity-pool.upsert',
+      operation: () => {
+        if (!services.supply) {
+          reply.code(503);
+          return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.supplyAgreementId || !body.name || !body.dimension || !body.source) {
+          reply.code(400);
+          return { error: { code: 'CAPACITY_POOL_FIELDS_REQUIRED' } };
+        }
+        return services.supply.upsertCapacityPool({
+          supplyAgreementId: String(body.supplyAgreementId),
+          name: String(body.name),
+          dimension: String(body.dimension) as
+            'TOKENS' | 'REQUESTS' | 'COST' | 'CONCURRENCY' | 'CUSTOM',
+          limit: body.limit == null ? undefined : Number(body.limit),
+          remaining: body.remaining == null ? undefined : Number(body.remaining),
+          unit: body.unit ? String(body.unit) : undefined,
+          resetAt: body.resetAt == null ? undefined : Number(body.resetAt),
+          lifecycle: body.lifecycle
+            ? (String(body.lifecycle) as 'ACTIVE' | 'SUSPENDED' | 'RETIRED')
+            : undefined,
+          source: String(body.source),
+          metadata:
+            body.metadata && typeof body.metadata === 'object'
+              ? (body.metadata as Record<string, unknown>)
+              : undefined,
+          observedAt: body.observedAt == null ? undefined : Number(body.observedAt),
+        });
+      },
+    }),
+  );
+
+  app.post<{ Params: { agreementId: string } }>(
+    '/api/v2/commands/supply-agreements/:agreementId/set-plan',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supply-agreement.set-plan',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!body.planId) {
+            reply.code(400);
+            return { error: { code: 'PLAN_REQUIRED' } };
+          }
+          try {
+            return services.supply.assignPlanToAgreement(
+              request.params.agreementId,
+              String(body.planId),
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'PLAN_ASSIGNMENT_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 409);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { employmentId: string } }>(
+    '/api/v2/commands/employments/:employmentId/set-offering',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'employment.set-offering',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!body.offeringId) {
+            reply.code(400);
+            return { error: { code: 'OFFERING_REQUIRED' } };
+          }
+          try {
+            return services.supply.assignOfferingToEmployment(
+              request.params.employmentId,
+              String(body.offeringId),
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'OFFERING_ASSIGNMENT_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 409);
             return { error: { code } };
           }
         },

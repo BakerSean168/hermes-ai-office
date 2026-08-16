@@ -1,6 +1,7 @@
 import type { GatewayRouteResolution } from '../gateway/ports.js';
 import { GatewayRegistry } from '../gateway/registry.js';
 import type { DispatchCandidate, V2Repository } from './repository.js';
+import { SupplyRepository, type CapacityState } from './supply.js';
 
 interface RouteResult {
   employmentId: string;
@@ -8,6 +9,7 @@ interface RouteResult {
   externalRouteRef: string;
   routable: boolean;
   reasons: string[];
+  capacity: CapacityState;
 }
 
 interface CandidateResult {
@@ -32,10 +34,16 @@ function appointmentRank(value: DispatchCandidate['appointmentClass']): number {
 export class DispatchService {
   readonly #repository: V2Repository;
   readonly #gateways: GatewayRegistry;
+  readonly #supply: SupplyRepository;
 
-  constructor(repository: V2Repository, gateways: GatewayRegistry) {
+  constructor(
+    repository: V2Repository,
+    gateways: GatewayRegistry,
+    supply = new SupplyRepository(repository),
+  ) {
     this.#repository = repository;
     this.#gateways = gateways;
+    this.#supply = supply;
   }
 
   async dispatchDuty(
@@ -66,6 +74,18 @@ export class DispatchService {
       const routeResults: RouteResult[] = [];
       if (candidate.eligible) {
         for (const route of candidate.routes) {
+          const capacity = this.#supply.capacityForAgreement(route.supplyAgreementId);
+          if (!capacity.available) {
+            routeResults.push({
+              employmentId: route.employmentId,
+              gatewayId: route.gatewayId,
+              externalRouteRef: route.externalRouteRef,
+              routable: false,
+              reasons: capacity.reasons,
+              capacity,
+            });
+            continue;
+          }
           const gateway = this.#gateways.get(route.gatewayId);
           if (!gateway) {
             routeResults.push({
@@ -74,6 +94,7 @@ export class DispatchService {
               externalRouteRef: route.externalRouteRef,
               routable: false,
               reasons: ['GATEWAY_ADAPTER_UNAVAILABLE'],
+              capacity,
             });
             continue;
           }
@@ -94,6 +115,7 @@ export class DispatchService {
             externalRouteRef: route.externalRouteRef,
             routable: resolution.routable,
             reasons: resolution.reasons,
+            capacity,
           });
           if (!selection && resolution.routable && resolution.route) {
             selection = {
