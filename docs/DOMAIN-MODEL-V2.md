@@ -12,23 +12,26 @@ The primary business metaphor is:
 
 - **WorkScope** — where work belongs: a project, responsibility area, or long-lived operating context.
 - **Position** — a job/seat in the organization: Profile Lead, Researcher, Reviewer, Codex Developer, OpenCode Developer, and so on.
-- **Employee** — externally supplied model capacity that can hold one or many Positions.
-- **Appointment** — the temporal fact that an Employee holds a Position.
+- **Employee** — a durable workforce identity (`Supplier × SupplierModel`) that can hold one or many Positions across multiple commercial periods.
+- **Employment** — the temporal commercial fact that a SupplyAgreement currently or historically lets us use that Employee.
+- **Appointment** — the temporal organizational fact that an Employee holds a Position.
 - **DutySession** — one activation of a Position for a concrete Run.
 - **StaffingSegment** — the temporal fact that an Employee actually staffs a DutySession.
 - **RuntimeSession** — the technical execution shell used by that DutySession, such as Hermes Profile, Hermes Subagent, Codex, or OpenCode.
 - **ModelInvocation / InvocationAttempt** — logical model work and its concrete upstream attempts.
-- **UsageEntry** — immutable accounting attached to the actual Employee, Position, Run, supplier agreement, and route involved.
+- **UsageEntry** — immutable accounting attached to the actual Employee, Employment, Position, Run, supplier agreement, and route involved.
 
 The most important separation is:
 
 ```text
 Position != Employee != RuntimeSession != Channel
+Employee != Employment != Appointment
 
+Employment       = "this commercial relationship lets us use this employee"
 Appointment      = "this employee holds this position"
 DutySession      = "this position is active for this run"
 StaffingSegment  = "this employee is actually staffing this duty now"
-InvocationAttempt= "this concrete upstream route handled this request attempt"
+InvocationAttempt= "this concrete employment + route handled this request attempt"
 ```
 
 This separation is required to support concurrent jobs, history, failover, animation, auditable routing, cost attribution, and archival without identity corruption.
@@ -65,8 +68,10 @@ Core objects:
 - Supplier
 - Plan
 - SupplyAgreement
+- SupplierModel
 - ModelOffering
 - Employee
+- Employment
 - Channel
 - CapacityPool
 
@@ -74,8 +79,9 @@ Answers:
 
 - Which external AI employees do we have?
 - Who supplies them?
-- Under which subscription/account/contract?
-- Which models are included?
+- Which supplier-specific model identity makes each Employee durable?
+- Through which current or historical Employments can we use that Employee?
+- Under which subscription/account/contract was each period supplied?
 - Which channels can reach them?
 - Which quotas and concurrency pools are shared?
 
@@ -176,8 +182,10 @@ External runtime IDs, CPA IDs, provider IDs, PIDs, session IDs, and model aliase
 | Supplier                | `sup_`     |
 | Plan                    | `plan_`    |
 | SupplyAgreement         | `agr_`     |
+| SupplierModel           | `smdl_`    |
 | ModelOffering           | `off_`     |
 | Employee                | `emp_`     |
+| Employment              | `empl_`    |
 | Channel                 | `chn_`     |
 | CapacityPool            | `pool_`    |
 | CapabilityDefinition    | `cap_`     |
@@ -453,7 +461,7 @@ Plan {
 
 ### 5.5 SupplyAgreement
 
-A concrete entitlement owned by this organization: subscription, account, API contract, sponsored allocation, or other agreement.
+A SupplyAgreement is one concrete commercial entitlement owned by this organization: subscription, account, API contract, sponsored allocation, or another purchasable/renewable relationship.
 
 Example:
 
@@ -491,13 +499,49 @@ ACTIVE/SUSPENDED -> TERMINATED
 EXPIRED/TERMINATED -> ARCHIVED
 ```
 
-A new truly separate subscription/account creates a new SupplyAgreement. Rotating credentials for the same continuing entitlement does not.
+SupplyAgreement is a purchasing/accounting identity, not an Employee identity.
 
-### 5.6 ModelOffering
+A renewal may continue the same agreement or create a new agreement record depending on the external contract/account semantics. Either choice must not create a new Employee when the Supplier and SupplierModel are unchanged.
 
-A Supplier/Plan-specific offering of a canonical ModelDefinition.
+Credential rotation for the same entitlement never creates a new SupplyAgreement or Employee by itself.
 
-This object exists because a supplier may expose different aliases, protocols, context limits, tool features, or restrictions for the same canonical model.
+### 5.6 SupplierModel
+
+SupplierModel is the durable model identity as represented by one Supplier.
+
+It exists because a canonical ModelDefinition and a supplier-facing model are not always identical concepts. The same canonical model may be exposed under supplier-specific aliases, capabilities, rollout versions, or protocol constraints.
+
+Suggested fields:
+
+```text
+SupplierModel {
+  id
+  supplierId
+  modelDefinitionId
+  supplierModelKey       // stable identity within the Supplier when available
+  aliases[]
+  displayName
+  lifecycle
+  firstSeenAt
+  retiredAt?
+}
+```
+
+Identity rule:
+
+```text
+same Supplier + same SupplierModel = same Employee
+```
+
+Changing plan, subscription, account, credential, or Channel does not change SupplierModel identity.
+
+If a Supplier changes an alias while it is known to represent the same underlying supplier model, adapters should preserve the SupplierModel and add/update aliases. When equivalence is uncertain, the system may create a provisional SupplierModel and later merge it through an explicit identity-reconciliation operation rather than silently rewriting history.
+
+### 5.7 ModelOffering
+
+ModelOffering describes that a Plan or SupplyAgreement currently entitles the organization to use a SupplierModel under particular commercial or technical terms.
+
+This is an entitlement object, not an employee identity.
 
 Suggested fields:
 
@@ -505,60 +549,75 @@ Suggested fields:
 ModelOffering {
   id
   supplierId
+  supplierModelId
   planId?
-  modelDefinitionId
-  supplierModelName
+  supplyAgreementId?
   advertisedCapabilities
   protocolOptions[]
+  commercialMetadata
   lifecycle
+  validFrom?
+  validTo?
 }
 ```
 
-### 5.7 Employee
+Multiple ModelOfferings may point to the same SupplierModel—for example OpenCode Go and OpenCode Enterprise may both provide the same DeepSeek V4 Flash employee.
 
-An Employee is the durable business identity for externally supplied model labor.
+### 5.8 Employee
+
+An Employee is the durable business identity for model labor supplied by one Supplier.
 
 Canonical identity rule:
 
 ```text
-Employee = SupplyAgreement × ModelOffering
+Employee = Supplier × SupplierModel
 ```
 
 Example:
 
 ```text
-DeepSeek V4 Flash @ My OpenCode Go subscription
+DeepSeek V4 Flash @ OpenCode
 ```
 
-The same canonical model through another agreement is another Employee.
+The same SupplierModel remains the same Employee across:
 
-The same Employee through multiple Channels remains the same Employee.
+- plan upgrades/downgrades;
+- subscription expiration and later re-subscription;
+- account replacement;
+- credential rotation;
+- multiple concurrent SupplyAgreements;
+- multiple Channels.
+
+The same canonical model supplied by another Supplier is a different Employee because supplier-specific reliability, commercial behavior, routing, and service characteristics are different.
 
 Suggested fields:
 
 ```text
 Employee {
   id
-  supplyAgreementId
-  modelOfferingId
+  supplierId
+  supplierModelId
   displayName
-  employmentLifecycle
-  hiredAt
-  endedAt?
+  recordLifecycle       // ACTIVE | RETIRED | ARCHIVED
+  firstSeenAt
+  retiredAt?
   archivedAt?
   archiveReason?
 }
 ```
 
-Employment lifecycle:
+Employee does not directly own `hiredAt` or `endedAt`. Those are temporal facts of Employment records.
+
+Derived cooperation state:
 
 ```text
-ACTIVE <-> SUSPENDED
-ACTIVE/SUSPENDED -> ENDED
-ENDED -> ARCHIVED
+EMPLOYED = at least one current Employment exists
+DORMANT  = no current Employment exists, but Employee is not retired/archived
+RETIRED  = Supplier/SupplierModel is no longer considered usable as a workforce identity
+ARCHIVED = hidden from default operational views while history remains
 ```
 
-Operational availability is deliberately separate:
+Operational availability is also derived separately from active Employments, Channels, protocol compatibility, health, and CapacityPools:
 
 ```text
 AVAILABLE
@@ -569,11 +628,50 @@ DISABLED
 UNKNOWN
 ```
 
-An Employee can be `ACTIVE` while operationally `EXHAUSTED`.
+An Employee can therefore keep current Appointments while `DORMANT` or operationally `EXHAUSTED`. Dispatch simply treats the Employee as not routable and may choose a backup. If the same Employee is later re-employed, those organizational Appointments do not need to be recreated unless policy changed.
 
-### 5.8 Channel
+### 5.9 Employment
 
-A Channel is a technical route, not an employee identity.
+Employment is the temporal relationship that grants this organization the right to use an Employee through a particular SupplyAgreement.
+
+It answers "through which commercial relationship could we use this employee during this period?"
+
+Suggested fields:
+
+```text
+Employment {
+  id
+  employeeId
+  supplyAgreementId
+  modelOfferingId?
+  status                // SCHEDULED | CURRENT | SUSPENDED | ENDED
+  effectiveFrom
+  effectiveTo?
+  endedReason?
+  createdAt
+}
+```
+
+Lifecycle:
+
+```text
+SCHEDULED -> CURRENT <-> SUSPENDED
+CURRENT/SUSPENDED -> ENDED
+SCHEDULED -> ENDED
+```
+
+Rules:
+
+1. One Employee may have many historical Employments.
+2. One Employee may have multiple concurrent current Employments through different accounts/plans.
+3. Ending the last Employment makes the Employee `DORMANT`; it does not create a new Employee identity later.
+4. A later subscription/re-hire creates or reactivates an Employment for the same Employee.
+5. Employment history is retained for accounting and procurement analysis.
+6. Appointment history and Employment history are independent timelines.
+
+### 5.10 Channel
+
+A Channel is a technical route, not an employee identity or employment identity.
 
 Examples:
 
@@ -613,9 +711,9 @@ Health is separate:
 UNKNOWN | HEALTHY | DEGRADED | UNHEALTHY
 ```
 
-One Employee may be reachable through multiple Channels. One Channel may carry multiple Employees from the same agreement.
+One Employee may be reachable through many Employments and Channels. One Channel may carry multiple Employees from the same SupplyAgreement.
 
-### 5.9 CapacityPool
+### 5.11 CapacityPool
 
 CapacityPool models shared scarcity.
 
@@ -642,9 +740,9 @@ CapacityPool {
 }
 ```
 
-Employees and Channels may consume one or more CapacityPools.
+Employees consume CapacityPools only through active Employments/Channels belonging to the associated SupplyAgreement.
 
-This prevents the false assumption that every Employee has an independent quota.
+This prevents the false assumption that every Employee has an independent quota while preserving one stable Employee career across different plans and subscription periods.
 
 ## 6. Capability and qualification model
 
@@ -676,8 +774,11 @@ Possible subjects:
 
 - ModelDefinition
 - Supplier
+- SupplierModel
 - ModelOffering
 - Employee
+- SupplyAgreement
+- Employment
 - Channel
 
 Suggested fields:
@@ -751,11 +852,11 @@ Routable   = can the employee actually be reached and consume capacity now?
 Example:
 
 ```text
-Employee: DeepSeek V4 Flash @ OpenCode Go
+Employee: DeepSeek V4 Flash @ OpenCode
 Qualified: YES
 Eligible:  YES
 Routable:  NO
-Reason:    shared monthly quota exhausted
+Reason:    all current Employments are quota-exhausted or unreachable
 ```
 
 ## 7. Staffing model
@@ -884,12 +985,13 @@ Selection order should be conceptually:
 1. Position requirement qualification
 2. hard staffing constraints
 3. Appointment eligibility
-4. Employee employment state
-5. Channel availability/protocol compatibility
-6. CapacityPool availability
-7. explicit appointment class/priority
-8. soft constraints
-9. quality/reliability/cost/latency/utilization score
+4. Employee cooperation state (`EMPLOYED` vs `DORMANT`)
+5. at least one routable Employment for the Employee
+6. Channel availability/protocol compatibility
+7. CapacityPool availability
+8. explicit appointment class/priority
+9. soft constraints
+10. quality/reliability/cost/latency/utilization score
 
 The decision must explain every rejection and the winner.
 
@@ -1083,9 +1185,10 @@ InvocationAttempt {
   id
   invocationId
   employeeId
+  employmentId
   channelId
   supplyAgreementId
-  modelOfferingId
+  modelOfferingId?
   attemptNumber
   startedAt
   endedAt?
@@ -1117,9 +1220,11 @@ UsageEntry {
   positionId
   employeeId
   supplierId
+  employmentId
   supplyAgreementId
   modelDefinitionId
-  modelOfferingId
+  supplierModelId
+  modelOfferingId?
   channelId
 
   inputTokens
@@ -1177,7 +1282,19 @@ Historical performance should be role-aware. A strong Developer is not automatic
 
 The system must never infer history only from the current row.
 
-### 9.1 Employee current appointments
+### 9.1 Employee current employments
+
+All Employments where `status = CURRENT` and the effective interval contains now.
+
+This answers "through which commercial relationships can we currently use this employee?"
+
+### 9.2 Employee employment history
+
+All ENDED Employments plus previous non-current intervals. This history is retained across cancellation and re-subscription.
+
+This answers "through which contracts/plans/accounts have we used this employee over its career?"
+
+### 9.3 Employee current appointments
 
 Derived from Appointments where:
 
@@ -1187,25 +1304,25 @@ and effectiveFrom <= now
 and (effectiveTo is null or effectiveTo > now)
 ```
 
-### 9.2 Employee historical appointments
+### 9.4 Employee historical appointments
 
 All ENDED/REVOKED Appointments plus prior time-bounded CURRENT records.
 
 This answers "which jobs has this employee been appointed to?"
 
-### 9.3 Employee current work
+### 9.5 Employee current work
 
 All open StaffingSegments.
 
 This answers "what is this employee actually doing right now?"
 
-### 9.4 Employee work history
+### 9.6 Employee work history
 
 All closed StaffingSegments joined to Position, WorkScope, Role, Run, and runtime information.
 
 This answers "which jobs did this employee actually perform?"
 
-### 9.5 Appointed but never worked
+### 9.7 Appointed but never worked
 
 This is valid and must remain distinguishable:
 
@@ -1223,11 +1340,17 @@ The Employee page should be a projection over source facts, not a special mutabl
 Example:
 
 ```text
-E-014 — DeepSeek V4 Flash
+E-014 — DeepSeek V4 Flash @ OpenCode
 Supplier: OpenCode
-Agreement: OpenCode Go / Primary subscription
-Employment: ACTIVE
+Supplier Model: DeepSeek V4 Flash
+Cooperation: EMPLOYED
 Availability: AVAILABLE
+
+Current Employments
+- OpenCode Go / Primary subscription      CURRENT
+
+Employment History
+- OpenCode Go / 2026 H1 subscription     2026-01-01 -> 2026-06-30
 
 Current Appointments
 - MemoFlow Lead                PRIMARY
@@ -1292,9 +1415,10 @@ This provides the inverse view of the Employee dossier.
 
 Supplier/Agreement dashboards should expose:
 
-- active Employees supplied
-- archived/ended Employees
-- available ModelOfferings
+- Employees supplied by the Supplier
+- currently employed vs dormant Employees
+- current and historical Employments by agreement
+- available SupplierModels / ModelOfferings
 - Channel health
 - shared CapacityPools
 - usage by Employee / Position / WorkScope
@@ -1316,18 +1440,22 @@ Hard deletion is reserved for:
 - ephemeral caches
 - corrupt test data under explicit maintenance procedures
 
-### 13.2 Employee end-of-employment
+### 13.2 Supply end, dormancy, and re-employment
 
 When a SupplyAgreement permanently ends:
 
 1. associated Channels become unusable/archived according to policy;
-2. Employees become `ENDED`;
-3. current Appointments are ended with reason `SUPPLY_ENDED` unless explicitly migrated;
-4. open StaffingSegments must be re-dispatched or failed explicitly;
-5. Usage and historical records remain;
-6. Employee may later be `ARCHIVED` for default UI filtering.
+2. Employments backed by that agreement become `ENDED`;
+3. active duties staffed by affected Employees are re-evaluated; if another routable Employment for the same Employee exists, the StaffingSegment may continue unchanged while later InvocationAttempts switch commercial route;
+4. if the Employee has no routable Employment, the current StaffingSegment is closed/re-dispatched or the duty fails explicitly;
+5. the Employee remains the same durable identity;
+6. current Appointments do **not** automatically end merely because procurement stopped;
+7. if no other current Employment exists, cooperation state becomes `DORMANT`;
+8. Usage, Appointment, Employment, Staffing, and Evaluation history remain.
 
-A new separate agreement creates new Employee identities even for the same model.
+If the same Supplier later provides the same SupplierModel again, the system reuses the same Employee and records a new/current Employment. Career statistics continue across the gap.
+
+Employee becomes `RETIRED` only when the SupplierModel/workforce identity itself is intentionally retired, and `ARCHIVED` only when the record should be hidden from default views. Neither operation deletes history.
 
 ### 13.3 Position retirement
 
@@ -1375,7 +1503,7 @@ Target flow:
 Supplier adapters / CPA discovery
         |
         v
-SupplyAgreement / ModelOffering / Employee / Channel / CapacityPool registry
+SupplierModel / Employee / SupplyAgreement / Employment / ModelOffering / Channel / CapacityPool registry
         |
         v
 Qualification + current Availability
@@ -1428,11 +1556,12 @@ A PRIMARY Appointment expresses organizational preference, not guaranteed perpet
 Recommended levels:
 
 ```text
-L0: retry same Employee through same Channel
-L1: same Employee through another Channel
-L2: another Employee holding the same Position
-L3: another qualified Employee allowed by StaffingRule/constraints
-L4: explicit escalation / human decision
+L0: retry same Employee through the same Employment and Channel
+L1: same Employee + same Employment through another Channel
+L2: same Employee through another active Employment/SupplyAgreement
+L3: another Employee holding the same Position
+L4: another qualified Employee allowed by StaffingRule/constraints
+L5: explicit escalation / human decision
 ```
 
 Each transition must create auditable DispatchDecision and/or InvocationAttempt evidence.
@@ -1458,8 +1587,10 @@ one Position -> many historical DutySessions
 one Run -> many DutySessions
 one DutySession -> sequential StaffingSegments
 one ModelInvocation -> many InvocationAttempts
-one SupplyAgreement -> many Employees
-one CapacityPool -> consumption by many Employees
+one SupplierModel -> one durable Employee per Supplier
+one Employee -> many historical/current Employments
+one SupplyAgreement -> many Employments
+one CapacityPool -> consumption by many Employees through Employments
 ```
 
 Default policy may impose practical concurrency limits, but these are Staffing/Capacity constraints rather than identity assumptions.
@@ -1473,13 +1604,17 @@ PositionTemplate 1 ---- * Position
 Position * ---- * Position             via PositionRelation
 
 Supplier 1 ---- * Plan
+Supplier 1 ---- * SupplierModel
+ModelDefinition 1 ---- * SupplierModel
+SupplierModel 1 ---- 1 Employee        durable workforce identity within a Supplier
 Plan 1 ---- * ModelOffering
-ModelDefinition 1 ---- * ModelOffering
-SupplyAgreement 1 ---- * Employee
-ModelOffering 1 ---- * Employee
+SupplierModel 1 ---- * ModelOffering
+SupplyAgreement 1 ---- * Employment
+Employee 1 ---- * Employment
+ModelOffering 1 ---- * Employment       optional entitlement provenance
 SupplyAgreement 1 ---- * Channel
 SupplyAgreement 1 ---- * CapacityPool
-Employee * ---- * Channel              routability relation/projection
+Employee * ---- * Channel              derived routability through Employment + Agreement
 
 Employee 1 ---- * Appointment
 Position 1 ---- * Appointment
@@ -1513,20 +1648,23 @@ These invariants are architecture-level contracts.
 9. One Employee may hold many current Appointments.
 10. One Position may have multiple current Appointments for primary/backup coverage.
 11. One Employee may staff multiple concurrent DutySessions unless policy/capacity forbids it.
-12. Employee identity is `SupplyAgreement × ModelOffering`, not `Channel × Model`.
-13. Channel changes must not change Employee identity.
-14. Credential rotation must not create a new Employee when the SupplyAgreement is continuous.
-15. A genuinely new SupplyAgreement creates new Employee identity even for the same ModelOffering.
-16. Position supervision and organizational relations are Position-to-Position, not Employee-to-Employee.
-17. Current work is derived from open StaffingSegments, never from Appointment status.
-18. Historical appointment and historical actual work are separate timelines.
-19. A logical invocation may contain multiple physical InvocationAttempts.
-20. Usage is attributed to the concrete attempt and then projected upward.
-21. Closed historical records are never silently rewritten by current policy.
-22. Archive hides records from default operations but preserves referential history.
-23. Secrets may be destroyed; their historical business metadata must not expose secret values.
-24. Every dispatch/failover must be explainable from recorded candidate outcomes or a documented external cause.
-25. UI animation state is a projection and never the source of business lifecycle transitions.
+12. Employee identity is `Supplier × SupplierModel`, not `SupplyAgreement × ModelOffering` and not `Channel × Model`.
+13. Plan, SupplyAgreement, Employment, Channel, account, and credential changes must not change Employee identity when Supplier + SupplierModel remain the same.
+14. The same canonical model from a different Supplier is a different Employee.
+15. Employment and Appointment are independent timelines: procurement ending does not automatically revoke organizational responsibility.
+16. An Employee with no current Employment is `DORMANT`, not a newly archived/ended employee.
+17. Re-employing the same SupplierModel reuses the same Employee and preserves lifetime statistics.
+18. Position supervision and organizational relations are Position-to-Position, not Employee-to-Employee.
+19. Current work is derived from open StaffingSegments, never from Appointment status.
+20. Historical appointment and historical actual work are separate timelines.
+21. A logical invocation may contain multiple physical InvocationAttempts.
+22. Every InvocationAttempt identifies the concrete Employment + SupplyAgreement + Channel used.
+23. Usage is attributed to the concrete attempt and then projected upward to Employee career, Employment period, Position, Run, Supplier, and agreement views.
+24. Closed historical records are never silently rewritten by current policy.
+25. Archive hides records from default operations but preserves referential history.
+26. Secrets may be destroyed; their historical business metadata must not expose secret values.
+27. Every dispatch/failover must be explainable from recorded candidate outcomes or a documented external cause.
+28. UI animation state is a projection and never the source of business lifecycle transitions.
 
 ## 20. Canonical employee statistics
 
@@ -1534,8 +1672,11 @@ All Employee statistics are derived from immutable/temporal facts.
 
 ### 20.1 Employment and staffing
 
-- employment start/end date
-- days active
+- first seen / first employed date
+- current cooperation state (`EMPLOYED` / `DORMANT`)
+- current Employment count
+- historical Employment count
+- cumulative employed days across all Employment periods
 - current Appointment count
 - historical Appointment count
 - distinct Positions ever appointed
@@ -1618,11 +1759,16 @@ Workforce Supply:
 agreement.activated
 agreement.suspended
 agreement.ended
+supplier_model.discovered
+supplier_model.identity_reconciled
 offering.discovered
-employee.hired
-employee.suspended
-employee.ended
+employee.discovered
+employee.retired
 employee.archived
+employment.started
+employment.suspended
+employment.resumed
+employment.ended
 channel.discovered
 channel.health.changed
 channel.quarantined
@@ -1690,13 +1836,16 @@ Retire as a business identity.
 Migrate into:
 
 ```text
+Supplier
+SupplierModel
+Employee = Supplier × SupplierModel
 SupplyAgreement
-ModelOffering
-Employee = SupplyAgreement × ModelOffering
+Employment = Employee × SupplyAgreement over time
+ModelOffering = entitlement/provenance
 Channel = route
 ```
 
-A compatibility projection may continue exposing legacy `workerId` until clients move.
+Legacy rows that differ only by Channel or agreement but clearly represent the same SupplierModel should converge on one Employee while retaining separate Employment/Channel history. A compatibility projection may continue exposing legacy `workerId` until clients move.
 
 ### 23.4 Current `Assignment`
 
@@ -1756,17 +1905,19 @@ For the next architecture phase, this document treats the following as decisions
 
 1. **Profiles are decomposed:** WorkScope + Profile Lead Position.
 2. **Hermes Profile/Subagent/Codex/OpenCode are runtime forms of Positions, not employee identities.**
-3. **Employee identity is agreement-scoped model labor:** SupplyAgreement × ModelOffering.
-4. **Channel is a route, not an Employee.**
-5. **Employees may hold many Positions and staff many concurrent duties.**
-6. **Appointments and actual work are different temporal facts.**
-7. **StaffingRule handles bulk policy; Appointment preserves concrete history.**
-8. **DispatchDecision is separate from Appointment and records why a concrete Employee was chosen.**
-9. **DutySession survives Employee replacement; StaffingSegment records the replacement timeline.**
-10. **Logical invocation and physical attempts are separate to represent retry/failover.**
-11. **Quota/concurrency may be shared through CapacityPool.**
-12. **Archive preserves business history.**
-13. **UI/animation is a projection over domain facts.**
+3. **Employee identity is supplier-scoped model labor:** Supplier × SupplierModel.
+4. **SupplyAgreement/Employment describe how and when we can hire/use that Employee; they do not define the Employee.**
+5. **Channel is a route, not an Employee.**
+6. **Employees may hold many Positions and staff many concurrent duties.**
+7. **Appointments and actual work are different temporal facts.**
+8. **Employment and Appointment are independent temporal facts.**
+9. **StaffingRule handles bulk policy; Appointment preserves concrete history.**
+10. **DispatchDecision is separate from Appointment and records why a concrete Employee was chosen.**
+11. **DutySession survives Employee replacement; StaffingSegment records the replacement timeline.**
+12. **Logical invocation and physical attempts are separate to represent retry/failover and agreement/channel changes.**
+13. **Quota/concurrency may be shared through CapacityPool.**
+14. **Archive preserves business history.**
+15. **UI/animation is a projection over domain facts.**
 
 ## 26. Remaining bounded decisions
 
@@ -1788,7 +1939,8 @@ The safest vertical slice is:
 
 ```text
 existing CPA discovery
-  -> SupplyAgreement / ModelOffering / Employee / Channel projection
+  -> Supplier / SupplierModel / stable Employee identity
+  -> SupplyAgreement / Employment / ModelOffering / Channel projection
   -> one existing Position
   -> StaffingRule + materialized Appointment
   -> DispatchDecision
@@ -1800,13 +1952,15 @@ existing CPA discovery
 
 Acceptance for that slice:
 
-1. A discovered supplier model is represented as an Employee independent of Channel.
-2. The Employee can hold more than one Appointment.
-3. Current appointments and historical appointments can be queried separately.
-4. A Run can open a DutySession for a Position.
-5. Dispatch chooses an Employee with recorded reasons.
-6. The resulting StaffingSegment makes "who is working now" queryable.
-7. A model call records logical invocation and physical attempt separately.
-8. Usage is attributable to Employee + Position + Run + Agreement + Channel.
-9. Existing Pixel Office remains operational through compatibility projections.
-10. No secret value enters business tables, events, or UI payloads.
+1. A discovered Supplier + SupplierModel maps to one stable Employee independent of Agreement and Channel.
+2. Ending and later recreating an Employment for the same SupplierModel reuses the Employee identity and career history.
+3. The Employee can hold more than one Appointment.
+4. Current appointments and historical appointments can be queried separately.
+5. Current and historical Employments can be queried separately from Appointments.
+6. A Run can open a DutySession for a Position.
+7. Dispatch chooses an Employee with recorded reasons and only considers the Employee routable when at least one valid Employment route exists.
+8. The resulting StaffingSegment makes "who is working now" queryable.
+9. A model call records logical invocation and physical attempt separately, including the actual Employment + Agreement + Channel.
+10. Usage is attributable both to Employee lifetime and to a concrete Employment/Agreement period, plus Position and Run.
+11. Existing Pixel Office remains operational through compatibility projections.
+12. No secret value enters business tables, events, or UI payloads.
