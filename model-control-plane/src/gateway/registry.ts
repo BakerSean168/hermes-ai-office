@@ -1,4 +1,8 @@
-import type { GatewayExecutionPort } from './ports.js';
+import {
+  supportsGatewayInvocation,
+  type GatewayExecutionPort,
+  type GatewayInvocationPort,
+} from './ports.js';
 
 export class GatewayRegistry {
   readonly #gateways = new Map<string, GatewayExecutionPort>();
@@ -13,6 +17,11 @@ export class GatewayRegistry {
 
   get(gatewayId: string): GatewayExecutionPort | null {
     return this.#gateways.get(gatewayId) ?? null;
+  }
+
+  getInvocation(gatewayId: string): (GatewayExecutionPort & GatewayInvocationPort) | null {
+    const gateway = this.get(gatewayId);
+    return gateway && supportsGatewayInvocation(gateway) ? gateway : null;
   }
 
   list(): GatewayExecutionPort[] {

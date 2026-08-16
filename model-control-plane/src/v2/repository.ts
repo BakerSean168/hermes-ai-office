@@ -45,6 +45,35 @@ function rows(value: unknown): Row[] {
   return Array.isArray(value) ? (value as Row[]) : [];
 }
 
+export interface InvocationContext {
+  dutySessionId: string;
+  runId: string;
+  positionId: string;
+  staffingSegmentId: string;
+  employeeId: string;
+  employmentId: string;
+  supplyAgreementId: string;
+  supplierId: string;
+  supplierModelId: string;
+  gatewayDbId: string;
+  gatewayId: string;
+  gatewayBindingId: string;
+  externalRouteRef: string;
+  protocol: GatewayProtocol;
+}
+
+export interface UsageInput {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  actualCost?: number;
+  allocatedCost?: number;
+  marketValue?: number;
+  currency?: string;
+}
+
 export interface CreateRunInput {
   workScopeId: string;
   title: string;
@@ -1254,6 +1283,527 @@ export class V2Repository {
       trigger: value.trigger,
       correlationId: value.correlation_id,
       decidedAt: value.decided_at,
+    }));
+  }
+
+  invocationContext(dutySessionId: string): InvocationContext | null {
+    const value = row(
+      this.db
+        .prepare(
+          `SELECT d.id duty_session_id,d.run_id,d.position_id,d.lifecycle duty_lifecycle,
+                  ss.id staffing_segment_id,ss.employee_id,
+                  dd.selected_employment_id employment_id,
+                  em.supply_agreement_id,
+                  e.supplier_id,e.supplier_model_id,
+                  b.id gateway_binding_id,b.external_route_ref,b.protocol,
+                  g.id gateway_db_id,g.slug gateway_slug
+           FROM v2_duty_sessions d
+           JOIN v2_staffing_segments ss ON ss.duty_session_id=d.id AND ss.ended_at IS NULL
+           JOIN v2_dispatch_decisions dd ON dd.id=ss.dispatch_decision_id
+           JOIN v2_employees e ON e.id=ss.employee_id
+           JOIN v2_employments em
+             ON em.id=dd.selected_employment_id AND em.employee_id=e.id
+                AND em.status='CURRENT' AND em.effective_to IS NULL
+           JOIN v2_supply_agreements agr
+             ON agr.id=em.supply_agreement_id AND agr.lifecycle='ACTIVE'
+           JOIN v2_gateway_bindings b
+             ON b.employment_id=em.id AND b.lifecycle='ACTIVE'
+           JOIN v2_gateways g ON g.id=b.gateway_id AND g.lifecycle='ACTIVE'
+           WHERE d.id=? AND d.lifecycle='ACTIVE'
+           ORDER BY b.priority DESC,b.created_at ASC LIMIT 1`,
+        )
+        .get(dutySessionId),
+    );
+    if (!value) return null;
+    return {
+      dutySessionId: String(value.duty_session_id),
+      runId: String(value.run_id),
+      positionId: String(value.position_id),
+      staffingSegmentId: String(value.staffing_segment_id),
+      employeeId: String(value.employee_id),
+      employmentId: String(value.employment_id),
+      supplyAgreementId: String(value.supply_agreement_id),
+      supplierId: String(value.supplier_id),
+      supplierModelId: String(value.supplier_model_id),
+      gatewayDbId: String(value.gateway_db_id),
+      gatewayId: String(value.gateway_slug),
+      gatewayBindingId: String(value.gateway_binding_id),
+      externalRouteRef: String(value.external_route_ref),
+      protocol: String(value.protocol) as GatewayProtocol,
+    };
+  }
+
+  setDutyActivity(dutySessionId: string, activity: string, correlationId?: string): void {
+    const duty = this.getDuty(dutySessionId);
+    if (!duty) throw new Error('DUTY_NOT_FOUND');
+    this.transaction(() => {
+      this.db
+        .prepare('UPDATE v2_duty_sessions SET current_activity=? WHERE id=?')
+        .run(activity, dutySessionId);
+      this.emit({
+        type: 'duty.activity.changed',
+        entityType: 'DutySession',
+        entityId: dutySessionId,
+        runId: String(duty.run_id),
+        dutySessionId,
+        correlationId,
+        payload: { activity },
+      });
+    });
+  }
+
+  startInvocation(input: {
+    context: InvocationContext;
+    runtimeSessionRef?: string;
+    correlationId?: string;
+    metadata?: JsonRecord;
+  }): Row {
+    const timestamp = now();
+    const id = newId('inv', timestamp);
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_model_invocations(id,run_id,duty_session_id,runtime_session_ref,logical_position_id,status,requested_at,correlation_id,metadata_json)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.context.runId,
+          input.context.dutySessionId,
+          input.runtimeSessionRef ?? null,
+          input.context.positionId,
+          'PENDING',
+          timestamp,
+          input.correlationId ?? null,
+          encode(input.metadata),
+        );
+      this.db
+        .prepare("UPDATE v2_duty_sessions SET current_activity='THINKING' WHERE id=?")
+        .run(input.context.dutySessionId);
+      this.emit({
+        type: 'invocation.started',
+        entityType: 'ModelInvocation',
+        entityId: id,
+        correlationId: input.correlationId,
+        runId: input.context.runId,
+        dutySessionId: input.context.dutySessionId,
+        invocationId: id,
+        payload: {
+          employeeId: input.context.employeeId,
+          employmentId: input.context.employmentId,
+          externalRouteRef: input.context.externalRouteRef,
+        },
+      });
+      return row(this.db.prepare('SELECT * FROM v2_model_invocations WHERE id=?').get(id))!;
+    });
+  }
+
+  startInvocationAttempt(input: {
+    invocationId: string;
+    context: InvocationContext;
+    correlationId?: string;
+  }): Row {
+    const invocation = row(
+      this.db.prepare('SELECT * FROM v2_model_invocations WHERE id=?').get(input.invocationId),
+    );
+    if (!invocation) throw new Error('INVOCATION_NOT_FOUND');
+    const timestamp = now();
+    const attemptNumber = Number(
+      row(
+        this.db
+          .prepare(
+            'SELECT COALESCE(MAX(attempt_number),0)+1 next_number FROM v2_invocation_attempts WHERE invocation_id=?',
+          )
+          .get(input.invocationId),
+      )?.next_number ?? 1,
+    );
+    const id = newId('attempt', timestamp);
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_invocation_attempts(id,invocation_id,attempt_number,employee_id,employment_id,supply_agreement_id,gateway_id,gateway_binding_id,external_route_ref,outcome,started_at,metadata_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.invocationId,
+          attemptNumber,
+          input.context.employeeId,
+          input.context.employmentId,
+          input.context.supplyAgreementId,
+          input.context.gatewayDbId,
+          input.context.gatewayBindingId,
+          input.context.externalRouteRef,
+          'STARTED',
+          timestamp,
+          '{}',
+        );
+      this.db
+        .prepare("UPDATE v2_model_invocations SET status='STREAMING' WHERE id=?")
+        .run(input.invocationId);
+      this.emit({
+        type: 'invocation.attempt.started',
+        entityType: 'InvocationAttempt',
+        entityId: id,
+        correlationId: input.correlationId,
+        runId: input.context.runId,
+        dutySessionId: input.context.dutySessionId,
+        invocationId: input.invocationId,
+        payload: {
+          attemptNumber,
+          employeeId: input.context.employeeId,
+          employmentId: input.context.employmentId,
+          gatewayId: input.context.gatewayId,
+          externalRouteRef: input.context.externalRouteRef,
+        },
+      });
+      return row(this.db.prepare('SELECT * FROM v2_invocation_attempts WHERE id=?').get(id))!;
+    });
+  }
+
+  completeInvocationAttempt(input: {
+    attemptId: string;
+    gatewayRequestId: string;
+    externalDeploymentRef?: string;
+    latencyMs: number;
+    metadata?: JsonRecord;
+    correlationId?: string;
+  }): Row {
+    const attempt = row(
+      this.db
+        .prepare(
+          `SELECT a.*,i.run_id,i.duty_session_id FROM v2_invocation_attempts a
+           JOIN v2_model_invocations i ON i.id=a.invocation_id WHERE a.id=?`,
+        )
+        .get(input.attemptId),
+    );
+    if (!attempt) throw new Error('INVOCATION_ATTEMPT_NOT_FOUND');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_invocation_attempts
+           SET outcome='SUCCEEDED',gateway_request_id=?,external_deployment_ref=?,latency_ms=?,ended_at=?,metadata_json=?
+           WHERE id=?`,
+        )
+        .run(
+          input.gatewayRequestId,
+          input.externalDeploymentRef ?? null,
+          Math.round(input.latencyMs),
+          timestamp,
+          encode(input.metadata),
+          input.attemptId,
+        );
+      this.emit({
+        type: 'invocation.attempt.succeeded',
+        entityType: 'InvocationAttempt',
+        entityId: input.attemptId,
+        correlationId: input.correlationId,
+        runId: String(attempt.run_id),
+        dutySessionId: String(attempt.duty_session_id),
+        invocationId: String(attempt.invocation_id),
+        payload: {
+          gatewayRequestId: input.gatewayRequestId,
+          externalDeploymentRef: input.externalDeploymentRef ?? null,
+          latencyMs: input.latencyMs,
+        },
+      });
+      return row(
+        this.db.prepare('SELECT * FROM v2_invocation_attempts WHERE id=?').get(input.attemptId),
+      )!;
+    });
+  }
+
+  failInvocationAttempt(input: {
+    attemptId: string;
+    errorClass: string;
+    correlationId?: string;
+  }): Row {
+    const attempt = row(
+      this.db
+        .prepare(
+          `SELECT a.*,i.run_id,i.duty_session_id FROM v2_invocation_attempts a
+           JOIN v2_model_invocations i ON i.id=a.invocation_id WHERE a.id=?`,
+        )
+        .get(input.attemptId),
+    );
+    if (!attempt) throw new Error('INVOCATION_ATTEMPT_NOT_FOUND');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_invocation_attempts SET outcome='FAILED',error_class=?,ended_at=? WHERE id=?`,
+        )
+        .run(input.errorClass, timestamp, input.attemptId);
+      this.emit({
+        type: 'invocation.attempt.failed',
+        entityType: 'InvocationAttempt',
+        entityId: input.attemptId,
+        correlationId: input.correlationId,
+        runId: String(attempt.run_id),
+        dutySessionId: String(attempt.duty_session_id),
+        invocationId: String(attempt.invocation_id),
+        payload: { errorClass: input.errorClass },
+      });
+      return row(
+        this.db.prepare('SELECT * FROM v2_invocation_attempts WHERE id=?').get(input.attemptId),
+      )!;
+    });
+  }
+
+  recordUsage(input: {
+    attemptId: string;
+    context: InvocationContext;
+    usage: UsageInput;
+    source: string;
+    correlationId?: string;
+    metadata?: JsonRecord;
+  }): Row {
+    const existing = row(
+      this.db
+        .prepare('SELECT * FROM v2_usage_entries WHERE invocation_attempt_id=?')
+        .get(input.attemptId),
+    );
+    if (existing) return existing;
+    const timestamp = now();
+    const id = newId('usage', timestamp);
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_usage_entries(id,invocation_attempt_id,run_id,duty_session_id,position_id,employee_id,supplier_id,employment_id,supply_agreement_id,supplier_model_id,gateway_id,external_route_ref,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,reasoning_tokens,actual_cost,allocated_cost,market_value,currency,occurred_at,source,metadata_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.attemptId,
+          input.context.runId,
+          input.context.dutySessionId,
+          input.context.positionId,
+          input.context.employeeId,
+          input.context.supplierId,
+          input.context.employmentId,
+          input.context.supplyAgreementId,
+          input.context.supplierModelId,
+          input.context.gatewayDbId,
+          input.context.externalRouteRef,
+          Math.max(0, Math.round(input.usage.inputTokens)),
+          Math.max(0, Math.round(input.usage.outputTokens)),
+          Math.max(0, Math.round(input.usage.cacheReadTokens)),
+          Math.max(0, Math.round(input.usage.cacheWriteTokens)),
+          Math.max(0, Math.round(input.usage.reasoningTokens)),
+          input.usage.actualCost ?? 0,
+          input.usage.allocatedCost ?? 0,
+          input.usage.marketValue ?? 0,
+          input.usage.currency ?? 'USD',
+          timestamp,
+          input.source,
+          encode(input.metadata),
+        );
+      this.emit({
+        type: 'usage.recorded',
+        entityType: 'UsageEntry',
+        entityId: id,
+        correlationId: input.correlationId,
+        runId: input.context.runId,
+        dutySessionId: input.context.dutySessionId,
+        payload: {
+          invocationAttemptId: input.attemptId,
+          employeeId: input.context.employeeId,
+          employmentId: input.context.employmentId,
+          inputTokens: input.usage.inputTokens,
+          outputTokens: input.usage.outputTokens,
+          actualCost: input.usage.actualCost ?? 0,
+        },
+      });
+      return row(this.db.prepare('SELECT * FROM v2_usage_entries WHERE id=?').get(id))!;
+    });
+  }
+
+  completeInvocation(input: {
+    invocationId: string;
+    status: 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+    correlationId?: string;
+  }): Row {
+    const invocation = row(
+      this.db.prepare('SELECT * FROM v2_model_invocations WHERE id=?').get(input.invocationId),
+    );
+    if (!invocation) throw new Error('INVOCATION_NOT_FOUND');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare('UPDATE v2_model_invocations SET status=?,completed_at=? WHERE id=?')
+        .run(input.status, timestamp, input.invocationId);
+      this.emit({
+        type: input.status === 'SUCCEEDED' ? 'invocation.completed' : 'invocation.failed',
+        entityType: 'ModelInvocation',
+        entityId: input.invocationId,
+        correlationId: input.correlationId,
+        runId: String(invocation.run_id),
+        dutySessionId: String(invocation.duty_session_id),
+        invocationId: input.invocationId,
+        payload: { status: input.status },
+      });
+      return row(
+        this.db.prepare('SELECT * FROM v2_model_invocations WHERE id=?').get(input.invocationId),
+      )!;
+    });
+  }
+
+  completeDuty(input: {
+    dutySessionId: string;
+    outcome?: 'COMPLETED' | 'FAILED' | 'CANCELLED';
+    reason?: string;
+    correlationId?: string;
+  }): Row {
+    const duty = this.getDuty(input.dutySessionId);
+    if (!duty) throw new Error('DUTY_NOT_FOUND');
+    const outcome = input.outcome ?? 'COMPLETED';
+    const timestamp = now();
+    return this.transaction(() => {
+      const open = row(
+        this.db
+          .prepare(
+            'SELECT * FROM v2_staffing_segments WHERE duty_session_id=? AND ended_at IS NULL',
+          )
+          .get(input.dutySessionId),
+      );
+      if (open) {
+        this.db
+          .prepare('UPDATE v2_staffing_segments SET ended_at=?,ended_reason=? WHERE id=?')
+          .run(timestamp, outcome, String(open.id));
+        this.emit({
+          type: 'staffing_segment.ended',
+          entityType: 'StaffingSegment',
+          entityId: String(open.id),
+          correlationId: input.correlationId,
+          runId: String(duty.run_id),
+          dutySessionId: input.dutySessionId,
+          payload: { employeeId: open.employee_id, reason: outcome },
+        });
+      }
+      this.db
+        .prepare(
+          `UPDATE v2_duty_sessions SET lifecycle=?,current_activity='IDLE',closed_at=?,close_reason=? WHERE id=?`,
+        )
+        .run(outcome, timestamp, input.reason ?? outcome, input.dutySessionId);
+      this.emit({
+        type:
+          outcome === 'COMPLETED'
+            ? 'duty.completed'
+            : outcome === 'FAILED'
+              ? 'duty.failed'
+              : 'duty.cancelled',
+        entityType: 'DutySession',
+        entityId: input.dutySessionId,
+        correlationId: input.correlationId,
+        runId: String(duty.run_id),
+        dutySessionId: input.dutySessionId,
+        payload: { outcome, reason: input.reason ?? outcome },
+      });
+      const openDuties = Number(
+        row(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) count FROM v2_duty_sessions
+               WHERE run_id=? AND lifecycle IN ('PLANNED','ACTIVE')`,
+            )
+            .get(String(duty.run_id)),
+        )?.count ?? 0,
+      );
+      if (openDuties === 0) {
+        this.db
+          .prepare('UPDATE v2_runs SET status=?,completed_at=?,updated_at=? WHERE id=?')
+          .run(outcome, timestamp, timestamp, String(duty.run_id));
+        this.emit({
+          type:
+            outcome === 'COMPLETED'
+              ? 'run.completed'
+              : outcome === 'FAILED'
+                ? 'run.failed'
+                : 'run.cancelled',
+          entityType: 'Run',
+          entityId: String(duty.run_id),
+          correlationId: input.correlationId,
+          runId: String(duty.run_id),
+          payload: { outcome },
+        });
+      }
+      return this.getDuty(input.dutySessionId)!;
+    });
+  }
+
+  listInvocations(filters: { dutySessionId?: string; runId?: string } = {}): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT i.*,
+                  (SELECT COUNT(*) FROM v2_invocation_attempts a WHERE a.invocation_id=i.id) attempt_count
+           FROM v2_model_invocations i
+           WHERE (? IS NULL OR i.duty_session_id=?) AND (? IS NULL OR i.run_id=?)
+           ORDER BY i.requested_at DESC`,
+        )
+        .all(
+          filters.dutySessionId ?? null,
+          filters.dutySessionId ?? null,
+          filters.runId ?? null,
+          filters.runId ?? null,
+        ),
+    ).map((value) => ({
+      id: value.id,
+      runId: value.run_id,
+      dutySessionId: value.duty_session_id,
+      runtimeSessionRef: value.runtime_session_ref,
+      logicalPositionId: value.logical_position_id,
+      status: value.status,
+      requestedAt: value.requested_at,
+      completedAt: value.completed_at,
+      correlationId: value.correlation_id,
+      attemptCount: Number(value.attempt_count ?? 0),
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  listUsage(filters: { employeeId?: string; dutySessionId?: string; runId?: string } = {}): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT u.* FROM v2_usage_entries u
+           WHERE (? IS NULL OR u.employee_id=?)
+             AND (? IS NULL OR u.duty_session_id=?)
+             AND (? IS NULL OR u.run_id=?)
+           ORDER BY u.occurred_at DESC`,
+        )
+        .all(
+          filters.employeeId ?? null,
+          filters.employeeId ?? null,
+          filters.dutySessionId ?? null,
+          filters.dutySessionId ?? null,
+          filters.runId ?? null,
+          filters.runId ?? null,
+        ),
+    ).map((value) => ({
+      id: value.id,
+      invocationAttemptId: value.invocation_attempt_id,
+      runId: value.run_id,
+      dutySessionId: value.duty_session_id,
+      positionId: value.position_id,
+      employeeId: value.employee_id,
+      employmentId: value.employment_id,
+      supplyAgreementId: value.supply_agreement_id,
+      gatewayId: value.gateway_id,
+      externalRouteRef: value.external_route_ref,
+      inputTokens: Number(value.input_tokens ?? 0),
+      outputTokens: Number(value.output_tokens ?? 0),
+      cacheReadTokens: Number(value.cache_read_tokens ?? 0),
+      cacheWriteTokens: Number(value.cache_write_tokens ?? 0),
+      reasoningTokens: Number(value.reasoning_tokens ?? 0),
+      actualCost: Number(value.actual_cost ?? 0),
+      allocatedCost: Number(value.allocated_cost ?? 0),
+      marketValue: Number(value.market_value ?? 0),
+      currency: value.currency,
+      occurredAt: value.occurred_at,
+      source: value.source,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
     }));
   }
 

@@ -87,6 +87,43 @@ export interface GatewayUsagePage {
   nextCursor?: string;
 }
 
+export interface GatewayInvocationRequest {
+  route: GatewayRouteRef;
+  input: string;
+  maxOutputTokens?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GatewayInvocationResult {
+  gatewayRequestId: string;
+  externalDeploymentRef?: string;
+  outputText: string;
+  responseModel?: string;
+  status: 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  actualCost?: number;
+  currency?: string;
+  latencyMs: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GatewayInvocationPort {
+  readonly gatewayId: string;
+  invoke(request: GatewayInvocationRequest, signal?: AbortSignal): Promise<GatewayInvocationResult>;
+}
+
+export function supportsGatewayInvocation(
+  gateway: GatewayExecutionPort,
+): gateway is GatewayExecutionPort & GatewayInvocationPort {
+  return (
+    'invoke' in gateway && typeof (gateway as Partial<GatewayInvocationPort>).invoke === 'function'
+  );
+}
+
 export interface GatewayExecutionPort {
   readonly gatewayId: string;
   resolveRoute(employmentId: string): Promise<GatewayRouteResolution>;

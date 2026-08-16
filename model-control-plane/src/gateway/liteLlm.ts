@@ -6,6 +6,9 @@ import type {
   GatewayDiscoverySnapshot,
   GatewayExecutionPort,
   GatewayHealth,
+  GatewayInvocationPort,
+  GatewayInvocationRequest,
+  GatewayInvocationResult,
   GatewayProtocol,
   GatewayRouteEvidence,
   GatewayRouteRef,
@@ -18,6 +21,41 @@ interface JsonRecord {
 
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function asNumber(value: unknown): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function headerNumber(headers: Headers, name: string): number | undefined {
+  const value = headers.get(name);
+  if (value == null || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function responsesText(payload: JsonRecord): string {
+  if (typeof payload.output_text === 'string') return payload.output_text;
+  const output = Array.isArray(payload.output) ? payload.output : [];
+  const chunks: string[] = [];
+  for (const rawItem of output) {
+    const item = asRecord(rawItem);
+    const content = Array.isArray(item.content) ? item.content : [];
+    for (const rawContent of content) {
+      const part = asRecord(rawContent);
+      if (typeof part.text === 'string') chunks.push(part.text);
+      else if (typeof part.output_text === 'string') chunks.push(part.output_text);
+    }
+  }
+  return chunks.join('');
+}
+
+function chatText(payload: JsonRecord): string {
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const choice = asRecord(choices[0]);
+  const message = asRecord(choice.message);
+  return typeof message.content === 'string' ? message.content : '';
 }
 
 export interface GatewaySecretProvider {
@@ -61,7 +99,9 @@ export class StaticBearerTokenProvider implements GatewaySecretProvider {
   }
 }
 
-export class LiteLlmGateway implements GatewayExecutionPort, GatewayDiscoveryPort {
+export class LiteLlmGateway
+  implements GatewayExecutionPort, GatewayDiscoveryPort, GatewayInvocationPort
+{
   readonly gatewayId: string;
   readonly #baseUrl: string;
   readonly #secrets: GatewaySecretProvider;
@@ -82,15 +122,24 @@ export class LiteLlmGateway implements GatewayExecutionPort, GatewayDiscoveryPor
     this.#routeProtocols = options.routeProtocols ?? {};
   }
 
-  async #requestJson(path: string): Promise<unknown> {
+  async #request(path: string, init: RequestInit = {}, timeoutMs = 10_000): Promise<Response> {
     const token = await this.#secrets.readBearerToken();
     if (!token) throw new Error('empty LiteLLM bearer token');
     const response = await fetch(`${this.#baseUrl}${path}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(10_000),
+      ...init,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(init.body ? { 'content-type': 'application/json' } : {}),
+        ...init.headers,
+      },
+      signal: init.signal ?? AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) throw new Error(`LiteLLM returned HTTP ${response.status}`);
-    return response.json();
+    if (!response.ok) throw new Error(`LITELLM_HTTP_${response.status}`);
+    return response;
+  }
+
+  async #requestJson(path: string): Promise<unknown> {
+    return (await this.#request(path)).json();
   }
 
   async #modelIds(): Promise<Set<string>> {
@@ -138,6 +187,109 @@ export class LiteLlmGateway implements GatewayExecutionPort, GatewayDiscoveryPor
       metadata: { source: 'litellm-model-list' },
     }));
     return { gatewayId: this.gatewayId, observedAt, routes };
+  }
+
+  async invoke(
+    request: GatewayInvocationRequest,
+    signal?: AbortSignal,
+  ): Promise<GatewayInvocationResult> {
+    if (request.route.gatewayId !== this.gatewayId) throw new Error('GATEWAY_ROUTE_MISMATCH');
+    const startedAt = Date.now();
+    let response: Response;
+    let payload: JsonRecord;
+    let outputText: string;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let reasoningTokens = 0;
+
+    if (request.route.protocol === 'anthropic-messages') {
+      throw new Error('LITELLM_INVOCATION_PROTOCOL_UNSUPPORTED');
+    }
+
+    if (request.route.protocol === 'openai-responses') {
+      response = await this.#request(
+        '/v1/responses',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            model: request.route.externalRouteRef,
+            input: request.input,
+            max_output_tokens: request.maxOutputTokens ?? 512,
+          }),
+          signal,
+        },
+        180_000,
+      );
+      payload = asRecord(await response.json());
+      outputText = responsesText(payload);
+      const usage = asRecord(payload.usage);
+      const inputDetails = asRecord(usage.input_tokens_details);
+      const outputDetails = asRecord(usage.output_tokens_details);
+      inputTokens = asNumber(usage.input_tokens);
+      outputTokens = asNumber(usage.output_tokens);
+      cacheReadTokens = asNumber(inputDetails.cached_tokens);
+      reasoningTokens = asNumber(outputDetails.reasoning_tokens);
+    } else {
+      response = await this.#request(
+        '/v1/chat/completions',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            model: request.route.externalRouteRef,
+            messages: [{ role: 'user', content: request.input }],
+            max_tokens: request.maxOutputTokens ?? 512,
+            stream: false,
+          }),
+          signal,
+        },
+        180_000,
+      );
+      payload = asRecord(await response.json());
+      outputText = chatText(payload);
+      const usage = asRecord(payload.usage);
+      const promptDetails = asRecord(usage.prompt_tokens_details);
+      const completionDetails = asRecord(usage.completion_tokens_details);
+      inputTokens = asNumber(usage.prompt_tokens);
+      outputTokens = asNumber(usage.completion_tokens);
+      cacheReadTokens = asNumber(promptDetails.cached_tokens);
+      reasoningTokens = asNumber(completionDetails.reasoning_tokens);
+    }
+
+    const gatewayRequestId =
+      response.headers.get('x-litellm-call-id') || String(payload.id ?? `litellm-${startedAt}`);
+    const latencyMs =
+      headerNumber(response.headers, 'x-litellm-response-duration-ms') ?? Date.now() - startedAt;
+    const cost =
+      headerNumber(response.headers, 'x-litellm-response-cost-original') ??
+      headerNumber(response.headers, 'x-litellm-response-cost');
+
+    return {
+      gatewayRequestId,
+      externalDeploymentRef: response.headers.get('x-litellm-model-id') ?? undefined,
+      outputText,
+      responseModel: typeof payload.model === 'string' ? payload.model : undefined,
+      status:
+        payload.status === 'cancelled'
+          ? 'cancelled'
+          : payload.status === 'failed' || payload.error
+            ? 'failed'
+            : 'succeeded',
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens: 0,
+      reasoningTokens,
+      actualCost: cost,
+      currency: 'USD',
+      latencyMs,
+      metadata: {
+        liteLlmVersion: response.headers.get('x-litellm-version'),
+        modelGroup: response.headers.get('x-litellm-model-group'),
+        attemptedRetries: asNumber(response.headers.get('x-litellm-attempted-retries')),
+        attemptedFallbacks: asNumber(response.headers.get('x-litellm-attempted-fallbacks')),
+      },
+    };
   }
 
   invocationEndpoint(): string {

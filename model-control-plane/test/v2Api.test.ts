@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildControlPlane, type LegacyCpaPort, type LegacyUsagePort } from '../src/app.js';
-import type { GatewayExecutionPort, GatewayRouteRef } from '../src/gateway/ports.js';
+import type {
+  GatewayExecutionPort,
+  GatewayInvocationPort,
+  GatewayInvocationRequest,
+  GatewayRouteRef,
+} from '../src/gateway/ports.js';
 import { GatewayRegistry } from '../src/gateway/registry.js';
 
 const cpa: LegacyCpaPort = {
@@ -105,7 +110,7 @@ test('V2 employee dossier returns deterministic not-found error', async () => {
   }
 });
 
-class ApiFakeGateway implements GatewayExecutionPort {
+class ApiFakeGateway implements GatewayExecutionPort, GatewayInvocationPort {
   readonly gatewayId = 'litellm-reference';
 
   async resolveRoute(employmentId: string) {
@@ -124,6 +129,25 @@ class ApiFakeGateway implements GatewayExecutionPort {
 
   async getRouteHealth(_route: GatewayRouteRef) {
     return 'healthy' as const;
+  }
+
+  async invoke(request: GatewayInvocationRequest) {
+    return {
+      gatewayRequestId: 'api_call',
+      externalDeploymentRef: 'api_deployment',
+      outputText: 'API_REVIEW_OK',
+      responseModel: request.route.externalRouteRef,
+      status: 'succeeded' as const,
+      inputTokens: 12,
+      outputTokens: 4,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 0,
+      reasoningTokens: 1,
+      actualCost: 0.01,
+      currency: 'USD',
+      latencyMs: 7,
+      metadata: { attemptedRetries: 0 },
+    };
   }
 }
 
@@ -179,11 +203,37 @@ test('V2 command API opens a Run, Duty and dispatches current Employee', async (
     });
     assert.equal(duties.json().items[0].currentStaffing.employeeId, seeded.employeeId);
 
+    const invokeResponse = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/internal/duties/${duty.id}/invoke`,
+      payload: {
+        input: 'Review the API test change.',
+        correlationId: 'corr_api_test',
+      },
+    });
+    assert.equal(invokeResponse.statusCode, 200);
+    assert.equal(invokeResponse.json().outputText, 'API_REVIEW_OK');
+    assert.equal(invokeResponse.json().usage.inputTokens, 12);
+
+    const completedDuties = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v2/duties?runId=${run.id}`,
+    });
+    assert.equal(completedDuties.json().items[0].lifecycle, 'COMPLETED');
+    assert.equal(completedDuties.json().items[0].currentStaffing, null);
+
+    const usageResponse = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v2/usage?runId=${run.id}`,
+    });
+    assert.equal(usageResponse.json().items.length, 1);
+    assert.equal(usageResponse.json().items[0].actualCost, 0.01);
+
     const workforce = await runtime.app.inject({
       method: 'GET',
       url: '/api/v2/projections/workforce',
     });
-    assert.equal(workforce.json().summary.currentDuties, 1);
+    assert.equal(workforce.json().summary.currentDuties, 0);
   } finally {
     await runtime.app.close();
   }

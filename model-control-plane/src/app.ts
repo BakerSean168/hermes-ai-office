@@ -10,6 +10,7 @@ import { GatewayRegistry } from './gateway/registry.js';
 import { ControlPlaneStore } from './store.mjs';
 import { registerV2Routes } from './v2/api.js';
 import { DispatchService } from './v2/dispatch.js';
+import { InvocationService } from './v2/invocation.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
 
@@ -127,6 +128,7 @@ export async function buildControlPlane(
     );
   }
   const dispatchService = new DispatchService(v2, gateways);
+  const invocationService = new InvocationService(v2, gateways);
   const cpa: LegacyCpaPort =
     options.cpa ??
     (new CpaAdapter({
@@ -220,7 +222,7 @@ export async function buildControlPlane(
     return event;
   };
 
-  registerV2Routes(app, v2, { dispatchService });
+  registerV2Routes(app, v2, { dispatchService, invocationService });
 
   app.get('/api/health', async () => ({
     status: 'ok',
