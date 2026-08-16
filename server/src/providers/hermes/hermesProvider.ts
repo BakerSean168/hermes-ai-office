@@ -14,7 +14,7 @@
 
 import type { AgentEvent, HookProvider } from '../../../../core/src/provider.js';
 import type { AgentStateStore } from '../../agentStateStore.js';
-import type { OrgStore } from '../../orgStore.js';
+import type { OrgSnapshot, OrgStore } from '../../orgStore.js';
 import {
   BridgeClient,
   type HermesBoard,
@@ -601,6 +601,8 @@ export interface HermesProviderOptions {
   fetchImpl?: typeof fetch;
   /** Persist hook for the profile → Area mapping (wired by cli.ts to config.json). */
   onAreaMappingsChanged?: (mappings: Record<string, string[]>) => void;
+  /** Optional side effect for forwarding the normalized organization snapshot. */
+  onOrgSnapshot?: (snapshot: OrgSnapshot) => void;
 }
 
 export class HermesProvider implements HookProvider {
@@ -622,6 +624,7 @@ export class HermesProvider implements HookProvider {
   /** Latest spawn list (kept so board frames can re-apply spawn correlation). */
   private spawns: HermesSpawn[] = [];
   private readonly onAreaMappingsChanged?: (mappings: Record<string, string[]>) => void;
+  private readonly onOrgSnapshot?: (snapshot: OrgSnapshot) => void;
   /** Signature of the last area mapping so we only persist/broadcast on change. */
   private lastAreaSignature: string | null = null;
 
@@ -629,6 +632,7 @@ export class HermesProvider implements HookProvider {
     this.store = opts.store;
     this.orgStore = opts.orgStore;
     this.onAreaMappingsChanged = opts.onAreaMappingsChanged;
+    this.onOrgSnapshot = opts.onOrgSnapshot;
     this.bridge = new BridgeClient({
       baseUrl: opts.baseUrl ?? 'http://127.0.0.1:8787',
       onBoard: (board) => this.handleBoard(board),
@@ -724,7 +728,9 @@ export class HermesProvider implements HookProvider {
   }
 
   private broadcastOrg(): void {
-    this.store.broadcast({ type: 'orgState', ...this.orgStore.snapshot() });
+    const snapshot = this.orgStore.snapshot();
+    this.store.broadcast({ type: 'orgState', ...snapshot });
+    this.onOrgSnapshot?.(snapshot);
   }
 
   private rebuildOrgGraph(board: HermesBoard): void {

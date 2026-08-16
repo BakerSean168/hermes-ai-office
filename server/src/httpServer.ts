@@ -172,6 +172,42 @@ export function registerModelControlPlaneRoutes(app: FastifyInstance): void {
     }
   });
 
+  app.get('/api/model/v2/projections/office', async (_request, reply) => {
+    try {
+      const response = await fetch(`${baseUrl}/api/v2/projections/office`);
+      if (!response.ok) {
+        reply.code(502);
+        return { error: 'model-control-plane-v2-unavailable', status: response.status };
+      }
+      return await response.json();
+    } catch (error) {
+      reply.code(502);
+      return { error: 'model-control-plane-v2-unavailable', message: String(error) };
+    }
+  });
+
+  app.get('/api/model/v2/incidents', async (request, reply) => {
+    try {
+      const query = request.query as Record<string, unknown>;
+      const params = new URLSearchParams();
+      for (const key of ['lifecycle', 'runId', 'positionId', 'limit']) {
+        const value = query?.[key];
+        if (typeof value === 'string') params.set(key, value);
+        else if (typeof value === 'number') params.set(key, String(value));
+      }
+      const suffix = params.size > 0 ? `?${params.toString()}` : '';
+      const response = await fetch(`${baseUrl}/api/v2/incidents${suffix}`);
+      if (!response.ok) {
+        reply.code(502);
+        return { error: 'model-control-plane-v2-unavailable', status: response.status };
+      }
+      return await response.json();
+    } catch (error) {
+      reply.code(502);
+      return { error: 'model-control-plane-v2-unavailable', message: String(error) };
+    }
+  });
+
   app.get<{ Params: { employeeId: string } }>(
     '/api/model/v2/employees/:employeeId/dossier',
     async (request, reply) => {

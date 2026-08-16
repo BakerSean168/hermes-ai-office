@@ -39,6 +39,16 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
       );
       return;
     }
+    if (request.url === '/api/v2/projections/office') {
+      response.end(
+        JSON.stringify({ projectionVersion: 2, summary: { positions: 1 }, positions: [] }),
+      );
+      return;
+    }
+    if (request.url === '/api/v2/incidents?limit=20') {
+      response.end(JSON.stringify({ items: [{ id: 'inc_1', lifecycle: 'OPEN' }] }));
+      return;
+    }
     response.writeHead(404).end(JSON.stringify({ error: 'not-found' }));
   });
   const port = await listen(upstream);
@@ -59,6 +69,20 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
     });
     expect(dossier.statusCode).toBe(200);
     expect(dossier.json().cooperation.state).toBe('EMPLOYED');
+
+    const office = await app.inject({
+      method: 'GET',
+      url: '/api/model/v2/projections/office',
+    });
+    expect(office.statusCode).toBe(200);
+    expect(office.json().summary.positions).toBe(1);
+
+    const incidents = await app.inject({
+      method: 'GET',
+      url: '/api/model/v2/incidents?limit=20',
+    });
+    expect(incidents.statusCode).toBe(200);
+    expect(incidents.json().items[0].id).toBe('inc_1');
 
     const missing = await app.inject({
       method: 'GET',

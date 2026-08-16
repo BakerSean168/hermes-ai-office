@@ -711,11 +711,13 @@ describe('HermesProvider profile aggregation integration', () => {
     };
     const store = new AgentStateStore();
     const orgStore = new OrgStore();
+    const forwardedSnapshots: ReturnType<OrgStore['snapshot']>[] = [];
     const provider = new HermesProvider({
       store,
       orgStore,
       baseUrl: 'http://test',
       fetchImpl: makeFetchImpl(board, emptyKanban),
+      onOrgSnapshot: (snapshot) => forwardedSnapshots.push(snapshot),
     });
     provider.start();
     try {
@@ -733,6 +735,8 @@ describe('HermesProvider profile aggregation integration', () => {
       expect(profile.workload).toBe('EXECUTING');
       expect(profile.displayName).toBe('MemoFlow');
       expect(profile.mission).toBe('Sync Engine v2');
+      expect(forwardedSnapshots.length).toBeGreaterThan(0);
+      expect(forwardedSnapshots.at(-1)?.profiles[0]?.profileId).toBe('memoflow');
     } finally {
       provider.stop();
     }

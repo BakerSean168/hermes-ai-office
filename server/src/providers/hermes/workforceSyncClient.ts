@@ -100,15 +100,10 @@ export class HermesWorkforceSyncClient {
 
 let singleton: HermesWorkforceSyncClient | null = null;
 let singletonKey = '';
-let configuredBaseUrl: string | null = null;
-
-export function configureHermesWorkforceSync(baseUrl: string | null): void {
-  configuredBaseUrl = baseUrl?.trim() || null;
-}
 
 export function enqueueHermesWorkforceSnapshot(snapshot: OrgSnapshot): void {
   if (process.env.HERMES_WORKFORCE_SYNC === '0') return;
-  const baseUrl = configuredBaseUrl ?? process.env.MODEL_CONTROL_PLANE_URL?.trim();
+  const baseUrl = process.env.MODEL_CONTROL_PLANE_URL?.trim();
   if (!baseUrl) return;
   if (!singleton || singletonKey !== baseUrl) {
     singletonKey = baseUrl;
