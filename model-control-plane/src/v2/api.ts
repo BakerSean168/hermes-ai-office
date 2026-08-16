@@ -3,7 +3,6 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { DispatchService } from './dispatch.js';
 import type { GatewayDiscoveryService } from './discovery.js';
 import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
-import type { CompatibilityAuditService } from './compatibility.js';
 import type { FinanceRepository } from './finance.js';
 import {
   IdempotencyConflictError,
@@ -43,7 +42,6 @@ export function registerV2Routes(
     officeProjection?: OfficeProjectionService;
     incidentProjection?: IncidentProjectionService;
     maintenance?: MaintenanceService;
-    compatibility?: CompatibilityAuditService;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -363,15 +361,6 @@ export function registerV2Routes(
       },
     }),
   );
-
-  app.get('/api/v2/compatibility/status', async (_request, reply) => {
-    if (!services.compatibility) {
-      reply.code(503);
-      return { error: { code: 'COMPATIBILITY_AUDIT_UNAVAILABLE' } };
-    }
-    services.incidentProjection?.projectIncremental();
-    return services.compatibility.status();
-  });
 
   app.get<{ Params: { positionId: string } }>(
     '/api/v2/projections/positions/:positionId/dossier',

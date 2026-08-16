@@ -83,9 +83,7 @@ function channelFromProvider(provider: string, channels: CpaChannelStatus[]): st
   return exact?.name ?? null;
 }
 
-export class CpaCompatibilityGateway
-  implements GatewayExecutionPort, GatewayDiscoveryPort, GatewayUsagePort
-{
+export class CpaGateway implements GatewayExecutionPort, GatewayDiscoveryPort, GatewayUsagePort {
   readonly gatewayId: string;
   readonly #statusSource: CpaStatusSource;
   readonly #usageSource: CpaAggregateUsageSource;
@@ -152,7 +150,7 @@ export class CpaCompatibilityGateway
             },
           ],
           metadata: {
-            source: 'cpa-compat',
+            source: 'cpa-gateway',
             channelName: channel.name,
             lastTest: channel.lastTest ?? null,
           },

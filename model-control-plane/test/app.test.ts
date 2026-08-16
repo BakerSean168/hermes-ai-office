@@ -1,28 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildControlPlane, type LegacyCpaPort, type LegacyUsagePort } from '../src/app.js';
+import { buildControlPlane, type CpaProbePort, type CpaUsagePort } from '../src/app.js';
 
-const emptyCpa: LegacyCpaPort = {
+const emptyCpa: CpaProbePort = {
   async status() {
     return [];
   },
-  async bindAlias() {},
-  async unbindAlias() {},
-  async addChannel() {},
   async test() {},
-  async enable() {},
-  async disable() {},
-  async quarantine() {},
 };
 
-const emptyUsage: LegacyUsagePort = {
+const emptyUsage: CpaUsagePort = {
   async snapshot() {
     return { range: '30d', stats: { groups: [] }, costs: { models: [] } };
   },
 };
 
-test('typed app factory preserves V1 health and workforce routes', async () => {
+test('typed app factory exposes V2 only and retires public V1 routes', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
     logger: false,
@@ -37,6 +31,7 @@ test('typed app factory preserves V1 health and workforce routes', async () => {
     assert.deepEqual(health.json(), {
       status: 'ok',
       service: 'hermes-model-control-plane',
+      apiVersion: 2,
       db: ':memory:',
     });
 
@@ -61,53 +56,52 @@ test('typed app factory preserves V1 health and workforce routes', async () => {
       marketValue: 0,
     });
 
-    const workforce = await runtime.app.inject({
-      method: 'GET',
-      url: '/api/v1/dashboard/workforce',
-    });
-    assert.equal(workforce.statusCode, 200);
-    const snapshot = workforce.json();
-    assert.deepEqual(snapshot.positions.map((position: { id: string }) => position.id).sort(), [
-      'codex-general',
-      'coding-review',
-      'hermes-brain',
-    ]);
-    assert.deepEqual(Object.keys(snapshot).sort(), [
-      'activeRuns',
-      'assignments',
-      'channels',
-      'contracts',
-      'models',
-      'positions',
-      'prices',
-      'profiles',
-      'providers',
-      'quotas',
-      'stats',
-      'workers',
-    ]);
+    for (const url of [
+      '/api/v1/snapshot',
+      '/api/v1/dashboard/workforce',
+      '/api/v1/events',
+      '/api/v2/compatibility/status',
+    ]) {
+      const retired = await runtime.app.inject({ method: 'GET', url });
+      assert.equal(retired.statusCode, 404, `${url} must remain retired`);
+    }
   } finally {
     await runtime.app.close();
   }
 });
 
-test('typed app factory preserves validation status codes', async () => {
+test('V2 gateway discovery replaces legacy CPA synchronization', async () => {
+  const cpa: CpaProbePort = {
+    async status() {
+      return [
+        {
+          name: 'route-a',
+          protocol: 'openai-compatible',
+          enabled: true,
+          models: ['model-a'],
+          health: 'healthy',
+          lastTest: 'pass',
+        },
+      ];
+    },
+    async test() {},
+  };
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
     logger: false,
-    cpa: emptyCpa,
+    cpa,
     cpaUsage: emptyUsage,
     initialSync: false,
   });
 
   try {
-    const response = await runtime.app.inject({
-      method: 'POST',
-      url: '/api/v1/usage',
-      payload: { workerId: 'missing' },
-    });
-    assert.equal(response.statusCode, 400);
-    assert.equal(response.json().error, 'unknown worker');
+    assert.equal(runtime.v2.listGateways().length, 0);
+    await runtime.reconcileGateways();
+    const gateways = runtime.v2.listGateways();
+    assert.equal(gateways.length, 1);
+    assert.equal(gateways[0]?.slug, 'cpa-compat');
+    assert.equal(gateways[0]?.kind, 'CPA');
+    assert.equal(runtime.v2.listEmployees().length, 0);
   } finally {
     await runtime.app.close();
   }

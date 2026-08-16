@@ -15,9 +15,7 @@ Environment=MODEL_CP_PORT=8320
 Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
 Environment=MODEL_CP_CPA_SUDO=0
 Environment=MODEL_CP_USAGE_RANGE=30d
-Environment=MODEL_CP_SYNC_INTERVAL_MS=60000
 Environment=MODEL_CP_HEALTH_CHECK_INTERVAL_MS=1800000
-Environment=MODEL_CP_MANAGE_POSITION_ALIASES=1
 Environment=MODEL_CP_V2_LITELLM=1
 Environment=MODEL_CP_V2_DISCOVERY=1
 Environment=MODEL_CP_V2_DISCOVERY_INTERVAL_MS=60000

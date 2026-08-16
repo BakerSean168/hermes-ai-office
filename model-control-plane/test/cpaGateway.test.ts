@@ -1,11 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-  CpaCompatibilityGateway,
-  cpaRouteRef,
-  parseCpaRouteRef,
-} from '../src/gateway/cpaCompatibility.js';
+import { CpaGateway, cpaRouteRef, parseCpaRouteRef } from '../src/gateway/cpaGateway.js';
 import { StaticGatewayBindingSource } from '../src/gateway/staticBindings.js';
 
 const statusSource = {
@@ -79,7 +75,7 @@ function makeGateway() {
       protocol: 'openai-chat-completions',
     },
   ]);
-  return new CpaCompatibilityGateway({ statusSource, usageSource, bindings });
+  return new CpaGateway({ statusSource, usageSource, bindings });
 }
 
 test('CPA route references round-trip without becoming business identity', () => {
@@ -90,7 +86,7 @@ test('CPA route references round-trip without becoming business identity', () =>
   });
 });
 
-test('CPA compatibility adapter resolves only the selected employment binding', async () => {
+test('CPA gateway adapter resolves only the selected employment binding', async () => {
   const gateway = makeGateway();
   const selected = await gateway.resolveRoute('empl_open_code');
   assert.equal(selected.routable, true);

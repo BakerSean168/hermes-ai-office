@@ -13,6 +13,14 @@ function tableNames(db: ReturnType<typeof openDb>): string[] {
 
 test('V2 schema migration is additive and idempotent', () => {
   const db = openDb(':memory:');
+  assert.equal(
+    db
+      .prepare(
+        "SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name IN ('providers','workers','assignments')",
+      )
+      .get().count,
+    0,
+  );
   const first = runV2Migrations(db);
   const second = runV2Migrations(db);
 
@@ -41,8 +49,9 @@ test('V2 schema migration is additive and idempotent', () => {
     '010_maintenance',
   ]);
   const tables = tableNames(db);
-  assert.ok(tables.includes('providers'));
-  assert.ok(tables.includes('workers'));
+  assert.ok(!tables.includes('providers'));
+  assert.ok(!tables.includes('workers'));
+  assert.ok(!tables.includes('assignments'));
   assert.ok(tables.includes('v2_employees'));
   assert.ok(tables.includes('v2_employments'));
   assert.ok(tables.includes('v2_gateway_bindings'));

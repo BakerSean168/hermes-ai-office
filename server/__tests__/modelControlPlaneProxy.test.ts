@@ -90,6 +90,16 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
     });
     expect(missing.statusCode).toBe(404);
     expect(missing.json().error).toBe('model-control-plane-v2-employee-not-found');
+
+    for (const retired of [
+      { method: 'GET' as const, url: '/api/model/workforce' },
+      { method: 'GET' as const, url: '/api/model/config' },
+      { method: 'GET' as const, url: '/api/model/events' },
+      { method: 'POST' as const, url: '/api/model/admin/channels' },
+    ]) {
+      const response = await app.inject(retired);
+      expect(response.statusCode).toBe(404);
+    }
   } finally {
     if (previousUrl === undefined) delete process.env.MODEL_CONTROL_PLANE_URL;
     else process.env.MODEL_CONTROL_PLANE_URL = previousUrl;

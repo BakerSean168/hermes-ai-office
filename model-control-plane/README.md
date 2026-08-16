@@ -1,95 +1,118 @@
-# Hermes Model Control Plane
+# Hermes AI Workforce Control Plane
 
-> **Domain migration note:** This README describes the currently deployed Model Control Plane implementation. The authoritative north-star business model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md). In V2, the legacy `Worker = Channel × ModelDefinition` identity becomes a compatibility projection; durable employee identity is `Employee = Supplier × SupplierModel`. SupplyAgreement/Employment describe the commercial periods through which that employee can work, while `Channel` is only an access route. Existing APIs remain protected during migration.
+The Model Control Plane is the V2 business authority for the Hermes AI company. The authoritative domain model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md), with deployed engineering status in [`../docs/implementation-v2/IMPLEMENTATION-STATUS.md`](../docs/implementation-v2/IMPLEMENTATION-STATUS.md).
 
-The currently deployed Model Control Plane is the source of truth for V1 model workforce state. The V2 north star narrows this service into a gateway-neutral AI Workforce Domain Service: it owns organizational identity, staffing, business route policy, attribution, and projections while generic model transport is delegated through Gateway Ports.
+## Responsibilities
 
-## Domain model
+The service owns four business boundaries:
+
+- **Organization:** WorkScope, RoleDefinition, PositionTemplate, Position and PositionRelation.
+- **Workforce supply:** Supplier, SupplierModel, Plan, ModelOffering, SupplyAgreement, Employment, Employee, Channel and CapacityPool.
+- **Staffing:** capability evidence, requirements, qualification, StaffingRule, Appointment, StaffingConstraint, DispatchDecision and StaffingSegment.
+- **Execution and evidence:** Run, DutySession, RuntimeSession, ModelInvocation, InvocationAttempt, UsageEntry, Evaluation, Incident and projection checkpoints.
+
+The identity rules are strict:
 
 ```text
-Provider (external company)
-  └─ Channel (account / contract / API route)
-       ├─ Contract (free / subscription / metered / sponsored)
-       ├─ Quota
-       └─ Worker = Channel × ModelDefinition (external employee)
-
-Profile (team / workflow)
-  └─ Position (stable job: Hermes Brain, Codex Developer, Reviewer...)
-       └─ Assignment (Worker candidate/current employee, priority + status)
-            └─ Run (one concrete task/session)
-                 └─ UsageLedger (tokens + actual/allocated/market cost)
-
-Price -> ModelDefinition or Worker
-Health -> Channel/Worker discovery state
-Event -> every relevant control-plane change
+Position != Employee != RuntimeSession != Gateway/Channel
+Appointment != actual work
+DutySession + open StaffingSegment = actual work now
+Employee identity = Supplier x SupplierModel
+Employment = one concrete commercial access period
 ```
 
-Identity invariant: a model name is not a Worker. `deepseek-v4-flash` through two channels creates two Workers because cost, quota, reliability, and contract differ.
+Runtime model hints never create Employee identity. Gateway health changes routability, not durable workforce identity.
 
-## Ownership boundaries
+## Gateway boundary
 
-- **Gateway Port (transport infrastructure):** forward model requests, normalize provider protocols, keep credentials, and handle physical retry/load-balancing within an approved Employment route. LiteLLM Proxy is the V2 reference implementation; CPA is the current compatibility adapter.
-- **Model Control Plane:** registry, contracts, quotas, health, assignments, policy scoring, usage attribution, event history, dashboard projection.
-- **Pixel Agents:** visualization plus a thin management facade. It consumes the dashboard projection/SSE and forwards explicit admin actions to the Control Plane; it never reads CPA secrets or the SQLite database.
-- **Hermes/Codex/OpenCode clients:** should converge on stable logical Positions/aliases rather than duplicating provider credentials.
+Model transport is delegated through gateway ports. The current adapters are:
 
-The CPA integration is an adapter, not a core dependency. V2 uses explicit gateway ports and treats **LiteLLM Proxy as the reference gateway implementation**. CPA remains behind a compatibility adapter and may also be used behind LiteLLM for special subscription/provider protocols when that reduces complexity. Current CPA lifecycle mutations remain behind `gatewayctl` until migration retires them.
+- **LiteLLM Gateway** as the reference generic gateway.
+- **CPA Gateway** as an adapter for subscription/provider routes that are already managed through CPA/gatewayctl.
 
-## Scheduling
+The MCP reads CPA route/health evidence and aggregate usage through the gateway adapter. It does not own CPA credentials or physical channel lifecycle administration.
 
-Resolution follows:
+CPA operational changes such as adding a channel, changing a secret, enabling/disabling a route, quarantine, or manual alias surgery belong to `gatewayctl` / the dedicated model-gateway management workflow. They are intentionally not exposed through Pixel Office.
 
-1. Eligibility: channel/worker enabled, acceptable health, required capabilities/context, non-exhausted quota.
-2. Assignment priority (dominant).
-3. Weighted quality, reliability, cost efficiency, latency, and quota efficiency.
-4. Quota reset pressure can raise utilization of prepaid capacity near reset.
-5. Reconciliation marks exactly one candidate `active` per Position and other eligible candidates `standby`.
-6. A Position can declare `routeProtocol`; incompatible workers remain visible but are not eligible for that ingress.
-7. The selected worker is published to CPA as an audited logical alias such as `position:hermes-brain`, so clients depend on the job rather than a provider/model.
-
-Default Positions currently seeded: `hermes-brain`, `codex-general`, `coding-review`.
-
-## Accounting
-
-Three cost concepts are intentionally separate:
-
-- `actualCost`: amount actually charged by a metered provider/gateway.
-- `allocatedCost`: share of a subscription/fixed contract allocated to a run/position.
-- `marketValue`: counterfactual value calculated from configured per-model/worker price data.
-
-CPA's CAP Token Usage Tracker is imported as an idempotent 30-day aggregate snapshot. Subscription fixed cost is allocated across usage (tokens by default, requests optionally), and configured worker/model prices revalue historical snapshots as `marketValue`. Request/run-specific attribution is recorded through `POST /api/v1/usage`; logical `position:*` calls provide the stable identity needed for future position-level attribution.
+The durable CPA gateway id remains `cpa-compat` for existing V2 binding continuity. The name is an external reference, not a V1 Worker compatibility model.
 
 ## API
 
-Read:
+The public control-plane surface is V2 only.
+
+Primary reads include:
 
 - `GET /api/health`
-- `GET /api/v1/dashboard/workforce`
-- `GET /api/v1/providers|channels|workers|profiles|positions|assignments|quotas|contracts|prices`
-- `GET /api/v1/stats/:dimension`
-- `GET /api/v1/events/history`
-- `GET /api/v1/events` (SSE)
+- `GET /api/v2/health`
+- `GET /api/v2/projections/workforce`
+- `GET /api/v2/projections/office`
+- `GET /api/v2/projections/positions/:positionId/dossier`
+- `GET /api/v2/projections/runs/:runId/dossier`
+- `GET /api/v2/employees`
+- `GET /api/v2/employments`
+- `GET /api/v2/appointments`
+- `GET /api/v2/positions`
+- `GET /api/v2/gateways`
+- `GET /api/v2/channels`
+- `GET /api/v2/runtime-sessions`
+- `GET /api/v2/incidents`
+- `GET /api/v2/events` (SSE)
 
-Write/control:
+V2 commands cover organization, staffing, lifecycle, run/duty dispatch, invocation, finance/evaluation, gateway discovery/reconciliation, incident operations and safe maintenance. Effectful commands use persistent idempotency where appropriate.
 
-- `POST /api/v1/providers|channels|models|workers|profiles|positions|assignments|quotas|contracts|prices`
-- `POST /api/v1/resolve/:positionId`
-- `POST /api/v1/usage`
-- `POST /api/v1/adapters/cpa/sync`
-- `POST /api/v1/adapters/cpa/channels` (safe channel onboarding; API key is streamed to gatewayctl stdin and not persisted by the Control Plane)
-- `POST /api/v1/adapters/cpa/usage/sync`
-- `POST /api/v1/assignments/reconcile`
-- `PATCH /api/v1/channels/:id/policy` and `/assignments/:id/policy`
-- `POST /api/v1/channels/:id/actions/:action` (`test`, `enable`, `disable`, `quarantine`)
+`/api/v1/*` was retired in the V1-removal release. Pixel Office exposes only explicit `/api/model/v2/*` read/SSE facade routes.
 
-The service binds to loopback by default. Pixel Agents exposes workforce/event reads plus an explicitly enabled management facade (`MODEL_CONTROL_PLANE_ADMIN=1`); secrets are forwarded only for channel onboarding and are never included in events or the Control Plane database.
+## Hermes execution projection
 
-## Events
+HermesProvider/OrgStore normalizes Bridge observations and sends latest-wins snapshots to:
 
-Examples: `provider.changed`, `channel.changed`, `worker.changed`, `position.changed`, `assignment.changed`, `assignment.activated`, `quota.changed`, `price.changed`, `contract.changed`, `route.resolved`, `usage.recorded`, `usage.snapshot.synced`, `cpa.synced`, `assignments.reconciled`.
+```text
+POST /api/v2/internal/hermes/sync
+```
 
-Consumers react to facts, not UI commands. Pixel Agents decides how an `assignment.activated` event is animated.
+The projection maps runtime facts without fabricating workforce identity:
+
+```text
+ProfileController -> WorkScope + standing Profile Lead Position
+Run               -> V2 Run
+ExecutionNode     -> run-scoped Position + DutySession + RuntimeSession
+ExecutionEdge     -> RuntimeEdge and valid PositionRelation
+```
+
+A transiently missing runtime closes its current DutySession but preserves RuntimeSession history. Reappearance can open a new Duty without creating a new Employee.
+
+## Persistence
+
+SQLite schema ownership is exclusively through checksum-verified additive migrations under `src/v2/migrations/`.
+
+`openDb()` only opens SQLite and applies database pragmas; it no longer creates the retired V1 Provider/Worker/Assignment schema. Existing production V1 tables are intentionally left in the current database as historical evidence and rollback archaeology, but no running code reads or writes them and a fresh database does not create them.
+
+Core business history is retained. Automatic maintenance is limited to explicitly ephemeral replay-cache cleanup and repair of stale operational sync records.
+
+## Background jobs
+
+The V2 service runs:
+
+- gateway discovery reconciliation;
+- gateway usage reconciliation;
+- incident projection;
+- safe maintenance;
+- CPA route health probes when the CPA gateway adapter is enabled.
+
+There is no V1 CPA synchronization loop and no `position:*` alias reconciliation loop.
+
+## Pixel Office
+
+Pixel Office consumes purpose-built V2 projections and V2 SSE only. It does not join SQLite tables, read gateway secrets, expose V1 workers/assignments, or forward CPA administration requests.
+
+The AI Workforce panel therefore shows durable Employees, current Appointments/work and gateway binding summaries rather than legacy Channel x Model workers.
 
 ## Deployment
 
-Production on oracle2 uses the tracked `deploy/hermes-model-control-plane.service`, listens on `127.0.0.1:8320`, and stores state at `/srv/hermes-personal/data/model-control-plane/control-plane.sqlite`. It refreshes CPA discovery/usage every 60 seconds and performs active health probes every 30 minutes. The Hermes Office bridge (`8787`) and Pixel Office (`3100`) are also persistent host systemd services, so rebuilding the Hermes container no longer removes the dashboard chain.
+Production on oracle2 uses `deploy/hermes-model-control-plane.service`, binds to `127.0.0.1:8320`, and stores SQLite state at:
+
+```text
+/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
+```
+
+The release process performs a SQLite online backup before a control-plane cutover, rebuilds MCP/Office artifacts, restarts services, then verifies V2 health, Hermes execution sync, workforce identity counts, retired-route 404s, SQLite integrity and foreign keys.
