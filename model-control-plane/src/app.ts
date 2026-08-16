@@ -5,10 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { CpaAdapter } from './adapters/cpa.mjs';
 import { CpaUsageAdapter } from './adapters/cpaUsage.mjs';
 import { openDb } from './db.mjs';
+import { EnvFileBearerTokenProvider, LiteLlmGateway } from './gateway/liteLlm.js';
+import { GatewayRegistry } from './gateway/registry.js';
 import { ControlPlaneStore } from './store.mjs';
 import { registerV2Routes } from './v2/api.js';
+import { DispatchService } from './v2/dispatch.js';
 import { runV2Migrations } from './v2/migrations.js';
-import { V2Repository } from './v2/repository.js';
+import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,12 +71,14 @@ export interface BuildControlPlaneOptions {
   cpa?: LegacyCpaPort;
   cpaUsage?: LegacyUsagePort;
   initialSync?: boolean;
+  gateways?: GatewayRegistry;
 }
 
 export interface ControlPlaneRuntime {
   app: FastifyInstance;
   store: InstanceType<typeof ControlPlaneStore>;
   v2: V2Repository;
+  gateways: GatewayRegistry;
   dbFile: string;
   host: string;
   port: number;
@@ -102,6 +107,26 @@ export async function buildControlPlane(
   if (env.MODEL_CP_V2_SCHEMA !== '0') runV2Migrations(db);
   const store = new ControlPlaneStore(db);
   const v2 = new V2Repository(db);
+  const gateways = options.gateways ?? new GatewayRegistry();
+  if (
+    !options.gateways &&
+    env.MODEL_CP_V2_LITELLM !== '0' &&
+    env.LITELLM_BASE_URL &&
+    env.LITELLM_ENV_FILE
+  ) {
+    gateways.register(
+      new LiteLlmGateway({
+        gatewayId: env.LITELLM_GATEWAY_ID ?? 'litellm-reference',
+        baseUrl: env.LITELLM_BASE_URL,
+        secrets: new EnvFileBearerTokenProvider(env.LITELLM_ENV_FILE),
+        bindings: new RepositoryGatewayBindingSource(
+          v2,
+          env.LITELLM_GATEWAY_ID ?? 'litellm-reference',
+        ),
+      }),
+    );
+  }
+  const dispatchService = new DispatchService(v2, gateways);
   const cpa: LegacyCpaPort =
     options.cpa ??
     (new CpaAdapter({
@@ -195,7 +220,7 @@ export async function buildControlPlane(
     return event;
   };
 
-  registerV2Routes(app, v2);
+  registerV2Routes(app, v2, { dispatchService });
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -474,5 +499,5 @@ export async function buildControlPlane(
   });
 
   await seed();
-  return { app, store, v2, dbFile, host, port, refreshCpa, startBackgroundJobs };
+  return { app, store, v2, gateways, dbFile, host, port, refreshCpa, startBackgroundJobs };
 }

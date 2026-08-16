@@ -45,6 +45,59 @@ function rows(value: unknown): Row[] {
   return Array.isArray(value) ? (value as Row[]) : [];
 }
 
+export interface CreateRunInput {
+  workScopeId: string;
+  title: string;
+  externalRunRef?: string;
+  metadata?: JsonRecord;
+}
+
+export interface OpenDutyInput {
+  runId: string;
+  positionId: string;
+  activity?: string;
+  metadata?: JsonRecord;
+}
+
+export interface DispatchRouteCandidate {
+  employmentId: string;
+  supplyAgreementId: string;
+  gatewayId: string;
+  gatewayBindingId: string;
+  externalRouteRef: string;
+  protocol: GatewayProtocol;
+  bindingPriority: number;
+}
+
+export interface DispatchCandidate {
+  employeeId: string;
+  employeeName: string;
+  employeeLifecycle: string;
+  appointmentId: string;
+  appointmentClass: 'PRIMARY' | 'BACKUP' | 'RESERVE';
+  appointmentPriority: number;
+  qualified: boolean;
+  eligible: boolean;
+  reasons: string[];
+  routes: DispatchRouteCandidate[];
+}
+
+export interface DispatchSelection {
+  employeeId: string;
+  appointmentId: string;
+  employmentId: string;
+}
+
+export interface RecordDispatchInput {
+  dutySessionId: string;
+  trigger: string;
+  policyVersion: string;
+  correlationId?: string;
+  candidateResults: unknown[];
+  selected?: DispatchSelection;
+  reasons?: string[];
+}
+
 export interface BootstrapReferenceInput {
   supplierSlug: string;
   supplierName: string;
@@ -83,6 +136,8 @@ export interface BootstrapReferenceResult {
 export class V2Repository {
   readonly db: DatabaseSync;
   readonly #listeners = new Set<V2EventListener>();
+  #transactionDepth = 0;
+  #pendingEvents: V2Event[] = [];
 
   constructor(db: DatabaseSync) {
     this.db = db;
@@ -94,10 +149,19 @@ export class V2Repository {
   }
 
   transaction<T>(operation: () => T): T {
+    if (this.#transactionDepth > 0) return operation();
     this.db.exec('BEGIN IMMEDIATE');
+    this.#transactionDepth = 1;
+    this.#pendingEvents = [];
     try {
       const result = operation();
       this.db.exec('COMMIT');
+      const committedEvents = this.#pendingEvents;
+      this.#pendingEvents = [];
+      this.#transactionDepth = 0;
+      for (const event of committedEvents) {
+        for (const listener of this.#listeners) listener(event);
+      }
       return result;
     } catch (error) {
       try {
@@ -105,6 +169,8 @@ export class V2Repository {
       } catch {
         // The original error is authoritative.
       }
+      this.#pendingEvents = [];
+      this.#transactionDepth = 0;
       throw error;
     }
   }
@@ -157,7 +223,8 @@ export class V2Repository {
       occurredAt: input.occurredAt ?? recordedAt,
       recordedAt,
     };
-    for (const listener of this.#listeners) listener(event);
+    if (this.#transactionDepth > 0) this.#pendingEvents.push(event);
+    else for (const listener of this.#listeners) listener(event);
     return event;
   }
 
@@ -781,6 +848,413 @@ export class V2Repository {
         currentDuties: employees.reduce((sum, item) => sum + Number(item.currentDutyCount ?? 0), 0),
       },
     };
+  }
+
+  getPosition(positionId: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT p.*,ws.slug work_scope_slug,ws.name work_scope_name
+           FROM v2_positions p LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
+           WHERE p.id=?`,
+        )
+        .get(positionId),
+    );
+  }
+
+  findPositionBySlug(slug: string, workScopeSlug?: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT p.*,ws.slug work_scope_slug,ws.name work_scope_name
+           FROM v2_positions p LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
+           WHERE p.slug=? AND (? IS NULL OR ws.slug=?)
+           ORDER BY p.created_at LIMIT 1`,
+        )
+        .get(slug, workScopeSlug ?? null, workScopeSlug ?? null),
+    );
+  }
+
+  createRun(input: CreateRunInput): Row {
+    if (input.externalRunRef) {
+      const existing = row(
+        this.db.prepare('SELECT * FROM v2_runs WHERE external_run_ref=?').get(input.externalRunRef),
+      );
+      if (existing) return existing;
+    }
+    const timestamp = now();
+    const id = newId('run', timestamp);
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_runs(id,work_scope_id,external_run_ref,title,status,started_at,metadata_json,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.workScopeId,
+          input.externalRunRef ?? null,
+          input.title,
+          'RUNNING',
+          timestamp,
+          encode(input.metadata),
+          timestamp,
+          timestamp,
+        );
+      this.emit({
+        type: 'run.started',
+        entityType: 'Run',
+        entityId: id,
+        runId: id,
+        payload: { workScopeId: input.workScopeId, title: input.title },
+      });
+    });
+    return row(this.db.prepare('SELECT * FROM v2_runs WHERE id=?').get(id))!;
+  }
+
+  getRun(runId: string): Row | null {
+    return row(this.db.prepare('SELECT * FROM v2_runs WHERE id=?').get(runId));
+  }
+
+  listRuns(limit = 100): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT r.*,ws.slug work_scope_slug,ws.name work_scope_name
+           FROM v2_runs r LEFT JOIN v2_work_scopes ws ON ws.id=r.work_scope_id
+           ORDER BY r.started_at DESC LIMIT ?`,
+        )
+        .all(limit),
+    ).map((value) => ({
+      id: value.id,
+      workScope: value.work_scope_id
+        ? { id: value.work_scope_id, slug: value.work_scope_slug, name: value.work_scope_name }
+        : null,
+      externalRunRef: value.external_run_ref,
+      title: value.title,
+      status: value.status,
+      startedAt: value.started_at,
+      completedAt: value.completed_at,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  openDuty(input: OpenDutyInput): Row {
+    const run = this.getRun(input.runId);
+    if (!run) throw new Error('RUN_NOT_FOUND');
+    const position = this.getPosition(input.positionId);
+    if (!position) throw new Error('POSITION_NOT_FOUND');
+    const existing = row(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_duty_sessions
+           WHERE run_id=? AND position_id=? AND lifecycle IN ('PLANNED','ACTIVE')
+           ORDER BY opened_at DESC LIMIT 1`,
+        )
+        .get(input.runId, input.positionId),
+    );
+    if (existing) return existing;
+    const timestamp = now();
+    const id = newId('duty', timestamp);
+    this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_duty_sessions(id,run_id,position_id,lifecycle,current_activity,opened_at,metadata_json)
+           VALUES(?,?,?,?,?,?,?)`,
+        )
+        .run(
+          id,
+          input.runId,
+          input.positionId,
+          'PLANNED',
+          input.activity ?? 'IDLE',
+          timestamp,
+          encode(input.metadata),
+        );
+      this.emit({
+        type: 'duty.opened',
+        entityType: 'DutySession',
+        entityId: id,
+        runId: input.runId,
+        dutySessionId: id,
+        payload: { positionId: input.positionId },
+      });
+    });
+    return row(this.db.prepare('SELECT * FROM v2_duty_sessions WHERE id=?').get(id))!;
+  }
+
+  getDuty(dutySessionId: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT d.*,p.name position_name,p.slug position_slug,p.kind position_kind,
+                  r.title run_title,r.status run_status,r.work_scope_id
+           FROM v2_duty_sessions d
+           JOIN v2_positions p ON p.id=d.position_id
+           JOIN v2_runs r ON r.id=d.run_id
+           WHERE d.id=?`,
+        )
+        .get(dutySessionId),
+    );
+  }
+
+  listDuties(filters: { runId?: string; activeOnly?: boolean } = {}): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT d.*,p.name position_name,p.slug position_slug,p.kind position_kind,
+                  r.title run_title,r.status run_status,
+                  ss.id staffing_segment_id,ss.employee_id,e.display_name employee_name
+           FROM v2_duty_sessions d
+           JOIN v2_positions p ON p.id=d.position_id
+           JOIN v2_runs r ON r.id=d.run_id
+           LEFT JOIN v2_staffing_segments ss ON ss.duty_session_id=d.id AND ss.ended_at IS NULL
+           LEFT JOIN v2_employees e ON e.id=ss.employee_id
+           WHERE (? IS NULL OR d.run_id=?)
+             AND (?=0 OR d.lifecycle IN ('PLANNED','ACTIVE'))
+           ORDER BY d.opened_at DESC`,
+        )
+        .all(filters.runId ?? null, filters.runId ?? null, filters.activeOnly ? 1 : 0),
+    ).map((value) => ({
+      id: value.id,
+      runId: value.run_id,
+      runTitle: value.run_title,
+      runStatus: value.run_status,
+      positionId: value.position_id,
+      positionName: value.position_name,
+      positionSlug: value.position_slug,
+      positionKind: value.position_kind,
+      lifecycle: value.lifecycle,
+      currentActivity: value.current_activity,
+      openedAt: value.opened_at,
+      closedAt: value.closed_at,
+      closeReason: value.close_reason,
+      currentStaffing: value.staffing_segment_id
+        ? {
+            segmentId: value.staffing_segment_id,
+            employeeId: value.employee_id,
+            employeeName: value.employee_name,
+          }
+        : null,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  dispatchCandidates(positionId: string): DispatchCandidate[] {
+    const raw = rows(
+      this.db
+        .prepare(
+          `SELECT a.id appointment_id,a.appointment_class,a.priority appointment_priority,
+                  e.id employee_id,e.display_name employee_name,e.record_lifecycle,
+                  em.id employment_id,em.supply_agreement_id,em.status employment_status,
+                  agr.lifecycle agreement_lifecycle,
+                  b.id gateway_binding_id,b.external_route_ref,b.protocol,b.priority binding_priority,
+                  g.slug gateway_slug,g.lifecycle gateway_lifecycle
+           FROM v2_appointments a
+           JOIN v2_employees e ON e.id=a.employee_id
+           LEFT JOIN v2_employments em
+             ON em.employee_id=e.id AND em.status='CURRENT' AND em.effective_to IS NULL
+           LEFT JOIN v2_supply_agreements agr ON agr.id=em.supply_agreement_id
+           LEFT JOIN v2_gateway_bindings b
+             ON b.employment_id=em.id AND b.lifecycle='ACTIVE'
+           LEFT JOIN v2_gateways g ON g.id=b.gateway_id AND g.lifecycle='ACTIVE'
+           WHERE a.position_id=? AND a.status='CURRENT' AND a.effective_to IS NULL
+           ORDER BY CASE a.appointment_class WHEN 'PRIMARY' THEN 0 WHEN 'BACKUP' THEN 1 ELSE 2 END,
+                    a.priority DESC,b.priority DESC,em.effective_from ASC`,
+        )
+        .all(positionId),
+    );
+    const byAppointment = new Map<string, DispatchCandidate>();
+    for (const value of raw) {
+      const appointmentId = String(value.appointment_id);
+      let candidate = byAppointment.get(appointmentId);
+      if (!candidate) {
+        const lifecycleEligible = value.record_lifecycle === 'ACTIVE';
+        candidate = {
+          employeeId: String(value.employee_id),
+          employeeName: String(value.employee_name),
+          employeeLifecycle: String(value.record_lifecycle),
+          appointmentId,
+          appointmentClass: String(
+            value.appointment_class,
+          ) as DispatchCandidate['appointmentClass'],
+          appointmentPriority: Number(value.appointment_priority ?? 0),
+          qualified: true,
+          eligible: lifecycleEligible,
+          reasons: lifecycleEligible
+            ? ['CURRENT_APPOINTMENT', 'FIRST_SLICE_STATIC_QUALIFICATION']
+            : ['EMPLOYEE_NOT_ACTIVE'],
+          routes: [],
+        };
+        byAppointment.set(appointmentId, candidate);
+      }
+      if (
+        candidate.eligible &&
+        value.employment_id &&
+        value.supply_agreement_id &&
+        value.employment_status === 'CURRENT' &&
+        value.agreement_lifecycle === 'ACTIVE' &&
+        value.gateway_binding_id &&
+        value.gateway_slug &&
+        value.gateway_lifecycle === 'ACTIVE'
+      ) {
+        candidate.routes.push({
+          employmentId: String(value.employment_id),
+          supplyAgreementId: String(value.supply_agreement_id),
+          gatewayId: String(value.gateway_slug),
+          gatewayBindingId: String(value.gateway_binding_id),
+          externalRouteRef: String(value.external_route_ref),
+          protocol: String(value.protocol) as GatewayProtocol,
+          bindingPriority: Number(value.binding_priority ?? 0),
+        });
+      }
+    }
+    return [...byAppointment.values()];
+  }
+
+  recordDispatch(input: RecordDispatchInput): Row {
+    const duty = this.getDuty(input.dutySessionId);
+    if (!duty) throw new Error('DUTY_NOT_FOUND');
+    if (!['PLANNED', 'ACTIVE'].includes(String(duty.lifecycle))) {
+      throw new Error('DUTY_NOT_DISPATCHABLE');
+    }
+    const timestamp = now();
+    const decisionId = newId('disp', timestamp);
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO v2_dispatch_decisions(id,duty_session_id,selected_employee_id,selected_appointment_id,selected_employment_id,candidate_results_json,reasons_json,policy_version,trigger,correlation_id,decided_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          decisionId,
+          input.dutySessionId,
+          input.selected?.employeeId ?? null,
+          input.selected?.appointmentId ?? null,
+          input.selected?.employmentId ?? null,
+          encode(input.candidateResults),
+          encode(input.reasons ?? []),
+          input.policyVersion,
+          input.trigger,
+          input.correlationId ?? null,
+          timestamp,
+        );
+
+      let segmentId: string | null = null;
+      let replacedSegmentId: string | null = null;
+      const open = row(
+        this.db
+          .prepare(
+            'SELECT * FROM v2_staffing_segments WHERE duty_session_id=? AND ended_at IS NULL',
+          )
+          .get(input.dutySessionId),
+      );
+      if (input.selected) {
+        if (open && open.employee_id === input.selected.employeeId) {
+          segmentId = String(open.id);
+        } else {
+          if (open) {
+            replacedSegmentId = String(open.id);
+            this.db
+              .prepare(
+                `UPDATE v2_staffing_segments SET ended_at=?,ended_reason='REPLACED' WHERE id=?`,
+              )
+              .run(timestamp, String(open.id));
+            this.emit({
+              type: 'staffing_segment.ended',
+              entityType: 'StaffingSegment',
+              entityId: String(open.id),
+              runId: String(duty.run_id),
+              dutySessionId: input.dutySessionId,
+              correlationId: input.correlationId,
+              payload: { reason: 'REPLACED', employeeId: open.employee_id },
+            });
+          }
+          segmentId = newId('seg', timestamp);
+          this.db
+            .prepare(
+              `INSERT INTO v2_staffing_segments(id,duty_session_id,employee_id,appointment_id,dispatch_decision_id,started_at,metadata_json)
+               VALUES(?,?,?,?,?,?,?)`,
+            )
+            .run(
+              segmentId,
+              input.dutySessionId,
+              input.selected.employeeId,
+              input.selected.appointmentId,
+              decisionId,
+              timestamp,
+              '{}',
+            );
+          this.emit({
+            type: 'staffing_segment.started',
+            entityType: 'StaffingSegment',
+            entityId: segmentId,
+            runId: String(duty.run_id),
+            dutySessionId: input.dutySessionId,
+            correlationId: input.correlationId,
+            payload: {
+              employeeId: input.selected.employeeId,
+              employmentId: input.selected.employmentId,
+              appointmentId: input.selected.appointmentId,
+            },
+          });
+        }
+        this.db
+          .prepare(
+            "UPDATE v2_duty_sessions SET lifecycle='ACTIVE',current_activity='IDLE' WHERE id=?",
+          )
+          .run(input.dutySessionId);
+      } else {
+        this.db
+          .prepare("UPDATE v2_duty_sessions SET current_activity='BLOCKED' WHERE id=?")
+          .run(input.dutySessionId);
+      }
+      this.emit({
+        type: input.selected ? 'dispatch.decided' : 'dispatch.failed',
+        entityType: 'DispatchDecision',
+        entityId: decisionId,
+        runId: String(duty.run_id),
+        dutySessionId: input.dutySessionId,
+        correlationId: input.correlationId,
+        payload: {
+          selectedEmployeeId: input.selected?.employeeId ?? null,
+          selectedEmploymentId: input.selected?.employmentId ?? null,
+          candidateCount: input.candidateResults.length,
+          reasons: input.reasons ?? [],
+        },
+      });
+      return {
+        decisionId,
+        dutySessionId: input.dutySessionId,
+        selected: input.selected ?? null,
+        staffingSegmentId: segmentId,
+        replacedStaffingSegmentId: replacedSegmentId,
+        decidedAt: timestamp,
+      };
+    });
+  }
+
+  listDispatchDecisions(dutySessionId?: string): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_dispatch_decisions
+           WHERE (? IS NULL OR duty_session_id=?) ORDER BY decided_at DESC`,
+        )
+        .all(dutySessionId ?? null, dutySessionId ?? null),
+    ).map((value) => ({
+      id: value.id,
+      dutySessionId: value.duty_session_id,
+      selectedEmployeeId: value.selected_employee_id,
+      selectedAppointmentId: value.selected_appointment_id,
+      selectedEmploymentId: value.selected_employment_id,
+      candidateResults: decode<unknown[]>(value.candidate_results_json, []),
+      reasons: decode<string[]>(value.reasons_json, []),
+      policyVersion: value.policy_version,
+      trigger: value.trigger,
+      correlationId: value.correlation_id,
+      decidedAt: value.decided_at,
+    }));
   }
 
   listGateways(): Row[] {

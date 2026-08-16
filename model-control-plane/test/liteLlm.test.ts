@@ -1,8 +1,15 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createServer, type Server } from 'node:http';
 import test from 'node:test';
 
-import { LiteLlmGateway, StaticBearerTokenProvider } from '../src/gateway/liteLlm.js';
+import {
+  EnvFileBearerTokenProvider,
+  LiteLlmGateway,
+  StaticBearerTokenProvider,
+} from '../src/gateway/liteLlm.js';
 import { StaticGatewayBindingSource } from '../src/gateway/staticBindings.js';
 
 async function listen(server: Server): Promise<number> {
@@ -131,5 +138,17 @@ test('LiteLLM adapter reports an unavailable route without crossing Employment',
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),
     );
+  }
+});
+
+test('env-file token provider reads only the requested key', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'litellm-secret-'));
+  const file = path.join(directory, 'gateway.env');
+  fs.writeFileSync(file, 'OTHER=value\nLITELLM_MASTER_KEY=secret-value\n');
+  try {
+    const provider = new EnvFileBearerTokenProvider(file);
+    assert.equal(await provider.readBearerToken(), 'secret-value');
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+
 import type {
   GatewayBindingSource,
   GatewayDiscoveryPort,
@@ -20,6 +22,31 @@ function asRecord(value: unknown): JsonRecord {
 
 export interface GatewaySecretProvider {
   readBearerToken(): Promise<string>;
+}
+
+export class EnvFileBearerTokenProvider implements GatewaySecretProvider {
+  readonly #path: string;
+  readonly #key: string;
+
+  constructor(path: string, key = 'LITELLM_MASTER_KEY') {
+    this.#path = path;
+    this.#key = key;
+  }
+
+  async readBearerToken(): Promise<string> {
+    const text = fs.readFileSync(this.#path, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      if (!line || line.trimStart().startsWith('#')) continue;
+      const index = line.indexOf('=');
+      if (index <= 0) continue;
+      const key = line.slice(0, index).trim();
+      if (key !== this.#key) continue;
+      const value = line.slice(index + 1).trim();
+      if (!value) throw new Error(`empty ${this.#key} in gateway env file`);
+      return value;
+    }
+    throw new Error(`missing ${this.#key} in gateway env file`);
+  }
 }
 
 export class StaticBearerTokenProvider implements GatewaySecretProvider {

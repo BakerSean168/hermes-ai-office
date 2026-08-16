@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { buildControlPlane, type LegacyCpaPort, type LegacyUsagePort } from '../src/app.js';
+import type { GatewayExecutionPort, GatewayRouteRef } from '../src/gateway/ports.js';
+import { GatewayRegistry } from '../src/gateway/registry.js';
 
 const cpa: LegacyCpaPort = {
   async status() {
@@ -98,6 +100,90 @@ test('V2 employee dossier returns deterministic not-found error', async () => {
     });
     assert.equal(response.statusCode, 404);
     assert.deepEqual(response.json(), { error: { code: 'EMPLOYEE_NOT_FOUND' } });
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+class ApiFakeGateway implements GatewayExecutionPort {
+  readonly gatewayId = 'litellm-reference';
+
+  async resolveRoute(employmentId: string) {
+    return {
+      route: {
+        gatewayId: this.gatewayId,
+        employmentId,
+        externalRouteRef: `employment:${employmentId}`,
+        protocol: 'openai-responses' as const,
+      },
+      routable: true,
+      reasons: ['API_TEST_ROUTE'],
+      observedAt: Date.now(),
+    };
+  }
+
+  async getRouteHealth(_route: GatewayRouteRef) {
+    return 'healthy' as const;
+  }
+}
+
+test('V2 command API opens a Run, Duty and dispatches current Employee', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa,
+    cpaUsage: usage,
+    initialSync: false,
+    gateways: new GatewayRegistry([new ApiFakeGateway()]),
+  });
+  const seeded = runtime.v2.bootstrapReference(reference);
+
+  try {
+    const runResponse = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/runs/create',
+      payload: {
+        workScopeId: seeded.workScopeId,
+        title: 'API review run',
+        externalRunRef: 'api-review-run',
+      },
+    });
+    assert.equal(runResponse.statusCode, 200);
+    const run = runResponse.json();
+
+    const dutyResponse = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/duties/open',
+      payload: {
+        runId: run.id,
+        positionId: seeded.positionId,
+        activity: 'REVIEWING',
+      },
+    });
+    assert.equal(dutyResponse.statusCode, 200);
+    const duty = dutyResponse.json();
+
+    const dispatchResponse = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/duties/${duty.id}/dispatch`,
+      payload: { correlationId: 'corr_api_test' },
+    });
+    assert.equal(dispatchResponse.statusCode, 200);
+    const dispatch = dispatchResponse.json();
+    assert.equal(dispatch.selected.employeeId, seeded.employeeId);
+    assert.equal(dispatch.selected.employmentId, seeded.employmentId);
+
+    const duties = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v2/duties?runId=${run.id}`,
+    });
+    assert.equal(duties.json().items[0].currentStaffing.employeeId, seeded.employeeId);
+
+    const workforce = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/workforce',
+    });
+    assert.equal(workforce.json().summary.currentDuties, 1);
   } finally {
     await runtime.app.close();
   }

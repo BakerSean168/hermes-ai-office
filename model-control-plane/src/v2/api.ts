@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 
+import type { DispatchService } from './dispatch.js';
 import type { V2Event, V2Repository } from './repository.js';
 
 function number(value: unknown, fallback: number): number {
@@ -7,7 +8,11 @@ function number(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-export function registerV2Routes(app: FastifyInstance, repository: V2Repository): void {
+export function registerV2Routes(
+  app: FastifyInstance,
+  repository: V2Repository,
+  services: { dispatchService?: DispatchService } = {},
+): void {
   app.get('/api/v2/health', async () => ({
     status: 'ok',
     service: 'hermes-ai-workforce-domain',
@@ -43,6 +48,96 @@ export function registerV2Routes(app: FastifyInstance, repository: V2Repository)
   app.get('/api/v2/appointments', async () => ({ items: repository.listAppointments() }));
   app.get('/api/v2/positions', async () => ({ items: repository.listPositions() }));
   app.get('/api/v2/gateways', async () => ({ items: repository.listGateways() }));
+
+  app.get('/api/v2/runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const limit = Math.min(500, Math.max(1, number(query.limit, 100)));
+    return { items: repository.listRuns(limit) };
+  });
+  app.get('/api/v2/duties', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items: repository.listDuties({
+        runId: typeof query.runId === 'string' ? query.runId : undefined,
+        activeOnly: query.activeOnly === '1' || query.activeOnly === 'true',
+      }),
+    };
+  });
+  app.get('/api/v2/dispatch-decisions', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items: repository.listDispatchDecisions(
+        typeof query.dutySessionId === 'string' ? query.dutySessionId : undefined,
+      ),
+    };
+  });
+
+  app.post('/api/v2/commands/runs/create', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    if (!body.workScopeId || !body.title) {
+      reply.code(400);
+      return { error: { code: 'WORK_SCOPE_AND_TITLE_REQUIRED' } };
+    }
+    try {
+      return repository.createRun({
+        workScopeId: String(body.workScopeId),
+        title: String(body.title),
+        externalRunRef: body.externalRunRef ? String(body.externalRunRef) : undefined,
+        metadata:
+          body.metadata && typeof body.metadata === 'object'
+            ? (body.metadata as Record<string, unknown>)
+            : undefined,
+      });
+    } catch (error) {
+      reply.code(422);
+      return { error: { code: error instanceof Error ? error.message : 'RUN_CREATE_FAILED' } };
+    }
+  });
+
+  app.post('/api/v2/commands/duties/open', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    if (!body.runId || !body.positionId) {
+      reply.code(400);
+      return { error: { code: 'RUN_AND_POSITION_REQUIRED' } };
+    }
+    try {
+      return repository.openDuty({
+        runId: String(body.runId),
+        positionId: String(body.positionId),
+        activity: body.activity ? String(body.activity) : undefined,
+        metadata:
+          body.metadata && typeof body.metadata === 'object'
+            ? (body.metadata as Record<string, unknown>)
+            : undefined,
+      });
+    } catch (error) {
+      reply.code(422);
+      return { error: { code: error instanceof Error ? error.message : 'DUTY_OPEN_FAILED' } };
+    }
+  });
+
+  app.post<{ Params: { dutySessionId: string } }>(
+    '/api/v2/commands/duties/:dutySessionId/dispatch',
+    async (request, reply) => {
+      if (!services.dispatchService) {
+        reply.code(503);
+        return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      try {
+        const result = await services.dispatchService.dispatchDuty(request.params.dutySessionId, {
+          trigger: body.trigger ? String(body.trigger) : undefined,
+          correlationId: body.correlationId ? String(body.correlationId) : undefined,
+        });
+        if (!result.selected) reply.code(422);
+        return result;
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'DISPATCH_FAILED';
+        reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+        return { error: { code } };
+      }
+    },
+  );
 
   app.get('/api/v2/projections/workforce', async () => repository.workforceProjection());
   app.get<{ Params: { employeeId: string } }>(
