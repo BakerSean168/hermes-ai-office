@@ -40,6 +40,22 @@ test('typed app factory preserves V1 health and workforce routes', async () => {
       db: ':memory:',
     });
 
+    const v2Health = await runtime.app.inject({ method: 'GET', url: '/api/v2/health' });
+    assert.equal(v2Health.statusCode, 200);
+    assert.equal(v2Health.json().apiVersion, 2);
+
+    const v2Workforce = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/workforce',
+    });
+    assert.equal(v2Workforce.statusCode, 200);
+    assert.deepEqual(v2Workforce.json().summary, {
+      employees: 0,
+      employed: 0,
+      dormant: 0,
+      currentDuties: 0,
+    });
+
     const workforce = await runtime.app.inject({
       method: 'GET',
       url: '/api/v1/dashboard/workforce',

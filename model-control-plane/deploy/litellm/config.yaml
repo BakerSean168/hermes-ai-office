@@ -1,7 +1,7 @@
 model_list:
-  - model_name: employment:bootstrap-coding-review
+  - model_name: os.environ/V2_REFERENCE_ROUTE
     litellm_params:
-      model: openai/employment:bootstrap-coding-review
+      model: os.environ/V2_REFERENCE_UPSTREAM_MODEL
       api_base: http://127.0.0.1:8317/v1
       api_key: os.environ/CPA_DATA_API_KEY
       timeout: 120

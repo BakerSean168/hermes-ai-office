@@ -6,7 +6,9 @@ import { CpaAdapter } from './adapters/cpa.mjs';
 import { CpaUsageAdapter } from './adapters/cpaUsage.mjs';
 import { openDb } from './db.mjs';
 import { ControlPlaneStore } from './store.mjs';
+import { registerV2Routes } from './v2/api.js';
 import { runV2Migrations } from './v2/migrations.js';
+import { V2Repository } from './v2/repository.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +73,7 @@ export interface BuildControlPlaneOptions {
 export interface ControlPlaneRuntime {
   app: FastifyInstance;
   store: InstanceType<typeof ControlPlaneStore>;
+  v2: V2Repository;
   dbFile: string;
   host: string;
   port: number;
@@ -98,6 +101,7 @@ export async function buildControlPlane(
   const db = openDb(dbFile);
   if (env.MODEL_CP_V2_SCHEMA !== '0') runV2Migrations(db);
   const store = new ControlPlaneStore(db);
+  const v2 = new V2Repository(db);
   const cpa: LegacyCpaPort =
     options.cpa ??
     (new CpaAdapter({
@@ -190,6 +194,8 @@ export async function buildControlPlane(
     for (const send of listeners) send(event);
     return event;
   };
+
+  registerV2Routes(app, v2);
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -468,5 +474,5 @@ export async function buildControlPlane(
   });
 
   await seed();
-  return { app, store, dbFile, host, port, refreshCpa, startBackgroundJobs };
+  return { app, store, v2, dbFile, host, port, refreshCpa, startBackgroundJobs };
 }

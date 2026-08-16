@@ -7,7 +7,18 @@ interface JsonRecord {
   [key: string]: unknown;
 }
 
-type Row = Record<string, unknown>;
+export type V2Row = Record<string, unknown>;
+type Row = V2Row;
+
+export interface V2Event extends V2Row {
+  seq: number;
+  eventId: string;
+  type: string;
+  occurredAt: number;
+  recordedAt: number;
+}
+
+export type V2EventListener = (event: V2Event) => void;
 
 function now(): number {
   return Date.now();
@@ -71,9 +82,15 @@ export interface BootstrapReferenceResult {
 
 export class V2Repository {
   readonly db: DatabaseSync;
+  readonly #listeners = new Set<V2EventListener>();
 
   constructor(db: DatabaseSync) {
     this.db = db;
+  }
+
+  subscribe(listener: V2EventListener): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
   }
 
   transaction<T>(operation: () => T): T {
@@ -105,7 +122,7 @@ export class V2Repository {
     actorRef?: string;
     payload?: unknown;
     occurredAt?: number;
-  }): Row {
+  }): V2Event {
     const recordedAt = now();
     const eventId = newId('event', recordedAt);
     const result = this.db
@@ -130,7 +147,7 @@ export class V2Repository {
         input.occurredAt ?? recordedAt,
         recordedAt,
       );
-    return {
+    const event: V2Event = {
       seq: Number(result.lastInsertRowid),
       eventId,
       type: input.type,
@@ -140,6 +157,8 @@ export class V2Repository {
       occurredAt: input.occurredAt ?? recordedAt,
       recordedAt,
     };
+    for (const listener of this.#listeners) listener(event);
+    return event;
   }
 
   getOrCreateSupplier(slug: string, name: string): Row {
@@ -749,26 +768,7 @@ export class V2Repository {
 
   workforceProjection(): Row {
     const employees = this.listEmployees();
-    const gateways = rows(
-      this.db
-        .prepare(
-          `SELECT g.*,
-                  COUNT(DISTINCT b.id) active_bindings
-           FROM v2_gateways g
-           LEFT JOIN v2_gateway_bindings b ON b.gateway_id=g.id AND b.lifecycle='ACTIVE'
-           GROUP BY g.id ORDER BY g.display_name`,
-        )
-        .all(),
-    ).map((value) => ({
-      id: value.id,
-      slug: value.slug,
-      kind: value.kind,
-      displayName: value.display_name,
-      lifecycle: value.lifecycle,
-      baseUrlHint: value.base_url_hint,
-      activeBindings: Number(value.active_bindings ?? 0),
-      lastSeenAt: value.last_seen_at,
-    }));
+    const gateways = this.listGateways();
     return {
       projectionVersion: 1,
       generatedAt: now(),
@@ -781,6 +781,128 @@ export class V2Repository {
         currentDuties: employees.reduce((sum, item) => sum + Number(item.currentDutyCount ?? 0), 0),
       },
     };
+  }
+
+  listGateways(): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT g.*,
+                  (SELECT COUNT(*) FROM v2_gateway_bindings b
+                    WHERE b.gateway_id=g.id AND b.lifecycle='ACTIVE') active_bindings
+           FROM v2_gateways g ORDER BY g.display_name`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      slug: value.slug,
+      kind: value.kind,
+      displayName: value.display_name,
+      lifecycle: value.lifecycle,
+      baseUrlHint: value.base_url_hint,
+      activeBindings: Number(value.active_bindings ?? 0),
+      lastSeenAt: value.last_seen_at,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  listPositions(): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT p.*,ws.slug work_scope_slug,ws.name work_scope_name,
+                  (SELECT COUNT(*) FROM v2_appointments a
+                    WHERE a.position_id=p.id AND a.status='CURRENT' AND a.effective_to IS NULL) current_appointments,
+                  (SELECT COUNT(*) FROM v2_duty_sessions d
+                    WHERE d.position_id=p.id AND d.lifecycle='ACTIVE') current_duties
+           FROM v2_positions p
+           LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
+           ORDER BY ws.name,p.name`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      slug: value.slug,
+      name: value.name,
+      kind: value.kind,
+      lifecycle: value.lifecycle,
+      runtimeKind: value.runtime_kind,
+      workScope: value.work_scope_id
+        ? { id: value.work_scope_id, slug: value.work_scope_slug, name: value.work_scope_name }
+        : null,
+      currentAppointmentCount: Number(value.current_appointments ?? 0),
+      currentDutyCount: Number(value.current_duties ?? 0),
+      requirements: decode<JsonRecord>(value.requirements_json, {}),
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  listEmployments(employeeId?: string): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT em.*,a.name agreement_name,a.lifecycle agreement_lifecycle,a.external_account_ref,
+                  e.display_name employee_name
+           FROM v2_employments em
+           JOIN v2_supply_agreements a ON a.id=em.supply_agreement_id
+           JOIN v2_employees e ON e.id=em.employee_id
+           WHERE (? IS NULL OR em.employee_id=?)
+           ORDER BY em.effective_from DESC`,
+        )
+        .all(employeeId ?? null, employeeId ?? null),
+    ).map((value) => ({
+      id: value.id,
+      employeeId: value.employee_id,
+      employeeName: value.employee_name,
+      supplyAgreementId: value.supply_agreement_id,
+      agreementName: value.agreement_name,
+      agreementLifecycle: value.agreement_lifecycle,
+      externalAccountRef: value.external_account_ref,
+      status: value.status,
+      effectiveFrom: value.effective_from,
+      effectiveTo: value.effective_to,
+      endedReason: value.ended_reason,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+  }
+
+  listAppointments(filters: { employeeId?: string; positionId?: string } = {}): Row[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT a.*,e.display_name employee_name,p.name position_name,p.slug position_slug,
+                  ws.name work_scope_name,ws.slug work_scope_slug
+           FROM v2_appointments a
+           JOIN v2_employees e ON e.id=a.employee_id
+           JOIN v2_positions p ON p.id=a.position_id
+           LEFT JOIN v2_work_scopes ws ON ws.id=p.work_scope_id
+           WHERE (? IS NULL OR a.employee_id=?) AND (? IS NULL OR a.position_id=?)
+           ORDER BY a.effective_from DESC`,
+        )
+        .all(
+          filters.employeeId ?? null,
+          filters.employeeId ?? null,
+          filters.positionId ?? null,
+          filters.positionId ?? null,
+        ),
+    ).map((value) => ({
+      id: value.id,
+      employeeId: value.employee_id,
+      employeeName: value.employee_name,
+      positionId: value.position_id,
+      positionName: value.position_name,
+      positionSlug: value.position_slug,
+      workScopeName: value.work_scope_name,
+      workScopeSlug: value.work_scope_slug,
+      class: value.appointment_class,
+      priority: value.priority,
+      status: value.status,
+      effectiveFrom: value.effective_from,
+      effectiveTo: value.effective_to,
+      source: value.source,
+      endedReason: value.ended_reason,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
   }
 
   eventsAfter(seq = 0, limit = 500): Row[] {
