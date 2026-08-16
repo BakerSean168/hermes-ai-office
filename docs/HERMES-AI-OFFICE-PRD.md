@@ -4,6 +4,8 @@ Status: Draft v0.1 for business alignment
 Date: 2026-08-16
 Scope: Hermes AI Office, Model Control Plane, and their integration with Hermes runtimes and CPA
 
+> **Domain model authority:** [`DOMAIN-MODEL-V2.md`](DOMAIN-MODEL-V2.md) is the authoritative domain specification for identity, staffing, execution, supply, history, routing, and archival semantics. Where older terminology in this PRD conflicts with Domain Model V2—especially `Profile -> Position`, `Model Worker = Channel × Model`, `Assignment`, and `Execution Node`—Domain Model V2 supersedes it. This PRD remains authoritative for product goals, workflows, and scope.
+
 ## 1. Why this document exists
 
 The repository currently contains several strong implementation specifications (`SPEC-*`), the Hermes bridge specifications, and a Model Control Plane README. Those documents explain how individual features are built, but they do not yet provide one authoritative business-level description of the product.

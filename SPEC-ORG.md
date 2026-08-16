@@ -1,5 +1,7 @@
 # Hermes Organization Layer — pixel-agents 改造 (实施规格)
 
+> **Historical implementation spec:** This document records the first Hermes Organization Layer implementation. For new business semantics and future migrations, [`docs/DOMAIN-MODEL-V2.md`](docs/DOMAIN-MODEL-V2.md) is authoritative. In particular, Profile/ExecutionNode/Worker terminology here must not override the V2 WorkScope/Position/DutySession/Employee model.
+
 ## 背景
 
 - 母体: pixel-agents(standalone 模式, 已在 127.0.0.1:3100 跑通)
@@ -25,6 +27,7 @@ Provider 集成遵循 pixel-agents 的 CLAUDE.md 分层规则: core/ 零依赖, 
 实现 `HookProvider` 接口的**非 hook 变体**: 不安装 shell hooks, 而是 SSE 订阅 bridge。
 
 新增文件:
+
 - `server/src/providers/hermes/hermesProvider.ts` — 主 provider
 - `server/src/providers/hermes/bridgeClient.ts` — SSE 客户端(订阅 8787 /api/events, 断线重连 + 轮询 fallback)
 - `server/src/providers/hermes/orgModel.ts` — Organization 领域模型(见下)
@@ -42,41 +45,60 @@ Provider 集成遵循 pixel-agents 的 CLAUDE.md 分层规则: core/ 零依赖, 
 ### board → AgentEvent 映射
 
 bridge 的 board 结构:
+
 ```json
 {
-  "gateway": {"version": "0.20.0", "busy": true, "active_agents": 2, "active_sessions": 2},
-  "teams": [{
-    "name": "memoflow", "display": "MemoFlow",
-    "worker_total": 3, "worker_active": 2,
-    "mission": "Sync Engine v2", "elapsed_sec": 1104, "cost_usd": 1.38,
-    "workers": [{
-      "id": "20260812_064027_c0e07db4", "num": 1,
-      "runtime": "opencode", "model": "deepseek-v4-flash",
-      "task": "DeepSeek V4 Pro 版本状态核查",
-      "action": "receiving stream response",
-      "status": "llm_running",           // idle|llm_running|planning|coding|browsing|testing|reviewing|waiting_io|blocked|working
-      "elapsed_sec": 1800,
-      "tokens": {"input": 161102, "output": 57679, "cache_read": 10449280, "reasoning": 32379},
-      "cost_usd": 0.0,
-      "source": "telegram", "chat_id": "-1004334123414", "thread_id": "3",
-      "last_activity_at": 1786767299.1
-    }]
-  }]
+  "gateway": { "version": "0.20.0", "busy": true, "active_agents": 2, "active_sessions": 2 },
+  "teams": [
+    {
+      "name": "memoflow",
+      "display": "MemoFlow",
+      "worker_total": 3,
+      "worker_active": 2,
+      "mission": "Sync Engine v2",
+      "elapsed_sec": 1104,
+      "cost_usd": 1.38,
+      "workers": [
+        {
+          "id": "20260812_064027_c0e07db4",
+          "num": 1,
+          "runtime": "opencode",
+          "model": "deepseek-v4-flash",
+          "task": "DeepSeek V4 Pro 版本状态核查",
+          "action": "receiving stream response",
+          "status": "llm_running", // idle|llm_running|planning|coding|browsing|testing|reviewing|waiting_io|blocked|working
+          "elapsed_sec": 1800,
+          "tokens": {
+            "input": 161102,
+            "output": 57679,
+            "cache_read": 10449280,
+            "reasoning": 32379
+          },
+          "cost_usd": 0.0,
+          "source": "telegram",
+          "chat_id": "-1004334123414",
+          "thread_id": "3",
+          "last_activity_at": 1786767299.1
+        }
+      ]
+    }
+  ]
 }
 ```
 
 映射规则 (bridge diff → AgentEvent, 在 server 端维护上一帧做 diff):
 
-| bridge 变化 | AgentEvent |
-|---|---|
-| 新 team 出现 | 该 team 每个 worker 发 `sessionStart` (sessionId=`hermes:<profile>:<workerId>`) |
-| 新 worker 出现 (active) | `sessionStart` + `toolStart`(toolName=按 status 映射) |
-| worker status 变化 | `toolEnd`(旧) + `toolStart`(新, toolName=映射) |
-| worker action 含工具名 | `toolStart` toolName=提取的工具名 |
-| worker 消失 / 变 idle | `toolEnd` + `turnEnd` |
-| team 全部 idle | `sessionEnd` 仅当 worker 从列表移除 |
+| bridge 变化             | AgentEvent                                                                      |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| 新 team 出现            | 该 team 每个 worker 发 `sessionStart` (sessionId=`hermes:<profile>:<workerId>`) |
+| 新 worker 出现 (active) | `sessionStart` + `toolStart`(toolName=按 status 映射)                           |
+| worker status 变化      | `toolEnd`(旧) + `toolStart`(新, toolName=映射)                                  |
+| worker action 含工具名  | `toolStart` toolName=提取的工具名                                               |
+| worker 消失 / 变 idle   | `toolEnd` + `turnEnd`                                                           |
+| team 全部 idle          | `sessionEnd` 仅当 worker 从列表移除                                             |
 
 status → toolName 映射 (驱动动画):
+
 - planning → `plan` (reading 动画)
 - llm_running → `think` (special: 大脑动画)
 - coding → `write` (typing 动画)
@@ -114,10 +136,21 @@ sessionId 约定: `hermes:<profile>:<workerId>` — 保证 OpenCode/Codex/Hermes
 export type ProfileAvailability = 'ONLINE' | 'DEGRADED' | 'OFFLINE';
 export type ProfileWorkload = 'READY' | 'PLANNING' | 'SUPERVISING' | 'EXECUTING' | 'BLOCKED';
 export type NodeType = 'HERMES_SUBAGENT' | 'OPENCODE' | 'CODEX' | 'TERMINAL' | 'BROWSER' | 'OTHER';
-export type NodeRole = 'SUPERVISOR' | 'ORCHESTRATOR' | 'EXECUTOR' | 'REVIEWER' | 'RESEARCHER' | 'TESTER' | 'INTEGRATOR';
+export type NodeRole =
+  'SUPERVISOR' | 'ORCHESTRATOR' | 'EXECUTOR' | 'REVIEWER' | 'RESEARCHER' | 'TESTER' | 'INTEGRATOR';
 export type NodeState =
-  | 'STARTING' | 'THINKING' | 'CODING' | 'TERMINAL' | 'BROWSING' | 'TESTING'
-  | 'REVIEWING' | 'WAITING_IO' | 'NEEDS_INPUT' | 'BLOCKED' | 'DONE' | 'FAILED';
+  | 'STARTING'
+  | 'THINKING'
+  | 'CODING'
+  | 'TERMINAL'
+  | 'BROWSING'
+  | 'TESTING'
+  | 'REVIEWING'
+  | 'WAITING_IO'
+  | 'NEEDS_INPUT'
+  | 'BLOCKED'
+  | 'DONE'
+  | 'FAILED';
 export type EdgeRelation = 'SPAWNED' | 'DELEGATED' | 'SUPERVISES' | 'REVIEWS' | 'DEPENDS_ON';
 
 export interface ProfileController {
@@ -130,28 +163,51 @@ export interface ProfileController {
 }
 
 export interface Run {
-  id: string; profileId: string; title: string;
+  id: string;
+  profileId: string;
+  title: string;
   status: 'PLANNING' | 'RUNNING' | 'BLOCKED' | 'FINALIZING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
-  createdAt: number; startedAt?: number; completedAt?: number;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
   rootNodeIds: string[];
 }
 
 export interface ExecutionNode {
-  id: string; profileId: string; runId: string; parentId?: string;
-  type: NodeType; role: NodeRole;
-  runtime?: string; model?: string;
-  taskId?: string; taskTitle?: string;
+  id: string;
+  profileId: string;
+  runId: string;
+  parentId?: string;
+  type: NodeType;
+  role: NodeRole;
+  runtime?: string;
+  model?: string;
+  taskId?: string;
+  taskTitle?: string;
   state: NodeState;
-  sessionId?: string; processId?: number;
-  cwd?: string; workspace?: string; worktree?: string; branch?: string;
-  currentTool?: string; currentAction?: string;
-  tokensIn?: number; tokensOut?: number; cachedTokens?: number; cost?: number;
-  startedAt: number; updatedAt: number; lastHeartbeatAt?: number;
+  sessionId?: string;
+  processId?: number;
+  cwd?: string;
+  workspace?: string;
+  worktree?: string;
+  branch?: string;
+  currentTool?: string;
+  currentAction?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  cachedTokens?: number;
+  cost?: number;
+  startedAt: number;
+  updatedAt: number;
+  lastHeartbeatAt?: number;
   metadata?: Record<string, unknown>;
 }
 
 export interface ExecutionEdge {
-  id: string; runId: string; fromNodeId: string; toNodeId: string;
+  id: string;
+  runId: string;
+  fromNodeId: string;
+  toNodeId: string;
   relation: EdgeRelation;
 }
 ```

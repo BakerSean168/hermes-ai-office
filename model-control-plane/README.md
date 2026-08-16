@@ -1,5 +1,7 @@
 # Hermes Model Control Plane
 
+> **Domain migration note:** This README describes the currently deployed Model Control Plane implementation. The authoritative north-star business model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md). In V2, the legacy `Worker = Channel × ModelDefinition` identity becomes a compatibility projection; the durable employee identity is `Employee = SupplyAgreement × ModelOffering`, while `Channel` is only an access route. Existing APIs remain protected during migration.
+
 The Model Control Plane is the source of truth for model workforce identity, routing policy, accounting, quota, and events. It is deliberately separate from both the model data plane (currently CLIProxyAPI/CPA) and Pixel Agents visualization.
 
 ## Domain model
