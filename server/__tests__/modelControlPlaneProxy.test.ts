@@ -24,7 +24,7 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
         JSON.stringify({
           projectionVersion: 2,
           summary: { employees: 1, employed: 1, currentDuties: 0 },
-          employees: [{ id: 'emp_1', displayName: 'DeepSeek @ Planner Pool' }],
+          employees: [{ id: 'emp_1', displayName: 'DeepSeek @ OpenCode' }],
           gateways: [],
         }),
       );
@@ -33,8 +33,19 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
     if (request.url === '/api/v2/projections/employees/emp_1/dossier') {
       response.end(
         JSON.stringify({
-          identity: { id: 'emp_1', displayName: 'DeepSeek @ Planner Pool' },
+          identity: { id: 'emp_1', displayName: 'DeepSeek @ OpenCode' },
           cooperation: { state: 'EMPLOYED' },
+        }),
+      );
+      return;
+    }
+    if (request.url === '/api/v2/projections/supply') {
+      response.end(
+        JSON.stringify({
+          projectionVersion: 2,
+          summary: { suppliers: 1, employees: 1 },
+          suppliers: [{ id: 'sup_1', name: 'OpenCode', employees: [{ id: 'emp_1' }] }],
+          gateways: [],
         }),
       );
       return;
@@ -76,6 +87,13 @@ it('Pixel backend proxies V2 workforce and employee dossier without exposing ups
     });
     expect(office.statusCode).toBe(200);
     expect(office.json().summary.positions).toBe(1);
+
+    const supply = await app.inject({
+      method: 'GET',
+      url: '/api/model/v2/projections/supply',
+    });
+    expect(supply.statusCode).toBe(200);
+    expect(supply.json().suppliers[0].name).toBe('OpenCode');
 
     const incidents = await app.inject({
       method: 'GET',

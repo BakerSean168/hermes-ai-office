@@ -56,6 +56,11 @@ test('typed app factory exposes V2 only and retires public V1 routes', async () 
       marketValue: 0,
     });
 
+    const supply = await runtime.app.inject({ method: 'GET', url: '/api/v2/projections/supply' });
+    assert.equal(supply.statusCode, 200);
+    assert.equal(supply.json().summary.suppliers, 0);
+    assert.deepEqual(supply.json().suppliers, []);
+
     for (const url of [
       '/api/v1/snapshot',
       '/api/v1/dashboard/workforce',

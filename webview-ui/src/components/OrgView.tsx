@@ -1,4 +1,4 @@
-import { type ReactNode, useMemo } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 
 import {
   ORG_AVAILABILITY_DEGRADED_COLOR,
@@ -10,9 +10,11 @@ import {
   ORG_WORKLOAD_READY_COLOR,
 } from '../constants.js';
 import type { OrgNode, OrgProfile, OrgRun, OrgState } from '../org/types.js';
+import { CompanyOverviewPanel } from './CompanyOverviewPanel';
 import { IncidentPanel } from './IncidentPanel';
 import { ModelWorkforcePanel } from './ModelWorkforcePanel.js';
 import { OfficePositionPanel } from './OfficePositionPanel';
+import { SupplierPanel } from './SupplierPanel';
 
 interface OrgViewProps {
   orgState: OrgState | null;
@@ -258,6 +260,9 @@ function computeStats(orgState: OrgState | null): OrgStats {
 }
 
 export function OrgView({ orgState, onClose }: OrgViewProps) {
+  const [section, setSection] = useState<
+    'overview' | 'organization' | 'workforce' | 'suppliers' | 'operations' | 'incidents'
+  >('overview');
   const blocks = useMemo(() => buildBlocks(orgState), [orgState]);
   const stats = useMemo(() => computeStats(orgState), [orgState]);
 
@@ -276,90 +281,138 @@ export function OrgView({ orgState, onClose }: OrgViewProps) {
     return map;
   }, [orgState]);
 
+  const sections = [
+    ['overview', 'Overview'],
+    ['organization', 'Organization'],
+    ['workforce', 'Workforce'],
+    ['suppliers', 'Suppliers'],
+    ['operations', 'Operations'],
+    ['incidents', 'Incidents'],
+  ] as const;
+
   return (
-    <div className="org-sans absolute inset-0 z-30 bg-bg-dark flex flex-col">
-      <div className="flex items-center justify-between p-6 border-b-2 border-border">
-        <div className="flex items-center gap-4">
-          <span className="text-xl">🌐 Organization</span>
-          <span className="text-sm text-text-muted">
-            {stats.profiles} Profiles · {stats.activeRuns} Active Runs · {stats.activeWorkers}{' '}
-            Active Workers
-          </span>
-        </div>
-        <button
-          onClick={onClose}
-          className="px-6 py-2 text-base bg-btn-bg hover:bg-btn-hover border-2 border-border rounded-none cursor-pointer"
-        >
-          Back to Office
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-auto p-6">
-        <div className="mb-6">
-          <ModelWorkforcePanel />
-          <OfficePositionPanel />
-          <IncidentPanel />
-        </div>
-        {blocks.length === 0 ? (
-          <div className="text-base text-text-muted">
-            No Hermes bridge data yet. Waiting for the first board frame…
+    <div className="org-sans absolute inset-0 z-30 flex flex-col bg-bg-dark">
+      <header className="border-b-2 border-border bg-bg">
+        <div className="flex flex-wrap items-center justify-between gap-4 px-6 py-5">
+          <div>
+            <div className="text-xl">Hermes AI Company</div>
+            <div className="mt-1 text-xs text-text-muted">
+              {stats.profiles} Hermes workspaces observed · {stats.activeRuns} active runs ·{' '}
+              {stats.activeWorkers} active runtime workers
+            </div>
           </div>
-        ) : (
-          <div className="flex flex-col gap-6">
-            {blocks.map((block) => (
-              <div
-                key={block.profile.profileId}
-                className="pixel-panel p-6"
-                style={{ backgroundColor: 'var(--color-bg)' }}
-              >
-                <div className="flex items-center gap-4 mb-4">
-                  <span className="text-xl">🏢</span>
-                  <span className="text-lg">{block.title}</span>
-                  <Badge
-                    label={block.workload}
-                    color={WORKLOAD_COLORS[block.workload] ?? ORG_WORKLOAD_READY_COLOR}
-                  />
-                  <Badge
-                    label={block.availability}
-                    color={
-                      AVAILABILITY_COLORS[block.availability] ?? ORG_AVAILABILITY_OFFLINE_COLOR
-                    }
-                  />
-                </div>
+          <button
+            onClick={onClose}
+            className="cursor-pointer rounded-none border-2 border-border bg-btn-bg px-6 py-2 text-base hover:bg-btn-hover"
+          >
+            Back to Office
+          </button>
+        </div>
+        <nav
+          className="flex gap-1 overflow-x-auto border-t border-border px-6"
+          aria-label="Company console sections"
+        >
+          {sections.map(([id, label]) => (
+            <button
+              className={`cursor-pointer border-x border-t border-border px-5 py-3 text-sm ${
+                section === id
+                  ? 'bg-active-bg text-text'
+                  : 'bg-bg-dark text-text-muted hover:bg-btn-hover'
+              }`}
+              key={id}
+              onClick={() => setSection(id)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-                <ControllerRow profile={block.profile} />
+      <main className="flex-1 overflow-auto p-6">
+        {section === 'overview' ? <CompanyOverviewPanel /> : null}
+        {section === 'organization' ? <OfficePositionPanel /> : null}
+        {section === 'workforce' ? <ModelWorkforcePanel /> : null}
+        {section === 'suppliers' ? <SupplierPanel /> : null}
+        {section === 'incidents' ? <IncidentPanel /> : null}
+        {section === 'operations' ? (
+          <OperationsPanel blocks={blocks} dependsOnByTo={dependsOnByTo} nodesById={nodesById} />
+        ) : null}
+      </main>
+    </div>
+  );
+}
 
-                {block.runs.length === 0 ? (
-                  <div className="pl-10 text-sm text-text-muted">No active runs</div>
+function OperationsPanel({
+  blocks,
+  nodesById,
+  dependsOnByTo,
+}: {
+  blocks: ProfileBlock[];
+  nodesById: Map<string, OrgNode>;
+  dependsOnByTo: Map<string, string[]>;
+}) {
+  if (blocks.length === 0) {
+    return (
+      <div className="pixel-panel p-5 text-sm text-text-muted">
+        No Hermes runtime observations yet. Waiting for the first board frame…
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-6">
+      <div>
+        <div className="text-lg">Runtime Operations</div>
+        <div className="mt-1 text-xs text-text-muted">
+          Hermes Profiles, Runs and execution nodes are operational evidence. They do not define
+          Employee identity.
+        </div>
+      </div>
+      {blocks.map((block) => (
+        <div key={block.profile.profileId} className="pixel-panel p-6">
+          <div className="mb-4 flex items-center gap-4">
+            <span className="text-xl">🏢</span>
+            <span className="text-lg">{block.title}</span>
+            <Badge
+              label={block.workload}
+              color={WORKLOAD_COLORS[block.workload] ?? ORG_WORKLOAD_READY_COLOR}
+            />
+            <Badge
+              label={block.availability}
+              color={AVAILABILITY_COLORS[block.availability] ?? ORG_AVAILABILITY_OFFLINE_COLOR}
+            />
+          </div>
+
+          <ControllerRow profile={block.profile} />
+
+          {block.runs.length === 0 ? (
+            <div className="pl-10 text-sm text-text-muted">No active runs</div>
+          ) : (
+            block.runs.map((run) => (
+              <div key={run.key} className="mb-4 last:mb-0">
+                <RunHeader run={run} />
+                {run.tree.length === 0 ? (
+                  <div className="pl-10 text-sm text-text-muted">
+                    Controller-owned run · no delegated runtime workers
+                  </div>
                 ) : (
-                  block.runs.map((run) => (
-                    <div key={run.key} className="mb-4 last:mb-0">
-                      <RunHeader run={run} />
-                      {run.tree.length === 0 ? (
-                        <div className="pl-10 text-sm text-text-muted">
-                          Controller-owned run · no delegated workers
-                        </div>
-                      ) : (
-                        <div className="flex flex-col gap-1">
-                          {run.tree.map((t) => (
-                            <NodeRow
-                              key={t.node.id}
-                              treeNode={t}
-                              depth={0}
-                              nodesById={nodesById}
-                              dependsOnByTo={dependsOnByTo}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  ))
+                  <div className="flex flex-col gap-1">
+                    {run.tree.map((treeNode) => (
+                      <NodeRow
+                        key={treeNode.node.id}
+                        treeNode={treeNode}
+                        depth={0}
+                        nodesById={nodesById}
+                        dependsOnByTo={dependsOnByTo}
+                      />
+                    ))}
+                  </div>
                 )}
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            ))
+          )}
+        </div>
+      ))}
     </div>
   );
 }

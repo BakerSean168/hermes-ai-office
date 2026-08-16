@@ -159,6 +159,10 @@ export function registerModelControlPlaneRoutes(app: FastifyInstance): void {
     proxyJson('/api/v2/projections/office', reply),
   );
 
+  app.get('/api/model/v2/projections/supply', async (_request, reply) =>
+    proxyJson('/api/v2/projections/supply', reply),
+  );
+
   app.get('/api/model/v2/incidents', async (request, reply) => {
     const query = request.query as Record<string, unknown>;
     const params = new URLSearchParams();

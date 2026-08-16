@@ -139,6 +139,22 @@ export function registerV2Routes(
     };
   });
 
+  app.get(
+    '/api/v2/projections/supply',
+    async () =>
+      services.supply?.projection() ?? {
+        projectionVersion: 2,
+        generatedAt: Date.now(),
+        suppliers: [],
+        gateways: [],
+        unmappedInfrastructure: { channels: [], count: 0 },
+        summary: {},
+      },
+  );
+  app.get('/api/v2/suppliers', async () => ({
+    items: (services.supply?.projection().suppliers as unknown[]) ?? [],
+  }));
+
   app.get('/api/v2/supply-agreements', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
     return {

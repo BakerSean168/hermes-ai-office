@@ -506,6 +506,189 @@ export class SupplyRepository {
     }));
   }
 
+  projection(): V2Row {
+    const suppliers = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT id,slug,name,lifecycle,metadata_json,created_at,updated_at
+           FROM v2_suppliers ORDER BY name`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      slug: value.slug,
+      name: value.name,
+      lifecycle: value.lifecycle,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+      createdAt: value.created_at,
+      updatedAt: value.updated_at,
+    }));
+    const supplierModels = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT id,supplier_id,supplier_model_key,model_definition_ref,aliases_json,display_name,lifecycle,
+                  first_seen_at,retired_at,metadata_json
+           FROM v2_supplier_models ORDER BY display_name`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      supplierId: value.supplier_id,
+      key: value.supplier_model_key,
+      modelDefinitionRef: value.model_definition_ref,
+      aliases: decode<string[]>(value.aliases_json, []),
+      name: value.display_name,
+      lifecycle: value.lifecycle,
+      firstSeenAt: value.first_seen_at,
+      retiredAt: value.retired_at,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+    const plans = this.listPlans();
+    const agreements = this.listSupplyAgreements();
+    const offerings = this.listModelOfferings();
+    const capacityPools = this.listCapacityPools();
+    const employees = this.#domain.listEmployees();
+    const employments = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT em.*,e.display_name employee_name,e.supplier_id,e.supplier_model_id,
+                  sm.supplier_model_key,sm.display_name supplier_model_name,
+                  a.name agreement_name,a.lifecycle agreement_lifecycle
+           FROM v2_employments em
+           JOIN v2_employees e ON e.id=em.employee_id
+           JOIN v2_supplier_models sm ON sm.id=e.supplier_model_id
+           JOIN v2_supply_agreements a ON a.id=em.supply_agreement_id
+           ORDER BY em.effective_from DESC`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      employeeId: value.employee_id,
+      employeeName: value.employee_name,
+      supplierId: value.supplier_id,
+      supplierModelId: value.supplier_model_id,
+      supplierModelKey: value.supplier_model_key,
+      supplierModelName: value.supplier_model_name,
+      supplyAgreementId: value.supply_agreement_id,
+      agreementName: value.agreement_name,
+      agreementLifecycle: value.agreement_lifecycle,
+      modelOfferingId: value.model_offering_id,
+      status: value.status,
+      effectiveFrom: value.effective_from,
+      effectiveTo: value.effective_to,
+      endedReason: value.ended_reason,
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+    const bindings = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT b.*,g.slug gateway_slug,g.display_name gateway_name,g.kind gateway_kind,
+                  em.supply_agreement_id
+           FROM v2_gateway_bindings b
+           JOIN v2_gateways g ON g.id=b.gateway_id
+           JOIN v2_employments em ON em.id=b.employment_id
+           ORDER BY g.display_name,b.priority DESC,b.created_at`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      employmentId: value.employment_id,
+      supplyAgreementId: value.supply_agreement_id,
+      gatewayId: value.gateway_id,
+      gatewaySlug: value.gateway_slug,
+      gatewayName: value.gateway_name,
+      gatewayKind: value.gateway_kind,
+      externalRouteRef: value.external_route_ref,
+      protocol: value.protocol,
+      lifecycle: value.lifecycle,
+      priority: Number(value.priority ?? 0),
+      metadata: decode<JsonRecord>(value.metadata_json, {}),
+    }));
+    const channels = this.#domain.listChannels();
+    const gateways = this.#domain.listGateways();
+
+    const supplierItems = suppliers.map((supplier) => {
+      const supplierId = String(supplier.id);
+      const supplierAgreements = agreements.filter((item) => item.supplierId === supplierId);
+      const agreementIds = new Set(supplierAgreements.map((item) => String(item.id)));
+      const supplierEmployments = employments.filter((item) => item.supplierId === supplierId);
+      const employmentIds = new Set(supplierEmployments.map((item) => String(item.id)));
+      const supplierEmployees = employees.filter(
+        (item) => (item.supplier as { id?: unknown } | undefined)?.id === supplierId,
+      );
+      return {
+        ...supplier,
+        supplierModels: supplierModels.filter((item) => item.supplierId === supplierId),
+        plans: plans.filter((item) => item.supplierId === supplierId),
+        modelOfferings: offerings.filter((item) => item.supplierId === supplierId),
+        employees: supplierEmployees,
+        agreements: supplierAgreements.map((agreement) => ({
+          ...agreement,
+          employments: supplierEmployments
+            .filter((employment) => employment.supplyAgreementId === agreement.id)
+            .map((employment) => ({
+              ...employment,
+              employee: supplierEmployees.find((item) => item.id === employment.employeeId) ?? null,
+              bindings: bindings.filter((binding) => binding.employmentId === employment.id),
+            })),
+          capacityPools: capacityPools.filter((pool) => pool.supplyAgreementId === agreement.id),
+          channels: channels.filter((channel) => channel.supplyAgreementId === agreement.id),
+        })),
+        infrastructure: {
+          bindings: bindings.filter((binding) => employmentIds.has(String(binding.employmentId))),
+          channels: channels.filter(
+            (channel) =>
+              channel.supplyAgreementId != null &&
+              agreementIds.has(String(channel.supplyAgreementId)),
+          ),
+        },
+        summary: {
+          supplierModels: supplierModels.filter((item) => item.supplierId === supplierId).length,
+          employees: supplierEmployees.length,
+          employed: supplierEmployees.filter((item) => item.cooperationState === 'EMPLOYED').length,
+          plans: plans.filter((item) => item.supplierId === supplierId).length,
+          agreements: supplierAgreements.length,
+          activeAgreements: supplierAgreements.filter((item) => item.lifecycle === 'ACTIVE').length,
+          currentEmployments: supplierEmployments.filter((item) => item.status === 'CURRENT')
+            .length,
+          capacityPools: capacityPools.filter((pool) =>
+            agreementIds.has(String(pool.supplyAgreementId)),
+          ).length,
+          activeBindings: bindings.filter(
+            (binding) =>
+              employmentIds.has(String(binding.employmentId)) && binding.lifecycle === 'ACTIVE',
+          ).length,
+        },
+      };
+    });
+
+    const unmappedChannels = channels.filter((channel) => channel.supplyAgreementId == null);
+    return {
+      projectionVersion: 2,
+      generatedAt: now(),
+      suppliers: supplierItems,
+      gateways,
+      unmappedInfrastructure: {
+        channels: unmappedChannels,
+        count: unmappedChannels.length,
+      },
+      summary: {
+        suppliers: supplierItems.length,
+        activeSuppliers: supplierItems.filter((item) => item.lifecycle === 'ACTIVE').length,
+        supplierModels: supplierModels.length,
+        employees: employees.length,
+        plans: plans.length,
+        agreements: agreements.length,
+        activeAgreements: agreements.filter((item) => item.lifecycle === 'ACTIVE').length,
+        currentEmployments: employments.filter((item) => item.status === 'CURRENT').length,
+        capacityPools: capacityPools.length,
+        activeBindings: bindings.filter((item) => item.lifecycle === 'ACTIVE').length,
+        gateways: gateways.length,
+        unmappedChannels: unmappedChannels.length,
+      },
+    };
+  }
+
   capacityForAgreement(supplyAgreementId: string): CapacityState {
     const pools = this.listCapacityPools(supplyAgreementId).filter(
       (pool) => pool.lifecycle === 'ACTIVE',

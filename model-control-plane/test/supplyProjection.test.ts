@@ -1,0 +1,109 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { openDb } from '../src/db.mjs';
+import { runV2Migrations } from '../src/v2/migrations.js';
+import { V2Repository } from '../src/v2/repository.js';
+import { SupplyRepository } from '../src/v2/supply.js';
+
+function make() {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const repository = new V2Repository(db);
+  const supply = new SupplyRepository(repository);
+  const seeded = repository.bootstrapReference({
+    supplierSlug: 'opencode',
+    supplierName: 'OpenCode',
+    supplierModelKey: 'deepseek-v4-flash',
+    supplierModelName: 'DeepSeek V4 Flash',
+    agreementRef: 'opencode-go-primary',
+    agreementName: 'OpenCode Go / Primary subscription',
+    gatewaySlug: 'litellm-reference',
+    gatewayKind: 'LITELLM',
+    gatewayName: 'LiteLLM Reference Gateway',
+    workScopeSlug: 'development',
+    workScopeName: 'Development',
+    positionSlug: 'coding-review',
+    positionName: 'Coding Reviewer',
+    positionKind: 'REVIEWER',
+    runtimeKind: 'CODEX',
+    protocol: 'openai-responses',
+  });
+  return { repository, supply, seeded };
+}
+
+test('Supply projection exposes HR supplier hierarchy without assigning unmapped gateway evidence', () => {
+  const { repository, supply, seeded } = make();
+  const plan = supply.getOrCreatePlan({
+    supplierId: seeded.supplierId,
+    slug: 'go',
+    name: 'OpenCode Go',
+    commercialType: 'SUBSCRIPTION',
+  });
+  supply.assignPlanToAgreement(seeded.agreementId, String(plan.id));
+  const offering = supply.getOrCreateModelOffering({
+    supplierId: seeded.supplierId,
+    supplierModelId: seeded.supplierModelId,
+    planId: String(plan.id),
+    supplyAgreementId: seeded.agreementId,
+    protocolOptions: ['openai-responses'],
+  });
+  supply.assignOfferingToEmployment(seeded.employmentId, String(offering.id));
+  supply.upsertCapacityPool({
+    supplyAgreementId: seeded.agreementId,
+    name: 'monthly-requests',
+    dimension: 'REQUESTS',
+    limit: 1_000,
+    remaining: 600,
+    unit: 'requests',
+    source: 'TEST',
+  });
+
+  repository.upsertChannelObservation({
+    gatewayId: seeded.gatewayId,
+    supplyAgreementId: seeded.agreementId,
+    externalRouteRef: 'opencode-go/deepseek-v4-flash',
+    name: 'OpenCode Go',
+    protocol: 'openai-responses',
+    health: 'HEALTHY',
+    observedAt: Date.now(),
+  });
+  repository.upsertChannelObservation({
+    gatewayId: seeded.gatewayId,
+    externalRouteRef: 'technical/unmapped/model-x',
+    name: 'Technical route only',
+    protocol: 'openai-responses',
+    health: 'UNKNOWN',
+    observedAt: Date.now(),
+  });
+
+  const projection = supply.projection();
+  assert.deepEqual(projection.summary, {
+    suppliers: 1,
+    activeSuppliers: 1,
+    supplierModels: 1,
+    employees: 1,
+    plans: 1,
+    agreements: 1,
+    activeAgreements: 1,
+    currentEmployments: 1,
+    capacityPools: 1,
+    activeBindings: 1,
+    gateways: 1,
+    unmappedChannels: 1,
+  });
+
+  const supplier = (projection.suppliers as Array<Record<string, unknown>>)[0]!;
+  assert.equal(supplier.name, 'OpenCode');
+  assert.equal((supplier.plans as unknown[]).length, 1);
+  assert.equal(
+    (supplier.employees as Array<Record<string, unknown>>)[0]?.displayName,
+    'DeepSeek V4 Flash @ OpenCode',
+  );
+  const agreement = (supplier.agreements as Array<Record<string, unknown>>)[0]!;
+  assert.equal(agreement.planName, 'OpenCode Go');
+  assert.equal((agreement.employments as unknown[]).length, 1);
+  assert.equal((agreement.capacityPools as unknown[]).length, 1);
+  assert.equal((agreement.channels as Array<Record<string, unknown>>)[0]?.name, 'OpenCode Go');
+  assert.equal((projection.unmappedInfrastructure as Record<string, unknown>).count, 1);
+});
