@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { DispatchService } from './dispatch.js';
 import type { InvocationService } from './invocation.js';
+import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
 
 function number(value: unknown, fallback: number): number {
@@ -12,7 +13,11 @@ function number(value: unknown, fallback: number): number {
 export function registerV2Routes(
   app: FastifyInstance,
   repository: V2Repository,
-  services: { dispatchService?: DispatchService; invocationService?: InvocationService } = {},
+  services: {
+    dispatchService?: DispatchService;
+    invocationService?: InvocationService;
+    lifecycleService?: WorkforceLifecycleService;
+  } = {},
 ): void {
   app.get('/api/v2/health', async () => ({
     status: 'ok',
@@ -154,6 +159,113 @@ export function registerV2Routes(
         return result;
       } catch (error) {
         const code = error instanceof Error ? error.message : 'DISPATCH_FAILED';
+        reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+        return { error: { code } };
+      }
+    },
+  );
+
+  const lifecycleError = (error: unknown): { status: number; code: string } => {
+    const code = error instanceof Error ? error.message : 'LIFECYCLE_COMMAND_FAILED';
+    if (code.endsWith('_NOT_FOUND')) return { status: 404, code };
+    if (
+      code.endsWith('_NOT_SUSPENDABLE') ||
+      code.endsWith('_NOT_RESUMABLE') ||
+      code.endsWith('_NOT_ENDABLE')
+    ) {
+      return { status: 409, code };
+    }
+    return { status: 422, code };
+  };
+
+  for (const action of ['suspend', 'resume', 'end'] as const) {
+    app.post<{ Params: { employmentId: string } }>(
+      `/api/v2/commands/employments/:employmentId/${action}`,
+      async (request, reply) => {
+        if (!services.lifecycleService) {
+          reply.code(503);
+          return { error: { code: 'LIFECYCLE_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        try {
+          if (action === 'suspend') {
+            return await services.lifecycleService.suspendEmployment(request.params.employmentId, {
+              reason: body.reason ? String(body.reason) : undefined,
+              correlationId: body.correlationId ? String(body.correlationId) : undefined,
+            });
+          }
+          if (action === 'resume') {
+            return await services.lifecycleService.resumeEmployment(request.params.employmentId, {
+              correlationId: body.correlationId ? String(body.correlationId) : undefined,
+            });
+          }
+          return await services.lifecycleService.endEmployment(request.params.employmentId, {
+            reason: body.reason ? String(body.reason) : undefined,
+            correlationId: body.correlationId ? String(body.correlationId) : undefined,
+          });
+        } catch (error) {
+          const failure = lifecycleError(error);
+          reply.code(failure.status);
+          return { error: { code: failure.code } };
+        }
+      },
+    );
+  }
+
+  for (const action of ['suspend', 'resume', 'end'] as const) {
+    app.post<{ Params: { appointmentId: string } }>(
+      `/api/v2/commands/appointments/:appointmentId/${action}`,
+      async (request, reply) => {
+        if (!services.lifecycleService) {
+          reply.code(503);
+          return { error: { code: 'LIFECYCLE_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        try {
+          if (action === 'suspend') {
+            return await services.lifecycleService.suspendAppointment(
+              request.params.appointmentId,
+              {
+                reason: body.reason ? String(body.reason) : undefined,
+                correlationId: body.correlationId ? String(body.correlationId) : undefined,
+              },
+            );
+          }
+          if (action === 'resume') {
+            return await services.lifecycleService.resumeAppointment(request.params.appointmentId, {
+              correlationId: body.correlationId ? String(body.correlationId) : undefined,
+            });
+          }
+          return await services.lifecycleService.endAppointment(request.params.appointmentId, {
+            reason: body.reason ? String(body.reason) : undefined,
+            correlationId: body.correlationId ? String(body.correlationId) : undefined,
+          });
+        } catch (error) {
+          const failure = lifecycleError(error);
+          reply.code(failure.status);
+          return { error: { code: failure.code } };
+        }
+      },
+    );
+  }
+
+  app.post<{ Params: { dutySessionId: string } }>(
+    '/api/v2/commands/duties/:dutySessionId/redispatch',
+    async (request, reply) => {
+      if (!services.dispatchService) {
+        reply.code(503);
+        return { error: { code: 'DISPATCH_SERVICE_UNAVAILABLE' } };
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      try {
+        const result = await services.dispatchService.dispatchDuty(request.params.dutySessionId, {
+          trigger: body.trigger ? String(body.trigger) : 'OPERATOR_REDISPATCH',
+          correlationId: body.correlationId ? String(body.correlationId) : undefined,
+        });
+        if (!result.selected) reply.code(422);
+        return result;
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'REDISPATCH_FAILED';
         reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
         return { error: { code } };
       }

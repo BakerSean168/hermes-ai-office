@@ -424,6 +424,124 @@ export class V2Repository {
     return row(this.db.prepare('SELECT * FROM v2_employments WHERE id=?').get(id))!;
   }
 
+  getEmployment(employmentId: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT em.*,a.lifecycle agreement_lifecycle,a.name agreement_name
+           FROM v2_employments em
+           JOIN v2_supply_agreements a ON a.id=em.supply_agreement_id
+           WHERE em.id=?`,
+        )
+        .get(employmentId),
+    );
+  }
+
+  suspendEmployment(
+    employmentId: string,
+    reason = 'OPERATOR_SUSPENDED',
+    correlationId?: string,
+  ): Row {
+    const existing = this.getEmployment(employmentId);
+    if (!existing) throw new Error('EMPLOYMENT_NOT_FOUND');
+    if (existing.status === 'SUSPENDED') return existing;
+    if (existing.status !== 'CURRENT') throw new Error('EMPLOYMENT_NOT_SUSPENDABLE');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_employments SET status='SUSPENDED',ended_reason=?,updated_at=? WHERE id=?`,
+        )
+        .run(reason, timestamp, employmentId);
+      this.emit({
+        type: 'employment.suspended',
+        correlationId,
+        entityType: 'Employment',
+        entityId: employmentId,
+        payload: { employeeId: existing.employee_id, reason },
+      });
+      return this.getEmployment(employmentId)!;
+    });
+  }
+
+  resumeEmployment(employmentId: string, correlationId?: string): Row {
+    const existing = this.getEmployment(employmentId);
+    if (!existing) throw new Error('EMPLOYMENT_NOT_FOUND');
+    if (existing.status === 'CURRENT') return existing;
+    if (existing.status !== 'SUSPENDED') throw new Error('EMPLOYMENT_NOT_RESUMABLE');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_employments SET status='CURRENT',ended_reason=NULL,updated_at=? WHERE id=?`,
+        )
+        .run(timestamp, employmentId);
+      this.emit({
+        type: 'employment.resumed',
+        correlationId,
+        entityType: 'Employment',
+        entityId: employmentId,
+        payload: { employeeId: existing.employee_id },
+      });
+      return this.getEmployment(employmentId)!;
+    });
+  }
+
+  endEmployment(employmentId: string, reason = 'OPERATOR_ENDED', correlationId?: string): Row {
+    const existing = this.getEmployment(employmentId);
+    if (!existing) throw new Error('EMPLOYMENT_NOT_FOUND');
+    if (existing.status === 'ENDED') return existing;
+    if (!['SCHEDULED', 'CURRENT', 'SUSPENDED'].includes(String(existing.status))) {
+      throw new Error('EMPLOYMENT_NOT_ENDABLE');
+    }
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_employments
+           SET status='ENDED',effective_to=COALESCE(effective_to,?),ended_reason=?,updated_at=?
+           WHERE id=?`,
+        )
+        .run(timestamp, reason, timestamp, employmentId);
+      const currentCount = Number(
+        row(
+          this.db
+            .prepare(
+              `SELECT COUNT(*) count FROM v2_employments
+               WHERE employee_id=? AND status='CURRENT' AND effective_to IS NULL`,
+            )
+            .get(String(existing.employee_id)),
+        )?.count ?? 0,
+      );
+      this.emit({
+        type: 'employment.ended',
+        correlationId,
+        entityType: 'Employment',
+        entityId: employmentId,
+        payload: {
+          employeeId: existing.employee_id,
+          supplyAgreementId: existing.supply_agreement_id,
+          reason,
+          employeeCooperationStateAfter: currentCount > 0 ? 'EMPLOYED' : 'DORMANT',
+        },
+      });
+      return this.getEmployment(employmentId)!;
+    });
+  }
+
+  activeDutyIdsForEmployee(employeeId: string): string[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT d.id FROM v2_duty_sessions d
+           JOIN v2_staffing_segments ss ON ss.duty_session_id=d.id AND ss.ended_at IS NULL
+           WHERE ss.employee_id=? AND d.lifecycle='ACTIVE'
+           ORDER BY d.opened_at`,
+        )
+        .all(employeeId),
+    ).map((value) => String(value.id));
+  }
+
   getOrCreateGateway(input: {
     slug: string;
     kind: 'LITELLM' | 'CPA' | 'DIRECT' | 'OTHER';
@@ -606,6 +724,118 @@ export class V2Repository {
       payload: { employeeId: input.employeeId, positionId: input.positionId },
     });
     return row(this.db.prepare('SELECT * FROM v2_appointments WHERE id=?').get(id))!;
+  }
+
+  getAppointment(appointmentId: string): Row | null {
+    return row(
+      this.db
+        .prepare(
+          `SELECT a.*,e.display_name employee_name,p.name position_name
+           FROM v2_appointments a
+           JOIN v2_employees e ON e.id=a.employee_id
+           JOIN v2_positions p ON p.id=a.position_id
+           WHERE a.id=?`,
+        )
+        .get(appointmentId),
+    );
+  }
+
+  suspendAppointment(
+    appointmentId: string,
+    reason = 'OPERATOR_SUSPENDED',
+    correlationId?: string,
+  ): Row {
+    const existing = this.getAppointment(appointmentId);
+    if (!existing) throw new Error('APPOINTMENT_NOT_FOUND');
+    if (existing.status === 'SUSPENDED') return existing;
+    if (existing.status !== 'CURRENT') throw new Error('APPOINTMENT_NOT_SUSPENDABLE');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_appointments SET status='SUSPENDED',ended_reason=?,updated_at=? WHERE id=?`,
+        )
+        .run(reason, timestamp, appointmentId);
+      this.emit({
+        type: 'appointment.suspended',
+        correlationId,
+        entityType: 'Appointment',
+        entityId: appointmentId,
+        payload: {
+          employeeId: existing.employee_id,
+          positionId: existing.position_id,
+          reason,
+        },
+      });
+      return this.getAppointment(appointmentId)!;
+    });
+  }
+
+  resumeAppointment(appointmentId: string, correlationId?: string): Row {
+    const existing = this.getAppointment(appointmentId);
+    if (!existing) throw new Error('APPOINTMENT_NOT_FOUND');
+    if (existing.status === 'CURRENT') return existing;
+    if (existing.status !== 'SUSPENDED') throw new Error('APPOINTMENT_NOT_RESUMABLE');
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_appointments SET status='CURRENT',ended_reason=NULL,updated_at=? WHERE id=?`,
+        )
+        .run(timestamp, appointmentId);
+      this.emit({
+        type: 'appointment.resumed',
+        correlationId,
+        entityType: 'Appointment',
+        entityId: appointmentId,
+        payload: { employeeId: existing.employee_id, positionId: existing.position_id },
+      });
+      return this.getAppointment(appointmentId)!;
+    });
+  }
+
+  endAppointment(appointmentId: string, reason = 'OPERATOR_ENDED', correlationId?: string): Row {
+    const existing = this.getAppointment(appointmentId);
+    if (!existing) throw new Error('APPOINTMENT_NOT_FOUND');
+    if (existing.status === 'ENDED') return existing;
+    if (!['SCHEDULED', 'CURRENT', 'SUSPENDED'].includes(String(existing.status))) {
+      throw new Error('APPOINTMENT_NOT_ENDABLE');
+    }
+    const timestamp = now();
+    return this.transaction(() => {
+      this.db
+        .prepare(
+          `UPDATE v2_appointments
+           SET status='ENDED',effective_to=COALESCE(effective_to,?),ended_reason=?,updated_at=?
+           WHERE id=?`,
+        )
+        .run(timestamp, reason, timestamp, appointmentId);
+      this.emit({
+        type: 'appointment.ended',
+        correlationId,
+        entityType: 'Appointment',
+        entityId: appointmentId,
+        payload: {
+          employeeId: existing.employee_id,
+          positionId: existing.position_id,
+          reason,
+        },
+      });
+      return this.getAppointment(appointmentId)!;
+    });
+  }
+
+  activeDutyIdsForAppointment(appointmentId: string): string[] {
+    return rows(
+      this.db
+        .prepare(
+          `SELECT d.id FROM v2_duty_sessions d
+           JOIN v2_staffing_segments ss ON ss.duty_session_id=d.id AND ss.ended_at IS NULL
+           WHERE ss.appointment_id=? AND d.lifecycle='ACTIVE'
+           ORDER BY d.opened_at`,
+        )
+        .all(appointmentId),
+    ).map((value) => String(value.id));
   }
 
   bootstrapReference(input: BootstrapReferenceInput): BootstrapReferenceResult {
@@ -1304,6 +1534,22 @@ export class V2Repository {
           )
           .run(input.dutySessionId);
       } else {
+        if (open) {
+          this.db
+            .prepare(
+              `UPDATE v2_staffing_segments SET ended_at=?,ended_reason='UNAVAILABLE' WHERE id=?`,
+            )
+            .run(timestamp, String(open.id));
+          this.emit({
+            type: 'staffing_segment.ended',
+            entityType: 'StaffingSegment',
+            entityId: String(open.id),
+            runId: String(duty.run_id),
+            dutySessionId: input.dutySessionId,
+            correlationId: input.correlationId,
+            payload: { reason: 'UNAVAILABLE', employeeId: open.employee_id },
+          });
+        }
         this.db
           .prepare("UPDATE v2_duty_sessions SET current_activity='BLOCKED' WHERE id=?")
           .run(input.dutySessionId);
@@ -1338,7 +1584,7 @@ export class V2Repository {
       this.db
         .prepare(
           `SELECT * FROM v2_dispatch_decisions
-           WHERE (? IS NULL OR duty_session_id=?) ORDER BY decided_at DESC`,
+           WHERE (? IS NULL OR duty_session_id=?) ORDER BY decided_at DESC,rowid DESC`,
         )
         .all(dutySessionId ?? null, dutySessionId ?? null),
     ).map((value) => ({
@@ -1369,7 +1615,13 @@ export class V2Repository {
                   g.id gateway_db_id,g.slug gateway_slug
            FROM v2_duty_sessions d
            JOIN v2_staffing_segments ss ON ss.duty_session_id=d.id AND ss.ended_at IS NULL
-           JOIN v2_dispatch_decisions dd ON dd.id=ss.dispatch_decision_id
+           JOIN v2_dispatch_decisions dd ON dd.id=(
+             SELECT latest.id FROM v2_dispatch_decisions latest
+             WHERE latest.duty_session_id=d.id
+               AND latest.selected_employee_id=ss.employee_id
+               AND latest.selected_employment_id IS NOT NULL
+             ORDER BY latest.decided_at DESC,latest.rowid DESC LIMIT 1
+           )
            JOIN v2_employees e ON e.id=ss.employee_id
            JOIN v2_employments em
              ON em.id=dd.selected_employment_id AND em.employee_id=e.id
