@@ -204,17 +204,7 @@ Endpoint:
 GET /api/v2/projections/workforce
 ```
 
-Hierarchy:
-
-```text
-Supplier
-  -> Employees
-       -> current Employments
-            -> SupplyAgreement
-            -> ModelOffering
-            -> Channels
-            -> CapacityPools
-```
+The Workforce projection is deliberately Employee-centric. It exposes durable Employee identity, current Appointments/work and career usage. It may include coarse gateway counts for backwards read compatibility, but the product Workforce page does not use gateway inventory as employee content.
 
 Do not render Channel as an Employee card.
 
@@ -232,7 +222,31 @@ lifetime actual/allocated/market cost
 recent reliability
 ```
 
-## 7. Employee dossier
+## 7. Supply / HR projection
+
+Endpoint:
+
+```text
+GET /api/v2/projections/supply
+```
+
+Hierarchy:
+
+```text
+Supplier
+  -> SupplierModel / Employee
+  -> Plan / SupplyAgreement
+       -> Employment
+            -> GatewayBinding
+       -> CapacityPool
+       -> mapped Channel evidence
+```
+
+The projection also contains `unmappedInfrastructure`, grouped by Gateway + Channel, for technical routes whose commercial Supplier/Agreement has not been explicitly classified. This is an intentional quarantine boundary: missing commercial identity is visible to operators but cannot fabricate a Supplier or Employee.
+
+The Suppliers product area is the only top-level Company Console view that foregrounds Gateway/Channel infrastructure. Workforce remains Employee-centric; Operations remains Runtime-centric.
+
+## 8. Employee dossier
 
 Endpoint:
 
@@ -310,7 +324,7 @@ employment.ended
 
 but filters must let users view each history independently.
 
-## 8. Position dossier
+## 9. Position dossier
 
 Endpoint:
 
@@ -333,7 +347,7 @@ Sections:
 - dispatch/failover history;
 - vacancy/unroutable duration.
 
-## 9. Supplier dossier
+## 10. Supplier dossier
 
 Endpoint:
 
@@ -356,7 +370,7 @@ Shows:
 - failover rate;
 - usage by Employee/Position/WorkScope.
 
-## 10. Statistics semantics
+## 11. Statistics semantics
 
 Statistics are time-windowed queries over source facts or rollups.
 

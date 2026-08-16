@@ -348,13 +348,15 @@ Purpose: high-density troubleshooting and supervision.
 
 Shows tabular, filterable state for tasks, runs, nodes, errors, waits, tokens, cost and timing.
 
-### 8.4 Model workforce view
+### 8.4 Workforce and Suppliers views
 
-Purpose: manage external model capacity.
+Purpose: separate "who works here" from "where our workforce comes from."
 
-Shows Suppliers, SupplierModels, Employees, Employments, SupplyAgreements, Channels, CapacityPools, current Appointments, current work, health, quota, contract and pricing.
+The **Workforce** view is Employee-centric: durable Employees, cooperation state, Appointments, actual current work, career usage and performance.
 
-This view should ultimately be a first-class product area, not merely a panel embedded inside Organization.
+The **Suppliers** view is HR/commercial-centric: Suppliers, SupplierModels, Plans, SupplyAgreements, Employments, CapacityPools and mapped Gateway/Channel evidence. Technical routes without explicit commercial identity appear as unclassified infrastructure evidence and never become Suppliers/Employees by naming convention.
+
+These are first-class product areas in the AI Company Console rather than panels appended to the Hermes runtime view.
 
 ## 9. Business invariants
 

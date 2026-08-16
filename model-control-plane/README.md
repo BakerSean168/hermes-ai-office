@@ -32,6 +32,8 @@ Model transport is delegated through gateway ports. The current adapters are:
 
 The MCP reads CPA route/health evidence and aggregate usage through the gateway adapter. It does not own CPA credentials or physical channel lifecycle administration.
 
+Gateway discovery records technical evidence only. Commercial Supplier/SupplierModel/Agreement identity is created through explicit V2 catalog registration, never inferred solely from a Channel name. Unclassified routes remain visible in the Supply projection until an operator supplies business identity.
+
 CPA operational changes such as adding a channel, changing a secret, enabling/disabling a route, quarantine, or manual alias surgery belong to `gatewayctl` / the dedicated model-gateway management workflow. They are intentionally not exposed through Pixel Office.
 
 The durable CPA gateway id remains `cpa-compat` for existing V2 binding continuity. The name is an external reference, not a V1 Worker compatibility model.
@@ -45,6 +47,7 @@ Primary reads include:
 - `GET /api/health`
 - `GET /api/v2/health`
 - `GET /api/v2/projections/workforce`
+- `GET /api/v2/projections/supply`
 - `GET /api/v2/projections/office`
 - `GET /api/v2/projections/positions/:positionId/dossier`
 - `GET /api/v2/projections/runs/:runId/dossier`

@@ -462,6 +462,7 @@ Purpose-built read models avoid forcing the browser to join dozens of entities:
 GET /api/v2/projections/office
 GET /api/v2/projections/organization
 GET /api/v2/projections/workforce
+GET /api/v2/projections/supply
 GET /api/v2/projections/operations
 GET /api/v2/projections/employees/:employeeId/dossier
 GET /api/v2/projections/positions/:positionId/dossier
@@ -505,17 +506,11 @@ SECRET_BEARING_ADMIN
 
 This is not a full RBAC system. It is a boundary so browser-read APIs cannot accidentally inherit internal adapter privileges.
 
-## 19. V1 compatibility
+## 19. Retired V1 compatibility
 
-During migration:
+The migration compatibility surface described by earlier revisions of this contract was retired on 2026-08-16. `/api/v1/*`, the old Pixel `/api/model/*` workforce/admin facade and the transition compatibility-status endpoint return 404. Historical V1 database rows are evidence only and have no public runtime API.
 
-- `/api/v1/workers` remains a legacy projection;
-- `/api/v1/assignments` remains V1 semantics;
-- `/api/v1/dashboard/workforce` may eventually be generated from V2 projections but must keep its current shape;
-- `/api/v1/resolve/:positionId` keeps existing behavior until a documented cutover;
-- Pixel `/api/model/*` remains stable.
-
-No V1 response should silently change the meaning of `workerId` from legacy worker identity to V2 Employee ID.
+The active Pixel facade is explicit V2 read/SSE routing under `/api/model/v2/*`.
 
 ## 20. API acceptance criteria
 
@@ -535,3 +530,11 @@ V2 API design is implemented correctly when:
 The deployed API is V2-only: workforce/organization/execution/finance/staffing reads and commands, Hermes normalized execution sync, replayable incident projection, maintenance policy/runs, and V2 event SSE. Pixel Office proxies selected read models through explicit `/api/model/v2/*` facade routes. `/api/v1/*`, the transition compatibility-status endpoint, and the old Office management facade are retired and return 404.
 
 Command endpoints that can create external or durable effects use persistent idempotency. Runtime sync is an internal normalized projection endpoint and never accepts runtime model names as Employee identity.
+
+Supplier catalog additions are explicit commands:
+
+```text
+POST /api/v2/commands/supply-catalog/register
+```
+
+The command requires Supplier, SupplierModel and SupplyAgreement identity. An optional existing gateway route may be associated with that agreement as observed infrastructure evidence. The command never creates an Appointment; route binding is separately explicit. Technical discovery without commercial identity remains unmapped evidence.

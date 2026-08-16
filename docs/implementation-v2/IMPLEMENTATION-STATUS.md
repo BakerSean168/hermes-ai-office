@@ -6,7 +6,7 @@
 
 ## 1. Current state
 
-The V2 north-star architecture is implemented as an additive business domain beside the protected V1 compatibility surface.
+The V2 north-star architecture is the production business authority and public control-plane surface. The V1 runtime compatibility surface has been retired; historical V1 database evidence is retained read-only for audit/rollback archaeology.
 
 The current production shape is:
 
@@ -145,7 +145,25 @@ Pixel Office reads V2 projections rather than joining domain tables itself.
 
 ### Workforce projection
 
-Answers: who are our Employees, through which Employments, which Appointments do they hold, what work and usage can actually be attributed to them?
+Answers: who are our Employees, which Appointments do they hold, what work is actually staffed now, and what career usage can be attributed to each durable Employee? Gateway administration is intentionally absent from this employee-centric read model.
+
+### Supply projection
+
+`GET /api/v2/projections/supply` is the supplier-centric HR/commercial read model. It groups:
+
+```text
+Supplier
+  → SupplierModel / Employee
+  → Plan / SupplyAgreement
+       → Employment
+       → CapacityPool
+       → mapped Channel evidence
+       → GatewayBinding
+```
+
+Unmapped gateway Channels are returned separately as infrastructure evidence grouped by gateway/channel name. They do **not** become Supplier or Employee identity merely because a technical route exists.
+
+Commercial identity is registered explicitly through the idempotent `supply-catalog.register` command. Registration may associate observed Channel evidence with a SupplyAgreement, but it does not create an Appointment and does not activate a dispatch binding unless that is explicitly requested.
 
 ### Office projection
 
@@ -284,3 +302,30 @@ The host still has no Chrome/Chromium executable for Playwright, so this release
 ## 13. Remaining work classification
 
 There is no live V1 compatibility runtime left to retire. Future work is normal V2 product evolution: richer supply discovery, additional staffing policy, evaluation/analytics, gateway adapters, and UI ergonomics. Reintroducing a V1 Worker/Assignment authority path or a generic Office gateway-admin proxy would be an architectural regression.
+
+## 13. AI Company console and supplier catalog — 2026-08-16
+
+The former single long Organization page has been split into first-class product sections:
+
+```text
+Overview | Organization | Workforce | Suppliers | Operations | Incidents
+```
+
+- **Overview** summarizes WorkScopes, Positions, Employees, HR Suppliers and attention items.
+- **Organization** groups Positions by WorkScope and keeps Appointment/Runtime evidence on each seat.
+- **Workforce** is Employee-centric and no longer mixes Gateway inventory into the employee list.
+- **Suppliers** exposes the Supplier → Agreement/Plan → Employment/Employee → infrastructure chain.
+- **Operations** owns Hermes Profile/Run/runtime observations that previously appeared below the business panels.
+- **Incidents** remains the replayable operational problem view.
+
+A production catalog reconciliation explicitly registered high-confidence commercial sources without altering staffing:
+
+- OpenCode / OpenCode Go: DeepSeek V4 Flash and DeepSeek V4 Pro;
+- Kiro: Claude Sonnet 4.5, Claude Opus 4.6 and Claude Haiku 4.5;
+- AnyRouter: Claude Opus 5, Claude Opus 4.7 and Claude 3.7 Sonnet.
+
+At verification time the production catalog contained 4 Suppliers, 9 Employees, 9 current Employments, 4 active SupplyAgreements, 1 Plan and only 1 current Appointment. The new catalog entries therefore expanded HR visibility without changing the active Coding Reviewer assignment or creating new dispatch bindings.
+
+`nico-free-deepseek` and unclassified `planner-pool` physical routes remain technical evidence where commercial identity is not sufficiently proven. Missing commercial evidence is displayed as unclassified rather than guessed.
+
+The LiteLLM route deployment script was also decoupled from business bootstrap. It now validates and binds an already-existing CURRENT Employment; it cannot create Supplier/Employee/Agreement/Appointment identity from a channel/model name. The standalone production bootstrap CLI was removed, and the MCP build cleans `dist/` before compiling so deleted runtime entrypoints cannot survive as stale artifacts.
