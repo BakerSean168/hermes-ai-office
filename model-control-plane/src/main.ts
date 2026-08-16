@@ -1,3 +1,5 @@
-// Transitional compiled entry point. V1 modules remain behavior-frozen JavaScript
-// while new V2 modules are introduced as strict TypeScript.
-import './server.mjs';
+import { buildControlPlane } from './app.js';
+
+const runtime = await buildControlPlane();
+await runtime.app.listen({ host: runtime.host, port: runtime.port });
+runtime.startBackgroundJobs();

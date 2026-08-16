@@ -7,8 +7,9 @@ Requires=docker.service
 [Service]
 Type=simple
 WorkingDirectory=/srv/hermes-personal/workspace/repos/pixel-agents
-ExecStart=/opt/node-v24.18.0-linux-arm64/bin/node model-control-plane/src/server.mjs
+ExecStart=/opt/node-v24.18.0-linux-arm64/bin/node model-control-plane/dist/main.js
 Environment=NODE_ENV=production
+ExecStartPre=/usr/bin/test -f /srv/hermes-personal/workspace/repos/pixel-agents/model-control-plane/dist/main.js
 Environment=MODEL_CP_HOST=127.0.0.1
 Environment=MODEL_CP_PORT=8320
 Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
