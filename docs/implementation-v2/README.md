@@ -1,26 +1,27 @@
 # Hermes AI Office V2 — Implementation Documentation
 
-**Status:** implementation-preparation package  
+**Status:** deployed V2 implementation + active compatibility/cutover package
 **Authority:** subordinate to [`../DOMAIN-MODEL-V2.md`](../DOMAIN-MODEL-V2.md) for domain semantics and [`../HERMES-AI-OFFICE-PRD.md`](../HERMES-AI-OFFICE-PRD.md) for product goals.
 
 This directory translates Domain Model V2 into concrete engineering contracts. It is intentionally split by concern so implementation work can change one boundary without redefining the whole product.
 
 ## Document map
 
-| Document                                             | Purpose                                                                        | Primary consumers            |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)                 | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
-| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)         | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
-| [`TECH-STACK.md`](TECH-STACK.md)                     | concrete language, database, API, gateway, deployment and test stack decisions | implementation owners        |
-| [`FIRST-VERTICAL-SLICE.md`](FIRST-VERTICAL-SLICE.md) | smallest execution-ready V2 business spine and batch sequence                  | implementation agents        |
-| [`PERSISTENCE.md`](PERSISTENCE.md)                   | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
-| [`API-CONTRACT.md`](API-CONTRACT.md)                 | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
-| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)             | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
-| [`WORKFLOWS.md`](WORKFLOWS.md)                       | end-to-end business flows and failure behavior                                 | product + engineering        |
-| [`PROJECTIONS.md`](PROJECTIONS.md)                   | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
-| [`MIGRATION.md`](MIGRATION.md)                       | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
-| [`ROADMAP.md`](ROADMAP.md)                           | phased execution plan and ticket boundaries                                    | implementation agents        |
-| [`VERIFICATION.md`](VERIFICATION.md)                 | acceptance evidence and regression matrix                                      | reviewers + release checks   |
+| Document                                               | Purpose                                                                        | Primary consumers            |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------ | ---------------------------- |
+| [`IMPLEMENTATION-STATUS.md`](IMPLEMENTATION-STATUS.md) | deployed capabilities, migration level, compatibility state, remaining cutover | operators, reviewers         |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)                   | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
+| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)           | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
+| [`TECH-STACK.md`](TECH-STACK.md)                       | concrete language, database, API, gateway, deployment and test stack decisions | implementation owners        |
+| [`FIRST-VERTICAL-SLICE.md`](FIRST-VERTICAL-SLICE.md)   | smallest execution-ready V2 business spine and batch sequence                  | implementation agents        |
+| [`PERSISTENCE.md`](PERSISTENCE.md)                     | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
+| [`API-CONTRACT.md`](API-CONTRACT.md)                   | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
+| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)               | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
+| [`WORKFLOWS.md`](WORKFLOWS.md)                         | end-to-end business flows and failure behavior                                 | product + engineering        |
+| [`PROJECTIONS.md`](PROJECTIONS.md)                     | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
+| [`MIGRATION.md`](MIGRATION.md)                         | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
+| [`ROADMAP.md`](ROADMAP.md)                             | phased execution plan and ticket boundaries                                    | implementation agents        |
+| [`VERIFICATION.md`](VERIFICATION.md)                   | acceptance evidence and regression matrix                                      | reviewers + release checks   |
 
 ## Authority rules
 
@@ -52,9 +53,9 @@ events
 external_usage_snapshots
 ```
 
-The deployed HTTP surface is `/api/v1/*`, including workforce snapshot, worker/assignment CRUD, resolve, CPA sync, usage sync, stats, events, and channel actions. This is the **current-state baseline only**. V2 core contracts name generic gateway concepts rather than CPA-specific ones.
+The deployed HTTP surface now includes both the protected `/api/v1/*` compatibility contract and authoritative `/api/v2/*` business/read contracts. Pixel Office exposes selected V2 read models through explicit `/api/model/v2/*` facade routes while retaining its V1 compatibility facade. Gateway-neutral V2 contracts name generic gateway concepts rather than CPA-specific ones.
 
-The V2 documents therefore assume a compatibility period in which:
+The production system is therefore in the intended compatibility period in which:
 
 ```text
 legacy V1 model + projections

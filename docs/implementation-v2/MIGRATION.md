@@ -392,3 +392,7 @@ V1 can be considered ready for retirement only when:
 5. V1 writes are disabled;
 6. historical V1 data remains queryable or migrated with documented precision;
 7. rollback procedure has been tested before final cleanup.
+
+## Current migration/cutover state — 2026-08-16
+
+Additive V2 schema migrations 001–010 are deployed. V1 remains in `DUAL_RUN` compatibility mode by design. `GET /api/v2/compatibility/status` is the cutover gate and reports blockers rather than comparing V1 Worker one-to-one with V2 Employee. V1 must not be disabled until CPA sync/position-alias ownership and protected consumers have migrated and explicit retirement approval is present.

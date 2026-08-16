@@ -458,3 +458,7 @@ Raw high-volume activity observations may have a retention/compaction policy. Be
 4. Current UI can recover after SSE disconnect through replay/refetch.
 5. Duplicate delivery does not duplicate durable facts.
 6. Supply expiration emits Employment changes without creating/replacing Employee identity.
+
+## Implemented event/replay addendum
+
+V2 events now cover staffing/dispatch, runtime synchronization, finance/evaluation, qualification, organization topology, incidents and maintenance. Incident ACK/Resolve are themselves V2 events so a full derived-projection rebuild preserves operator decisions. Projection checkpoints record the last processed event sequence.

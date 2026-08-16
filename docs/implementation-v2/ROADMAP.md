@@ -528,3 +528,9 @@ Stop and create a focused decision if implementation would:
 - break `/api/v1` without compatibility evidence;
 - invent historical precision unavailable in current data;
 - implement deferred domain richness without a real use case.
+
+## Implementation status — 2026-08-16
+
+The V2 north-star domain and control plane are implemented through migration `010_maintenance`, including gateway-neutral execution, persistent idempotency, supply/capacity, finance/evaluation, capability/qualification/staffing policy, organization topology, Hermes RuntimeSession projection, purpose-built Office projections, replayable incidents and safe retention maintenance.
+
+The remaining roadmap item is an **operational V1 retirement cutover**, not another business-domain rewrite. Production intentionally remains `DUAL_RUN` while CPA V1 synchronization, `position:*` alias ownership and protected V1 consumers still exist. The machine-readable readiness decision is `GET /api/v2/compatibility/status`. See `IMPLEMENTATION-STATUS.md` for the exact deployed state and cutover rule.

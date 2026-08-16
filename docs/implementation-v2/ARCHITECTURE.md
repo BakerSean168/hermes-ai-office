@@ -321,3 +321,9 @@ These are migration constraints, not north-star architecture choices.
 10. InvocationAttempt bridges business identity to physical gateway evidence.
 11. UI reads projections; it does not join raw tables or gateway admin state itself.
 12. Events are append-only facts with replayable sequence numbers.
+
+## Implemented architecture addendum — 2026-08-16
+
+The deployed V2 architecture now includes the complete separation between organizational Position, Employee staffing, and RuntimeSession technical execution. HermesProvider/OrgStore is the normalized execution source; MCP receives latest-wins snapshots and projects ProfileController/Run/ExecutionNode/ExecutionEdge into WorkScope/Position/DutySession/RuntimeSession without creating Employee identity from runtime model hints.
+
+Operational governance is part of the same modular monolith: append-only V2 events feed replayable Incident/checkpoint projections, and maintenance is restricted to ephemeral replay cache plus stale operational-run repair. See `IMPLEMENTATION-STATUS.md` for the deployed migration and verification matrix.

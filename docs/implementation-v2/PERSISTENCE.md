@@ -747,3 +747,9 @@ v2_schema_migrations(version, name, applied_at, checksum)
 Migrations must be idempotent at deployment level: already-applied versions are skipped; checksum mismatch is a hard failure.
 
 Before destructive cleanup of V1 tables, require a separately approved future phase. V2 introduction itself is additive.
+
+## Implemented persistence addendum — migrations 001–010
+
+The production schema has advanced additively through `010_maintenance`. New durable areas include supply/capacity, finance/evaluation, qualification/staffing policy, organization topology, runtime projection, incidents/checkpoints, and maintenance history. Applied SQL migrations are checksum protected and must never be edited in place.
+
+RuntimeSession and model hints are execution telemetry, not Employee identity. Finance recalculation uses append-only valuation/allocation overlays rather than rewriting closed UsageEntry facts. Core business evidence is retained by default; only expired idempotency cache is automatically deleted.

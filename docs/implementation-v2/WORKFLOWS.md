@@ -465,3 +465,7 @@ The model is considered workflow-complete when automated tests can demonstrate:
 - usage attributes to the actual attempt route;
 - appointed-but-never-worked remains distinguishable;
 - V1 consumers remain operational during migration.
+
+## Implemented workflow addendum
+
+Hermes execution now follows `OrgStore snapshot → V2 Run/Position/Duty/RuntimeSession projection`, independently from Employee dispatch. A runtime can therefore be active but unattributed; only a StaffingSegment establishes which Employee was actually on duty. Employment/Appointment lifecycle changes redispatch active duties with B2/B3 failover semantics.

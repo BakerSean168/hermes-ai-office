@@ -318,3 +318,7 @@ The first slice is not complete until all are true:
 8. V2 event replay works;
 9. V1 Pixel/Control Plane path remains operational;
 10. no secrets found by repository secret scanning.
+
+## Implemented verification addendum
+
+Each production batch has been gated by focused tests, MCP/root type-check and full test suites, production build, secret scan, Git commit/push, pre-migration SQLite backup, migration/health assertions, direct and proxied V2 reads, workforce identity invariants, SQLite integrity/foreign-key checks, and browser checks for material UI changes. Maintenance is dry-run validated before normal scheduled execution.

@@ -501,3 +501,7 @@ The core domain shape is no longer blocked by these decisions. They should be re
 10. Whether a future ModelInvocation may intentionally split work across multiple Employees beyond retry/failover.
 
 Until these are decided, implementation should preserve current behavior and avoid embedding assumptions that make these choices expensive to change.
+
+## Implementation baseline — 2026-08-16
+
+The product is now implemented around the V2 AI-company semantics: organizational positions are distinct from model Employees; one Employee may hold multiple Appointments; actual work attribution requires a StaffingSegment; Hermes/Subagent/Codex/OpenCode are represented as runtime/position execution mechanisms rather than Employee identity. Purpose-built Office/Workforce projections expose this distinction. V1 remains a protected compatibility layer until its machine-readable retirement gates are clear.

@@ -1970,3 +1970,7 @@ Acceptance for that slice:
 10. Usage is attributable both to Employee lifetime and to a concrete Employment/Agreement period, plus Position and Run.
 11. Existing Pixel Office remains operational through compatibility projections.
 12. No secret value enters business tables, events, or UI payloads.
+
+## Deployed conformance note — 2026-08-16
+
+The domain model in this document is now represented in the running V2 control plane. In particular, RuntimeSession is explicitly below Position/Duty and cannot create Employee identity from `modelHint`; qualification/constraints feed dispatch; PositionRelation remains stable across employee replacement; finance/performance values are evidence/versioned overlays; Incidents are replayable projections of append-only events. Production V1 is compatibility-only and intentionally dual-run until cutover blockers are removed.

@@ -444,3 +444,7 @@ Rules:
 5. Actual Employee replacement visibly changes staffing history.
 6. Employee dossier shows career stats across supply gaps.
 7. UI never needs raw secret-bearing provider data.
+
+## Implemented projection addendum
+
+Purpose-built projections now include Workforce, Office, Position dossier, Run dossier and Incident. Office Position status deliberately distinguishes `WORKING` from `RUNTIME_ACTIVE_UNATTRIBUTED`; runtime evidence without a StaffingSegment never counts as staffed work.
