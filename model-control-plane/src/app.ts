@@ -6,6 +6,7 @@ import { CpaAdapter } from './adapters/cpa.mjs';
 import { CpaUsageAdapter } from './adapters/cpaUsage.mjs';
 import { openDb } from './db.mjs';
 import { ControlPlaneStore } from './store.mjs';
+import { runV2Migrations } from './v2/migrations.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -94,7 +95,9 @@ export async function buildControlPlane(
   const host = env.MODEL_CP_HOST ?? '127.0.0.1';
   const port = Number(env.MODEL_CP_PORT ?? 8320);
   const app = Fastify({ logger: options.logger ?? true });
-  const store = new ControlPlaneStore(openDb(dbFile));
+  const db = openDb(dbFile);
+  if (env.MODEL_CP_V2_SCHEMA !== '0') runV2Migrations(db);
+  const store = new ControlPlaneStore(db);
   const cpa: LegacyCpaPort =
     options.cpa ??
     (new CpaAdapter({
