@@ -1094,6 +1094,31 @@ export class V2Repository {
           )
           .get(employeeId),
       ) ?? {};
+    const derivedMarketValue = Number(
+      row(
+        this.db
+          .prepare(
+            `SELECT COALESCE(SUM(v.amount),0) amount
+             FROM v2_usage_market_valuations v
+             JOIN v2_usage_entries u ON u.id=v.usage_entry_id
+             WHERE u.employee_id=? AND v.superseded_at IS NULL`,
+          )
+          .get(employeeId),
+      )?.amount ?? 0,
+    );
+    const derivedAllocatedCost = Number(
+      row(
+        this.db
+          .prepare(
+            `SELECT COALESCE(SUM(e.amount),0) amount
+             FROM v2_cost_allocation_entries e
+             JOIN v2_cost_allocation_runs r ON r.id=e.allocation_run_id
+             JOIN v2_usage_entries u ON u.id=e.usage_entry_id
+             WHERE u.employee_id=? AND r.status='COMPLETED' AND r.superseded_at IS NULL`,
+          )
+          .get(employeeId),
+      )?.amount ?? 0,
+    );
     return {
       identity: {
         id: identity.id,
@@ -1143,8 +1168,8 @@ export class V2Repository {
           cacheWriteTokens: Number(usage.cache_write_tokens ?? 0),
           reasoningTokens: Number(usage.reasoning_tokens ?? 0),
           actualCost: Number(usage.actual_cost ?? 0),
-          allocatedCost: Number(usage.allocated_cost ?? 0),
-          marketValue: Number(usage.market_value ?? 0),
+          allocatedCost: Number(usage.allocated_cost ?? 0) + derivedAllocatedCost,
+          marketValue: Number(usage.market_value ?? 0) + derivedMarketValue,
         },
       },
     };

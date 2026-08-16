@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import type { DispatchService } from './dispatch.js';
 import type { GatewayDiscoveryService } from './discovery.js';
+import type { FinanceRepository } from './finance.js';
 import {
   IdempotencyConflictError,
   IdempotencyInProgressError,
@@ -28,6 +29,7 @@ export function registerV2Routes(
     discoveryService?: GatewayDiscoveryService;
     usageReconciliationService?: UsageReconciliationService;
     supply?: SupplyRepository;
+    finance?: FinanceRepository;
     idempotencyService?: IdempotencyService;
   } = {},
 ): void {
@@ -162,6 +164,45 @@ export function registerV2Routes(
         ) ?? [],
     };
   });
+
+  app.get('/api/v2/reference-prices', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.finance?.listReferencePrices(
+          typeof query.supplierModelId === 'string' ? query.supplierModelId : undefined,
+        ) ?? [],
+    };
+  });
+
+  app.get('/api/v2/cost-allocation-runs', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.finance?.listAllocationRuns(
+          typeof query.agreementId === 'string' ? query.agreementId : undefined,
+        ) ?? [],
+    };
+  });
+
+  app.get('/api/v2/evaluations', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.finance?.listEvaluations({
+          employeeId: typeof query.employeeId === 'string' ? query.employeeId : undefined,
+          positionId: typeof query.positionId === 'string' ? query.positionId : undefined,
+          limit: Math.min(1_000, Math.max(1, number(query.limit, 100))),
+        }) ?? [],
+    };
+  });
+
+  app.get<{ Params: { employeeId: string } }>(
+    '/api/v2/employees/:employeeId/performance',
+    async (request) => ({
+      items: services.finance?.performanceByPosition(request.params.employeeId) ?? [],
+    }),
+  );
 
   app.get('/api/v2/usage-evidence', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
@@ -486,6 +527,204 @@ export function registerV2Routes(
           }
         },
       }),
+  );
+
+  app.post('/api/v2/commands/reference-prices/create', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'reference-price.create',
+      operation: () => {
+        if (!services.finance) {
+          reply.code(503);
+          return { error: { code: 'FINANCE_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.supplierModelId || !body.name || !body.source) {
+          reply.code(400);
+          return { error: { code: 'REFERENCE_PRICE_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.finance.createReferencePrice({
+            supplierModelId: String(body.supplierModelId),
+            name: String(body.name),
+            inputPerMillion:
+              body.inputPerMillion == null ? undefined : Number(body.inputPerMillion),
+            outputPerMillion:
+              body.outputPerMillion == null ? undefined : Number(body.outputPerMillion),
+            cacheReadPerMillion:
+              body.cacheReadPerMillion == null ? undefined : Number(body.cacheReadPerMillion),
+            cacheWritePerMillion:
+              body.cacheWritePerMillion == null ? undefined : Number(body.cacheWritePerMillion),
+            reasoningPerMillion:
+              body.reasoningPerMillion == null ? undefined : Number(body.reasoningPerMillion),
+            currency: body.currency ? String(body.currency) : undefined,
+            source: String(body.source),
+            effectiveFrom: body.effectiveFrom == null ? undefined : Number(body.effectiveFrom),
+            effectiveTo: body.effectiveTo == null ? undefined : Number(body.effectiveTo),
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'REFERENCE_PRICE_CREATE_FAILED';
+          reply.code(code.includes('FOREIGN KEY') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post<{ Params: { priceId: string } }>(
+    '/api/v2/commands/reference-prices/:priceId/apply',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'reference-price.apply',
+        operation: () => {
+          if (!services.finance) {
+            reply.code(503);
+            return { error: { code: 'FINANCE_SERVICE_UNAVAILABLE' } };
+          }
+          try {
+            return services.finance.applyReferencePrice(request.params.priceId);
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'REFERENCE_PRICE_APPLY_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { agreementId: string } }>(
+    '/api/v2/commands/supply-agreements/:agreementId/commercial-terms',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supply-agreement.commercial-terms',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.supply.updateAgreementCommercialTerms(request.params.agreementId, {
+              fixedCost:
+                body.fixedCost === undefined
+                  ? undefined
+                  : body.fixedCost === null
+                    ? null
+                    : Number(body.fixedCost),
+              currency:
+                body.currency === undefined
+                  ? undefined
+                  : body.currency === null
+                    ? null
+                    : String(body.currency),
+              billingPeriod:
+                body.billingPeriod === undefined
+                  ? undefined
+                  : body.billingPeriod === null
+                    ? null
+                    : String(body.billingPeriod),
+            });
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'COMMERCIAL_TERMS_UPDATE_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { agreementId: string } }>(
+    '/api/v2/commands/supply-agreements/:agreementId/allocate-cost',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supply-agreement.allocate-cost',
+        operation: () => {
+          if (!services.finance) {
+            reply.code(503);
+            return { error: { code: 'FINANCE_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (body.periodStart == null || body.periodEnd == null) {
+            reply.code(400);
+            return { error: { code: 'ALLOCATION_PERIOD_REQUIRED' } };
+          }
+          try {
+            return services.finance.allocateAgreementCost({
+              supplyAgreementId: request.params.agreementId,
+              periodStart: Number(body.periodStart),
+              periodEnd: Number(body.periodEnd),
+              basis: body.basis ? (String(body.basis) as 'TOKENS' | 'REQUESTS') : undefined,
+              fixedCost: body.fixedCost == null ? undefined : Number(body.fixedCost),
+              currency: body.currency ? String(body.currency) : undefined,
+              policy:
+                body.policy && typeof body.policy === 'object'
+                  ? (body.policy as Record<string, unknown>)
+                  : undefined,
+            });
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'COST_ALLOCATION_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post('/api/v2/commands/evaluations/record', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'evaluation.record',
+      operation: () => {
+        if (!services.finance) {
+          reply.code(503);
+          return { error: { code: 'FINANCE_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (
+          !body.subjectType ||
+          !body.subjectId ||
+          !body.source ||
+          !body.dimensions ||
+          typeof body.dimensions !== 'object' ||
+          Array.isArray(body.dimensions)
+        ) {
+          reply.code(400);
+          return { error: { code: 'EVALUATION_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.finance.recordEvaluation({
+            subjectType: String(body.subjectType),
+            subjectId: String(body.subjectId),
+            roleId: body.roleId ? String(body.roleId) : undefined,
+            positionId: body.positionId ? String(body.positionId) : undefined,
+            employeeId: body.employeeId ? String(body.employeeId) : undefined,
+            dimensions: body.dimensions as Record<string, number | boolean | string>,
+            source: String(body.source),
+            recordedAt: body.recordedAt == null ? undefined : Number(body.recordedAt),
+            metadata:
+              body.metadata && typeof body.metadata === 'object'
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'EVALUATION_RECORD_FAILED';
+          reply.code(code.includes('FOREIGN KEY') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
   );
 
   app.post<{ Params: { gatewayId: string } }>(

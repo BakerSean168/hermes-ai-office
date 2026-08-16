@@ -336,6 +336,70 @@ export class SupplyRepository {
     }));
   }
 
+  updateAgreementCommercialTerms(
+    agreementId: string,
+    input: { fixedCost?: number | null; currency?: string | null; billingPeriod?: string | null },
+  ): V2Row {
+    const existing = row(
+      this.#domain.db.prepare('SELECT * FROM v2_supply_agreements WHERE id=?').get(agreementId),
+    );
+    if (!existing) throw new Error('SUPPLY_AGREEMENT_NOT_FOUND');
+    const timestamp = now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_supply_agreements SET fixed_cost=?,currency=?,billing_period=?,updated_at=? WHERE id=?`,
+        )
+        .run(
+          input.fixedCost === undefined
+            ? existing.fixed_cost == null
+              ? null
+              : Number(existing.fixed_cost)
+            : input.fixedCost,
+          input.currency === undefined
+            ? existing.currency == null
+              ? null
+              : String(existing.currency)
+            : input.currency,
+          input.billingPeriod === undefined
+            ? existing.billing_period == null
+              ? null
+              : String(existing.billing_period)
+            : input.billingPeriod,
+          timestamp,
+          agreementId,
+        );
+      this.#domain.emit({
+        type: 'supply_agreement.commercial_terms.changed',
+        entityType: 'SupplyAgreement',
+        entityId: agreementId,
+        payload: {
+          fixedCost:
+            input.fixedCost === undefined
+              ? existing.fixed_cost == null
+                ? null
+                : Number(existing.fixed_cost)
+              : input.fixedCost,
+          currency:
+            input.currency === undefined
+              ? existing.currency == null
+                ? null
+                : String(existing.currency)
+              : input.currency,
+          billingPeriod:
+            input.billingPeriod === undefined
+              ? existing.billing_period == null
+                ? null
+                : String(existing.billing_period)
+              : input.billingPeriod,
+        },
+      });
+      return row(
+        this.#domain.db.prepare('SELECT * FROM v2_supply_agreements WHERE id=?').get(agreementId),
+      )!;
+    });
+  }
+
   assignPlanToAgreement(agreementId: string, planId: string): V2Row {
     const joined = row(
       this.#domain.db

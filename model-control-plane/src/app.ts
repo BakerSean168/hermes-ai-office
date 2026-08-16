@@ -12,6 +12,7 @@ import { ControlPlaneStore } from './store.mjs';
 import { registerV2Routes } from './v2/api.js';
 import { DispatchService } from './v2/dispatch.js';
 import { GatewayDiscoveryService } from './v2/discovery.js';
+import { FinanceRepository } from './v2/finance.js';
 import { IdempotencyService } from './v2/idempotency.js';
 import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
@@ -134,6 +135,7 @@ export async function buildControlPlane(
     );
   }
   const supply = new SupplyRepository(v2);
+  const finance = new FinanceRepository(v2);
   const dispatchService = new DispatchService(v2, gateways, supply);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
@@ -265,6 +267,7 @@ export async function buildControlPlane(
     discoveryService,
     usageReconciliationService,
     supply,
+    finance,
     idempotencyService,
   });
 
