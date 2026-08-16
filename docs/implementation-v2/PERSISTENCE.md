@@ -281,6 +281,28 @@ created_at
 updated_at
 ```
 
+### `v2_gateway_bindings`
+
+Infrastructure mapping from a business Employment to a logical route exposed by one Gateway. This is the authoritative mapping used by `GatewayExecutionPort.resolveRoute(employmentId)`.
+
+```text
+id PK
+employment_id FK
+gateway_id FK
+external_route_ref
+protocol
+lifecycle                 // ACTIVE | DISABLED | RETIRED
+priority                  // deterministic business-side route preference
+metadata_json             // non-secret evidence only
+created_at
+updated_at
+UNIQUE(employment_id, gateway_id, external_route_ref)
+```
+
+A GatewayBinding is not Employee identity, Employment identity, or physical deployment identity. It may survive changes in the gateway's internal deployment pool as long as `external_route_ref` preserves the same business Employment semantics.
+
+The first V2 vertical slice may use GatewayBinding without materializing physical Channel rows.
+
 ### `v2_channels`
 
 Safe projection of a physical gateway route/deployment. It is not the gateway configuration source of truth.

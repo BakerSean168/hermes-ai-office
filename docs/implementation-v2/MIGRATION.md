@@ -67,15 +67,18 @@ Before migration code lands, capture:
 - existing usage aggregate totals by worker/channel/model;
 - current test commands/results.
 
-## 4. Step 1 — Add V2 schema
+## 4. Step 1 — Add the minimal V2 schema spine
 
-Create all required `v2_*` tables and `v2_schema_migrations`.
+Create `v2_schema_migrations` plus only the tables required by the first vertical slice. The implementation order is defined in `FIRST-VERTICAL-SLICE.md`; richer conceptual tables from `PERSISTENCE.md` are added later when their workflow is implemented.
+
+The first slice does **not** require every V2 entity, physical Channel discovery, Capability/Qualification tables, StaffingRule DSL, CapacityPool, Evaluation, or full finance tables.
 
 No V1 table is changed except optional indexes/metadata required for safe bridge operation.
 
 Acceptance:
 
-- service starts with empty V2 tables;
+- service starts with the minimal empty V2 spine;
+- future migrations can add deferred V2 tables without changing existing identities;
 - V1 APIs return identical outputs;
 - rolling back binary leaves V1 DB usable.
 

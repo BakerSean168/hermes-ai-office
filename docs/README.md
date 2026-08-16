@@ -12,6 +12,8 @@ This directory contains the product and architecture source of truth for the Her
 
 - [`implementation-v2/ARCHITECTURE.md`](implementation-v2/ARCHITECTURE.md)
 - [`implementation-v2/GATEWAY-STRATEGY.md`](implementation-v2/GATEWAY-STRATEGY.md)
+- [`implementation-v2/TECH-STACK.md`](implementation-v2/TECH-STACK.md)
+- [`implementation-v2/FIRST-VERTICAL-SLICE.md`](implementation-v2/FIRST-VERTICAL-SLICE.md)
 - [`implementation-v2/PERSISTENCE.md`](implementation-v2/PERSISTENCE.md)
 - [`implementation-v2/API-CONTRACT.md`](implementation-v2/API-CONTRACT.md)
 - [`implementation-v2/EVENT-CONTRACT.md`](implementation-v2/EVENT-CONTRACT.md)

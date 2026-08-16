@@ -7,18 +7,20 @@ This directory translates Domain Model V2 into concrete engineering contracts. I
 
 ## Document map
 
-| Document                                     | Purpose                                                                        | Primary consumers            |
-| -------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)         | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
-| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md) | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
-| [`PERSISTENCE.md`](PERSISTENCE.md)           | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
-| [`API-CONTRACT.md`](API-CONTRACT.md)         | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
-| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)     | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
-| [`WORKFLOWS.md`](WORKFLOWS.md)               | end-to-end business flows and failure behavior                                 | product + engineering        |
-| [`PROJECTIONS.md`](PROJECTIONS.md)           | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
-| [`MIGRATION.md`](MIGRATION.md)               | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
-| [`ROADMAP.md`](ROADMAP.md)                   | phased execution plan and ticket boundaries                                    | implementation agents        |
-| [`VERIFICATION.md`](VERIFICATION.md)         | acceptance evidence and regression matrix                                      | reviewers + release checks   |
+| Document                                             | Purpose                                                                        | Primary consumers            |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)                 | service boundaries, ownership, control/data flow, protected contracts          | architects, implementers     |
+| [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)         | gateway-neutral ports, LiteLLM reference adapter, CPA compatibility boundary   | gateway/runtime implementers |
+| [`TECH-STACK.md`](TECH-STACK.md)                     | concrete language, database, API, gateway, deployment and test stack decisions | implementation owners        |
+| [`FIRST-VERTICAL-SLICE.md`](FIRST-VERTICAL-SLICE.md) | smallest execution-ready V2 business spine and batch sequence                  | implementation agents        |
+| [`PERSISTENCE.md`](PERSISTENCE.md)                   | V2 logical schema, temporal records, indexes, retention, compatibility mapping | backend/database work        |
+| [`API-CONTRACT.md`](API-CONTRACT.md)                 | `/api/v2` commands, queries, errors, idempotency, compatibility                | MCP + Pixel backend          |
+| [`EVENT-CONTRACT.md`](EVENT-CONTRACT.md)             | business event envelope, ordering, replay, correlation, SSE semantics          | MCP + UI + observers         |
+| [`WORKFLOWS.md`](WORKFLOWS.md)                       | end-to-end business flows and failure behavior                                 | product + engineering        |
+| [`PROJECTIONS.md`](PROJECTIONS.md)                   | read models, dashboards, employee/position pages, Office animation semantics   | frontend + projection layer  |
+| [`MIGRATION.md`](MIGRATION.md)                       | legacy-to-V2 migration, dual-read/write strategy, rollback                     | migration owners             |
+| [`ROADMAP.md`](ROADMAP.md)                           | phased execution plan and ticket boundaries                                    | implementation agents        |
+| [`VERIFICATION.md`](VERIFICATION.md)                 | acceptance evidence and regression matrix                                      | reviewers + release checks   |
 
 ## Authority rules
 
