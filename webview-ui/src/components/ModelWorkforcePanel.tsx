@@ -55,21 +55,10 @@ interface V2Employee {
   };
 }
 
-interface V2Gateway {
-  id: string;
-  slug: string;
-  kind: string;
-  displayName: string;
-  lifecycle: string;
-  activeBindings: number;
-  lastSeenAt?: number;
-}
-
 interface V2WorkforceProjection {
   projectionVersion: number;
   generatedAt: number;
   employees: V2Employee[];
-  gateways: V2Gateway[];
   summary: {
     employees: number;
     employed: number;
@@ -247,12 +236,6 @@ export function ModelWorkforcePanel() {
           {money(snapshot.summary.actualCost)} actual · {money(snapshot.summary.marketValue)} market
           value
         </span>
-        {snapshot.gateways.map((gateway) => (
-          <span key={gateway.id}>
-            {gateway.displayName} · {gateway.lifecycle} · {gateway.activeBindings} binding
-            {gateway.activeBindings === 1 ? '' : 's'}
-          </span>
-        ))}
       </div>
     </div>
   );
