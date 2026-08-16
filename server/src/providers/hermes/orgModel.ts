@@ -35,7 +35,13 @@ export interface ProfileController {
   availability: ProfileAvailability;
   workload: ProfileWorkload;
   sessionId?: string;
-  /** Profile mission (from the bridge team) — used as the "Active" run title. */
+  /** Root Hermes controller state. The controller is presence/control-plane, never an ExecutionNode. */
+  controllerState?: NodeState;
+  controllerStatus?: string;
+  controllerModel?: string;
+  controllerAction?: string;
+  controllerActive?: boolean;
+  /** Profile mission (from the bridge team) — used as the run title fallback. */
   mission?: string;
   lastSeenAt: number;
   lastResponseAt?: number;

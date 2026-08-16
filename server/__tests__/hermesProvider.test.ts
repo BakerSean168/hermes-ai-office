@@ -11,10 +11,12 @@ import {
   buildKanbanNodes,
   buildProcessNodes,
   buildProfileAreaMappings,
+  controllerRunStatus,
   diffBoard,
   formatHermesToolStatus,
   hermesContextWindowForModel,
   HermesProvider,
+  interactiveRunId,
   isActiveWorkerStatus,
   isSupervisorWorker,
   kanbanNodeId,
@@ -69,6 +71,14 @@ describe('hermesProvider helpers', () => {
     expect(statusToToolName('working')).toBe('Write');
     expect(statusToToolName('idle')).toBe('');
     expect(statusToToolName(undefined)).toBe('');
+  });
+
+  it('builds stable interactive run ids and maps controller lifecycle', () => {
+    expect(interactiveRunId('memoflow', 'root1')).toBe('interactive:memoflow:root1');
+    expect(controllerRunStatus('planning')).toBe('PLANNING');
+    expect(controllerRunStatus('coding')).toBe('RUNNING');
+    expect(controllerRunStatus('blocked')).toBe('BLOCKED');
+    expect(controllerRunStatus('idle')).toBe('COMPLETED');
   });
 
   it('classifies active vs idle worker status', () => {
@@ -372,6 +382,28 @@ describe('process node mapping', () => {
       runId: 'kanban:memoflow:12',
     });
     expect(result.edges[0]?.relation).toBe('SUPERVISES');
+  });
+
+  it('inherits the active profile run when the controller directly launches a runtime', () => {
+    const result = buildProcessNodes(
+      [
+        {
+          pid: 654,
+          cwd: '/workspace/repos/memoflow',
+          command: 'opencode run',
+          runtime: 'opencode',
+          profile_hint: 'memoflow',
+        },
+      ],
+      {
+        profileIds: new Set(['memoflow']),
+        ownedPids: new Set(),
+        spawns: [],
+        now: 123,
+        profileRunById: new Map([['memoflow', 'interactive:memoflow:root1']]),
+      },
+    );
+    expect(result.nodes[0]?.runId).toBe('interactive:memoflow:root1');
   });
 
   it('uses spawn metadata for parent/run and skips already-owned pids', () => {
@@ -742,7 +774,16 @@ describe('HermesProvider profile aggregation integration', () => {
       teams: [
         {
           name: 'memoflow',
-          controller: { session_id: 'root1', status: 'coding', is_active: true },
+          display: 'MemoFlow',
+          controller: {
+            session_id: 'root1',
+            status: 'coding',
+            is_active: true,
+            title: 'Refactor office graph',
+            action: 'terminal command running',
+            model: 'deepseek-v4-flash',
+            started_at: 100,
+          },
           workers: [],
         },
       ],
@@ -758,8 +799,20 @@ describe('HermesProvider profile aggregation integration', () => {
     provider.start();
     try {
       await waitFor(() => orgStore.profiles.get('memoflow') !== undefined);
-      expect(orgStore.profiles.get('memoflow')!.workload).toBe('EXECUTING');
+      const profile = orgStore.profiles.get('memoflow')!;
+      expect(profile.workload).toBe('EXECUTING');
+      expect(profile.sessionId).toBe('root1');
+      expect(profile.controllerState).toBe('CODING');
+      expect(profile.controllerActive).toBe(true);
+      expect(profile.controllerAction).toBe('terminal command running');
       expect(orgStore.nodes.size).toBe(0);
+      const run = orgStore.runs.get('interactive:memoflow:root1');
+      expect(run).toMatchObject({
+        profileId: 'memoflow',
+        title: 'Refactor office graph',
+        status: 'RUNNING',
+        startedAt: 100_000,
+      });
     } finally {
       provider.stop();
     }

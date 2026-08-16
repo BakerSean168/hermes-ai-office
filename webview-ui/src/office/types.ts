@@ -244,6 +244,13 @@ export interface Character {
   /** Hermes bridge runtime metadata (runtime + model). Shown on the overlay's
    *  second label line ("OpenCode · DeepSeek V4"). */
   meta?: { runtime?: string; model?: string };
+  /** True for characters projected from the authoritative Hermes Organization graph. */
+  isOrgPresence?: boolean;
+  /** Controller presence is stable control-plane identity; worker presence maps 1:1 to an ExecutionNode. */
+  orgKind?: 'controller' | 'worker';
+  orgEntityId?: string;
+  orgRunId?: string;
+  orgState?: string;
 
   // -- Context gauge --
   /** Tokens in the agent's context as of its newest turn; 0 until reported.

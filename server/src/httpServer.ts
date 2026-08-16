@@ -86,6 +86,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   // ── Routes ──────────────────────────────────────────────────
 
   registerHealthRoute(app);
+  registerModelControlPlaneRoutes(app);
   registerOrgRoutes(app, options);
   registerHookRoute(app, options);
   registerWebSocketRoute(app, options);
@@ -107,6 +108,168 @@ function registerHealthRoute(app: FastifyInstance): void {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     pid: process.pid,
   }));
+}
+
+// ── Model Control Plane adapter ─────────────────────────────────
+
+function modelControlPlaneUrl(): string | null {
+  const value = process.env['MODEL_CONTROL_PLANE_URL']?.trim();
+  return value ? value.replace(/\/$/, '') : null;
+}
+
+async function modelControlPlaneRequest(
+  baseUrl: string,
+  path: string,
+  method: 'POST' | 'PATCH',
+  body: unknown,
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  });
+  let responseBody: unknown;
+  try {
+    responseBody = await response.json();
+  } catch {
+    responseBody = { error: `model-control-plane HTTP ${response.status}` };
+  }
+  return { ok: response.ok, status: response.status, body: responseBody };
+}
+
+function registerModelControlPlaneRoutes(app: FastifyInstance): void {
+  const baseUrl = modelControlPlaneUrl();
+  if (!baseUrl) return;
+  const adminEnabled = process.env['MODEL_CONTROL_PLANE_ADMIN'] === '1';
+
+  app.get('/api/model/config', async () => ({ adminEnabled }));
+
+  app.get('/api/model/workforce', async (_request, reply) => {
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/dashboard/workforce`);
+      if (!response.ok) {
+        reply.code(502);
+        return { error: 'model-control-plane-unavailable', status: response.status };
+      }
+      return await response.json();
+    } catch (error) {
+      reply.code(502);
+      return { error: 'model-control-plane-unavailable', message: String(error) };
+    }
+  });
+
+  if (adminEnabled) {
+    app.patch<{
+      Params: { channelId: string };
+      Body: Record<string, unknown>;
+    }>('/api/model/admin/channels/:channelId/policy', async (request, reply) => {
+      const result = await modelControlPlaneRequest(
+        baseUrl,
+        `/api/v1/channels/${encodeURIComponent(request.params.channelId)}/policy`,
+        'PATCH',
+        request.body,
+      );
+      if (!result.ok) reply.code(result.status);
+      return result.body;
+    });
+
+    app.patch<{
+      Params: { assignmentId: string };
+      Body: Record<string, unknown>;
+    }>('/api/model/admin/assignments/:assignmentId/policy', async (request, reply) => {
+      const result = await modelControlPlaneRequest(
+        baseUrl,
+        `/api/v1/assignments/${encodeURIComponent(request.params.assignmentId)}/policy`,
+        'PATCH',
+        request.body,
+      );
+      if (!result.ok) reply.code(result.status);
+      return result.body;
+    });
+
+    app.post<{
+      Params: { channelId: string; action: string };
+      Body: Record<string, unknown>;
+    }>('/api/model/admin/channels/:channelId/actions/:action', async (request, reply) => {
+      const result = await modelControlPlaneRequest(
+        baseUrl,
+        `/api/v1/channels/${encodeURIComponent(request.params.channelId)}/actions/${encodeURIComponent(request.params.action)}`,
+        'POST',
+        request.body,
+      );
+      if (!result.ok) reply.code(result.status);
+      return result.body;
+    });
+
+    app.post<{ Body: Record<string, unknown> }>(
+      '/api/model/admin/channels',
+      async (request, reply) => {
+        const result = await modelControlPlaneRequest(
+          baseUrl,
+          '/api/v1/adapters/cpa/channels',
+          'POST',
+          request.body,
+        );
+        if (!result.ok) reply.code(result.status);
+        return result.body;
+      },
+    );
+
+    for (const resource of ['quotas', 'contracts', 'prices'] as const) {
+      app.post<{ Body: Record<string, unknown> }>(
+        `/api/model/admin/${resource}`,
+        async (request, reply) => {
+          const result = await modelControlPlaneRequest(
+            baseUrl,
+            `/api/v1/${resource}`,
+            'POST',
+            request.body,
+          );
+          if (!result.ok) reply.code(result.status);
+          return result.body;
+        },
+      );
+    }
+  }
+
+  app.get('/api/model/events', async (request, reply) => {
+    const controller = new AbortController();
+    request.raw.on('close', () => controller.abort());
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/events`, { signal: controller.signal });
+      if (!response.ok || !response.body) {
+        reply.code(502).send({ error: 'model-control-plane-events-unavailable' });
+        return;
+      }
+      reply.hijack();
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (!controller.signal.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const chunks = buffer.split('\n\n');
+        buffer = chunks.pop() ?? '';
+        for (const chunk of chunks) {
+          const data = chunk.split('\n').filter((line) => line.startsWith('data: '));
+          for (const line of data) reply.raw.write(`data: ${line.slice(6)}\n\n`);
+        }
+      }
+      reply.raw.end();
+    } catch (error) {
+      if (!controller.signal.aborted && !reply.raw.headersSent) {
+        reply
+          .code(502)
+          .send({ error: 'model-control-plane-events-unavailable', message: String(error) });
+      }
+    }
+  });
 }
 
 // ── Organization read API ──────────────────────────────────────

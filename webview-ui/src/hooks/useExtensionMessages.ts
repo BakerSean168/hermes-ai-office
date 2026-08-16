@@ -19,6 +19,7 @@ import {
 } from '../office/toolUtils.js';
 import type { OfficeLayout, ToolActivity } from '../office/types.js';
 import { setWallSprites } from '../office/wallTiles.js';
+import { projectOrgOfficePresences } from '../org/officeProjection.js';
 import type { OrgState } from '../org/types.js';
 import { isBrowserRuntime, isE2E } from '../runtime.js';
 import { transport } from '../transport/index.js';
@@ -105,7 +106,7 @@ interface ExtensionMessageState {
 function saveAgentSeats(os: OfficeState): void {
   const seats: Record<number, { palette: number; hueShift: number; seatId: string | null }> = {};
   for (const ch of os.characters.values()) {
-    if (ch.isSubagent) continue;
+    if (ch.isSubagent || ch.isOrgPresence) continue;
     seats[ch.id] = { palette: ch.palette, hueShift: ch.hueShift, seatId: ch.seatId };
   }
   transport.send({ type: 'saveAgentSeats', seats });
@@ -163,6 +164,10 @@ export function useExtensionMessages(
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
     let pendingAgents: PendingAgent[] = [];
+
+    // IDs currently owned by the Graph -> Office projection. They are reconciled
+    // on every orgState snapshot and never persisted as normal terminal agents.
+    let orgVisualIds = new Set<number>();
 
     // Accumulate distinct folderNames seen across agents (never removed during the
     // session): the source for the Areas folder-mapping dropdown, so a folder stays
@@ -690,29 +695,26 @@ export function useExtensionMessages(
           msg.teamUsesTmux as boolean | undefined,
           msg.processId as number | undefined,
         );
-        os.setAgentMeta(
-          id,
-          msg.meta as { runtime?: string; model?: string } | undefined,
-        );
+        os.setAgentMeta(id, msg.meta as { runtime?: string; model?: string } | undefined);
       } else if (msg.type === 'agentContextUsage') {
         const id = msg.id as number;
         os.setAgentContext(id, msg.contextTokens as number, msg.maxContextTokens as number);
       } else if (msg.type === 'orgState') {
         const profiles = (msg.profiles ?? []) as OrgState['profiles'];
-        setOrgState({
+        const nextOrg: OrgState = {
           profiles,
-          runs: msg.runs as OrgState['runs'],
-          nodes: msg.nodes as OrgState['nodes'],
-          edges: msg.edges as OrgState['edges'],
-        });
+          runs: (msg.runs ?? []) as OrgState['runs'],
+          nodes: (msg.nodes ?? []) as OrgState['nodes'],
+          edges: (msg.edges ?? []) as OrgState['edges'],
+        };
+        setOrgState(nextOrg);
+
         // Re-label the office's profile zones with the Hermes profile names and
         // feed the area nameplates their availability/workload status.
         const names = profiles
           .map((p) => p.displayName ?? p.profileId)
           .filter((n): n is string => typeof n === 'string' && n.length > 0);
-        if (names.length > 0) {
-          os.applyProfileAreaNames(names);
-        }
+        if (names.length > 0) os.applyProfileAreaNames(names);
         const statuses: Record<string, { availability: string; workload: string }> = {};
         for (const p of profiles) {
           const key = p.displayName ?? p.profileId;
@@ -721,6 +723,90 @@ export function useExtensionMessages(
           }
         }
         setAreaProfileStatuses(statuses);
+
+        // Authoritative Graph -> Office CharacterMapper. Controllers are stable
+        // presences but are not ExecutionNodes/Executors. Runtime workers map 1:1
+        // from live graph nodes; Kanban placeholder nodes never become people.
+        const presences = projectOrgOfficePresences(nextOrg);
+        const nextIds = new Set(presences.map((presence) => presence.id));
+        for (const oldId of orgVisualIds) {
+          if (!nextIds.has(oldId)) os.removeAgent(oldId);
+        }
+
+        for (const presence of presences) {
+          noteFolderName(presence.profileId);
+          let ch = os.characters.get(presence.id);
+          if (!ch) {
+            os.addAgent(
+              presence.id,
+              presence.palette,
+              0,
+              undefined,
+              presence.kind === 'controller',
+              presence.profileId,
+              undefined,
+              presence.displayName,
+            );
+            ch = os.characters.get(presence.id);
+          } else if (ch.matrixEffect === 'despawn') {
+            ch.matrixEffect = null;
+            ch.matrixEffectTimer = 0;
+          }
+          if (!ch) continue;
+          ch.isOrgPresence = true;
+          ch.orgKind = presence.kind;
+          ch.orgEntityId = presence.entityId;
+          ch.orgRunId = presence.runId;
+          ch.orgState = presence.state;
+          ch.folderName = presence.profileId;
+          os.setTeamInfo(
+            presence.id,
+            presence.displayName,
+            presence.agentName,
+            false,
+            undefined,
+            undefined,
+            presence.processId,
+          );
+          os.setAgentMeta(presence.id, { runtime: presence.runtime, model: presence.model });
+          os.setAgentTool(presence.id, presence.currentTool);
+          os.setAgentActive(presence.id, presence.active);
+          if (presence.state === 'BLOCKED') os.showPermissionBubble(presence.id);
+          else os.clearPermissionBubble(presence.id);
+        }
+
+        setAgents((prev) => {
+          const keep = prev.filter((id) => !orgVisualIds.has(id));
+          const merged = new Set([...keep, ...nextIds]);
+          return [...merged].sort((a, b) => a - b);
+        });
+        setAgentTools((prev) => {
+          const next = { ...prev };
+          for (const id of orgVisualIds) delete next[id];
+          for (const presence of presences) {
+            next[presence.id] = presence.active
+              ? [
+                  {
+                    toolId: `org:${presence.entityId}`,
+                    status: presence.activity,
+                    done: false,
+                    permissionWait: presence.state === 'BLOCKED',
+                  },
+                ]
+              : [];
+          }
+          return next;
+        });
+        setAgentStatuses((prev) => {
+          const next = { ...prev };
+          for (const id of orgVisualIds) delete next[id];
+          for (const presence of presences) next[presence.id] = presence.active ? 'active' : 'idle';
+          return next;
+        });
+        setSelectedAgent((prev) =>
+          prev !== null && orgVisualIds.has(prev) && !nextIds.has(prev) ? null : prev,
+        );
+        orgVisualIds = nextIds;
       }
     };
     const unsubscribe = transport.onMessage(handler);

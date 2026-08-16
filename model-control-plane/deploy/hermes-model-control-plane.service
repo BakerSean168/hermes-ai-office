@@ -1,0 +1,32 @@
+[Unit]
+Description=Hermes Model Control Plane
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/srv/hermes-personal/workspace/repos/pixel-agents
+ExecStart=/opt/node-v24.18.0-linux-arm64/bin/node model-control-plane/src/server.mjs
+Environment=NODE_ENV=production
+Environment=MODEL_CP_HOST=127.0.0.1
+Environment=MODEL_CP_PORT=8320
+Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
+Environment=MODEL_CP_CPA_SUDO=0
+Environment=MODEL_CP_USAGE_RANGE=30d
+Environment=MODEL_CP_SYNC_INTERVAL_MS=60000
+Environment=MODEL_CP_HEALTH_CHECK_INTERVAL_MS=1800000
+Environment=MODEL_CP_MANAGE_POSITION_ALIASES=1
+Environment=GATEWAYCTL=/usr/local/sbin/gatewayctl
+Environment=CPA_BASE_URL=http://127.0.0.1:8317
+Environment=CPA_MANAGEMENT_KEY_FILE=/opt/cpa/.mgmt_password
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/hermes-personal/data/model-control-plane /opt/cpa/state /opt/cpa/backups/gatewayctl
+
+[Install]
+WantedBy=multi-user.target

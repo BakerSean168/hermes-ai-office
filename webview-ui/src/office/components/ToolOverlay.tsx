@@ -224,7 +224,7 @@ export function ToolOverlay({
           if (ch.teamName) identityParts.push(ch.teamName);
           if (ch.agentName) identityParts.push(ch.agentName);
         }
-        const identityLabel = identityParts.length > 0 ? identityParts.join(' ') : null;
+        const identityLabel = identityParts.length > 0 ? identityParts.join(' · ') : null;
 
         // Runtime + model line ("OpenCode · DeepSeek V4") — omitted when the
         // agent has no model.
@@ -306,7 +306,7 @@ export function ToolOverlay({
                   </span>
                 )}
               </div>
-              {isSelected && !isSub && (
+              {isSelected && !isSub && !ch.isOrgPresence && (
                 <Button
                   variant="ghost"
                   size="icon"

@@ -57,6 +57,10 @@ export interface HermesController {
   status?: string;
   model?: string;
   action?: string;
+  title?: string;
+  source?: string;
+  thread_id?: string;
+  started_at?: number;
   is_active?: boolean;
   last_activity_at?: number;
 }

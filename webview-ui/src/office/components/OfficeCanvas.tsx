@@ -776,7 +776,7 @@ export function OfficeCanvas({
       if (officeState.selectedAgentId !== null) {
         const selectedCh = officeState.characters.get(officeState.selectedAgentId);
         // Skip seat reassignment for sub-agents
-        if (selectedCh && !selectedCh.isSubagent) {
+        if (selectedCh && !selectedCh.isSubagent && !selectedCh.isOrgPresence) {
           const tile = screenToTile(e.clientX, e.clientY);
           if (tile) {
             const seatId = officeState.getSeatAtTile(tile.col, tile.row);

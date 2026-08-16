@@ -212,12 +212,17 @@ function App() {
   );
 
   const handleCloseAgent = useCallback((id: number) => {
+    if (getOfficeState().characters.get(id)?.isOrgPresence) return;
     transport.send({ type: 'closeAgent', id });
   }, []);
 
   const handleClick = useCallback((agentId: number) => {
-    // If clicked agent is a sub-agent, focus the parent's terminal instead
+    // Organization-projected characters are observational identities, not local
+    // terminal handles. Selection still works, but focusing/closing them would
+    // send a meaningless synthetic id to the server.
     const os = getOfficeState();
+    if (os.characters.get(agentId)?.isOrgPresence) return;
+    // If clicked agent is a sub-agent, focus the parent's terminal instead
     const meta = os.subagentMeta.get(agentId);
     const focusId = meta ? meta.parentAgentId : agentId;
     transport.send({ type: 'focusAgent', id: focusId });
@@ -339,161 +344,162 @@ function App() {
             activeAreaLabel={activeAreaLabel}
           />
 
-      {!isDebugMode ? (
-        <>
-          <ZoomControls zoom={editor.zoom} onZoomChange={editor.handleZoomChange} />
+          {!isDebugMode ? (
+            <>
+              <ZoomControls zoom={editor.zoom} onZoomChange={editor.handleZoomChange} />
 
-          {/* Vignette overlay */}
-          <div
-            className="absolute inset-0 pointer-events-none"
-            style={{ background: 'var(--vignette)' }}
-          />
+              {/* Vignette overlay */}
+              <div
+                className="absolute inset-0 pointer-events-none"
+                style={{ background: 'var(--vignette)' }}
+              />
 
-          {editor.isEditMode && editor.isDirty && (
-            <EditActionBar editor={editor} editorState={editorState} />
+              {editor.isEditMode && editor.isDirty && (
+                <EditActionBar editor={editor} editorState={editorState} />
+              )}
+
+              {showRotateHint && (
+                <div
+                  className="absolute left-1/2 -translate-x-1/2 z-11 bg-accent-bright text-white text-sm py-3 px-8 rounded-none border-2 border-accent shadow-pixel pointer-events-none whitespace-nowrap"
+                  style={{ top: editor.isDirty ? 64 : 8 }}
+                >
+                  Rotate (R)
+                </div>
+              )}
+
+              {editor.isEditMode &&
+                (() => {
+                  const selUid = editorState.selectedFurnitureUid;
+                  const selColor = selUid
+                    ? (officeState.getLayout().furniture.find((f) => f.uid === selUid)?.color ??
+                      null)
+                    : null;
+                  return (
+                    <EditorToolbar
+                      activeTool={editorState.activeTool}
+                      selectedTileType={editorState.selectedTileType}
+                      selectedFurnitureType={editorState.selectedFurnitureType}
+                      selectedFurnitureUid={selUid}
+                      selectedFurnitureColor={selColor}
+                      floorColor={editorState.floorColor}
+                      wallColor={editorState.wallColor}
+                      selectedWallSet={editorState.selectedWallSet}
+                      onToolChange={editor.handleToolChange}
+                      onTileTypeChange={editor.handleTileTypeChange}
+                      onFloorColorChange={editor.handleFloorColorChange}
+                      onWallColorChange={editor.handleWallColorChange}
+                      onWallSetChange={editor.handleWallSetChange}
+                      onSelectedFurnitureColorChange={editor.handleSelectedFurnitureColorChange}
+                      pickedFurnitureColor={editorState.pickedFurnitureColor}
+                      onPickedFurnitureColorChange={editor.handlePickedFurnitureColorChange}
+                      onFurnitureTypeChange={editor.handleFurnitureTypeChange}
+                      loadedAssets={loadedAssets}
+                      activePetTypes={officeState.getActivePetTypes()}
+                      petCount={getPetCount()}
+                      onPetToggle={editor.handlePetToggle}
+                      carpetVariant={editor.carpetVariant}
+                      carpetColor={editor.carpetColor}
+                      carpetAccentColor={editor.carpetAccentColor}
+                      onCarpetVariantChange={editor.handleCarpetVariantChange}
+                      onCarpetColorChange={editor.handleCarpetColorChange}
+                      onCarpetAccentColorChange={editor.handleCarpetAccentColorChange}
+                      areas={officeState.getLayout().areas ?? []}
+                      selectedAreaLabel={editor.selectedAreaLabel}
+                      workspaceFolders={areaFolders}
+                      areasAvailable={areasAvailable}
+                      areaMappings={areaMappings}
+                      onSelectArea={editor.handleSelectArea}
+                      onAddArea={editor.handleAddArea}
+                      onRemoveArea={editor.handleRemoveArea}
+                      onRenameArea={editor.handleRenameArea}
+                      onAreaColorChange={editor.handleAreaColorChange}
+                      onAreaMappingChange={handleAreaMappingChange}
+                    />
+                  );
+                })()}
+
+              <ToolOverlay
+                officeState={officeState}
+                agents={agents}
+                agentTools={agentTools}
+                subagentTools={subagentTools}
+                subagentCharacters={subagentCharacters}
+                containerRef={containerRef}
+                zoom={editor.zoom}
+                panRef={editor.panRef}
+                onCloseAgent={handleCloseAgent}
+                alwaysShowOverlay={alwaysShowOverlay}
+              />
+            </>
+          ) : (
+            <DebugView
+              agents={agents}
+              selectedAgent={selectedAgent}
+              agentTools={agentTools}
+              agentStatuses={agentStatuses}
+              subagentTools={subagentTools}
+              officeState={officeState}
+              onSelectAgent={handleSelectAgent}
+            />
           )}
 
-          {showRotateHint && (
-            <div
-              className="absolute left-1/2 -translate-x-1/2 z-11 bg-accent-bright text-white text-sm py-3 px-8 rounded-none border-2 border-accent shadow-pixel pointer-events-none whitespace-nowrap"
-              style={{ top: editor.isDirty ? 64 : 8 }}
-            >
-              Rotate (R)
-            </div>
-          )}
-
-          {editor.isEditMode &&
-            (() => {
-              const selUid = editorState.selectedFurnitureUid;
-              const selColor = selUid
-                ? (officeState.getLayout().furniture.find((f) => f.uid === selUid)?.color ?? null)
-                : null;
-              return (
-                <EditorToolbar
-                  activeTool={editorState.activeTool}
-                  selectedTileType={editorState.selectedTileType}
-                  selectedFurnitureType={editorState.selectedFurnitureType}
-                  selectedFurnitureUid={selUid}
-                  selectedFurnitureColor={selColor}
-                  floorColor={editorState.floorColor}
-                  wallColor={editorState.wallColor}
-                  selectedWallSet={editorState.selectedWallSet}
-                  onToolChange={editor.handleToolChange}
-                  onTileTypeChange={editor.handleTileTypeChange}
-                  onFloorColorChange={editor.handleFloorColorChange}
-                  onWallColorChange={editor.handleWallColorChange}
-                  onWallSetChange={editor.handleWallSetChange}
-                  onSelectedFurnitureColorChange={editor.handleSelectedFurnitureColorChange}
-                  pickedFurnitureColor={editorState.pickedFurnitureColor}
-                  onPickedFurnitureColorChange={editor.handlePickedFurnitureColorChange}
-                  onFurnitureTypeChange={editor.handleFurnitureTypeChange}
-                  loadedAssets={loadedAssets}
-                  activePetTypes={officeState.getActivePetTypes()}
-                  petCount={getPetCount()}
-                  onPetToggle={editor.handlePetToggle}
-                  carpetVariant={editor.carpetVariant}
-                  carpetColor={editor.carpetColor}
-                  carpetAccentColor={editor.carpetAccentColor}
-                  onCarpetVariantChange={editor.handleCarpetVariantChange}
-                  onCarpetColorChange={editor.handleCarpetColorChange}
-                  onCarpetAccentColorChange={editor.handleCarpetAccentColorChange}
-                  areas={officeState.getLayout().areas ?? []}
-                  selectedAreaLabel={editor.selectedAreaLabel}
-                  workspaceFolders={areaFolders}
-                  areasAvailable={areasAvailable}
-                  areaMappings={areaMappings}
-                  onSelectArea={editor.handleSelectArea}
-                  onAddArea={editor.handleAddArea}
-                  onRemoveArea={editor.handleRemoveArea}
-                  onRenameArea={editor.handleRenameArea}
-                  onAreaColorChange={editor.handleAreaColorChange}
-                  onAreaMappingChange={handleAreaMappingChange}
-                />
-              );
-            })()}
-
-          <ToolOverlay
-            officeState={officeState}
-            agents={agents}
-            agentTools={agentTools}
-            subagentTools={subagentTools}
-            subagentCharacters={subagentCharacters}
-            containerRef={containerRef}
-            zoom={editor.zoom}
-            panRef={editor.panRef}
-            onCloseAgent={handleCloseAgent}
-            alwaysShowOverlay={alwaysShowOverlay}
-          />
-        </>
-      ) : (
-        <DebugView
-          agents={agents}
-          selectedAgent={selectedAgent}
-          agentTools={agentTools}
-          agentStatuses={agentStatuses}
-          subagentTools={subagentTools}
-          officeState={officeState}
-          onSelectAgent={handleSelectAgent}
-        />
-      )}
-
-      {/* Hooks first-run tooltip */}
-      {!hooksInfoShown && !hooksTooltipDismissed && (
-        <Tooltip
-          title="Instant Detection Active"
-          position="top-right"
-          onDismiss={() => {
-            setHooksTooltipDismissed(true);
-            transport.send({ type: 'setHooksInfoShown' });
-          }}
-        >
-          <span className="text-sm text-text leading-none">
-            Your agents now respond in real-time.{' '}
-            <span
-              className="text-accent cursor-pointer underline"
-              onClick={() => {
-                setIsHooksInfoOpen(true);
+          {/* Hooks first-run tooltip */}
+          {!hooksInfoShown && !hooksTooltipDismissed && (
+            <Tooltip
+              title="Instant Detection Active"
+              position="top-right"
+              onDismiss={() => {
                 setHooksTooltipDismissed(true);
                 transport.send({ type: 'setHooksInfoShown' });
               }}
             >
-              View more
-            </span>
-          </span>
-        </Tooltip>
-      )}
+              <span className="text-sm text-text leading-none">
+                Your agents now respond in real-time.{' '}
+                <span
+                  className="text-accent cursor-pointer underline"
+                  onClick={() => {
+                    setIsHooksInfoOpen(true);
+                    setHooksTooltipDismissed(true);
+                    transport.send({ type: 'setHooksInfoShown' });
+                  }}
+                >
+                  View more
+                </span>
+              </span>
+            </Tooltip>
+          )}
 
-      {/* Hooks info modal */}
-      <Modal
-        isOpen={isHooksInfoOpen}
-        onClose={() => setIsHooksInfoOpen(false)}
-        title="Instant Detection is ON"
-        zIndex={52}
-      >
-        <div className="text-base text-text px-10" style={{ lineHeight: 1.4 }}>
-          <p className="mb-8">Your Pixel Agents office now reacts in real-time:</p>
-          <ul className="mb-8 pl-18 list-disc m-0">
-            <li className="text-sm mb-2">Permission prompts appear instantly</li>
-            <li className="text-sm mb-2">Turn completions detected the moment they happen</li>
-            <li className="text-sm mb-2">Sound notifications play immediately</li>
-          </ul>
-          <p className="mb-12 text-text-muted">
-            This works through Claude Code Hooks, small event listeners that notify Pixel Agents
-            whenever something happens in your Claude sessions.
-          </p>
-          <div className="text-center">
-            <button
-              onClick={() => setIsHooksInfoOpen(false)}
-              className="py-4 px-20 text-lg bg-accent text-white border-2 border-accent rounded-none cursor-pointer shadow-pixel"
-            >
-              Got it
-            </button>
-          </div>
-          <p className="mt-8 text-xs text-text-muted text-center">
-            To disable, go to Settings {'>'} Instant Detection
-          </p>
-        </div>
-      </Modal>
+          {/* Hooks info modal */}
+          <Modal
+            isOpen={isHooksInfoOpen}
+            onClose={() => setIsHooksInfoOpen(false)}
+            title="Instant Detection is ON"
+            zIndex={52}
+          >
+            <div className="text-base text-text px-10" style={{ lineHeight: 1.4 }}>
+              <p className="mb-8">Your Pixel Agents office now reacts in real-time:</p>
+              <ul className="mb-8 pl-18 list-disc m-0">
+                <li className="text-sm mb-2">Permission prompts appear instantly</li>
+                <li className="text-sm mb-2">Turn completions detected the moment they happen</li>
+                <li className="text-sm mb-2">Sound notifications play immediately</li>
+              </ul>
+              <p className="mb-12 text-text-muted">
+                This works through Claude Code Hooks, small event listeners that notify Pixel Agents
+                whenever something happens in your Claude sessions.
+              </p>
+              <div className="text-center">
+                <button
+                  onClick={() => setIsHooksInfoOpen(false)}
+                  className="py-4 px-20 text-lg bg-accent text-white border-2 border-accent rounded-none cursor-pointer shadow-pixel"
+                >
+                  Got it
+                </button>
+              </div>
+              <p className="mt-8 text-xs text-text-muted text-center">
+                To disable, go to Settings {'>'} Instant Detection
+              </p>
+            </div>
+          </Modal>
         </>
       )}
 

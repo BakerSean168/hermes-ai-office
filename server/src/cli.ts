@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   // ── Hermes Organization layer (opt-in, off by default) ──
   // Enabled when HERMES_BRIDGE_ENABLED=1 or when HERMES_BRIDGE_URL is set. When
   // active, the HermesProvider subscribes to the hermes-office-bridge SSE stream
-  // and drives both the Organization graph (orgState) and worker characters.
+  // and drives the Organization graph (orgState); the webview projects graph nodes into characters.
   const hermesEnabled =
     process.env['HERMES_BRIDGE_ENABLED'] === '1' || !!process.env['HERMES_BRIDGE_URL'];
   const orgStore = hermesEnabled ? new OrgStore() : null;

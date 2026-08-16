@@ -15,6 +15,11 @@ export interface OrgProfile {
   availability: ProfileAvailability;
   workload: ProfileWorkload;
   sessionId?: string;
+  controllerState?: string;
+  controllerStatus?: string;
+  controllerModel?: string;
+  controllerAction?: string;
+  controllerActive?: boolean;
   mission?: string;
   lastSeenAt: number;
   lastResponseAt?: number;

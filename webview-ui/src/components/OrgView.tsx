@@ -10,6 +10,7 @@ import {
   ORG_WORKLOAD_READY_COLOR,
 } from '../constants.js';
 import type { OrgNode, OrgProfile, OrgRun, OrgState } from '../org/types.js';
+import { ModelWorkforcePanel } from './ModelWorkforcePanel.js';
 
 interface OrgViewProps {
   orgState: OrgState | null;
@@ -26,6 +27,7 @@ interface RunBlock {
   key: string;
   label: string;
   title: string;
+  status?: string;
   nodes: OrgNode[];
   tree: TreeNode[];
 }
@@ -135,6 +137,12 @@ function spawnCommand(node: OrgNode): string {
   return `⚡ ${cmd}`;
 }
 
+function runDisplayLabel(runId: string): string {
+  if (runId.startsWith('interactive:')) return 'Interactive';
+  if (runId.startsWith('kanban:')) return `#${runId.split(':').at(-1) ?? runId}`;
+  return `#${runId}`;
+}
+
 function buildBlocks(orgState: OrgState | null): ProfileBlock[] {
   if (!orgState) return [];
   const relationByKey = new Map<string, string>(
@@ -144,8 +152,12 @@ function buildBlocks(orgState: OrgState | null): ProfileBlock[] {
 
   return orgState.profiles.map((profile) => {
     const profileNodes = orgState.nodes.filter((n) => n.profileId === profile.profileId);
+    const profileRuns = orgState.runs.filter((r) => r.profileId === profile.profileId);
 
     const byRun = new Map<string, OrgNode[]>();
+    // Runs are first-class even when the controller is doing all the work and no
+    // delegated ExecutionNode exists yet.
+    for (const run of profileRuns) byRun.set(run.id, []);
     for (const n of profileNodes) {
       const key = n.runId || 'active';
       const list = byRun.get(key) ?? [];
@@ -155,21 +167,21 @@ function buildBlocks(orgState: OrgState | null): ProfileBlock[] {
     const keys = [...byRun.keys()].sort((a, b) => {
       if (a === 'active') return -1;
       if (b === 'active') return 1;
-      return a.localeCompare(b);
+      const ar = runById.get(a);
+      const br = runById.get(b);
+      return (br?.createdAt ?? 0) - (ar?.createdAt ?? 0) || a.localeCompare(b);
     });
 
     const runs: RunBlock[] = keys.map((key) => {
       const nodes = byRun.get(key)!;
       const run = key === 'active' ? undefined : runById.get(key);
       const title =
-        (run && run.title) ||
-        nodes.find((n) => n.taskTitle)?.taskTitle ||
-        profile.mission ||
-        'Active';
+        run?.title || nodes.find((n) => n.taskTitle)?.taskTitle || profile.mission || 'Active work';
       return {
         key,
-        label: key === 'active' ? 'Active' : `Run #${key}`,
+        label: key === 'active' ? 'Unscoped' : runDisplayLabel(key),
         title,
+        status: run?.status,
         nodes,
         tree: buildTree(nodes, relationByKey),
       };
@@ -215,24 +227,31 @@ function buildTree(nodes: OrgNode[], relationByKey: Map<string, string>): TreeNo
 interface OrgStats {
   profiles: number;
   activeRuns: number;
-  activeExecutors: number;
+  activeWorkers: number;
 }
 
 function computeStats(orgState: OrgState | null): OrgStats {
-  if (!orgState) return { profiles: 0, activeRuns: 0, activeExecutors: 0 };
-  const activeExecutors = orgState.nodes.filter((n) => isActiveNodeState(n.state)).length;
-
-  // active runs = distinct (profile, run) groups containing at least one active node
-  const activeRuns = new Set<string>();
-  for (const n of orgState.nodes) {
-    if (!isActiveNodeState(n.state)) continue;
-    activeRuns.add(`${n.profileId}\u0000${n.runId || ''}`);
+  if (!orgState) return { profiles: 0, activeRuns: 0, activeWorkers: 0 };
+  const terminalRuns = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
+  const activeRuns = new Set(
+    orgState.runs.filter((run) => !terminalRuns.has(run.status)).map((run) => run.id),
+  );
+  // Preserve visibility for legacy/unscoped active nodes while the run adapter is
+  // catching up; properly modelled nodes are already counted by their Run object.
+  for (const node of orgState.nodes) {
+    if (!isActiveNodeState(node.state)) continue;
+    if (!node.runId || !orgState.runs.some((run) => run.id === node.runId)) {
+      activeRuns.add(`${node.profileId}:unscoped`);
+    }
   }
+  const activeWorkers = orgState.nodes.filter(
+    (node) => node.metadata?.kanban !== true && isActiveNodeState(node.state),
+  ).length;
 
   return {
     profiles: orgState.profiles.length,
     activeRuns: activeRuns.size,
-    activeExecutors,
+    activeWorkers,
   };
 }
 
@@ -261,8 +280,8 @@ export function OrgView({ orgState, onClose }: OrgViewProps) {
         <div className="flex items-center gap-4">
           <span className="text-xl">🌐 Organization</span>
           <span className="text-sm text-text-muted">
-            {stats.profiles} Profiles · {stats.activeRuns} Active Runs · {stats.activeExecutors}{' '}
-            Active Executors
+            {stats.profiles} Profiles · {stats.activeRuns} Active Runs · {stats.activeWorkers}{' '}
+            Active Workers
           </span>
         </div>
         <button
@@ -274,6 +293,9 @@ export function OrgView({ orgState, onClose }: OrgViewProps) {
       </div>
 
       <div className="flex-1 overflow-auto p-6">
+        <div className="mb-6">
+          <ModelWorkforcePanel />
+        </div>
         {blocks.length === 0 ? (
           <div className="text-base text-text-muted">
             No Hermes bridge data yet. Waiting for the first board frame…
@@ -301,31 +323,64 @@ export function OrgView({ orgState, onClose }: OrgViewProps) {
                   />
                 </div>
 
-                {block.runs.map((run) => (
-                  <div key={run.key} className="mb-4 last:mb-0">
-                    <RunHeader run={run} />
-                    {run.tree.length === 0 ? (
-                      <div className="pl-10 text-sm text-text-muted">No active workers</div>
-                    ) : (
-                      <div className="flex flex-col gap-1">
-                        {run.tree.map((t) => (
-                          <NodeRow
-                            key={t.node.id}
-                            treeNode={t}
-                            depth={0}
-                            nodesById={nodesById}
-                            dependsOnByTo={dependsOnByTo}
-                          />
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                <ControllerRow profile={block.profile} />
+
+                {block.runs.length === 0 ? (
+                  <div className="pl-10 text-sm text-text-muted">No active runs</div>
+                ) : (
+                  block.runs.map((run) => (
+                    <div key={run.key} className="mb-4 last:mb-0">
+                      <RunHeader run={run} />
+                      {run.tree.length === 0 ? (
+                        <div className="pl-10 text-sm text-text-muted">
+                          Controller-owned run · no delegated workers
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-1">
+                          {run.tree.map((t) => (
+                            <NodeRow
+                              key={t.node.id}
+                              treeNode={t}
+                              depth={0}
+                              nodesById={nodesById}
+                              dependsOnByTo={dependsOnByTo}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
               </div>
             ))}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function ControllerRow({ profile }: { profile: OrgProfile }) {
+  const state = profile.controllerState ?? (profile.workload === 'READY' ? 'DONE' : 'THINKING');
+  const action = profile.controllerAction?.trim();
+  return (
+    <div className="flex items-center gap-3 text-sm py-2 mb-2 pl-2 border-l-2 border-border">
+      <span>◆</span>
+      <span className="text-text">Controller</span>
+      <span className="text-text-muted">Hermes</span>
+      {profile.controllerModel && (
+        <span className="text-text-muted">· {profile.controllerModel}</span>
+      )}
+      <Badge
+        label={profile.controllerActive ? state : 'READY'}
+        color={stateColor(profile.controllerActive ? state : 'DONE')}
+      />
+      {action && (
+        <span className="text-2xs text-text-muted truncate" title={action}>
+          {action}
+        </span>
+      )}
+      <span className="text-2xs text-text-muted">control plane · not an executor</span>
     </div>
   );
 }
@@ -339,11 +394,19 @@ function RunHeader({ run }: { run: RunBlock }) {
   return (
     <div className="flex items-center gap-3 text-sm text-text-muted mb-1">
       <span>└─</span>
-      <span className="text-text">Run</span>
-      <span className="text-text">{run.label}</span>
+      <span className="text-text">Run {run.label}</span>
+      {run.status && (
+        <Badge
+          label={run.status}
+          color={stateColor(
+            run.status === 'RUNNING' ? 'CODING' : run.status === 'BLOCKED' ? 'BLOCKED' : 'THINKING',
+          )}
+        />
+      )}
       <span className="text-text-muted">"{run.title}"</span>
       <span className="text-2xs">
-        ({run.nodes.length} nodes · {active} active{totalElapsed > 0 ? ` · ${formatElapsed(totalElapsed)}` : ''})
+        ({run.nodes.length} nodes · {active} active
+        {totalElapsed > 0 ? ` · ${formatElapsed(totalElapsed)}` : ''})
       </span>
     </div>
   );

@@ -3,22 +3,18 @@
  *
  * Unlike the Claude provider it installs no shell hooks and drives nothing from
  * JSONL transcripts. Instead it subscribes to the hermes-office-bridge SSE stream
- * (`GET /api/events`), diffs each board frame against the previous one, and turns
- * the diff into normalized `AgentEvent`s that map workers onto office characters
- * (sessionStart/toolStart/toolEnd/turnEnd/sessionEnd). It also rebuilds the
- * OrgStore graph and broadcasts the `orgState` snapshot on every frame.
+ * (`GET /api/events`), rebuilds the authoritative OrgStore graph, and broadcasts
+ * the `orgState` snapshot on every frame. The webview projects that graph into
+ * office characters so Graph View and Office View cannot diverge.
  *
- * Hermes workers are isolated from the Claude provider: they are `hooksOnly`
- * agents with their own `sessionId` (`hermes:<profile>:<workerId>`) and are never
- * persisted, restored, or touched by Claude's file watchers.
+ * The older flat worker -> AgentState path remains available as pure helper logic
+ * for compatibility tests, but HermesProvider no longer emits duplicate agent
+ * lifecycle messages from it.
  */
 
 import type { AgentEvent, HookProvider } from '../../../../core/src/provider.js';
 import type { AgentStateStore } from '../../agentStateStore.js';
-import { DEFAULT_MAX_CONTEXT_TOKENS } from '../../constants.js';
 import type { OrgStore } from '../../orgStore.js';
-import { assignPaletteIfNeeded } from '../../paletteAssigner.js';
-import type { AgentState } from '../../types.js';
 import {
   BridgeClient,
   type HermesBoard,
@@ -86,6 +82,31 @@ export function statusToToolName(status: string | undefined): string {
 export function isActiveWorkerStatus(status: string | undefined): boolean {
   const s = (status ?? 'idle').trim().toLowerCase();
   return s !== 'idle' && s !== '';
+}
+
+/** Stable run id for work performed directly by a profile's root controller session. */
+export function interactiveRunId(profileId: string, sessionId: string): string {
+  return `interactive:${profileId}:${sessionId}`;
+}
+
+/** Translate a root controller state into the corresponding run lifecycle. */
+export function controllerRunStatus(status: string | undefined): Run['status'] {
+  switch ((status ?? '').trim().toLowerCase()) {
+    case 'blocked':
+      return 'BLOCKED';
+    case 'planning':
+    case 'llm_running':
+      return 'PLANNING';
+    case 'idle':
+    case 'done':
+    case 'completed':
+      return 'COMPLETED';
+    case 'failed':
+    case 'error':
+      return 'FAILED';
+    default:
+      return 'RUNNING';
+  }
 }
 
 /** Stable session id for a worker (independent characters per worker). */
@@ -280,6 +301,8 @@ export function buildProcessNodes(
     now: number;
     parentRunById?: ReadonlyMap<string, string>;
     parentRoleById?: ReadonlyMap<string, ExecutionNode['role']>;
+    /** Active run to inherit when the root controller directly launches a runtime. */
+    profileRunById?: ReadonlyMap<string, string>;
   },
 ): { nodes: ExecutionNode[]; edges: ExecutionEdge[] } {
   const nodes: ExecutionNode[] = [];
@@ -309,7 +332,11 @@ export function buildProcessNodes(
     if (!profileId || !opts.profileIds.has(profileId)) continue;
     const id = `process:${proc.pid}`;
     const parentId = spawn?.parentNodeId || undefined;
-    const runId = spawn?.runId || (parentId ? opts.parentRunById?.get(parentId) : undefined) || '';
+    const runId =
+      spawn?.runId ||
+      (parentId ? opts.parentRunById?.get(parentId) : undefined) ||
+      opts.profileRunById?.get(profileId) ||
+      '';
     nodes.push({
       id,
       profileId,
@@ -335,8 +362,7 @@ export function buildProcessNodes(
         runId,
         fromNodeId: parentId,
         toNodeId: id,
-        relation:
-          opts.parentRoleById?.get(parentId) === 'SUPERVISOR' ? 'SUPERVISES' : 'SPAWNED',
+        relation: opts.parentRoleById?.get(parentId) === 'SUPERVISOR' ? 'SUPERVISES' : 'SPAWNED',
       });
     }
   }
@@ -589,16 +615,12 @@ export class HermesProvider implements HookProvider {
   private readonly store: AgentStateStore;
   private readonly orgStore: OrgStore;
   private readonly bridge: BridgeClient;
-  private prevBoard: HermesBoard | null = null;
   /** Latest board frame (kept so kanban updates can re-apply against it). */
   private board: HermesBoard | null = null;
   /** Latest kanban snapshot (kept so board frames can re-apply kanban nodes). */
   private kanban: HermesKanban | null = null;
   /** Latest spawn list (kept so board frames can re-apply spawn correlation). */
   private spawns: HermesSpawn[] = [];
-  private readonly sessionToAgentId = new Map<string, number>();
-  /** Profile display name per worker session (team.display, falling back to team.name). */
-  private readonly sessionDisplay = new Map<string, string>();
   private readonly onAreaMappingsChanged?: (mappings: Record<string, string[]>) => void;
   /** Signature of the last area mapping so we only persist/broadcast on change. */
   private lastAreaSignature: string | null = null;
@@ -656,21 +678,15 @@ export class HermesProvider implements HookProvider {
   // ── Board handling ──────────────────────────────────────────
 
   private handleBoard(board: HermesBoard): void {
-    const events = diffBoard(this.prevBoard, board);
-    this.prevBoard = board;
     this.board = board;
 
     this.rebuildOrgGraph(board);
 
-    // Broadcast areaMappings + orgState BEFORE applying events so the webview
-    // re-labels its profile zones and can seat new Hermes agents (teamName) in
-    // the correct zone on the same board frame.
+    // Hermes office characters are projected exclusively from orgState in the
+    // webview. Keeping the legacy flat worker -> AgentState projection in parallel
+    // created duplicate characters and made the canvas disagree with Graph View.
     this.syncAreaMappings(board);
     this.broadcastOrg();
-
-    for (const { sessionId, event } of events) {
-      this.applyEvent(sessionId, event);
-    }
   }
 
   /**
@@ -743,16 +759,56 @@ export class HermesProvider implements HookProvider {
       runtimeActive,
       controllerStatus: team.controller?.status,
     });
+    const controllerSessionId = team.controller?.session_id || undefined;
+    const controllerState = team.controller?.status
+      ? inferNodeState(team.controller.status)
+      : undefined;
+    const controllerActive = Boolean(
+      team.controller?.is_active && controllerState && isActiveState(controllerState),
+    );
+    const currentInteractiveRunId =
+      controllerActive && controllerSessionId
+        ? interactiveRunId(profileId, controllerSessionId)
+        : undefined;
+
     const profile: ProfileController = {
       profileId,
       displayName: team.display ?? team.name,
       availability: agg.availability,
       workload: agg.workload,
+      sessionId: controllerSessionId,
+      controllerState,
+      controllerStatus: team.controller?.status,
+      controllerModel: team.controller?.model,
+      controllerAction: team.controller?.action,
+      controllerActive,
       mission: team.mission,
       lastSeenAt: now,
-      lastResponseAt: now,
+      lastResponseAt: team.controller?.last_activity_at
+        ? Math.round(team.controller.last_activity_at * 1000)
+        : now,
     };
     this.orgStore.upsertProfile(profile);
+
+    if (currentInteractiveRunId && team.controller) {
+      this.orgStore.upsertRun({
+        id: currentInteractiveRunId,
+        profileId,
+        title:
+          team.controller.title?.trim() ||
+          team.mission?.trim() ||
+          `${team.display ?? team.name} interactive work`,
+        status: controllerRunStatus(team.controller.status),
+        createdAt: team.controller.started_at
+          ? Math.round(team.controller.started_at * 1000)
+          : team.controller.last_activity_at
+            ? Math.round(team.controller.last_activity_at * 1000)
+            : now,
+        startedAt: team.controller.started_at
+          ? Math.round(team.controller.started_at * 1000)
+          : undefined,
+      });
+    }
 
     const profileSpawns = this.spawns.filter((s) => s.profileId === profileId);
     const spawnBySession = matchSpawnsToWorkers(
@@ -769,22 +825,22 @@ export class HermesProvider implements HookProvider {
     for (const worker of team.workers) {
       const sessionId = workerSessionId(team, worker);
       const status = (worker.status ?? 'idle').trim().toLowerCase();
-      this.sessionDisplay.set(sessionId, team.display ?? team.name);
       const spawn = spawnBySession.get(sessionId);
       // parentId: prefer the spawn's explicit parent node, then the worker's
       // parent chain id (multi-level trees); otherwise the node hangs directly
       // off the profile (parentId undefined → UI renders it as profile-direct).
+      const parentSessionId = worker.parent_id || undefined;
       const parentId = spawn?.parentNodeId
         ? spawn.parentNodeId
-        : worker.parent_id
-          ? workerSessionId(team, { id: worker.parent_id })
+        : parentSessionId && parentSessionId !== controllerSessionId
+          ? workerSessionId(team, { id: parentSessionId })
           : undefined;
       const processId = resolveWorkerProcessId(worker, processes);
       const supervisor = isSupervisorWorker(worker, sessionId, profileSpawns);
       const node: ExecutionNode = {
         id: sessionId,
         profileId,
-        runId: spawn?.runId ?? '',
+        runId: spawn?.runId || currentInteractiveRunId || '',
         parentId,
         type: inferNodeType(worker.runtime ?? ''),
         role:
@@ -818,10 +874,11 @@ export class HermesProvider implements HookProvider {
     for (const worker of team.workers) {
       const sessionId = workerSessionId(team, worker);
       const spawn = spawnBySession.get(sessionId);
+      const parentSessionId = worker.parent_id || undefined;
       const parentId = spawn?.parentNodeId
         ? spawn.parentNodeId
-        : worker.parent_id
-          ? workerSessionId(team, { id: worker.parent_id })
+        : parentSessionId && parentSessionId !== controllerSessionId
+          ? workerSessionId(team, { id: parentSessionId })
           : undefined;
       if (!parentId) continue;
       const parentRole = this.orgStore.nodes.get(parentId)?.role;
@@ -913,6 +970,14 @@ export class HermesProvider implements HookProvider {
       if (node.runId) parentRunById.set(node.id, node.runId);
       parentRoleById.set(node.id, node.role);
     }
+    const profileRunById = new Map<string, string>();
+    for (const run of this.orgStore.runs.values()) {
+      if (run.status === 'COMPLETED' || run.status === 'FAILED' || run.status === 'CANCELLED')
+        continue;
+      if (!profileRunById.has(run.profileId) || run.id.startsWith('interactive:')) {
+        profileRunById.set(run.profileId, run.id);
+      }
+    }
     const { nodes, edges } = buildProcessNodes(processes, {
       profileIds,
       ownedPids,
@@ -920,141 +985,9 @@ export class HermesProvider implements HookProvider {
       now: Date.now(),
       parentRunById,
       parentRoleById,
+      profileRunById,
     });
     for (const node of nodes) this.orgStore.upsertNode(node);
     for (const edge of edges) this.orgStore.upsertEdge(edge);
-  }
-
-  // ── AgentEvent application (canvas characters) ─────────────
-
-  private applyEvent(sessionId: string, event: AgentEvent): void {
-    switch (event.kind) {
-      case 'sessionStart':
-        return this.applySessionStart(sessionId);
-      case 'sessionEnd':
-        return this.applySessionEnd(sessionId);
-      case 'toolStart':
-        return this.applyToolStart(sessionId, event);
-      case 'toolEnd':
-        return this.applyToolEnd(sessionId, event);
-      case 'turnEnd':
-        return this.applyTurnEnd(sessionId);
-      default:
-        return;
-    }
-  }
-
-  private applySessionStart(sessionId: string): void {
-    if (this.sessionToAgentId.has(sessionId)) return;
-    const id = this.store.nextAgentId.current++;
-    const node = this.orgStore.nodes.get(sessionId);
-    const profileName = this.sessionDisplay.get(sessionId) ?? node?.profileId ?? 'Default';
-    const num = node?.num;
-    const agentName = num !== undefined ? `#${String(num).padStart(2, '0')}` : undefined;
-    const meta =
-      node?.runtime || node?.model ? { runtime: node?.runtime, model: node?.model } : undefined;
-    const agent: AgentState = {
-      id,
-      sessionId,
-      terminalRef: undefined,
-      isExternal: true,
-      projectDir: '',
-      jsonlFile: '',
-      fileOffset: 0,
-      lineBuffer: '',
-      activeToolIds: new Set(),
-      activeToolStatuses: new Map(),
-      activeToolNames: new Map(),
-      activeSubagentToolIds: new Map(),
-      activeSubagentToolNames: new Map(),
-      backgroundAgentToolIds: new Set(),
-      isWaiting: false,
-      permissionSent: false,
-      hadToolsInTurn: false,
-      hookDelivered: true,
-      hooksOnly: true,
-      providerId: 'hermes',
-      lastDataAt: Date.now(),
-      linesProcessed: 0,
-      seenUnknownRecordTypes: new Set(),
-      folderName: node?.profileId,
-      teamName: profileName,
-      agentName,
-      meta,
-      contextTokens: 0,
-      maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
-    };
-    assignPaletteIfNeeded(agent, this.store);
-    this.store.set(id, agent);
-    this.sessionToAgentId.set(sessionId, id);
-    this.store.broadcast({
-      type: 'agentTeamInfo',
-      id,
-      teamName: agent.teamName,
-      agentName: agent.agentName,
-      processId: node?.processId,
-      meta: agent.meta,
-    });
-  }
-
-  private applySessionEnd(sessionId: string): void {
-    const agentId = this.sessionToAgentId.get(sessionId);
-    if (agentId === undefined) return;
-    this.sessionToAgentId.delete(sessionId);
-    this.sessionDisplay.delete(sessionId);
-    this.store.delete(agentId);
-  }
-
-  private applyToolStart(
-    sessionId: string,
-    event: Extract<AgentEvent, { kind: 'toolStart' }>,
-  ): void {
-    const agentId = this.sessionToAgentId.get(sessionId);
-    if (agentId === undefined) return;
-    const agent = this.store.get(agentId);
-    if (!agent) return;
-    const status = this.formatToolStatus(event.toolName, event.input);
-    agent.activeToolIds.add(event.toolId);
-    agent.activeToolStatuses.set(event.toolId, status);
-    agent.activeToolNames.set(event.toolId, event.toolName);
-    agent.isWaiting = false;
-    agent.hadToolsInTurn = true;
-    this.store.broadcast({
-      type: 'agentToolStart',
-      id: agentId,
-      toolId: event.toolId,
-      status,
-      toolName: event.toolName,
-    });
-    this.store.broadcast({ type: 'agentStatus', id: agentId, status: 'active' });
-    // A blocked worker gets the permission bubble (amber "..." over the
-    // character) so it reads as stuck, mirroring the Claude permission path.
-    if (event.toolName === 'Permission') {
-      this.store.broadcast({ type: 'agentToolPermission', id: agentId });
-    }
-  }
-
-  private applyToolEnd(sessionId: string, event: Extract<AgentEvent, { kind: 'toolEnd' }>): void {
-    const agentId = this.sessionToAgentId.get(sessionId);
-    if (agentId === undefined) return;
-    const agent = this.store.get(agentId);
-    if (!agent) return;
-    agent.activeToolIds.delete(event.toolId);
-    agent.activeToolStatuses.delete(event.toolId);
-    agent.activeToolNames.delete(event.toolId);
-    this.store.broadcast({ type: 'agentToolDone', id: agentId, toolId: event.toolId });
-  }
-
-  private applyTurnEnd(sessionId: string): void {
-    const agentId = this.sessionToAgentId.get(sessionId);
-    if (agentId === undefined) return;
-    const agent = this.store.get(agentId);
-    if (!agent) return;
-    agent.activeToolIds.clear();
-    agent.activeToolStatuses.clear();
-    agent.activeToolNames.clear();
-    agent.isWaiting = true;
-    this.store.broadcast({ type: 'agentToolsClear', id: agentId });
-    this.store.broadcast({ type: 'agentStatus', id: agentId, status: 'waiting' });
   }
 }
