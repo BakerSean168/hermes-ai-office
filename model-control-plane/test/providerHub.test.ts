@@ -60,3 +60,50 @@ test('provider hub rejects secret-shaped metadata', () => {
     /PROVIDER_HUB_SECRET_FIELD_FORBIDDEN/,
   );
 });
+
+test('promoting a profile-local connection to global retires the duplicate and preserves profile links', () => {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const hub = new ProviderHubRepository(new V2Repository(db));
+  const local = hub.upsertConnection({
+    providerKey: 'ark717',
+    displayName: 'Ark717',
+    baseUrl: 'https://api.ark717.com/v1',
+    protocol: 'openai-responses',
+    credentialRef: 'ARK717_API_KEY',
+    credentialScope: 'PROFILE_LOCAL',
+    sourceProfileId: 'memoflow',
+    sourceKind: 'CODEX_CONFIG',
+    shareScope: 'GLOBAL',
+    health: 'READY',
+    models: ['gpt-5.6-sol'],
+  });
+  hub.linkProfile({
+    connectionId: String(local.id),
+    profileId: 'memoflow',
+    runtimeKind: 'CODEX',
+    providerRef: 'ark717',
+    modelRef: 'gpt-5.6-sol',
+    sourceKind: 'PROFILE_DISCOVERY',
+  });
+  const global = hub.upsertConnection({
+    providerKey: 'ark717',
+    displayName: 'Ark717',
+    baseUrl: 'https://api.ark717.com/v1',
+    protocol: 'openai-responses',
+    credentialRef: 'ARK717_API_KEY',
+    credentialScope: 'GLOBAL',
+    sourceKind: 'CODEX_CONFIG',
+    shareScope: 'GLOBAL',
+    health: 'READY',
+    models: ['gpt-5.6-sol'],
+  });
+  const projection = hub.projection();
+  assert.equal(projection.summary.connections, 1);
+  assert.equal((projection.items as any[])[0].id, global.id);
+  assert.equal((projection.items as any[])[0].profileLinks[0].profile_id, 'memoflow');
+  assert.equal(
+    db.prepare('SELECT lifecycle FROM v2_provider_connections WHERE id=?').get(local.id).lifecycle,
+    'RETIRED',
+  );
+});

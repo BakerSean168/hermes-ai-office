@@ -161,6 +161,67 @@ export class ProviderHubRepository {
             timestamp,
           );
       }
+      if (credentialScope === 'GLOBAL') {
+        const duplicates = rows(
+          this.#domain.db
+            .prepare(
+              `SELECT id FROM v2_provider_connections
+               WHERE id!=? AND provider_key=?
+                 AND COALESCE(base_url,'')=COALESCE(?, '')
+                 AND COALESCE(credential_ref,'')=COALESCE(?, '')
+                 AND credential_scope!='GLOBAL' AND lifecycle='ACTIVE'`,
+            )
+            .all(id, providerKey, baseUrl, credentialRef),
+        );
+        for (const duplicate of duplicates) {
+          const duplicateId = String(duplicate.id);
+          const links = rows(
+            this.#domain.db
+              .prepare(
+                "SELECT * FROM v2_profile_provider_links WHERE connection_id=? AND state='ACTIVE'",
+              )
+              .all(duplicateId),
+          );
+          for (const link of links) {
+            const conflict = row(
+              this.#domain.db
+                .prepare(
+                  `SELECT id FROM v2_profile_provider_links
+                   WHERE connection_id=? AND profile_id=? AND runtime_kind=?
+                     AND COALESCE(provider_ref,'')=COALESCE(?, '')
+                     AND COALESCE(model_ref,'')=COALESCE(?, '')
+                     AND COALESCE(profile_ref,'')=COALESCE(?, '') AND state='ACTIVE'`,
+                )
+                .get(
+                  id,
+                  String(link.profile_id),
+                  String(link.runtime_kind),
+                  link.provider_ref ? String(link.provider_ref) : null,
+                  link.model_ref ? String(link.model_ref) : null,
+                  link.profile_ref ? String(link.profile_ref) : null,
+                ),
+            );
+            if (conflict) {
+              this.#domain.db
+                .prepare(
+                  "UPDATE v2_profile_provider_links SET state='INACTIVE',updated_at=? WHERE id=?",
+                )
+                .run(timestamp, String(link.id));
+            } else {
+              this.#domain.db
+                .prepare(
+                  'UPDATE v2_profile_provider_links SET connection_id=?,updated_at=? WHERE id=?',
+                )
+                .run(id, timestamp, String(link.id));
+            }
+          }
+          this.#domain.db
+            .prepare(
+              "UPDATE v2_provider_connections SET lifecycle='RETIRED',updated_at=? WHERE id=?",
+            )
+            .run(timestamp, duplicateId);
+        }
+      }
       this.#domain.emit({
         type: existing ? 'provider_connection.updated' : 'provider_connection.created',
         entityType: 'ProviderConnection',
