@@ -352,6 +352,11 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["employees"][0]["runtimeAccess"][0]["adapterKind"], "NATIVE_CONFIG")
         self.assertEqual(result["defaultEmployeeId"], "emp_beta")
 
+    def test_local_provider_endpoint_is_not_presented_as_an_official_website(self) -> None:
+        self.assertEqual(api._website_origin("http://127.0.0.1:8317/v1"), "")
+        self.assertEqual(api._website_origin("http://localhost:8317/v1"), "")
+        self.assertEqual(api._website_origin("https://worldclawpro.ai/v1"), "https://worldclawpro.ai")
+
     def test_custom_supplier_name_is_optional_and_identity_is_stable_by_endpoint(self) -> None:
         first = api._custom_supplier_identity("https://proxy.example.com/v1")
         second = api._custom_supplier_identity("https://proxy.example.com/v1/", "")

@@ -617,6 +617,8 @@ def _normalize_base_url(value: str) -> str:
 def _website_origin(value: str) -> str:
     raw = _normalize_base_url(value)
     parsed = urllib.parse.urlparse(raw)
+    if parsed.hostname in _ALLOWED_HOSTS:
+        return ""
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
