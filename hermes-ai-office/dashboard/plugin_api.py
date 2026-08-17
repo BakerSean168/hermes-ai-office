@@ -173,10 +173,12 @@ def _read_env_file(path: Path) -> Dict[str, str]:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        if line.startswith("export "):
+            line = line[7:].strip()
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key:
+        if key and key.replace("_", "").isalnum():
             result[key] = value
     return result
 
