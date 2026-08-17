@@ -691,7 +691,30 @@ export class V2Repository {
     baseUrlHint?: string;
   }): Row {
     const existing = row(this.db.prepare('SELECT * FROM v2_gateways WHERE slug=?').get(input.slug));
-    if (existing) return existing;
+    if (existing) {
+      const existingBaseUrlHint =
+        existing.base_url_hint == null ? null : String(existing.base_url_hint);
+      const nextBaseUrlHint = input.baseUrlHint ?? existingBaseUrlHint;
+      if (
+        String(existing.display_name) !== input.displayName ||
+        existingBaseUrlHint !== nextBaseUrlHint
+      ) {
+        const timestamp = now();
+        this.db
+          .prepare('UPDATE v2_gateways SET display_name=?,base_url_hint=?,updated_at=? WHERE id=?')
+          .run(input.displayName, nextBaseUrlHint, timestamp, String(existing.id));
+        this.emit({
+          type: 'gateway.descriptor.updated',
+          entityType: 'Gateway',
+          entityId: String(existing.id),
+          payload: { displayName: input.displayName, baseUrlHint: nextBaseUrlHint },
+        });
+        return row(
+          this.db.prepare('SELECT * FROM v2_gateways WHERE id=?').get(String(existing.id)),
+        )!;
+      }
+      return existing;
+    }
     const timestamp = now();
     const id = newId('gw', timestamp);
     this.db

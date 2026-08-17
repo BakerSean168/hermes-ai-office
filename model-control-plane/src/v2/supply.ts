@@ -60,6 +60,54 @@ export class SupplyRepository {
     return this.#domain.setSupplierStaffingPreferences({ supplierId, ...input });
   }
 
+  updateSupplierProfile(supplierId: string, input: { name: string }): V2Row {
+    const name = input.name.trim();
+    if (!name) throw new Error('SUPPLIER_NAME_REQUIRED');
+    const existing = row(
+      this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId),
+    );
+    if (!existing) throw new Error('SUPPLIER_NOT_FOUND');
+    const previousName = String(existing.name);
+    if (previousName === name) return existing;
+    const timestamp = now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare('UPDATE v2_suppliers SET name=?,updated_at=? WHERE id=?')
+        .run(name, timestamp, supplierId);
+
+      const employees = rows(
+        this.#domain.db
+          .prepare(
+            `SELECT e.id,e.display_name,sm.display_name supplier_model_name
+             FROM v2_employees e
+             JOIN v2_supplier_models sm ON sm.id=e.supplier_model_id
+             WHERE e.supplier_id=?`,
+          )
+          .all(supplierId),
+      );
+      const updateEmployee = this.#domain.db.prepare(
+        'UPDATE v2_employees SET display_name=?,updated_at=? WHERE id=?',
+      );
+      for (const employee of employees) {
+        const generatedPreviousName = `${String(employee.supplier_model_name)} @ ${previousName}`;
+        if (String(employee.display_name) !== generatedPreviousName) continue;
+        updateEmployee.run(
+          `${String(employee.supplier_model_name)} @ ${name}`,
+          timestamp,
+          String(employee.id),
+        );
+      }
+
+      this.#domain.emit({
+        type: 'supplier.profile.updated',
+        entityType: 'Supplier',
+        entityId: supplierId,
+        payload: { previousName, name },
+      });
+      return row(this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId))!;
+    });
+  }
+
   getOrCreatePlan(input: {
     supplierId: string;
     slug: string;

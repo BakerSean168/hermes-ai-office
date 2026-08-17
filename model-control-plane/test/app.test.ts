@@ -126,7 +126,72 @@ test('V2 gateway discovery replaces legacy CPA synchronization', async () => {
     assert.equal(gateways.length, 1);
     assert.equal(gateways[0]?.slug, 'cpa-compat');
     assert.equal(gateways[0]?.kind, 'CPA');
+    assert.equal(gateways[0]?.displayName, 'My CPA');
     assert.equal(runtime.v2.listEmployees().length, 0);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('gateway discovery refreshes an existing gateway display descriptor', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    runtime.v2.getOrCreateGateway({
+      slug: 'cpa-compat',
+      kind: 'CPA',
+      displayName: 'CPA Compatibility Gateway',
+    });
+    await runtime.reconcileGateways();
+    const gateway = runtime.v2.findGatewayBySlug('cpa-compat');
+    assert.equal(gateway?.display_name, 'My CPA');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('supplier profile update renames generated employee labels without changing identity', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    const catalogResponse = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/supply-catalog/register',
+      headers: { 'idempotency-key': 'catalog-relay-one-opus' },
+      payload: {
+        supplier: { slug: 'relay-one', name: 'Kiro' },
+        supplierModel: { key: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+        agreement: { externalAccountRef: 'relay-one-kiro', name: 'Kiro / Current access' },
+      },
+    });
+    assert.equal(catalogResponse.statusCode, 200);
+    const catalog = catalogResponse.json();
+    const employeeId = String(catalog.employee.id);
+    const supplierId = String(catalog.supplier.id);
+
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${supplierId}/profile`,
+      headers: { 'idempotency-key': 'supplier-profile-relay-one' },
+      payload: { name: 'Commercial Relay 1' },
+    });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().name, 'Commercial Relay 1');
+    const employee = runtime.v2.listEmployees().find((item) => item.id === employeeId);
+    assert.equal(employee?.displayName, 'Claude Opus 4.6 @ Commercial Relay 1');
+    assert.equal(employee?.id, employeeId);
   } finally {
     await runtime.app.close();
   }

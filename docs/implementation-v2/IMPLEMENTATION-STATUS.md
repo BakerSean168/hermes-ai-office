@@ -345,11 +345,12 @@ Overview | Organization | Workforce | Suppliers | Operations | Incidents
 A production catalog reconciliation explicitly registered high-confidence commercial sources without altering staffing:
 
 - OpenCode / OpenCode Go: DeepSeek V4 Flash and DeepSeek V4 Pro;
-- Kiro: Claude Sonnet 4.5, Claude Opus 4.6 and Claude Haiku 4.5;
+- 商业中转站1 (`kiro` internal identity), Kiro plan/group: Claude Sonnet 4.5, Claude Opus 4.6 and Claude Haiku 4.5;
 - AnyRouter: Claude Opus 5, Claude Opus 4.7 and Claude 3.7 Sonnet.
 
-At verification time the production catalog contained 4 Suppliers, 9 Employees, 9 current Employments, 4 active SupplyAgreements, 1 Plan and only 1 current Appointment. The new catalog entries therefore expanded HR visibility without changing the active Coding Reviewer assignment or creating new dispatch bindings.
+At verification time the production catalog contained 4 Suppliers, 10 Employees, 10 current Employments, 4 active SupplyAgreements, 2 Plans and only 1 current Appointment. The new catalog entries therefore expanded HR visibility without changing the active Coding Reviewer assignment or creating new dispatch bindings.
 
 `nico-free-deepseek` and unclassified `planner-pool` physical routes remain technical evidence where commercial identity is not sufficiently proven. Missing commercial evidence is displayed as unclassified rather than guessed.
+The personal CPA gateway is displayed as `My CPA`. The retired `planner-pro` alias has been removed while the underlying `deepseek-v4-pro` model remains available.
 
 The LiteLLM route deployment script was also decoupled from business bootstrap. It now validates and binds an already-existing CURRENT Employment; it cannot create Supplier/Employee/Agreement/Appointment identity from a channel/model name. The standalone production bootstrap CLI was removed, and the MCP build cleans `dist/` before compiling so deleted runtime entrypoints cannot survive as stale artifacts.

@@ -1365,6 +1365,36 @@ export function registerV2Routes(
   );
 
   app.post<{ Params: { supplierId: string } }>(
+    '/api/v2/commands/suppliers/:supplierId/profile',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supplier.profile.update',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!body.name || !String(body.name).trim()) {
+            reply.code(400);
+            return { error: { code: 'SUPPLIER_NAME_REQUIRED' } };
+          }
+          try {
+            return services.supply.updateSupplierProfile(request.params.supplierId, {
+              name: String(body.name),
+            });
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'SUPPLIER_PROFILE_UPDATE_FAILED';
+            reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { supplierId: string } }>(
     '/api/v2/commands/suppliers/:supplierId/staffing-preferences',
     async (request, reply) =>
       runCommand({

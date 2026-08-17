@@ -151,7 +151,7 @@ export async function buildControlPlane(
     },
     [env.CPA_GATEWAY_ID ?? 'cpa-compat']: {
       kind: 'CPA',
-      displayName: 'CPA Gateway',
+      displayName: 'My CPA',
       baseUrlHint: env.CPA_BASE_URL,
     },
   });
