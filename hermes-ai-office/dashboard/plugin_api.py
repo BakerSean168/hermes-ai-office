@@ -1062,7 +1062,7 @@ async def overview() -> Dict[str, Any]:
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
         _partial("personalChannels", "/api/v2/projections/personal-channels"),
-        _partial("providerHub", "/api/v2/projections/provider-hub"),
+        _partial("providerHub", "/api/v2/projections/provider-hub-summary"),
         _partial("organization", "/api/v2/projections/office"),
         _partial("incidents", "/api/v2/incidents?limit=200"),
         _partial("runtimeDecisions", "/api/v2/runtime-launch-decisions?limit=100"),
@@ -1094,6 +1094,17 @@ async def workforce() -> Dict[str, Any]:
 async def provider_hub(force: bool = False) -> Dict[str, Any]:
     try:
         return await asyncio.to_thread(_sync_profile_native_provider_hub, force)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/providers/hub/{connection_id}")
+async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    try:
+        return await asyncio.to_thread(_fetch_json, f"/api/v2/provider-connections/{safe_id}")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

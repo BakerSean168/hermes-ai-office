@@ -54,7 +54,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             "/api/v2/projections/workforce": {"summary": {"employees": 2}},
             "/api/v2/projections/supply": {"summary": {"suppliers": 1}},
             "/api/v2/projections/personal-channels": {"channels": [{"id": "grok2api"}]},
-            "/api/v2/projections/provider-hub": {"summary": {"connections": 2}, "items": []},
+            "/api/v2/projections/provider-hub-summary": {"summary": {"connections": 2}, "items": []},
             "/api/v2/projections/office": {"summary": {"positions": 3}},
             "/api/v2/incidents?limit=200": {"items": []},
             "/api/v2/runtime-launch-decisions?limit=100": {"items": [{"id": "rlaunch_1"}]},
@@ -382,6 +382,15 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["key_env"], "HERMES_AI_OFFICE_ABC123_API_KEY")
         self.assertNotIn("api_key", row)
 
+    def test_provider_hub_overview_is_compact_and_detail_is_lazy(self) -> None:
+        source = API_PATH.read_text(encoding="utf-8")
+        self.assertIn('"/api/v2/projections/provider-hub-summary"', source)
+        self.assertIn('@router.get("/providers/hub/{connection_id}")', source)
+        bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
+        self.assertIn('props.t("providers.viewDetails")', bundle)
+        self.assertIn('api("/providers/hub/" + encodeURIComponent(id))', bundle)
+        self.assertNotIn('label: props.t("providers.website"),\n        render: function (item)', bundle)
+
     def test_control_plane_url_is_forced_to_loopback(self) -> None:
         with mock.patch.dict(os.environ, {"HERMES_AI_OFFICE_CONTROL_PLANE_URL": "https://attacker.example"}):
             self.assertEqual(api._base_url(), "http://127.0.0.1:8320")
@@ -414,7 +423,7 @@ class DashboardBundleContractTest(unittest.TestCase):
 
     def test_dashboard_exposes_provider_and_supplier_website_metadata(self) -> None:
         bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('item.website_url', bundle)
+        self.assertIn('detailValue.website_url', bundle)
         self.assertIn('supplier.websiteUrl', bundle)
         self.assertIn('providers.website', bundle)
         self.assertIn('suppliers.website', bundle)

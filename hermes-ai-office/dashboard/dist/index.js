@@ -245,6 +245,32 @@
       "suppliers.cpaDeepseek": "DeepSeek API",
       "providers.title": "Provider Hub",
       "providers.subtitle": "Shared provider connections discovered from every Hermes profile. Add once, see it everywhere.",
+      "providers.subtitleCompact": "A compact view of shared provider connections. Open details only when you need endpoints, credentials, models, or profile usage.",
+      "providers.actions": "Actions",
+      "providers.viewDetails": "View details",
+      "providers.detailTitle": "Provider details",
+      "providers.detailSubtitle": "Connection, credential reference, available models, and profile usage",
+      "providers.close": "Close",
+      "providers.loadingDetails": "Loading provider details…",
+      "providers.basicInfo": "Connection",
+      "providers.technicalInfo": "Technical details",
+      "providers.modelCount": "{count} models",
+      "providers.profileCount": "{count} profiles",
+      "providers.credentialScope": "Credential scope",
+      "providers.credentialRef": "Credential reference",
+      "providers.baseUrl": "API Base URL",
+      "providers.shareScope": "Share scope",
+      "providers.protocol": "Protocol",
+      "providers.sourceKind": "Source",
+      "providers.sourceProfile": "Source profile",
+      "providers.lastSeen": "Last seen",
+      "providers.updatedAt": "Updated",
+      "providers.noModels": "No models discovered yet",
+      "providers.authKind.API_KEY": "API Key",
+      "providers.authKind.OAUTH": "OAuth",
+      "providers.authKind.SUBSCRIPTION": "Subscription",
+      "providers.authKind.ACCOUNT_POOL": "Account pool",
+      "providers.authKind.NONE": "No credential",
       "providers.sync": "Sync profiles",
       "providers.connection": "Channel",
       "providers.website": "Website",
@@ -303,6 +329,9 @@
       "incidents.occurrences": "Occurrences",
       "incidents.none": "No active incidents",
       "status.ACTIVE": "Active",
+      "status.READY": "Ready",
+      "status.UNAVAILABLE": "Unavailable",
+      "status.UNKNOWN": "Unknown",
       "status.HEALTHY": "Healthy",
       "status.EMPLOYED": "Employed",
       "status.WORKING": "Working",
@@ -514,9 +543,34 @@
       "suppliers.cpaDeepseek": "DeepSeek API",
       "providers.title": "渠道中心",
       "providers.subtitle": "集中管理所有 Hermes Profile 发现的 Provider 连接：一个 Profile 添加后，其它 Profile 也能看到。",
+      "providers.subtitleCompact": "主列表只保留渠道摘要；需要查看接口、凭证引用、模型和 Profile 使用情况时再打开详情。",
+      "providers.actions": "操作",
+      "providers.viewDetails": "查看详情",
+      "providers.detailTitle": "渠道详情",
+      "providers.detailSubtitle": "连接信息、凭证引用、可用模型与 Profile 使用情况",
+      "providers.close": "关闭",
+      "providers.loadingDetails": "正在获取渠道详情…",
+      "providers.basicInfo": "基础信息",
+      "providers.technicalInfo": "技术信息",
+      "providers.modelCount": "{count} 个模型",
+      "providers.profileCount": "{count} 个 Profile",
+      "providers.credentialScope": "凭证范围",
+      "providers.credentialRef": "凭证引用",
+      "providers.baseUrl": "API 请求地址",
+      "providers.shareScope": "共享范围",
+      "providers.protocol": "协议",
+      "providers.sourceKind": "来源",
+      "providers.sourceProfile": "来源 Profile",
+      "providers.lastSeen": "最近发现",
+      "providers.updatedAt": "最近更新",
+      "providers.noModels": "暂未发现模型",
+      "providers.authKind.API_KEY": "API Key",
+      "providers.authKind.OAUTH": "OAuth",
+      "providers.authKind.SUBSCRIPTION": "订阅",
+      "providers.authKind.ACCOUNT_POOL": "账号池",
+      "providers.authKind.NONE": "无凭证",
       "providers.sync": "同步 Profile",
       "providers.connection": "渠道",
-    "providers.website": "官網",
       "providers.website": "官网",
       "providers.status": "可用状态",
       "providers.auth": "凭证",
@@ -573,6 +627,9 @@
       "incidents.occurrences": "次数",
       "incidents.none": "暂无活跃事件",
       "status.ACTIVE": "活跃",
+      "status.READY": "可用",
+      "status.UNAVAILABLE": "不可用",
+      "status.UNKNOWN": "未知",
       "status.HEALTHY": "健康",
       "status.EMPLOYED": "受雇中",
       "status.WORKING": "工作中",
@@ -723,6 +780,7 @@
     if (
       [
         "ACTIVE",
+        "READY",
         "HEALTHY",
         "EMPLOYED",
         "WORKING",
@@ -742,7 +800,7 @@
       return "warn";
     }
     if (
-      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "DORMANT", "UNFILLED"].includes(
+      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "UNAVAILABLE", "DORMANT", "UNFILLED"].includes(
         normalized,
       )
     ) {
@@ -1660,8 +1718,28 @@
     const error = sourceError(hub);
     const [syncing, setSyncing] = React.useState(false);
     const [syncError, setSyncError] = React.useState("");
+    const [detailId, setDetailId] = React.useState("");
+    const [detail, setDetail] = React.useState(null);
+    const [detailLoading, setDetailLoading] = React.useState(false);
+    const [detailError, setDetailError] = React.useState("");
     if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
     const items = asArray(hub.items);
+
+    function authLabel(value) {
+      const key = String(value || "NONE").toUpperCase();
+      return props.t("providers.authKind." + key);
+    }
+
+    function formatTimestamp(value) {
+      const number = Number(value || 0);
+      if (!number) return "—";
+      try {
+        return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(number));
+      } catch (_error) {
+        return new Date(number).toLocaleString();
+      }
+    }
+
     async function syncNow() {
       setSyncing(true);
       setSyncError("");
@@ -1674,90 +1752,203 @@
         setSyncing(false);
       }
     }
+
+    async function openDetail(item) {
+      const id = String(item.id || "");
+      if (!id) return;
+      setDetailId(id);
+      setDetail(null);
+      setDetailError("");
+      setDetailLoading(true);
+      try {
+        const result = await api("/providers/hub/" + encodeURIComponent(id));
+        setDetail(result);
+      } catch (cause) {
+        setDetailError(String(cause));
+      } finally {
+        setDetailLoading(false);
+      }
+    }
+
+    function closeDetail() {
+      setDetailId("");
+      setDetail(null);
+      setDetailError("");
+      setDetailLoading(false);
+    }
+
+    function DetailFact(label, value, className) {
+      return h(
+        "div",
+        { className: "hao-provider-fact " + (className || "") },
+        h("span", null, label),
+        h("strong", null, value || "—"),
+      );
+    }
+
     const columns = [
       {
         key: "connection",
         label: props.t("providers.connection"),
         render: function (item) {
-          return h("div", { className: "hao-primary-cell" },
-            h("strong", null, item.display_name || item.provider_key),
-            h("small", null, [item.provider_key, item.base_url].filter(Boolean).join(" · ")),
+          const supplier = asObject(item.supplier);
+          return h(
+            "div",
+            { className: "hao-primary-cell hao-provider-summary-name" },
+            h("strong", null, item.displayName || item.providerKey),
+            h("small", null, [item.providerKey, supplier.name].filter(Boolean).join(" · ") || props.t("providers.noSupplier")),
           );
-        },
-      },
-      {
-        key: "website",
-        label: props.t("providers.website"),
-        render: function (item) {
-          const value = item.website_url || asObject(item.supplier).websiteUrl;
-          return value
-            ? h("a", { className: "hao-external-link", href: value, target: "_blank", rel: "noreferrer" }, value)
-            : h("span", { className: "hao-muted" }, "—");
         },
       },
       {
         key: "health",
         label: props.t("providers.status"),
-        render: function (item) { return h(Status, { value: item.health, t: props.t }); },
+        render: function (item) {
+          return h(Status, { value: item.health, t: props.t });
+        },
       },
       {
         key: "auth",
         label: props.t("providers.auth"),
         render: function (item) {
-          return h("div", { className: "hao-primary-cell" },
-            h("strong", null, item.auth_kind || "—"),
-            h("small", null, [item.credential_scope, item.credential_ref].filter(Boolean).join(" · ")),
-          );
+          return h("span", { className: "hao-provider-auth-summary" }, authLabel(item.authKind));
         },
       },
       {
         key: "models",
         label: props.t("providers.models"),
         render: function (item) {
-          const models = asArray(item.models);
-          return h("div", { className: "hao-chip-row" },
-            models.slice(0, 4).map(function (model) { return h("code", { className: "hao-code", key: model }, model); }),
-            models.length > 4 ? h("span", { className: "hao-count" }, "+" + props.number(models.length - 4)) : null,
-          );
+          return h("strong", { className: "hao-provider-count" }, props.t("providers.modelCount", { count: props.number(item.modelCount) }));
         },
       },
       {
         key: "profiles",
         label: props.t("providers.profiles"),
         render: function (item) {
-          const links = asArray(item.profileLinks);
-          if (!links.length) return h("span", { className: "hao-muted" }, props.t("providers.noProfiles"));
-          const grouped = new Map();
-          links.forEach(function (link) {
-            const key = String(link.profile_id || "profile");
-            const list = grouped.get(key) || [];
-            list.push([link.runtime_kind, link.model_ref].filter(Boolean).join(" / "));
-            grouped.set(key, list);
-          });
-          return h("div", { className: "hao-primary-cell" }, Array.from(grouped.entries()).map(function (entry) {
-            return h("div", { key: entry[0] }, h("strong", null, entry[0]), h("small", null, entry[1].join(" · ")));
-          }));
+          return Number(item.profileCount || 0) > 0
+            ? h("strong", { className: "hao-provider-count" }, props.t("providers.profileCount", { count: props.number(item.profileCount) }))
+            : h("span", { className: "hao-muted" }, props.t("providers.noProfiles"));
         },
       },
       {
-        key: "supplier",
-        label: props.t("providers.supplier"),
+        key: "actions",
+        label: props.t("providers.actions"),
         render: function (item) {
-          const supplier = asObject(item.supplier);
-          return supplier.name ? h("strong", null, supplier.name) : h("span", { className: "hao-muted" }, props.t("providers.noSupplier"));
+          return h(Button, { kind: "quiet", onClick: function () { openDetail(item); } }, props.t("providers.viewDetails"));
         },
       },
     ];
-    return h("div", { className: "hao-section-stack" },
-      h("div", { className: "hao-section-head" },
-        h("div", null, h("h1", null, props.t("providers.title")), h("p", null, props.t("providers.subtitle"))),
-        h("div", { className: "hao-inline-actions" },
+
+    const detailValue = asObject(detail);
+    const detailSupplier = asObject(detailValue.supplier);
+    const detailModels = asArray(detailValue.models);
+    const detailLinks = asArray(detailValue.profileLinks);
+    const website = detailValue.website_url || detailSupplier.websiteUrl || "";
+
+    return h(
+      "div",
+      { className: "hao-section-stack" },
+      h(
+        "div",
+        { className: "hao-section-head" },
+        h("div", null, h("h1", null, props.t("providers.title")), h("p", null, props.t("providers.subtitleCompact"))),
+        h(
+          "div",
+          { className: "hao-inline-actions" },
           h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(items.length) })),
           h(Button, { onClick: syncNow, disabled: syncing }, syncing ? props.t("shell.refreshing") : props.t("providers.sync")),
         ),
       ),
       syncError ? h(ErrorBanner, { title: props.t("shell.loadError"), error: syncError }) : null,
       h(DataTable, { columns: columns, rows: items, empty: props.t("providers.noConnections") }),
+      h(
+        Modal,
+        {
+          open: Boolean(detailId),
+          onClose: closeDetail,
+          labelledBy: "hao-provider-detail-title",
+          title: detailValue.display_name || detailValue.provider_key || props.t("providers.detailTitle"),
+          subtitle: detailValue.provider_key || props.t("providers.detailSubtitle"),
+          closeLabel: props.t("providers.close"),
+          wide: true,
+          footer: h(Button, { kind: "quiet", onClick: closeDetail }, props.t("providers.close")),
+        },
+        detailLoading
+          ? h("div", { className: "hao-provider-detail-loading" }, props.t("providers.loadingDetails"))
+          : detailError
+            ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailError })
+            : detail
+              ? h(
+                  "div",
+                  { className: "hao-provider-detail" },
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("providers.basicInfo")),
+                    h(
+                      "div",
+                      { className: "hao-provider-facts" },
+                      DetailFact(props.t("providers.status"), props.t("status." + String(detailValue.health || "UNKNOWN"))),
+                      DetailFact(props.t("providers.auth"), authLabel(detailValue.auth_kind)),
+                      DetailFact(props.t("providers.credentialScope"), detailValue.credential_scope || "—"),
+                      DetailFact(props.t("providers.credentialRef"), detailValue.credential_ref || "—", "hao-provider-fact-mono"),
+                      DetailFact(props.t("providers.baseUrl"), detailValue.base_url || "—", "hao-provider-fact-url"),
+                      website
+                        ? h(
+                            "div",
+                            { className: "hao-provider-fact hao-provider-fact-url" },
+                            h("span", null, props.t("providers.website")),
+                            h("a", { className: "hao-external-link", href: website, target: "_blank", rel: "noreferrer" }, website),
+                          )
+                        : DetailFact(props.t("providers.website"), "—"),
+                      DetailFact(props.t("providers.supplier"), detailSupplier.name || props.t("providers.noSupplier")),
+                      DetailFact(props.t("providers.shareScope"), detailValue.share_scope || "—"),
+                    ),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("div", { className: "hao-provider-section-head" }, h("h3", null, props.t("providers.models")), h("span", { className: "hao-count" }, props.number(detailModels.length))),
+                    detailModels.length
+                      ? h("div", { className: "hao-chip-row hao-provider-model-list" }, detailModels.map(function (model) { return h("code", { className: "hao-code", key: model }, model); }))
+                      : h("span", { className: "hao-muted" }, props.t("providers.noModels")),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("div", { className: "hao-provider-section-head" }, h("h3", null, props.t("providers.profiles")), h("span", { className: "hao-count" }, props.number(new Set(detailLinks.map(function (item) { return String(item.profile_id); })).size))),
+                    detailLinks.length
+                      ? h(
+                          "div",
+                          { className: "hao-provider-profile-list" },
+                          detailLinks.map(function (link) {
+                            return h(
+                              "div",
+                              { className: "hao-provider-profile-row", key: link.id },
+                              h("strong", null, link.profile_id || "profile"),
+                              h("span", null, [link.runtime_kind, link.provider_ref, link.model_ref, link.profile_ref].filter(Boolean).join(" · ")),
+                            );
+                          }),
+                        )
+                      : h("span", { className: "hao-muted" }, props.t("providers.noProfiles")),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("providers.technicalInfo")),
+                    h(
+                      "div",
+                      { className: "hao-provider-facts" },
+                      DetailFact(props.t("providers.protocol"), detailValue.protocol || "—"),
+                      DetailFact(props.t("providers.sourceKind"), detailValue.source_kind || "—"),
+                      DetailFact(props.t("providers.sourceProfile"), detailValue.source_profile_id || "—"),
+                      DetailFact(props.t("providers.lastSeen"), formatTimestamp(detailValue.last_seen_at)),
+                      DetailFact(props.t("providers.updatedAt"), formatTimestamp(detailValue.updated_at)),
+                    ),
+                  ),
+                )
+              : null,
+      ),
     );
   }
 
