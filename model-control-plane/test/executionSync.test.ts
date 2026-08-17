@@ -426,3 +426,98 @@ test('Hermes profile config does not guess an Employee from a bare model hint', 
   assert.ok(lead);
   assert.equal(repo.listAppointments({ positionId: String(lead.id) }).length, 0);
 });
+
+test('active Hermes Profile runtime is attributed through its config-derived Appointment', async () => {
+  const { db, repository: repo, execution } = make();
+  const supplier = repo.getOrCreateSupplier('opencode', 'OpenCode');
+  const model = repo.getOrCreateSupplierModel({
+    supplierId: String(supplier.id),
+    supplierModelKey: 'deepseek-v4-flash',
+    displayName: 'DeepSeek V4 Flash',
+  });
+  const employee = repo.getOrCreateEmployee({
+    supplierId: String(supplier.id),
+    supplierModelId: String(model.id),
+    displayName: 'DeepSeek V4 Flash @ OpenCode',
+  });
+  const agreement = repo.getOrCreateAgreement({
+    supplierId: String(supplier.id),
+    externalAccountRef: 'test:opencode-go-profile',
+    name: 'OpenCode Go profile test',
+  });
+  repo.getOrCreateCurrentEmployment({
+    employeeId: String(employee.id),
+    supplyAgreementId: String(agreement.id),
+  });
+
+  await execution.sync({
+    profiles: [
+      {
+        profileId: 'coder',
+        displayName: 'Coder',
+        availability: 'ONLINE',
+        workload: 'EXECUTING',
+        sessionId: 'root-profile',
+        controllerState: 'CODING',
+        controllerModel: 'deepseek-v4-flash',
+        configuredProvider: 'opencode-go',
+        configuredModel: 'deepseek-v4-flash',
+        lastSeenAt: 2_000,
+      },
+    ],
+    runs: [
+      {
+        id: 'interactive:coder:root-profile',
+        profileId: 'coder',
+        title: 'Coding',
+        status: 'RUNNING',
+        createdAt: 1_000,
+        startedAt: 1_100,
+      },
+    ],
+    nodes: [],
+    edges: [],
+  });
+  const run = repo
+    .listRuns(10)
+    .find((item) => item.externalRunRef === 'hermes:interactive:coder:root-profile');
+  assert.ok(run);
+  const duty = repo.listDuties({ runId: String(run.id) })[0];
+  assert.ok(duty);
+  const segments = db
+    .prepare('SELECT * FROM v2_staffing_segments WHERE duty_session_id=? AND ended_at IS NULL')
+    .all(String(duty.id)) as Array<Record<string, unknown>>;
+  assert.equal(segments.length, 1);
+  assert.equal(segments[0]?.employee_id, employee.id);
+  const decision = repo.listDispatchDecisions(String(duty.id))[0];
+  assert.equal(decision.policyVersion, 'hermes-profile-config-v1');
+});
+
+test('authoritative Hermes snapshot closes a previously active run that disappears', async () => {
+  const { repository: repo, execution } = make();
+  await execution.sync(runningSnapshot());
+  const active = repo
+    .listRuns(20)
+    .find((item) => item.externalRunRef === 'hermes:interactive:development:profile-session-1');
+  assert.ok(active);
+  const snapshot = runningSnapshot();
+  snapshot.sourceRevision = 'rev-no-runs';
+  snapshot.runs = [];
+  snapshot.nodes = [];
+  snapshot.edges = [];
+  const result = await execution.sync(snapshot);
+  assert.equal(
+    result.issues.some((item) => item.code === 'HERMES_RUN_SNAPSHOT_MISSING'),
+    true,
+  );
+  const closed = repo.getRun(String(active.id));
+  assert.equal(closed?.status, 'CANCELLED');
+  assert.equal(
+    execution.listRuntimeSessions({ runId: String(active.id), activeOnly: true }).length,
+    0,
+  );
+  assert.equal(
+    repo.listDuties({ runId: String(active.id) }).some((item) => item.lifecycle === 'ACTIVE'),
+    false,
+  );
+});

@@ -385,6 +385,82 @@ export class HermesExecutionSyncService {
     return { employeeId };
   }
 
+  #ensureObservedProfileStaffing(
+    profile: HermesProfileControllerInput,
+    position: V2Row,
+    duty: V2Row,
+  ): Record<string, unknown> | null {
+    const appointment = row(
+      this.#domain.db
+        .prepare(
+          `SELECT * FROM v2_appointments
+           WHERE position_id=? AND source='HERMES_PROFILE_CONFIG'
+             AND status='CURRENT' AND effective_to IS NULL
+           ORDER BY priority DESC,effective_from DESC LIMIT 1`,
+        )
+        .get(String(position.id)),
+    );
+    if (!appointment) return null;
+    const open = row(
+      this.#domain.db
+        .prepare(
+          `SELECT * FROM v2_staffing_segments
+           WHERE duty_session_id=? AND ended_at IS NULL`,
+        )
+        .get(String(duty.id)),
+    );
+    if (open && String(open.employee_id) === String(appointment.employee_id)) return null;
+
+    const employments = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT em.* FROM v2_employments em
+           JOIN v2_supply_agreements agr ON agr.id=em.supply_agreement_id
+           WHERE em.employee_id=? AND em.status='CURRENT' AND em.effective_to IS NULL
+             AND agr.lifecycle='ACTIVE'
+           ORDER BY em.effective_from ASC`,
+        )
+        .all(String(appointment.employee_id)),
+    );
+    if (employments.length !== 1) {
+      return {
+        code:
+          employments.length === 0
+            ? 'PROFILE_CURRENT_EMPLOYMENT_MISSING'
+            : 'PROFILE_CURRENT_EMPLOYMENT_AMBIGUOUS',
+        profileId: profile.profileId,
+        employeeId: appointment.employee_id,
+        employments: employments.length,
+      };
+    }
+    const employment = employments[0]!;
+    this.#domain.recordDispatch({
+      dutySessionId: String(duty.id),
+      trigger: 'HERMES_PROFILE_RUNTIME_OBSERVED',
+      policyVersion: 'hermes-profile-config-v1',
+      correlationId: profile.sessionId
+        ? `profile:${profile.profileId}:${profile.sessionId}`
+        : `profile:${profile.profileId}`,
+      candidateResults: [
+        {
+          employeeId: appointment.employee_id,
+          appointmentId: appointment.id,
+          employmentId: employment.id,
+          eligible: true,
+          routable: true,
+          reasons: ['HERMES_PROFILE_CONFIG_MATCH', 'RUNTIME_ALREADY_OBSERVED'],
+        },
+      ],
+      selected: {
+        employeeId: String(appointment.employee_id),
+        appointmentId: String(appointment.id),
+        employmentId: String(employment.id),
+      },
+      reasons: ['HERMES_PROFILE_CONFIG_OBSERVED'],
+    });
+    return null;
+  }
+
   #ensureNodePosition(
     node: HermesExecutionNodeInput,
     runId: string,
@@ -1021,6 +1097,14 @@ export class HermesExecutionSyncService {
             !terminalRun(sourceRun.status),
           );
           if (dutyResult.created) result.dutiesCreated += 1;
+          if (!terminalRun(sourceRun.status)) {
+            const staffingIssue = this.#ensureObservedProfileStaffing(
+              profile,
+              lead,
+              dutyResult.duty,
+            );
+            if (staffingIssue) result.issues.push(staffingIssue);
+          }
           const lifecycle = terminalRun(sourceRun.status)
             ? sourceRun.status === 'FAILED'
               ? 'FAILED'
@@ -1247,6 +1331,32 @@ export class HermesExecutionSyncService {
             );
             result.runtimeSessionsClosed += 1;
           }
+        }
+
+        const seenExternalRunRefs = new Set(snapshot.runs.map((item) => `hermes:${item.id}`));
+        const knownProfileIds = new Set(snapshot.profiles.map((item) => item.profileId));
+        const staleRuns = rows(
+          this.#domain.db
+            .prepare(
+              `SELECT * FROM v2_runs
+               WHERE external_run_ref LIKE 'hermes:%'
+                 AND status NOT IN ('COMPLETED','FAILED','CANCELLED')`,
+            )
+            .all(),
+        );
+        for (const run of staleRuns) {
+          if (seenExternalRunRefs.has(String(run.external_run_ref))) continue;
+          const metadata = decode<JsonRecord>(run.metadata_json, {});
+          if (metadata.source !== 'HERMES_ORG') continue;
+          const profileId = String(metadata.profileId ?? '');
+          if (!profileId || !knownProfileIds.has(profileId)) continue;
+          this.#finalizeRun(String(run.id), 'CANCELLED');
+          result.issues.push({
+            code: 'HERMES_RUN_SNAPSHOT_MISSING',
+            runId: String(run.id),
+            externalRunRef: String(run.external_run_ref),
+            profileId,
+          });
         }
 
         for (const sourceRun of snapshot.runs.filter((item) => terminalRun(item.status))) {
