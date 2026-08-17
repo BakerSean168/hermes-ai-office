@@ -647,6 +647,7 @@ async def overview() -> Dict[str, Any]:
     requests = [
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
+        _partial("personalChannels", "/api/v2/projections/personal-channels"),
         _partial("organization", "/api/v2/projections/office"),
         _partial("incidents", "/api/v2/incidents?limit=200"),
         _partial("runtimeDecisions", "/api/v2/runtime-launch-decisions?limit=100"),

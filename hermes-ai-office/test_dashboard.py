@@ -53,6 +53,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         payloads = {
             "/api/v2/projections/workforce": {"summary": {"employees": 2}},
             "/api/v2/projections/supply": {"summary": {"suppliers": 1}},
+            "/api/v2/projections/personal-channels": {"channels": [{"id": "grok2api"}]},
             "/api/v2/projections/office": {"summary": {"positions": 3}},
             "/api/v2/incidents?limit=200": {"items": []},
             "/api/v2/runtime-launch-decisions?limit=100": {"items": [{"id": "rlaunch_1"}]},
@@ -63,6 +64,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             result = await api.overview()
         self.assertEqual(result["workforce"]["summary"]["employees"], 2)
         self.assertEqual(result["supply"]["summary"]["suppliers"], 1)
+        self.assertEqual(result["personalChannels"]["channels"][0]["id"], "grok2api")
         self.assertEqual(result["organization"]["summary"]["positions"], 3)
         self.assertEqual(result["runtimeDecisions"]["items"][0]["id"], "rlaunch_1")
         self.assertEqual(result["controlPlaneUrl"], "local")
@@ -372,9 +374,10 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('className: "hao-modal ', source)
         self.assertIn('className: "hao-preset-grid"', source)
         self.assertIn('"suppliers.personalChannels": "个人渠道"', source)
-        self.assertIn('"suppliers.unmapped": "未映射到供应商"', source)
-        self.assertIn('channelInfrastructure', source)
-        self.assertIn('props.t("suppliers.cpaDeepseek")', source)
+        self.assertIn('"suppliers.accountPool": "账号池"', source)
+        self.assertIn('const personalChannels = asArray(personalChannelProjection.channels)', source)
+        self.assertNotIn('personalGateways.length', source)
+        self.assertNotIn('props.t("suppliers.cpaDeepseek")', source)
         self.assertNotIn('props.t("suppliers.unclassified")', source)
         self.assertIn('.hao-supplier-row {', css)
         self.assertIn('.hao-modal-backdrop {', css)
