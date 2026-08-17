@@ -1188,7 +1188,7 @@
         }),
         h(Metric, {
           label: props.t("overview.suppliers"),
-          value: props.number(supplySummary.suppliers),
+          value: props.number(supplySummary.workforceSources || supplySummary.suppliers),
           hint: props.t("overview.suppliersHint", {
             agreements: props.number(supplySummary.activeAgreements),
           }),

@@ -462,6 +462,8 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertNotIn("const suppliers = asArray(supply.suppliers).filter", source)
         self.assertIn('className: "hao-workforce-row"', source)
         self.assertIn('props.t("workforce.contributionTokens")', source)
+        self.assertIn('contributionTokens(right) - contributionTokens(left)', source)
+        self.assertIn('supplySummary.workforceSources || supplySummary.suppliers', source)
         self.assertIn('api("/employees/" + encodeURIComponent(String(employee.id)) + "/dossier")', source)
         self.assertIn('className: "hao-modal ', source)
         self.assertIn('className: "hao-preset-grid"', source)
