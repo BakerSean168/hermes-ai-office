@@ -199,3 +199,57 @@ test('personal channel projection is exposed as a V2 HTTP contract', async () =>
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('internal pool sync creates durable internal employees idempotently', async () => {
+  const { openDb } = await import('../src/db.mjs');
+  const { runV2Migrations } = await import('../src/v2/migrations.js');
+  const { V2Repository } = await import('../src/v2/repository.js');
+  const { SupplyRepository } = await import('../src/v2/supply.js');
+  const { InternalPoolWorkforceSyncService } = await import('../src/v2/personalChannels.js');
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const domain = new V2Repository(db);
+  const supply = new SupplyRepository(domain);
+  const channels = new PersonalChannelProjectionService([
+    {
+      snapshot() {
+        return {
+          id: 'my-cpa-grok',
+          name: 'My CPA',
+          kind: 'ACCOUNT_POOL' as const,
+          sourceKind: 'CPA' as const,
+          provider: 'xAI / Grok',
+          health: 'HEALTHY' as const,
+          accounts: { total: 10, enabled: 3, ready: 3, disabled: 7, reauthRequired: 0 },
+          models: [
+            { id: 'grok-4.5', provider: 'xai', capability: 'responses' },
+            { id: 'grok-4.6', provider: 'xai', capability: 'responses' },
+          ],
+        };
+      },
+    },
+  ]);
+  const sync = new InternalPoolWorkforceSyncService(channels, supply);
+  assert.deepEqual(await sync.sync(), { sources: 1, employees: 2 });
+  assert.deepEqual(await sync.sync(), { sources: 1, employees: 2 });
+  const workforce = domain.listEmployees().filter((item) => item.recordLifecycle === 'ACTIVE');
+  assert.equal(workforce.length, 2);
+  assert.equal(
+    workforce.every((item) => item.supplier.sourceKind === 'INTERNAL'),
+    true,
+  );
+  assert.deepEqual(workforce.map((item) => item.supplierModel.key).sort(), [
+    'grok-4.5',
+    'grok-4.6',
+  ]);
+  const projection = supply.projection() as {
+    suppliers: Array<{ name: string; sourceKind: string }>;
+  };
+  assert.equal(projection.suppliers.find((item) => item.name === 'My CPA')?.sourceKind, 'INTERNAL');
+  const summary = (supply.projection() as { summary: Record<string, number> }).summary;
+  assert.equal(summary.suppliers, 0);
+  assert.equal(summary.internalSources, 1);
+  assert.equal(summary.employees, 2);
+  assert.equal(summary.internalEmployees, 2);
+  assert.equal(summary.activeAgreements, 0);
+});

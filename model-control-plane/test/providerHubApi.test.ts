@@ -138,3 +138,54 @@ test('provider hub summary stays compact and detail is fetched by connection id'
   assert.equal(missing.statusCode, 404);
   assert.equal(missing.json().error.code, 'PROVIDER_CONNECTION_NOT_FOUND');
 });
+
+test('supplier provider connections are composed behind supplier detail', async (t) => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    initialSync: false,
+  });
+  t.after(async () => runtime.app.close());
+  const source = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v2/commands/workforce-sources/upsert',
+    headers: { 'idempotency-key': 'supplier-connection-source' },
+    payload: {
+      slug: 'worldclaw',
+      name: 'Worldclaw',
+      websiteUrl: 'https://worldclawpro.ai',
+      sourceKind: 'EXTERNAL',
+    },
+  });
+  assert.equal(source.statusCode, 200);
+  const supplierId = String(source.json().id);
+  const upsert = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v2/commands/provider-connections/upsert',
+    headers: { 'idempotency-key': 'supplier-connection-provider' },
+    payload: {
+      providerKey: 'worldclaw',
+      displayName: 'Worldclaw',
+      supplierId,
+      baseUrl: 'https://worldclawpro.ai',
+      websiteUrl: 'https://worldclawpro.ai',
+      protocol: 'openai-chat-completions',
+      authKind: 'API_KEY',
+      credentialRef: 'WORLDCLAW_API_KEY',
+      credentialScope: 'GLOBAL',
+      sourceKind: 'HERMES_TOOL_ONBOARDING',
+      shareScope: 'GLOBAL',
+      health: 'READY',
+      models: ['gpt-5.6-sol'],
+    },
+  });
+  assert.equal(upsert.statusCode, 200);
+  const response = await runtime.app.inject({
+    method: 'GET',
+    url: `/api/v2/suppliers/${supplierId}/provider-connections`,
+  });
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.json().items.length, 1);
+  assert.equal(response.json().items[0].provider_key, 'worldclaw');
+  assert.equal(response.json().items[0].credential_ref, 'WORLDCLAW_API_KEY');
+});

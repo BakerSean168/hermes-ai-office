@@ -94,8 +94,11 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
   assert.deepEqual(projection.summary, {
     suppliers: 1,
     activeSuppliers: 1,
+    workforceSources: 1,
+    internalSources: 0,
     supplierModels: 1,
     employees: 1,
+    internalEmployees: 0,
     plans: 1,
     agreements: 1,
     activeAgreements: 1,

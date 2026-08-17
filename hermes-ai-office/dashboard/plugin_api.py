@@ -247,11 +247,39 @@ def _update_supplier_website(supplier: Mapping[str, Any], supplier_spec: Mapping
 
 
 def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    seed = json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
+    safe_payload = dict(payload)
+    seed = json.dumps(safe_payload, sort_keys=True, ensure_ascii=False)
+    connection = _post_json(
+        "/api/v2/commands/provider-connections/upsert",
+        safe_payload,
+        idempotency_key="provider-hub-v4-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+    )
+    provider_key = str(safe_payload.get("providerKey") or connection.get("provider_key") or "").strip()
+    if provider_key in {"cpa", "claude-code-access"} or connection.get("supplier_id"):
+        return connection
+    spec = _connection_supplier(provider_key) or {}
+    source_payload = {
+        "slug": str(spec.get("slug") or provider_key),
+        "name": str(spec.get("name") or safe_payload.get("displayName") or provider_key),
+        "websiteUrl": str(spec.get("websiteUrl") or safe_payload.get("websiteUrl") or "") or None,
+        "sourceKind": "EXTERNAL",
+    }
+    source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
+    source = _post_json(
+        "/api/v2/commands/workforce-sources/upsert",
+        source_payload,
+        idempotency_key="provider-source-v1-" + hashlib.blake2b(source_seed.encode("utf-8"), digest_size=10).hexdigest(),
+    )
+    supplier_id = str(source.get("id") or "")
+    if not supplier_id:
+        return connection
+    attached = dict(safe_payload)
+    attached["supplierId"] = supplier_id
+    attached_seed = json.dumps(attached, sort_keys=True, ensure_ascii=False)
     return _post_json(
         "/api/v2/commands/provider-connections/upsert",
-        payload,
-        idempotency_key="provider-hub-v3-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+        attached,
+        idempotency_key="provider-hub-source-v1-" + hashlib.blake2b(attached_seed.encode("utf-8"), digest_size=10).hexdigest(),
     )
 
 
@@ -1061,8 +1089,6 @@ async def overview() -> Dict[str, Any]:
     requests = [
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
-        _partial("personalChannels", "/api/v2/projections/personal-channels"),
-        _partial("providerHub", "/api/v2/projections/provider-hub-summary"),
         _partial("organization", "/api/v2/projections/office"),
         _partial("incidents", "/api/v2/incidents?limit=200"),
         _partial("runtimeDecisions", "/api/v2/runtime-launch-decisions?limit=100"),
@@ -1105,6 +1131,19 @@ async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="invalid provider connection id")
     try:
         return await asyncio.to_thread(_fetch_json, f"/api/v2/provider-connections/{safe_id}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/suppliers/{supplier_id}/connections")
+async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    try:
+        return await asyncio.to_thread(
+            _fetch_json, f"/api/v2/suppliers/{safe_id}/provider-connections"
+        )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

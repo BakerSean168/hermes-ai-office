@@ -15,7 +15,10 @@ import type { InvocationService } from './invocation.js';
 import type { MaintenanceService } from './maintenance.js';
 import type { OrganizationRepository } from './organization.js';
 import type { OfficeProjectionService } from './projections.js';
-import type { PersonalChannelProjectionService } from './personalChannels.js';
+import type {
+  InternalPoolWorkforceSyncService,
+  PersonalChannelProjectionService,
+} from './personalChannels.js';
 import type { ProviderHubRepository, ProfileProviderRuntime } from './providerHub.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
@@ -57,6 +60,7 @@ export function registerV2Routes(
     runtimeAccess?: RuntimeAccessRepository;
     providerHub?: ProviderHubRepository;
     personalChannels?: PersonalChannelProjectionService;
+    internalWorkforce?: InternalPoolWorkforceSyncService;
   } = {},
 ): void {
   const runCommand = async <T>(input: {
@@ -128,6 +132,17 @@ export function registerV2Routes(
         return { error: { code: 'PROVIDER_CONNECTION_NOT_FOUND' } };
       }
       return detail;
+    },
+  );
+
+  app.get<{ Params: { supplierId: string } }>(
+    '/api/v2/suppliers/:supplierId/provider-connections',
+    async (request, reply) => {
+      if (!services.providerHub) {
+        reply.code(503);
+        return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+      }
+      return { items: services.providerHub.connectionsForSupplier(request.params.supplierId) };
     },
   );
 
@@ -232,6 +247,21 @@ export function registerV2Routes(
           }
         },
       }),
+  );
+
+  app.post('/api/v2/commands/internal-workforce/sync', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'internal-workforce.sync',
+      operation: async () => {
+        if (!services.internalWorkforce) {
+          reply.code(503);
+          return { error: { code: 'INTERNAL_WORKFORCE_UNAVAILABLE' } };
+        }
+        return services.internalWorkforce.sync();
+      },
+    }),
   );
 
   app.get('/api/v2/projections/personal-channels', async (_request, reply) => {
@@ -1511,6 +1541,32 @@ export function registerV2Routes(
     }),
   );
 
+  app.post('/api/v2/commands/workforce-sources/upsert', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'workforce-source.upsert',
+      operation: () => {
+        if (!services.supply) {
+          reply.code(503);
+          return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const sourceKind = String(body.sourceKind ?? 'EXTERNAL').toUpperCase();
+        if (!body.slug || !body.name || !['EXTERNAL', 'INTERNAL'].includes(sourceKind)) {
+          reply.code(400);
+          return { error: { code: 'WORKFORCE_SOURCE_IDENTITY_REQUIRED' } };
+        }
+        return services.supply.upsertSource({
+          slug: String(body.slug),
+          name: String(body.name),
+          websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
+          sourceKind: sourceKind as 'EXTERNAL' | 'INTERNAL',
+        });
+      },
+    }),
+  );
+
   app.post<{ Params: { supplierId: string } }>(
     '/api/v2/commands/suppliers/:supplierId/profile',
     async (request, reply) =>
@@ -1658,6 +1714,10 @@ export function registerV2Routes(
               slug: String(supplier.slug),
               name: String(supplier.name),
               websiteUrl: supplier.websiteUrl == null ? undefined : String(supplier.websiteUrl),
+              sourceKind:
+                supplier.sourceKind == null
+                  ? undefined
+                  : (String(supplier.sourceKind).toUpperCase() as 'EXTERNAL' | 'INTERNAL'),
             },
             supplierModel: { key: String(supplierModel.key), name: String(supplierModel.name) },
             agreement: {

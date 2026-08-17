@@ -220,8 +220,23 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 profile = str(getattr(_CTX, "profile_name", "") or "").strip()
             except Exception:
                 profile = ""
+        source_payload = {
+            "slug": provider_key,
+            "name": display_name,
+            "websiteUrl": website_url,
+            "sourceKind": "EXTERNAL",
+        }
+        source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
+        source = _control_plane_request(
+            "/api/v2/commands/workforce-sources/upsert",
+            method="POST",
+            payload=source_payload,
+            idempotency_key="provider-tool-source-v1-"
+            + hashlib.blake2b(source_seed.encode("utf-8"), digest_size=10).hexdigest(),
+        )
         payload = {
             "providerKey": provider_key,
+            "supplierId": source.get("id"),
             "displayName": display_name,
             "baseUrl": selected_base_url,
             "websiteUrl": website_url,
@@ -250,6 +265,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             {
                 "ok": True,
                 "connectionId": connection.get("id"),
+                "supplierId": source.get("id"),
                 "name": display_name,
                 "providerKey": provider_key,
                 "baseUrl": selected_base_url,
@@ -259,7 +275,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 "models": models,
                 "shared": True,
                 "message": (
-                    "Added to the shared Provider Hub. Other profiles discover it by querying the Hub; "
+                    "Added as a shared external supplier connection. Other profiles discover it through the common registry; "
                     "the API key is stored only in Hermes credential storage."
                 ),
             },

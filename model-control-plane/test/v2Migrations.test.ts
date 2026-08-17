@@ -39,6 +39,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '012_runtime_access_profiles',
     '013_provider_hub',
     '014_provider_websites',
+    '015_workforce_sources',
   ]);
   assert.deepEqual(second.skipped, [
     '001_spine',
@@ -55,6 +56,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '012_runtime_access_profiles',
     '013_provider_hub',
     '014_provider_websites',
+    '015_workforce_sources',
   ]);
   const tables = tableNames(db);
   assert.ok(!tables.includes('providers'));

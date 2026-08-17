@@ -26,6 +26,7 @@ import { MaintenanceService } from './v2/maintenance.js';
 import {
   CpaXaiPersonalChannelSource,
   Grok2ApiPersonalChannelSource,
+  InternalPoolWorkforceSyncService,
   PersonalChannelProjectionService,
 } from './v2/personalChannels.js';
 import { runV2Migrations } from './v2/migrations.js';
@@ -177,6 +178,7 @@ export async function buildControlPlane(
       baseUrl: env.GROK2API_BASE_URL ?? 'http://127.0.0.1:8000',
     }),
   ]);
+  const internalWorkforce = new InternalPoolWorkforceSyncService(personalChannels, supply);
   const usageReconciliationService = new UsageReconciliationService(v2, gateways);
   const gatewayProvisioning = new GatewayProvisioningService(v2, supply, gateways);
   const timers = new Set<NodeJS.Timeout>();
@@ -201,6 +203,7 @@ export async function buildControlPlane(
     runtimeAccess,
     providerHub,
     personalChannels,
+    internalWorkforce,
   });
 
   app.get('/api/health', async () => ({
@@ -226,6 +229,7 @@ export async function buildControlPlane(
   if (options.initialSync !== false) {
     try {
       await reconcileGateways();
+      await internalWorkforce.sync();
     } catch (error) {
       app.log.warn({ err: error }, 'initial V2 gateway discovery failed');
     }
@@ -272,6 +276,18 @@ export async function buildControlPlane(
         reconcileUsage();
         addInterval(reconcileUsage, usageInterval);
       }, 5_000);
+    }
+
+    const internalWorkforceInterval = Math.max(
+      60_000,
+      Number(env.MODEL_CP_INTERNAL_WORKFORCE_SYNC_INTERVAL_MS ?? 300_000),
+    );
+    if (internalWorkforceInterval > 0) {
+      addInterval(() => {
+        void internalWorkforce
+          .sync()
+          .catch((error) => app.log.warn({ err: error }, 'internal workforce sync failed'));
+      }, internalWorkforceInterval);
     }
 
     const incidentInterval = Number(env.MODEL_CP_INCIDENT_PROJECTION_INTERVAL_MS ?? 5_000);

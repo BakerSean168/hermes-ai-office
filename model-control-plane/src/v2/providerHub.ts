@@ -363,6 +363,12 @@ export class ProviderHubRepository {
     };
   }
 
+  connectionsForSupplier(supplierId: string): V2Row[] {
+    return this.listConnections()
+      .filter((item) => String(item.supplier_id ?? '') === supplierId)
+      .map((item) => this.connectionDetail(String(item.id)) ?? item);
+  }
+
   listConnections(includeRetired = false): V2Row[] {
     return rows(
       this.#domain.db

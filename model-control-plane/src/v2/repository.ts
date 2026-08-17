@@ -341,22 +341,34 @@ export class V2Repository {
     return event;
   }
 
-  getOrCreateSupplier(slug: string, name: string, websiteUrl?: string): Row {
+  getOrCreateSupplier(
+    slug: string,
+    name: string,
+    websiteUrl?: string,
+    sourceKind: 'EXTERNAL' | 'INTERNAL' = 'EXTERNAL',
+  ): Row {
     const normalizedWebsite = websiteUrl?.trim().replace(/\/$/, '') || null;
+    if (!['EXTERNAL', 'INTERNAL'].includes(sourceKind))
+      throw new Error('SUPPLIER_SOURCE_KIND_INVALID');
     if (normalizedWebsite && !/^https?:\/\//i.test(normalizedWebsite))
       throw new Error('SUPPLIER_WEBSITE_URL_INVALID');
     const existing = row(this.db.prepare('SELECT * FROM v2_suppliers WHERE slug=?').get(slug));
     if (existing) {
-      if (normalizedWebsite && String(existing.website_url ?? '') !== normalizedWebsite) {
+      if (
+        (normalizedWebsite && String(existing.website_url ?? '') !== normalizedWebsite) ||
+        String(existing.source_kind ?? 'EXTERNAL') !== sourceKind
+      ) {
         const timestamp = now();
         this.db
-          .prepare('UPDATE v2_suppliers SET website_url=?,updated_at=? WHERE id=?')
-          .run(normalizedWebsite, timestamp, String(existing.id));
+          .prepare(
+            'UPDATE v2_suppliers SET website_url=COALESCE(?,website_url),source_kind=?,updated_at=? WHERE id=?',
+          )
+          .run(normalizedWebsite, sourceKind, timestamp, String(existing.id));
         this.emit({
           type: 'supplier.website.updated',
           entityType: 'Supplier',
           entityId: String(existing.id),
-          payload: { websiteUrl: normalizedWebsite },
+          payload: { websiteUrl: normalizedWebsite, sourceKind },
         });
         return row(
           this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(String(existing.id)),
@@ -368,15 +380,15 @@ export class V2Repository {
     const id = newId('sup', timestamp);
     this.db
       .prepare(
-        `INSERT INTO v2_suppliers(id,slug,name,website_url,lifecycle,metadata_json,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?)`,
+        `INSERT INTO v2_suppliers(id,slug,name,website_url,source_kind,lifecycle,metadata_json,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?,?)`,
       )
-      .run(id, slug, name, normalizedWebsite, 'ACTIVE', '{}', timestamp, timestamp);
+      .run(id, slug, name, normalizedWebsite, sourceKind, 'ACTIVE', '{}', timestamp, timestamp);
     this.emit({
       type: 'supplier.created',
       entityType: 'Supplier',
       entityId: id,
-      payload: { slug, websiteUrl: normalizedWebsite },
+      payload: { slug, websiteUrl: normalizedWebsite, sourceKind },
     });
     return row(this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(id))!;
   }
@@ -1373,7 +1385,7 @@ export class V2Repository {
       this.db
         .prepare(
           `SELECT e.id,e.display_name,e.record_lifecycle,e.first_seen_at,
-                  s.id supplier_id,s.slug supplier_slug,s.name supplier_name,
+                  s.id supplier_id,s.slug supplier_slug,s.name supplier_name,s.source_kind supplier_source_kind,
                   sm.id supplier_model_id,sm.supplier_model_key,sm.display_name supplier_model_name,
                   (SELECT COUNT(*) FROM v2_employments em
                     WHERE em.employee_id=e.id AND em.status='CURRENT' AND em.effective_to IS NULL) current_employments,
@@ -1396,6 +1408,7 @@ export class V2Repository {
         id: value.supplier_id,
         slug: value.supplier_slug,
         name: value.supplier_name,
+        sourceKind: value.supplier_source_kind ?? 'EXTERNAL',
       },
       supplierModel: {
         id: value.supplier_model_id,
@@ -1413,7 +1426,7 @@ export class V2Repository {
     const identity = row(
       this.db
         .prepare(
-          `SELECT e.*,s.slug supplier_slug,s.name supplier_name,
+          `SELECT e.*,s.slug supplier_slug,s.name supplier_name,s.source_kind supplier_source_kind,
                   sm.supplier_model_key,sm.display_name supplier_model_name
            FROM v2_employees e
            JOIN v2_suppliers s ON s.id=e.supplier_id

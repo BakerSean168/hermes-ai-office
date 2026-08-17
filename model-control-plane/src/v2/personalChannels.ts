@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import type { SupplyRepository } from './supply.js';
+
 export type PersonalChannelHealth = 'HEALTHY' | 'DEGRADED' | 'UNAVAILABLE';
 
 export interface PersonalChannelModel {
@@ -254,5 +256,46 @@ export class PersonalChannelProjectionService {
         models: channels.reduce((sum, item) => sum + item.models.length, 0),
       },
     };
+  }
+}
+
+export class InternalPoolWorkforceSyncService {
+  readonly #channels: PersonalChannelProjectionService;
+  readonly #supply: SupplyRepository;
+
+  constructor(channels: PersonalChannelProjectionService, supply: SupplyRepository) {
+    this.#channels = channels;
+    this.#supply = supply;
+  }
+
+  async sync(): Promise<{ sources: number; employees: number }> {
+    const projection = (await this.#channels.projection()) as {
+      channels?: PersonalChannelSnapshot[];
+    };
+    const channels = Array.isArray(projection.channels) ? projection.channels : [];
+    let employees = 0;
+    for (const channel of channels) {
+      const slug = channel.id === 'my-cpa-grok' ? 'internal-my-cpa' : 'internal-grok2api';
+      const agreementRef = `internal-pool:${channel.id}`;
+      for (const model of channel.models) {
+        this.#supply.registerCatalogEntry({
+          supplier: {
+            slug,
+            name: channel.name,
+            sourceKind: 'INTERNAL',
+          },
+          supplierModel: { key: model.id, name: model.id },
+          agreement: {
+            externalAccountRef: agreementRef,
+            name: `${channel.name} internal account pool`,
+          },
+        });
+        employees += 1;
+      }
+      if (channel.models.length === 0) {
+        this.#supply.upsertSource({ slug, name: channel.name, sourceKind: 'INTERNAL' });
+      }
+    }
+    return { sources: channels.length, employees };
   }
 }

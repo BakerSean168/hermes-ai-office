@@ -53,6 +53,20 @@ export class SupplyRepository {
     this.#domain = domain;
   }
 
+  upsertSource(input: {
+    slug: string;
+    name: string;
+    websiteUrl?: string;
+    sourceKind?: 'EXTERNAL' | 'INTERNAL';
+  }): V2Row {
+    return this.#domain.getOrCreateSupplier(
+      input.slug.trim(),
+      input.name.trim(),
+      input.websiteUrl,
+      input.sourceKind ?? 'EXTERNAL',
+    );
+  }
+
   setStaffingPreferences(
     supplierId: string,
     input: { enabledEmployeeIds: string[]; defaultEmployeeId?: string | null },
@@ -736,7 +750,12 @@ export class SupplyRepository {
   }
 
   registerCatalogEntry(input: {
-    supplier: { slug: string; name: string; websiteUrl?: string };
+    supplier: {
+      slug: string;
+      name: string;
+      websiteUrl?: string;
+      sourceKind?: 'EXTERNAL' | 'INTERNAL';
+    };
     supplierModel: { key: string; name: string };
     agreement: { externalAccountRef: string; name: string };
     plan?: {
@@ -756,6 +775,7 @@ export class SupplyRepository {
         input.supplier.slug,
         input.supplier.name,
         input.supplier.websiteUrl,
+        input.supplier.sourceKind ?? 'EXTERNAL',
       );
       const supplierModel = this.#domain.getOrCreateSupplierModel({
         supplierId: String(supplier.id),
@@ -875,7 +895,7 @@ export class SupplyRepository {
     const suppliers = rows(
       this.#domain.db
         .prepare(
-          `SELECT id,slug,name,website_url,lifecycle,metadata_json,created_at,updated_at
+          `SELECT id,slug,name,website_url,source_kind,lifecycle,metadata_json,created_at,updated_at
            FROM v2_suppliers WHERE lifecycle='ACTIVE' ORDER BY name`,
         )
         .all(),
@@ -884,6 +904,7 @@ export class SupplyRepository {
       slug: value.slug,
       name: value.name,
       websiteUrl: value.website_url ?? null,
+      sourceKind: value.source_kind ?? 'EXTERNAL',
       lifecycle: value.lifecycle,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
       createdAt: value.created_at,
@@ -1189,6 +1210,12 @@ export class SupplyRepository {
         !currentAgreementById.has(String(channel.supplyAgreementId)),
     );
     const unmappedGroups = channelGroups.filter((group) => group.classification !== 'MAPPED');
+    const externalSupplierItems = supplierItems.filter(
+      (item) => String(item.sourceKind ?? 'EXTERNAL') !== 'INTERNAL',
+    );
+    const internalSourceItems = supplierItems.filter(
+      (item) => String(item.sourceKind ?? 'EXTERNAL') === 'INTERNAL',
+    );
     return {
       projectionVersion: 2,
       generatedAt: now(),
@@ -1204,25 +1231,31 @@ export class SupplyRepository {
         count: unmappedChannels.length,
       },
       summary: {
-        suppliers: supplierItems.length,
-        activeSuppliers: supplierItems.filter((item) => item.lifecycle === 'ACTIVE').length,
+        suppliers: externalSupplierItems.length,
+        activeSuppliers: externalSupplierItems.filter((item) => item.lifecycle === 'ACTIVE').length,
+        workforceSources: supplierItems.length,
+        internalSources: internalSourceItems.length,
         supplierModels: supplierModels.filter((item) =>
-          supplierItems.some((supplier) => supplier.id === item.supplierId),
+          externalSupplierItems.some((supplier) => supplier.id === item.supplierId),
         ).length,
         employees: supplierItems.reduce((count, supplier) => count + supplier.employees.length, 0),
+        internalEmployees: internalSourceItems.reduce(
+          (count, supplier) => count + supplier.employees.length,
+          0,
+        ),
         plans: plans.filter(
           (item) =>
-            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            externalSupplierItems.some((supplier) => supplier.id === item.supplierId) &&
             item.lifecycle === 'ACTIVE',
         ).length,
         agreements: agreements.filter(
           (item) =>
-            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            externalSupplierItems.some((supplier) => supplier.id === item.supplierId) &&
             item.lifecycle === 'ACTIVE',
         ).length,
         activeAgreements: agreements.filter(
           (item) =>
-            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            externalSupplierItems.some((supplier) => supplier.id === item.supplierId) &&
             item.lifecycle === 'ACTIVE',
         ).length,
         currentEmployments: employments.filter(
