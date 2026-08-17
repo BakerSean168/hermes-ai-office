@@ -41,8 +41,11 @@ class FakeConfig:
 
     def save_config(self, partial, merge_existing=True):
         assert merge_existing is True
-        runtime = partial["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"]
-        self.value["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"] = runtime
+        if "custom_providers" in partial:
+            self.value["custom_providers"] = partial["custom_providers"]
+        if "plugins" in partial:
+            runtime = partial["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"]
+            self.value["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"] = runtime
 
 
 class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
@@ -188,6 +191,82 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["runtimePolicy"]["mode"], "enforce")
             self.assertEqual(result["runtimePolicy"]["opencodePosition"], "review-executor")
             self.assertEqual(result["runtimePolicy"]["codexPosition"], "codex-reviewer")
+
+    async def test_provider_registration_only_materializes_selected_models_and_never_sends_key_to_domain(self) -> None:
+        descriptor = {
+            "id": "deepseek",
+            "name": "DeepSeek API",
+            "supplierSlug": "deepseek",
+            "supplierName": "DeepSeek",
+            "baseUrl": "https://api.deepseek.com/v1",
+            "keyEnv": "DEEPSEEK_API_KEY",
+            "transport": "openai_chat",
+            "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
+            "opencodePrefix": "deepseek",
+        }
+        calls = []
+
+        def post(path, payload, **kwargs):
+            calls.append((path, payload, kwargs))
+            if path.endswith("/staffing-preferences"):
+                return {"metadata": {"staffingPreferences": payload}}
+            model = payload["supplierModel"]["key"]
+            suffix = model.replace("/", "-")
+            return {
+                "supplier": {"id": "sup_deepseek"},
+                "employee": {"id": f"emp_{suffix}", "displayName": model},
+            }
+
+        body = api.ProviderRegisterRequest(
+            preset_id="deepseek",
+            api_key="secret-key-value",
+            selected_models=["deepseek-chat", "deepseek-reasoner"],
+            default_model="deepseek-reasoner",
+        )
+        with mock.patch.object(
+            api,
+            "_discover_provider_models",
+            return_value=(descriptor, ["deepseek-chat", "deepseek-reasoner", "unused"], False),
+        ), mock.patch.object(api, "_post_json", side_effect=post), mock.patch.object(
+            api, "_save_provider_secret"
+        ) as save_secret:
+            result = await api.register_provider(body)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual([item["model"] for item in result["employees"]], ["deepseek-chat", "deepseek-reasoner"])
+        self.assertEqual(result["defaultEmployeeId"], "emp_deepseek-reasoner")
+        save_secret.assert_called_once_with(descriptor, "secret-key-value")
+        catalog_calls = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
+        self.assertEqual(len(catalog_calls), 2)
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_calls))
+        preference = [payload for path, payload, _ in calls if path.endswith("staffing-preferences")][0]
+        self.assertEqual(preference["enabledEmployeeIds"], ["emp_deepseek-chat", "emp_deepseek-reasoner"])
+        self.assertEqual(preference["defaultEmployeeId"], "emp_deepseek-reasoner")
+
+    def test_custom_supplier_name_is_optional_and_identity_is_stable_by_endpoint(self) -> None:
+        first = api._custom_supplier_identity("https://proxy.example.com/v1")
+        second = api._custom_supplier_identity("https://proxy.example.com/v1/", "")
+        named = api._custom_supplier_identity("https://proxy.example.com/v1", "Team Router")
+        self.assertEqual(first["providerId"], second["providerId"])
+        self.assertEqual(first["supplierSlug"], second["supplierSlug"])
+        self.assertEqual(first["supplierName"], "Proxy")
+        self.assertEqual(named["supplierName"], "Team Router")
+        self.assertTrue(first["keyEnv"].startswith("HERMES_AI_OFFICE_"))
+
+    def test_custom_provider_config_stores_only_key_reference(self) -> None:
+        fake = FakeConfig()
+        fake.value["custom_providers"] = []
+        descriptor = {
+            "providerId": "custom:abc123",
+            "supplierName": "Team Router",
+            "baseUrl": "https://proxy.example.com/v1",
+            "keyEnv": "HERMES_AI_OFFICE_ABC123_API_KEY",
+        }
+        with mock.patch.object(api, "config_mod", fake):
+            api._save_custom_provider(descriptor)
+        row = fake.value["custom_providers"][0]
+        self.assertEqual(row["key_env"], "HERMES_AI_OFFICE_ABC123_API_KEY")
+        self.assertNotIn("api_key", row)
 
     def test_control_plane_url_is_forced_to_loopback(self) -> None:
         with mock.patch.dict(os.environ, {"HERMES_AI_OFFICE_CONTROL_PLANE_URL": "https://attacker.example"}):

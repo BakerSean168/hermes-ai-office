@@ -1,12 +1,14 @@
 """Hermes AI Office dashboard backend.
 
 Mounted by Hermes at ``/api/plugins/hermes-ai-office/``. The module is a thin,
-authenticated adapter over the local AI Workforce Domain Service. It never
-loads provider credentials and never proxies model traffic.
+authenticated adapter over Hermes native provider management and the local AI
+Workforce Domain Service. Provider secrets are handed only to Hermes credential
+storage; they are never forwarded into workforce projections or the domain DB.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import threading
@@ -15,7 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Sequence
 
 import yaml
 
@@ -42,6 +44,100 @@ class RuntimePolicySettings(BaseModel):
     opencode_position: str = "coding-executor"
     codex_position: str = "codex-executor"
 
+class ProviderDiscoverRequest(BaseModel):
+    preset_id: str
+    api_key: str = ""
+    base_url: str = ""
+    supplier_name: str = ""
+
+
+class ProviderRegisterRequest(ProviderDiscoverRequest):
+    selected_models: list[str]
+    default_model: str = ""
+
+
+_PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "opencode-go": {
+        "id": "opencode-go",
+        "name": "OpenCode Go",
+        "supplierSlug": "opencode",
+        "supplierName": "OpenCode",
+        "baseUrl": "https://opencode.ai/zen/go/v1",
+        "keyEnv": "OPENCODE_GO_API_KEY",
+        "transport": "openai_chat",
+        "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"},
+        "opencodePrefix": "opencode-go",
+        "featured": True,
+    },
+    "deepseek": {
+        "id": "deepseek",
+        "name": "DeepSeek API",
+        "supplierSlug": "deepseek",
+        "supplierName": "DeepSeek",
+        "baseUrl": "https://api.deepseek.com/v1",
+        "keyEnv": "DEEPSEEK_API_KEY",
+        "transport": "openai_chat",
+        "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
+        "opencodePrefix": "deepseek",
+        "featured": True,
+    },
+    "openrouter": {
+        "id": "openrouter",
+        "name": "OpenRouter",
+        "supplierSlug": "openrouter",
+        "supplierName": "OpenRouter",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "keyEnv": "OPENROUTER_API_KEY",
+        "transport": "openai_chat",
+        "plan": {"slug": "api", "name": "OpenRouter API", "commercialType": "METERED"},
+        "opencodePrefix": "openrouter",
+    },
+    "openai-api": {
+        "id": "openai-api",
+        "name": "OpenAI API",
+        "supplierSlug": "openai",
+        "supplierName": "OpenAI",
+        "baseUrl": "https://api.openai.com/v1",
+        "keyEnv": "OPENAI_API_KEY",
+        "transport": "codex_responses",
+        "plan": {"slug": "api", "name": "OpenAI API", "commercialType": "METERED"},
+        "opencodePrefix": "openai",
+    },
+    "xai": {
+        "id": "xai",
+        "name": "xAI API",
+        "supplierSlug": "xai",
+        "supplierName": "xAI",
+        "baseUrl": "https://api.x.ai/v1",
+        "keyEnv": "XAI_API_KEY",
+        "transport": "codex_responses",
+        "plan": {"slug": "api", "name": "xAI API", "commercialType": "METERED"},
+        "opencodePrefix": "xai",
+    },
+    "nvidia": {
+        "id": "nvidia",
+        "name": "NVIDIA NIM",
+        "supplierSlug": "nvidia",
+        "supplierName": "NVIDIA",
+        "baseUrl": "https://integrate.api.nvidia.com/v1",
+        "keyEnv": "NVIDIA_API_KEY",
+        "transport": "openai_chat",
+        "plan": {"slug": "api", "name": "NVIDIA NIM API", "commercialType": "METERED"},
+        "opencodePrefix": "nvidia",
+    },
+    "custom": {
+        "id": "custom",
+        "name": "自定义 OpenAI 兼容服务",
+        "supplierSlug": "",
+        "supplierName": "",
+        "baseUrl": "",
+        "keyEnv": "",
+        "transport": "openai_chat",
+        "plan": {"slug": "api", "name": "Custom API", "commercialType": "METERED"},
+        "featured": True,
+    },
+}
+
 
 def _base_url() -> str:
     raw = os.environ.get("HERMES_AI_OFFICE_CONTROL_PLANE_URL", _DEFAULT_BASE_URL).strip()
@@ -51,25 +147,225 @@ def _base_url() -> str:
     return raw.rstrip("/")
 
 
-def _fetch_json(path: str, *, timeout: float = 1.5) -> Dict[str, Any]:
+def _control_plane_json(
+    path: str,
+    *,
+    method: str = "GET",
+    payload: Mapping[str, Any] | None = None,
+    timeout: float = 3.0,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
     if not path.startswith("/"):
         raise ValueError("control-plane path must be absolute")
-    request = urllib.request.Request(
-        _base_url() + path,
-        headers={"Accept": "application/json"},
-        method="GET",
-    )
+    headers = {"Accept": "application/json"}
+    body = None
+    if payload is not None:
+        body = json.dumps(dict(payload)).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key[:200]
+    request = urllib.request.Request(_base_url() + path, data=body, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             value = json.load(response)
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"control plane returned HTTP {exc.code}") from exc
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"control plane returned HTTP {exc.code}: {detail}") from exc
     except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError("control plane unavailable") from exc
     if not isinstance(value, dict):
         raise RuntimeError("control plane returned a non-object payload")
     return value
 
+
+def _fetch_json(path: str, *, timeout: float = 1.5) -> Dict[str, Any]:
+    return _control_plane_json(path, timeout=timeout)
+
+
+def _post_json(
+    path: str,
+    payload: Mapping[str, Any],
+    *,
+    timeout: float = 5.0,
+    idempotency_key: str = "",
+) -> Dict[str, Any]:
+    return _control_plane_json(
+        path,
+        method="POST",
+        payload=payload,
+        timeout=timeout,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _safe_provider_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_base_url(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("需要有效的 HTTP(S) API 请求地址")
+    return raw
+
+
+def _custom_supplier_identity(base_url: str, supplier_name: str = "") -> Dict[str, str]:
+    normalized = _normalize_base_url(base_url)
+    digest = hashlib.blake2b(normalized.encode("utf-8"), digest_size=6).hexdigest()
+    hostname = urllib.parse.urlparse(normalized).hostname or "custom"
+    generated_name = supplier_name.strip() or hostname.split(".")[0].replace("-", " ").title() or "Custom API"
+    return {
+        "providerId": f"custom:{digest}",
+        "supplierSlug": f"custom-{digest}",
+        "supplierName": generated_name,
+        "keyEnv": f"HERMES_AI_OFFICE_{digest.upper()}_API_KEY",
+        "baseUrl": normalized,
+    }
+
+
+def _provider_descriptor(preset_id: str, base_url: str = "", supplier_name: str = "") -> Dict[str, Any]:
+    preset_key = _safe_provider_id(preset_id)
+    preset = _PROVIDER_PRESETS.get(preset_key)
+    if not preset:
+        raise ValueError("未知供应商预设")
+    if preset_key == "custom":
+        identity = _custom_supplier_identity(base_url, supplier_name)
+        return {**preset, **identity}
+    descriptor = dict(preset)
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY
+        provider = PROVIDER_REGISTRY.get(preset_key)
+        if provider:
+            descriptor["name"] = provider.name or descriptor["name"]
+            descriptor["baseUrl"] = provider.inference_base_url or descriptor["baseUrl"]
+            descriptor["keyEnv"] = (provider.api_key_env_vars or (descriptor["keyEnv"],))[0]
+    except Exception:
+        pass
+    return descriptor
+
+
+def _existing_provider_key(descriptor: Mapping[str, Any]) -> str:
+    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
+    if provider_id and not provider_id.startswith("custom:"):
+        try:
+            from hermes_cli.auth import resolve_api_key_provider_credentials
+            credentials = resolve_api_key_provider_credentials(provider_id)
+            value = str(credentials.get("api_key") or "").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+    key_env = str(descriptor.get("keyEnv") or "").strip()
+    if not key_env:
+        return ""
+    try:
+        if config_mod is not None and hasattr(config_mod, "get_env_value_prefer_dotenv"):
+            return str(config_mod.get_env_value_prefer_dotenv(key_env) or "").strip()
+        if config_mod is not None and hasattr(config_mod, "load_env"):
+            return str((config_mod.load_env() or {}).get(key_env) or "").strip()
+    except Exception:
+        pass
+    return str(os.environ.get(key_env) or "").strip()
+
+
+def _discover_provider_models(body: ProviderDiscoverRequest) -> tuple[Dict[str, Any], list[str], bool]:
+    descriptor = _provider_descriptor(body.preset_id, body.base_url, body.supplier_name)
+    api_key = body.api_key.strip() or _existing_provider_key(descriptor)
+    if not api_key:
+        raise ValueError("API Key 尚未配置")
+    base_url = _normalize_base_url(str(descriptor.get("baseUrl") or body.base_url))
+    transport = str(descriptor.get("transport") or "openai_chat")
+    api_mode = {
+        "codex_responses": "responses",
+        "anthropic_messages": "anthropic_messages",
+    }.get(transport, "chat_completions")
+    models: Sequence[str] | None = None
+    try:
+        from hermes_cli.models import fetch_api_models
+        models = fetch_api_models(api_key, base_url, timeout=8.0, api_mode=api_mode)
+    except Exception:
+        models = None
+    if not models and body.preset_id != "custom":
+        try:
+            from hermes_cli.models import provider_model_ids
+            models = provider_model_ids(body.preset_id, force_refresh=True)
+        except Exception:
+            models = None
+    cleaned = sorted({str(model).strip() for model in (models or []) if str(model).strip()})
+    if not cleaned:
+        raise ValueError("没有从该供应商获取到可用模型")
+    return descriptor, cleaned[:800], bool(_existing_provider_key(descriptor))
+
+
+def _save_provider_secret(descriptor: Mapping[str, Any], api_key: str) -> None:
+    value = api_key.strip()
+    if not value:
+        return
+    key_env = str(descriptor.get("keyEnv") or "").strip()
+    if not key_env:
+        raise ValueError("该供应商没有可写入的 Hermes 凭证槽")
+    from hermes_cli.credential_lifecycle import save_provider_env_credential
+    save_provider_env_credential(key_env, value)
+
+
+def _save_custom_provider(descriptor: Mapping[str, Any]) -> None:
+    if config_mod is None:
+        raise RuntimeError("Hermes config service unavailable")
+    base_url = str(descriptor["baseUrl"])
+    provider_id = str(descriptor["providerId"])
+    name = str(descriptor["supplierName"])
+    key_env = str(descriptor["keyEnv"])
+    current = config_mod.load_config_readonly() or {}
+    providers = current.get("custom_providers") if isinstance(current, Mapping) else None
+    rows = [dict(item) for item in providers if isinstance(item, Mapping)] if isinstance(providers, list) else []
+    replacement = {
+        "name": name,
+        "provider_key": provider_id,
+        "base_url": base_url,
+        "key_env": key_env,
+        "api_mode": "chat_completions",
+    }
+    normalized = base_url.rstrip("/")
+    for index, item in enumerate(rows):
+        if str(item.get("base_url") or "").rstrip("/") == normalized:
+            rows[index] = {**item, **replacement}
+            break
+    else:
+        rows.append(replacement)
+    config_mod.save_config({"custom_providers": rows}, merge_existing=True)
+
+
+def _runtime_selectors(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
+    prefix = str(descriptor.get("opencodePrefix") or "").strip()
+    if not prefix:
+        return {}
+    return {"OPENCODE": {"model": f"{prefix}/{model}", "provider": prefix}}
+
+
+def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
+    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "custom")
+    supplier_slug = str(descriptor["supplierSlug"])
+    supplier_name = str(descriptor["supplierName"])
+    plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else None
+    endpoint_tag = hashlib.blake2b(str(descriptor["baseUrl"]).encode("utf-8"), digest_size=5).hexdigest()
+    payload: Dict[str, Any] = {
+        "supplier": {"slug": supplier_slug, "name": supplier_name},
+        "supplierModel": {"key": model, "name": model},
+        "agreement": {
+            "externalAccountRef": f"hermes-provider:{provider_id}:{endpoint_tag}",
+            "name": f"{str(descriptor.get('name') or supplier_name)} via Hermes",
+        },
+    }
+    if plan:
+        payload["plan"] = dict(plan)
+    selectors = _runtime_selectors(descriptor, model)
+    if selectors:
+        payload["runtimeSelectors"] = selectors
+    return payload
 
 def _model_config(value: Any) -> Dict[str, str]:
     if not isinstance(value, Mapping):
@@ -298,6 +594,113 @@ async def workforce() -> Dict[str, Any]:
         return await asyncio.to_thread(_fetch_json, "/api/v2/projections/workforce")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/providers/presets")
+async def provider_presets() -> Dict[str, Any]:
+    items = []
+    for preset_id, raw in _PROVIDER_PRESETS.items():
+        descriptor = _provider_descriptor(preset_id, "https://example.invalid/v1" if preset_id == "custom" else "", "") if preset_id != "custom" else raw
+        items.append(
+            {
+                "id": preset_id,
+                "name": descriptor.get("name"),
+                "supplierName": descriptor.get("supplierName"),
+                "featured": bool(descriptor.get("featured")),
+                "custom": preset_id == "custom",
+                "configured": False if preset_id == "custom" else bool(_existing_provider_key(descriptor)),
+            }
+        )
+    return {"items": items}
+
+
+@router.post("/providers/discover")
+async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
+    try:
+        descriptor, models, configured = await asyncio.to_thread(_discover_provider_models, body)
+        return {
+            "provider": {
+                "id": body.preset_id,
+                "name": descriptor.get("name"),
+                "supplierName": descriptor.get("supplierName"),
+                "baseUrl": descriptor.get("baseUrl") if body.preset_id == "custom" else None,
+                "configured": configured,
+            },
+            "models": [{"id": model, "name": model} for model in models],
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="供应商模型发现失败") from exc
+
+
+@router.post("/providers/register")
+async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
+    try:
+        descriptor, discovered, _configured = await asyncio.to_thread(_discover_provider_models, body)
+        selected = list(dict.fromkeys(model.strip() for model in body.selected_models if model.strip()))
+        if not selected:
+            raise ValueError("至少选择一个模型作为员工")
+        unknown = [model for model in selected if model not in discovered]
+        if unknown:
+            raise ValueError("所选模型不在本次供应商发现结果中")
+        default_model = body.default_model.strip() or selected[0]
+        if default_model not in selected:
+            raise ValueError("默认员工必须来自已选择的模型")
+
+        if body.api_key.strip():
+            await asyncio.to_thread(_save_provider_secret, descriptor, body.api_key)
+        if body.preset_id == "custom":
+            await asyncio.to_thread(_save_custom_provider, descriptor)
+
+        registrations = []
+        supplier_id = ""
+        employee_ids: list[str] = []
+        default_employee_id = ""
+        for model in selected:
+            payload = _catalog_payload(descriptor, model)
+            digest = hashlib.blake2b(
+                f"{payload['supplier']['slug']}|{model}".encode("utf-8"), digest_size=8
+            ).hexdigest()
+            result = await asyncio.to_thread(
+                _post_json,
+                "/api/v2/commands/supply-catalog/register",
+                payload,
+                idempotency_key=f"office-onboard-{digest}",
+            )
+            supplier = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
+            employee = result.get("employee") if isinstance(result.get("employee"), Mapping) else {}
+            if not supplier.get("id") or not employee.get("id"):
+                raise RuntimeError("control plane did not return supplier/employee identity")
+            supplier_id = str(supplier["id"])
+            employee_id = str(employee["id"])
+            employee_ids.append(employee_id)
+            if model == default_model:
+                default_employee_id = employee_id
+            registrations.append(
+                {
+                    "model": model,
+                    "employeeId": employee_id,
+                    "employeeName": employee.get("displayName") or model,
+                }
+            )
+        preference = await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{supplier_id}/staffing-preferences",
+            {"enabledEmployeeIds": employee_ids, "defaultEmployeeId": default_employee_id},
+            idempotency_key=f"office-supplier-pref-{supplier_id}-{hashlib.blake2b('|'.join(employee_ids).encode('utf-8'), digest_size=6).hexdigest()}",
+        )
+        return {
+            "ok": True,
+            "supplierId": supplier_id,
+            "employees": registrations,
+            "defaultEmployeeId": default_employee_id,
+            "staffingPreferences": preference.get("metadata", {}).get("staffingPreferences", {}),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="供应商保存失败") from exc
 
 
 @router.get("/supply")
