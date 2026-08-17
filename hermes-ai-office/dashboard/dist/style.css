@@ -1962,3 +1962,13 @@
 .hao-metric-value {
   color: var(--hao-text) !important;
 }
+
+.hao-channel-section {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.hao-channel-section > .hao-section-head {
+  margin-bottom: 0;
+}

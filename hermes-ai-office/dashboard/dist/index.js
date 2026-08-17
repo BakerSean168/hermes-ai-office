@@ -226,13 +226,17 @@
       "suppliers.custom": "Custom endpoint",
       "suppliers.customHint": "OpenAI-compatible URL + API key",
       "suppliers.configured": "Configured",
-      "suppliers.unclassified": "Unclassified technical routes",
-      "suppliers.unclassifiedSubtitle":
-        "Technical evidence is kept separate and never fabricates supplier or employee identity.",
-      "suppliers.gateway": "Gateway",
+      "suppliers.personalChannels": "Personal channels",
+      "suppliers.personalChannelsSubtitle":
+        "My CPA is a known personal access channel. Route-level mapping shows whether each technical channel is linked to a business supplier.",
       "suppliers.channel": "Channel",
+      "suppliers.mapping": "Business mapping",
+      "suppliers.mapped": "Mapped",
+      "suppliers.unmapped": "Not mapped to a supplier",
+      "suppliers.partial": "Partially mapped",
       "suppliers.health": "Health",
-      "suppliers.models": "Model hints",
+      "suppliers.models": "Models",
+      "suppliers.cpaDeepseek": "DeepSeek API",
       "operations.title": "Operations",
       "operations.subtitle": "Current runs, activated duties, and technical runtime shells",
       "operations.runs": "Active runs",
@@ -471,12 +475,16 @@
       "suppliers.custom": "自定义接口",
       "suppliers.customHint": "OpenAI 兼容地址 + API Key",
       "suppliers.configured": "已配置",
-      "suppliers.unclassified": "未分类技术路由",
-      "suppliers.unclassifiedSubtitle": "技术证据与业务身份严格分离，不会自动捏造供应商或员工。",
-      "suppliers.gateway": "网关",
+      "suppliers.personalChannels": "个人渠道",
+      "suppliers.personalChannelsSubtitle": "My CPA 是已识别的个人接入渠道；这里只标记每条技术通道是否已经映射到业务供应商。",
       "suppliers.channel": "通道",
+      "suppliers.mapping": "业务映射",
+      "suppliers.mapped": "已映射",
+      "suppliers.unmapped": "未映射到供应商",
+      "suppliers.partial": "部分映射",
       "suppliers.health": "健康状态",
-      "suppliers.models": "模型提示",
+      "suppliers.models": "模型",
+      "suppliers.cpaDeepseek": "DeepSeek API",
       "operations.title": "运营",
       "operations.subtitle": "当前运行、已激活职责与技术运行时外壳",
       "operations.runs": "活跃运行",
@@ -1630,8 +1638,10 @@
       }),
     );
     const suppliers = asArray(supply.suppliers);
-    const infrastructure = asObject(supply.unmappedInfrastructure);
-    const infrastructureRows = asArray(infrastructure.groups);
+    const channelInfrastructure = asObject(supply.channelInfrastructure);
+    const personalGateways = asArray(channelInfrastructure.gateways).filter(function (gateway) {
+      return gateway.kind === "CPA";
+    });
     const currentPreset =
       presets.find(function (preset) {
         return preset.id === presetId;
@@ -1805,9 +1815,27 @@
       };
     }
 
-    const infrastructureColumns = [
-      { key: "gatewayName", label: props.t("suppliers.gateway"), render: function (row) { return row.gatewayName || row.gatewaySlug || "—"; } },
-      { key: "channelName", label: props.t("suppliers.channel") },
+    function technicalChannelLabel(row) {
+      if (row.gatewaySlug === "cpa-compat" && row.channelName === "planner-pool") {
+        return props.t("suppliers.cpaDeepseek");
+      }
+      return row.channelName || "—";
+    }
+
+    function mappingLabel(row) {
+      if (row.classification === "MAPPED") {
+        const names = asArray(row.mappedSuppliers).map(function (supplier) { return supplier.name; }).filter(Boolean);
+        return h("div", { className: "hao-primary-cell" }, h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.mapped")), names.length ? h("small", null, names.join(" · ")) : null);
+      }
+      if (row.classification === "PARTIAL") {
+        return h("span", { className: "hao-badge" }, props.t("suppliers.partial"));
+      }
+      return h("span", { className: "hao-badge hao-badge-warn" }, props.t("suppliers.unmapped"));
+    }
+
+    const channelColumns = [
+      { key: "channelName", label: props.t("suppliers.channel"), render: technicalChannelLabel },
+      { key: "classification", label: props.t("suppliers.mapping"), render: mappingLabel },
       { key: "health", label: props.t("suppliers.health"), render: function (row) { return h("div", { className: "hao-inline-badges" }, asArray(row.health).map(function (value) { return h(Status, { key: value, value: value, t: props.t }); })); } },
       { key: "modelHints", label: props.t("suppliers.models"), render: function (row) { return asArray(row.modelHints).length ? h("div", { className: "hao-code-list" }, asArray(row.modelHints).map(function (model) { return h("code", { key: model, className: "hao-code" }, model); })) : "—"; } },
     ];
@@ -1875,13 +1903,20 @@
             }),
           )
         : h(Empty, null, props.t("common.noData")),
-      infrastructureRows.length
+      personalGateways.length
         ? h(
-            "details",
-            { className: "hao-infrastructure-details" },
-            h("summary", null, props.t("suppliers.unclassified") + " · " + props.number(infrastructure.count || infrastructureRows.length)),
-            h("p", null, props.t("suppliers.unclassifiedSubtitle")),
-            h(DataTable, { columns: infrastructureColumns, rows: infrastructureRows, empty: props.t("common.noData") }),
+            "section",
+            { className: "hao-channel-section" },
+            h("div", { className: "hao-section-head" }, h("div", null, h("h2", null, props.t("suppliers.personalChannels")), h("p", null, props.t("suppliers.personalChannelsSubtitle")))),
+            personalGateways.map(function (gateway) {
+              const groups = asArray(gateway.groups);
+              return h(
+                "details",
+                { className: "hao-infrastructure-details", key: gateway.id || gateway.slug, open: true },
+                h("summary", null, String(gateway.name || gateway.slug || "My CPA") + " · " + props.number(groups.length)),
+                h(DataTable, { columns: channelColumns, rows: groups, empty: props.t("common.noData") }),
+              );
+            }),
           )
         : null,
       h(
