@@ -75,6 +75,7 @@
       "tabs.organization": "Organization",
       "tabs.workforce": "Workforce",
       "tabs.suppliers": "Suppliers",
+      "tabs.providers": "Channels",
       "tabs.operations": "Operations",
       "tabs.policy": "Runtime policy",
       "tabs.incidents": "Incidents",
@@ -241,6 +242,20 @@
       "suppliers.health": "Health",
       "suppliers.models": "Models",
       "suppliers.cpaDeepseek": "DeepSeek API",
+      "providers.title": "Provider Hub",
+      "providers.subtitle": "Shared provider connections discovered from every Hermes profile. Add once, see it everywhere.",
+      "providers.sync": "Sync profiles",
+      "providers.connection": "Channel",
+      "providers.status": "Availability",
+      "providers.auth": "Credential",
+      "providers.models": "Available models",
+      "providers.profiles": "Profiles using it",
+      "providers.supplier": "Business supplier",
+      "providers.shared": "Shared",
+      "providers.profileOnly": "Profile only",
+      "providers.noSupplier": "Not classified",
+      "providers.noProfiles": "Not used by a profile yet",
+      "providers.noConnections": "No provider connections discovered yet",
       "operations.title": "Operations",
       "operations.subtitle": "Current runs, activated duties, and technical runtime shells",
       "operations.runs": "Active runs",
@@ -329,6 +344,7 @@
       "tabs.organization": "组织架构",
       "tabs.workforce": "员工",
       "tabs.suppliers": "供应商",
+      "tabs.providers": "渠道",
       "tabs.operations": "运营",
       "tabs.policy": "运行时策略",
       "tabs.incidents": "事件",
@@ -493,6 +509,20 @@
       "suppliers.health": "健康状态",
       "suppliers.models": "模型",
       "suppliers.cpaDeepseek": "DeepSeek API",
+      "providers.title": "渠道中心",
+      "providers.subtitle": "集中管理所有 Hermes Profile 发现的 Provider 连接：一个 Profile 添加后，其它 Profile 也能看到。",
+      "providers.sync": "同步 Profile",
+      "providers.connection": "渠道",
+      "providers.status": "可用状态",
+      "providers.auth": "凭证",
+      "providers.models": "可用模型",
+      "providers.profiles": "正在使用的 Profile",
+      "providers.supplier": "业务供应商",
+      "providers.shared": "公共共享",
+      "providers.profileOnly": "仅本 Profile",
+      "providers.noSupplier": "尚未归类",
+      "providers.noProfiles": "尚无 Profile 使用",
+      "providers.noConnections": "还没有发现 Provider 渠道",
       "operations.title": "运营",
       "operations.subtitle": "当前运行、已激活职责与技术运行时外壳",
       "operations.runs": "活跃运行",
@@ -578,6 +608,7 @@
     "tabs.organization": "組織架構",
     "tabs.workforce": "員工",
     "tabs.suppliers": "供應商",
+    "tabs.providers": "渠道",
     "tabs.operations": "營運",
     "tabs.policy": "執行階段策略",
     "tabs.incidents": "事件",
@@ -1619,6 +1650,102 @@
     );
   }
 
+  function ProviderHub(props) {
+    const hub = asObject(props.data.providerHub);
+    const error = sourceError(hub);
+    const [syncing, setSyncing] = React.useState(false);
+    const [syncError, setSyncError] = React.useState("");
+    if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
+    const items = asArray(hub.items);
+    async function syncNow() {
+      setSyncing(true);
+      setSyncError("");
+      try {
+        await api("/providers/hub?force=true");
+        await props.onRefresh();
+      } catch (cause) {
+        setSyncError(String(cause));
+      } finally {
+        setSyncing(false);
+      }
+    }
+    const columns = [
+      {
+        key: "connection",
+        label: props.t("providers.connection"),
+        render: function (item) {
+          return h("div", { className: "hao-primary-cell" },
+            h("strong", null, item.display_name || item.provider_key),
+            h("small", null, [item.provider_key, item.base_url].filter(Boolean).join(" · ")),
+          );
+        },
+      },
+      {
+        key: "health",
+        label: props.t("providers.status"),
+        render: function (item) { return h(Status, { value: item.health, t: props.t }); },
+      },
+      {
+        key: "auth",
+        label: props.t("providers.auth"),
+        render: function (item) {
+          return h("div", { className: "hao-primary-cell" },
+            h("strong", null, item.auth_kind || "—"),
+            h("small", null, [item.credential_scope, item.credential_ref].filter(Boolean).join(" · ")),
+          );
+        },
+      },
+      {
+        key: "models",
+        label: props.t("providers.models"),
+        render: function (item) {
+          const models = asArray(item.models);
+          return h("div", { className: "hao-chip-row" },
+            models.slice(0, 4).map(function (model) { return h("code", { className: "hao-code", key: model }, model); }),
+            models.length > 4 ? h("span", { className: "hao-count" }, "+" + props.number(models.length - 4)) : null,
+          );
+        },
+      },
+      {
+        key: "profiles",
+        label: props.t("providers.profiles"),
+        render: function (item) {
+          const links = asArray(item.profileLinks);
+          if (!links.length) return h("span", { className: "hao-muted" }, props.t("providers.noProfiles"));
+          const grouped = new Map();
+          links.forEach(function (link) {
+            const key = String(link.profile_id || "profile");
+            const list = grouped.get(key) || [];
+            list.push([link.runtime_kind, link.model_ref].filter(Boolean).join(" / "));
+            grouped.set(key, list);
+          });
+          return h("div", { className: "hao-primary-cell" }, Array.from(grouped.entries()).map(function (entry) {
+            return h("div", { key: entry[0] }, h("strong", null, entry[0]), h("small", null, entry[1].join(" · ")));
+          }));
+        },
+      },
+      {
+        key: "supplier",
+        label: props.t("providers.supplier"),
+        render: function (item) {
+          const supplier = asObject(item.supplier);
+          return supplier.name ? h("strong", null, supplier.name) : h("span", { className: "hao-muted" }, props.t("providers.noSupplier"));
+        },
+      },
+    ];
+    return h("div", { className: "hao-section-stack" },
+      h("div", { className: "hao-section-head" },
+        h("div", null, h("h1", null, props.t("providers.title")), h("p", null, props.t("providers.subtitle"))),
+        h("div", { className: "hao-inline-actions" },
+          h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(items.length) })),
+          h(Button, { onClick: syncNow, disabled: syncing }, syncing ? props.t("shell.refreshing") : props.t("providers.sync")),
+        ),
+      ),
+      syncError ? h(ErrorBanner, { title: props.t("shell.loadError"), error: syncError }) : null,
+      h(DataTable, { columns: columns, rows: items, empty: props.t("providers.noConnections") }),
+    );
+  }
+
   function Suppliers(props) {
     const supply = asObject(props.data.supply);
     const workforce = asObject(props.data.workforce);
@@ -2316,7 +2443,7 @@
     );
   }
 
-  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
+  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "providers", "operations", "policy", "incidents"];
 
   function OfficePage() {
     const i18n = useI18n();
@@ -2376,6 +2503,7 @@
       if (tab === "organization") content = h(Organization, shared);
       else if (tab === "workforce") content = h(Workforce, shared);
       else if (tab === "suppliers") content = h(Suppliers, Object.assign({}, shared, { onRefresh: load }));
+      else if (tab === "providers") content = h(ProviderHub, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "operations") content = h(Operations, shared);
       else if (tab === "policy") content = h(RuntimePolicy, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "incidents") content = h(Incidents, shared);

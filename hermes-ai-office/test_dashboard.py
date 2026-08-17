@@ -54,6 +54,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             "/api/v2/projections/workforce": {"summary": {"employees": 2}},
             "/api/v2/projections/supply": {"summary": {"suppliers": 1}},
             "/api/v2/projections/personal-channels": {"channels": [{"id": "grok2api"}]},
+            "/api/v2/projections/provider-hub": {"summary": {"connections": 2}, "items": []},
             "/api/v2/projections/office": {"summary": {"positions": 3}},
             "/api/v2/incidents?limit=200": {"items": []},
             "/api/v2/runtime-launch-decisions?limit=100": {"items": [{"id": "rlaunch_1"}]},
@@ -65,6 +66,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["workforce"]["summary"]["employees"], 2)
         self.assertEqual(result["supply"]["summary"]["suppliers"], 1)
         self.assertEqual(result["personalChannels"]["channels"][0]["id"], "grok2api")
+        self.assertEqual(result["providerHub"]["summary"]["connections"], 2)
         self.assertEqual(result["organization"]["summary"]["positions"], 3)
         self.assertEqual(result["runtimeDecisions"]["items"][0]["id"], "rlaunch_1")
         self.assertEqual(result["controlPlaneUrl"], "local")
@@ -210,6 +212,24 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
 
         def post(path, payload, **kwargs):
             calls.append((path, payload, kwargs))
+            if path.endswith("provider-connections/upsert"):
+                return {
+                    "id": "pconn_deepseek",
+                    "provider_key": payload["providerKey"],
+                    "display_name": payload["displayName"],
+                    "supplier_id": payload.get("supplierId"),
+                    "base_url": payload.get("baseUrl"),
+                    "protocol": payload.get("protocol"),
+                    "auth_kind": payload.get("authKind"),
+                    "credential_ref": payload.get("credentialRef"),
+                    "credential_scope": payload.get("credentialScope"),
+                    "source_profile_id": payload.get("sourceProfileId"),
+                    "source_kind": payload.get("sourceKind"),
+                    "share_scope": payload.get("shareScope"),
+                    "health": payload.get("health"),
+                    "models": payload.get("models") or [],
+                    "metadata": payload.get("metadata") or {},
+                }
             if path.endswith("/staffing-preferences"):
                 return {"metadata": {"staffingPreferences": payload}}
             if path.endswith("/runtime-access"):
@@ -244,6 +264,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         catalog_calls = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_calls), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_calls))
+        hub_calls = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
+        self.assertGreaterEqual(len(hub_calls), 1)
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_calls))
         preference = [payload for path, payload, _ in calls if path.endswith("staffing-preferences")][0]
         self.assertEqual(preference["enabledEmployeeIds"], ["emp_deepseek-chat", "emp_deepseek-reasoner"])
         self.assertEqual(preference["defaultEmployeeId"], "emp_deepseek-reasoner")
@@ -263,6 +286,24 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
 
         def post(path, payload, idempotency_key=None):
             calls.append((path, payload, idempotency_key))
+            if path.endswith("provider-connections/upsert"):
+                return {
+                    "id": "pconn_custom",
+                    "provider_key": payload["providerKey"],
+                    "display_name": payload["displayName"],
+                    "supplier_id": payload.get("supplierId"),
+                    "base_url": payload.get("baseUrl"),
+                    "protocol": payload.get("protocol"),
+                    "auth_kind": payload.get("authKind"),
+                    "credential_ref": payload.get("credentialRef"),
+                    "credential_scope": payload.get("credentialScope"),
+                    "source_profile_id": payload.get("sourceProfileId"),
+                    "source_kind": payload.get("sourceKind"),
+                    "share_scope": payload.get("shareScope"),
+                    "health": payload.get("health"),
+                    "models": payload.get("models") or [],
+                    "metadata": payload.get("metadata") or {},
+                }
             if path.endswith("supply-catalog/register"):
                 model = payload["supplierModel"]["key"]
                 return {
@@ -297,6 +338,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         catalog_payloads = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_payloads), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_payloads))
+        hub_payloads = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
+        self.assertGreaterEqual(len(hub_payloads), 1)
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_payloads))
         access_calls = [(path, payload) for path, payload, _ in calls if path.endswith("runtime-access")]
         self.assertEqual(len(access_calls), 4)
         self.assertTrue(all(payload["adapterKind"] == "NATIVE_CONFIG" for _, payload in access_calls))
@@ -348,6 +392,9 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertEqual(manifest["tab"]["path"], "/office")
         self.assertEqual(manifest["api"], "plugin_api.py")
         self.assertIn('registry.register("hermes-ai-office", OfficePage)', source)
+        self.assertIn('"providers", "operations"', source)
+        self.assertIn('function ProviderHub(props)', source)
+        self.assertIn('/providers/hub?force=true', source)
         self.assertIn("window.__HERMES_PLUGIN_SDK__", source)
         self.assertNotIn('from "react"', source)
         self.assertNotIn("react.production.min", source)

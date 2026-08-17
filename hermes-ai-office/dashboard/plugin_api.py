@@ -13,6 +13,7 @@ import json
 import os
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -138,6 +139,361 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
     },
 }
 
+
+
+_PROVIDER_HUB_SYNC_LOCK = threading.Lock()
+_PROVIDER_HUB_LAST_SYNC = 0.0
+_PROVIDER_HUB_SYNC_TTL = 45.0
+
+_DISCOVERED_SUPPLIERS: Dict[str, Dict[str, Any]] = {
+    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED"},
+    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
+    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED"},
+    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED"},
+    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED"},
+    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
+}
+
+
+def _profile_root(profile_id: str) -> Path:
+    if get_hermes_home is None:
+        raise RuntimeError("Hermes home unavailable")
+    return Path(get_hermes_home()) / "profiles" / profile_id
+
+
+def _read_env_file(path: Path) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    if not path.exists():
+        return result
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return result
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key:
+            result[key] = value
+    return result
+
+
+def _global_credential_value(key_env: str) -> str:
+    try:
+        if config_mod is not None and hasattr(config_mod, "get_env_value_prefer_dotenv"):
+            return str(config_mod.get_env_value_prefer_dotenv(key_env) or "").strip()
+        if config_mod is not None and hasattr(config_mod, "load_env"):
+            return str((config_mod.load_env() or {}).get(key_env) or "").strip()
+    except Exception:
+        pass
+    return str(os.environ.get(key_env) or "").strip()
+
+
+def _promote_profile_credential(profile_id: str, key_env: str) -> bool:
+    if not key_env:
+        return False
+    if _global_credential_value(key_env):
+        return True
+    env = _read_env_file(_profile_root(profile_id) / "home" / ".clients.env")
+    value = str(env.get(key_env) or "").strip()
+    if not value:
+        return False
+    try:
+        from hermes_cli.credential_lifecycle import save_provider_env_credential
+        save_provider_env_credential(key_env, value)
+        return True
+    except Exception:
+        return False
+
+
+def _connection_supplier(provider_key: str) -> Mapping[str, Any] | None:
+    return _DISCOVERED_SUPPLIERS.get(provider_key)
+
+
+def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
+    seed = json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
+    return _post_json(
+        "/api/v2/commands/provider-connections/upsert",
+        payload,
+        idempotency_key="provider-hub-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+    )
+
+
+def _hub_link(connection_id: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
+    seed = f"{connection_id}|" + json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
+    return _post_json(
+        f"/api/v2/commands/provider-connections/{connection_id}/profile-links",
+        payload,
+        idempotency_key="provider-link-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+    )
+
+
+def _register_discovered_employee(
+    provider_key: str,
+    connection: Mapping[str, Any],
+    model: str,
+    *,
+    runtime_kind: str,
+    provider_ref: str,
+    profile_ref: str = "",
+    protocol: str = "",
+) -> Dict[str, Any] | None:
+    supplier_spec = _connection_supplier(provider_key)
+    if not supplier_spec or not model:
+        return None
+    supplier = {"slug": supplier_spec["slug"], "name": supplier_spec["name"]}
+    account_ref = f"provider-hub:{provider_key}:{connection.get('id')}"
+    payload: Dict[str, Any] = {
+        "supplier": supplier,
+        "supplierModel": {"key": model, "name": model},
+        "agreement": {
+            "externalAccountRef": account_ref,
+            "name": f"{supplier_spec['name']} shared connection",
+        },
+    }
+    if isinstance(supplier_spec.get("plan"), Mapping):
+        payload["plan"] = dict(supplier_spec["plan"])
+    result = _post_json(
+        "/api/v2/commands/supply-catalog/register",
+        payload,
+        idempotency_key="provider-catalog-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
+    )
+    employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
+    supplier_row = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
+    employment_id = str(employment.get("id") or "")
+    if employment_id:
+        access: Dict[str, Any] = {
+            "runtimeKind": runtime_kind,
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": provider_ref,
+            "modelRef": model,
+            "baseUrl": connection.get("base_url") or None,
+            "credentialRef": connection.get("credential_ref") or None,
+            "protocol": protocol or connection.get("protocol") or None,
+            "config": {"providerHubConnectionId": connection.get("id")},
+            "priority": 100,
+        }
+        if profile_ref:
+            access["profileRef"] = profile_ref
+        _post_json(
+            f"/api/v2/commands/employments/{employment_id}/runtime-access",
+            access,
+            idempotency_key="hub-runtime-" + hashlib.blake2b(json.dumps(access, sort_keys=True).encode(), digest_size=10).hexdigest(),
+        )
+    if supplier_row.get("id") and not connection.get("supplier_id"):
+        return _hub_upsert_connection({
+            "providerKey": connection.get("provider_key"),
+            "displayName": connection.get("display_name"),
+            "supplierId": supplier_row.get("id"),
+            "baseUrl": connection.get("base_url"),
+            "protocol": connection.get("protocol"),
+            "authKind": connection.get("auth_kind"),
+            "credentialRef": connection.get("credential_ref"),
+            "credentialScope": connection.get("credential_scope"),
+            "sourceProfileId": connection.get("source_profile_id"),
+            "sourceKind": connection.get("source_kind"),
+            "shareScope": connection.get("share_scope"),
+            "health": connection.get("health"),
+            "models": connection.get("models") or [],
+            "metadata": connection.get("metadata") or {},
+        })
+    return result
+
+
+def _codex_provider_catalog(profile_home: Path) -> tuple[Dict[str, Dict[str, Any]], list[Dict[str, Any]]]:
+    codex = profile_home / ".codex"
+    main = codex / "config.toml"
+    providers: Dict[str, Dict[str, Any]] = {}
+    configs: list[Dict[str, Any]] = []
+    if main.exists():
+        try:
+            value = tomllib.loads(main.read_text(encoding="utf-8"))
+            for key, raw in (value.get("model_providers") or {}).items():
+                if isinstance(raw, Mapping):
+                    providers[str(key)] = dict(raw)
+        except Exception:
+            pass
+    for path in sorted(codex.glob("*.config.toml")):
+        try:
+            value = tomllib.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        model = str(value.get("model") or "").strip()
+        provider = str(value.get("model_provider") or "").strip()
+        if model and provider:
+            configs.append({"path": path.name, "model": model, "provider": provider})
+    return providers, configs
+
+
+def _discover_profile_native_connections() -> list[Dict[str, Any]]:
+    if get_hermes_home is None:
+        return []
+    profiles_root = Path(get_hermes_home()) / "profiles"
+    if not profiles_root.exists():
+        return []
+    discovered: list[Dict[str, Any]] = []
+    for profile_dir in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
+        profile_id = profile_dir.name
+        home = profile_dir / "home"
+        env = _read_env_file(home / ".clients.env")
+        providers, configs = _codex_provider_catalog(home)
+        auth_path = home / ".codex" / "auth.json"
+        auth: Dict[str, Any] = {}
+        if auth_path.exists():
+            try:
+                raw_auth = json.loads(auth_path.read_text(encoding="utf-8"))
+                if isinstance(raw_auth, Mapping):
+                    auth = dict(raw_auth)
+            except Exception:
+                pass
+        for config in configs:
+            provider_ref = str(config["provider"])
+            model = str(config["model"])
+            if provider_ref == "openai" and auth.get("auth_mode") == "chatgpt":
+                token_map = auth.get("tokens") if isinstance(auth.get("tokens"), Mapping) else {}
+                ready = bool(token_map)
+                connection = _hub_upsert_connection({
+                    "providerKey": "openai-team",
+                    "displayName": "OpenAI Official · ChatGPT Team / Business",
+                    "protocol": "codex-chatgpt-oauth",
+                    "authKind": "OAUTH",
+                    "credentialRef": f"codex-auth:{profile_id}",
+                    "credentialScope": "OAUTH_PROFILE",
+                    "sourceProfileId": profile_id,
+                    "sourceKind": "CODEX_OAUTH",
+                    "shareScope": "GLOBAL",
+                    "health": "READY" if ready else "UNAVAILABLE",
+                    "models": [model],
+                    "metadata": {"configFile": config["path"], "planType": "team"},
+                })
+                _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CODEX", "providerRef": "openai", "modelRef": model, "profileRef": "team", "sourceKind": "PROFILE_DISCOVERY"})
+                _register_discovered_employee("openai-team", connection, model, runtime_kind="CODEX", provider_ref="openai", profile_ref="team", protocol="codex-chatgpt-oauth")
+                discovered.append(connection)
+                continue
+            provider = providers.get(provider_ref) or {}
+            base_url = str(provider.get("base_url") or "").strip().rstrip("/")
+            credential_ref = str(provider.get("env_key") or "").strip()
+            wire_api = str(provider.get("wire_api") or "responses").strip()
+            if not base_url:
+                continue
+            promoted = _promote_profile_credential(profile_id, credential_ref) if credential_ref else False
+            display = {
+                "anyrouter": "AnyRouter",
+                "fastaitoken": "FastAI Token",
+                "ark717": "Ark717",
+            }.get(provider_ref, str(provider.get("name") or provider_ref))
+            connection = _hub_upsert_connection({
+                "providerKey": provider_ref,
+                "displayName": display,
+                "baseUrl": base_url,
+                "protocol": "openai-responses" if wire_api == "responses" else wire_api,
+                "authKind": "API_KEY",
+                "credentialRef": credential_ref or None,
+                "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
+                "sourceProfileId": None if promoted else profile_id,
+                "sourceKind": "CODEX_CONFIG",
+                "shareScope": "GLOBAL",
+                "health": "READY" if promoted or bool(env.get(credential_ref)) else "UNAVAILABLE",
+                "models": [model],
+                "metadata": {"discoveredFromProfile": profile_id, "configFile": config["path"]},
+            })
+            _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CODEX", "providerRef": provider_ref, "modelRef": model, "profileRef": provider_ref, "sourceKind": "PROFILE_DISCOVERY"})
+            _register_discovered_employee(provider_ref, connection, model, runtime_kind="CODEX", provider_ref=provider_ref, profile_ref=provider_ref, protocol="openai-responses" if wire_api == "responses" else wire_api)
+            discovered.append(connection)
+
+        opencode_path = home / ".config" / "opencode" / "opencode.json"
+        if opencode_path.exists():
+            try:
+                opencode = json.loads(opencode_path.read_text(encoding="utf-8"))
+            except Exception:
+                opencode = {}
+            provider_rows = opencode.get("provider") if isinstance(opencode, Mapping) and isinstance(opencode.get("provider"), Mapping) else {}
+            for provider_ref, raw in provider_rows.items():
+                if not isinstance(raw, Mapping):
+                    continue
+                opts = raw.get("options") if isinstance(raw.get("options"), Mapping) else {}
+                base_url = str(opts.get("baseURL") or opts.get("baseUrl") or "").strip().rstrip("/")
+                key_expr = str(opts.get("apiKey") or opts.get("api_key") or "").strip()
+                credential_ref = ""
+                if key_expr.startswith("{env:") and key_expr.endswith("}"):
+                    credential_ref = key_expr[5:-1].strip()
+                models = sorted(str(item) for item in (raw.get("models") or {}).keys()) if isinstance(raw.get("models"), Mapping) else []
+                if not base_url:
+                    continue
+                promoted = _promote_profile_credential(profile_id, credential_ref) if credential_ref else False
+                display = {"opencode-go": "OpenCode Go", "chybenzun": "Chybenzun", "cpa": "My CPA"}.get(str(provider_ref), str(provider_ref))
+                connection = _hub_upsert_connection({
+                    "providerKey": str(provider_ref),
+                    "displayName": display,
+                    "baseUrl": base_url,
+                    "protocol": "openai-chat-completions",
+                    "authKind": "API_KEY",
+                    "credentialRef": credential_ref or None,
+                    "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
+                    "sourceProfileId": None if promoted else profile_id,
+                    "sourceKind": "OPENCODE_CONFIG",
+                    "shareScope": "GLOBAL",
+                    "health": "READY" if promoted or bool(env.get(credential_ref)) else "UNKNOWN",
+                    "models": models,
+                    "metadata": {"discoveredFromProfile": profile_id, "package": raw.get("npm") or raw.get("package")},
+                })
+                for model in models:
+                    _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "OPENCODE", "providerRef": str(provider_ref), "modelRef": model, "sourceKind": "PROFILE_DISCOVERY"})
+                selected_provider = ""
+                selected_model = ""
+                profile_config_path = profile_dir / "config.yaml"
+                if profile_config_path.exists():
+                    try:
+                        profile_config = yaml.safe_load(profile_config_path.read_text(encoding="utf-8")) or {}
+                        model_config = profile_config.get("model") if isinstance(profile_config, Mapping) else None
+                        if isinstance(model_config, Mapping):
+                            selected_provider = str(model_config.get("provider") or "").strip()
+                            selected_model = str(model_config.get("default") or model_config.get("model") or "").strip()
+                    except Exception:
+                        pass
+                if str(provider_ref) == selected_provider and selected_model and selected_model in models and provider_ref in _DISCOVERED_SUPPLIERS:
+                    _register_discovered_employee(str(provider_ref), connection, selected_model, runtime_kind="OPENCODE", provider_ref=str(provider_ref), protocol="openai-chat-completions")
+                discovered.append(connection)
+
+        anthropic_base = str(env.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
+        if anthropic_base:
+            credential_ref = "ANTHROPIC_AUTH_TOKEN"
+            promoted = _promote_profile_credential(profile_id, credential_ref)
+            connection = _hub_upsert_connection({
+                "providerKey": "claude-code-access",
+                "displayName": "Claude Code access",
+                "baseUrl": anthropic_base,
+                "protocol": "anthropic-messages",
+                "authKind": "API_KEY",
+                "credentialRef": credential_ref,
+                "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
+                "sourceProfileId": None if promoted else profile_id,
+                "sourceKind": "CLAUDE_CODE_ENV",
+                "shareScope": "GLOBAL",
+                "health": "READY" if promoted else "UNAVAILABLE",
+                "models": [],
+                "metadata": {"discoveredFromProfile": profile_id},
+            })
+            _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CLAUDE_CODE", "providerRef": "anthropic", "sourceKind": "PROFILE_DISCOVERY"})
+            discovered.append(connection)
+    return discovered
+
+
+def _sync_profile_native_provider_hub(force: bool = False) -> Dict[str, Any]:
+    global _PROVIDER_HUB_LAST_SYNC
+    now = time.monotonic()
+    if not force and now - _PROVIDER_HUB_LAST_SYNC < _PROVIDER_HUB_SYNC_TTL:
+        return _fetch_json("/api/v2/projections/provider-hub")
+    with _PROVIDER_HUB_SYNC_LOCK:
+        now = time.monotonic()
+        if not force and now - _PROVIDER_HUB_LAST_SYNC < _PROVIDER_HUB_SYNC_TTL:
+            return _fetch_json("/api/v2/projections/provider-hub")
+        _discover_profile_native_connections()
+        _PROVIDER_HUB_LAST_SYNC = time.monotonic()
+        return _fetch_json("/api/v2/projections/provider-hub")
 
 def _base_url() -> str:
     raw = os.environ.get("HERMES_AI_OFFICE_CONTROL_PLANE_URL", _DEFAULT_BASE_URL).strip()
@@ -644,10 +1000,15 @@ async def health() -> Dict[str, Any]:
 
 @router.get("/overview")
 async def overview() -> Dict[str, Any]:
+    try:
+        await asyncio.to_thread(_sync_profile_native_provider_hub)
+    except Exception:
+        pass
     requests = [
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
         _partial("personalChannels", "/api/v2/projections/personal-channels"),
+        _partial("providerHub", "/api/v2/projections/provider-hub"),
         _partial("organization", "/api/v2/projections/office"),
         _partial("incidents", "/api/v2/incidents?limit=200"),
         _partial("runtimeDecisions", "/api/v2/runtime-launch-decisions?limit=100"),
@@ -671,6 +1032,14 @@ async def overview() -> Dict[str, Any]:
 async def workforce() -> Dict[str, Any]:
     try:
         return await asyncio.to_thread(_fetch_json, "/api/v2/projections/workforce")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/providers/hub")
+async def provider_hub(force: bool = False) -> Dict[str, Any]:
+    try:
+        return await asyncio.to_thread(_sync_profile_native_provider_hub, force)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -732,6 +1101,27 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
         if body.preset_id == "custom":
             await asyncio.to_thread(_save_custom_provider, descriptor)
 
+        hub_connection = await asyncio.to_thread(
+            _hub_upsert_connection,
+            {
+                "providerKey": str(descriptor.get("id") or descriptor.get("providerId") or body.preset_id),
+                "displayName": str(descriptor.get("name") or descriptor.get("supplierName") or body.preset_id),
+                "baseUrl": descriptor.get("baseUrl"),
+                "protocol": {
+                    "codex_responses": "openai-responses",
+                    "anthropic_messages": "anthropic-messages",
+                }.get(str(descriptor.get("transport") or "openai_chat"), "openai-chat-completions"),
+                "authKind": "API_KEY",
+                "credentialRef": descriptor.get("keyEnv"),
+                "credentialScope": "GLOBAL",
+                "sourceKind": "DASHBOARD_ONBOARDING",
+                "shareScope": "GLOBAL",
+                "health": "READY",
+                "models": discovered,
+                "metadata": {"onboardedBy": "hermes-ai-office"},
+            },
+        )
+
         registrations = []
         supplier_id = ""
         employee_ids: list[str] = []
@@ -781,6 +1171,26 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                     "employmentId": employment_id or None,
                     "runtimeAccess": runtime_accesses,
                 }
+            )
+        if supplier_id:
+            await asyncio.to_thread(
+                _hub_upsert_connection,
+                {
+                    "providerKey": hub_connection.get("provider_key"),
+                    "displayName": hub_connection.get("display_name"),
+                    "supplierId": supplier_id,
+                    "baseUrl": hub_connection.get("base_url"),
+                    "protocol": hub_connection.get("protocol"),
+                    "authKind": hub_connection.get("auth_kind"),
+                    "credentialRef": hub_connection.get("credential_ref"),
+                    "credentialScope": hub_connection.get("credential_scope"),
+                    "sourceProfileId": hub_connection.get("source_profile_id"),
+                    "sourceKind": hub_connection.get("source_kind"),
+                    "shareScope": hub_connection.get("share_scope"),
+                    "health": hub_connection.get("health"),
+                    "models": hub_connection.get("models") or discovered,
+                    "metadata": hub_connection.get("metadata") or {},
+                },
             )
         preference = await asyncio.to_thread(
             _post_json,
