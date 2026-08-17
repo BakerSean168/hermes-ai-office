@@ -53,6 +53,13 @@ export class SupplyRepository {
     this.#domain = domain;
   }
 
+  setStaffingPreferences(
+    supplierId: string,
+    input: { enabledEmployeeIds: string[]; defaultEmployeeId?: string | null },
+  ): V2Row {
+    return this.#domain.setSupplierStaffingPreferences({ supplierId, ...input });
+  }
+
   getOrCreatePlan(input: {
     supplierId: string;
     slug: string;

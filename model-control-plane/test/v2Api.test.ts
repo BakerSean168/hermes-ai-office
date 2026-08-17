@@ -90,6 +90,54 @@ test('V2 API exposes Employee identity, Employment and Appointment separately', 
   }
 });
 
+test('supplier staffing preferences are an idempotent V2 command contract', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa,
+    cpaUsage: usage,
+    initialSync: false,
+  });
+  const seeded = runtime.v2.bootstrapReference(reference);
+  try {
+    const payload = {
+      enabledEmployeeIds: [seeded.employeeId],
+      defaultEmployeeId: seeded.employeeId,
+    };
+    const first = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/staffing-preferences`,
+      headers: { 'Idempotency-Key': 'supplier-pref-api-1' },
+      payload,
+    });
+    assert.equal(first.statusCode, 200);
+    assert.deepEqual(first.json().metadata.staffingPreferences.enabledEmployeeIds, [
+      seeded.employeeId,
+    ]);
+    assert.equal(first.json().metadata.staffingPreferences.defaultEmployeeId, seeded.employeeId);
+
+    const replay = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/staffing-preferences`,
+      headers: { 'Idempotency-Key': 'supplier-pref-api-1' },
+      payload,
+    });
+    assert.equal(replay.statusCode, 200);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+
+    const projection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    const supplier = projection
+      .json()
+      .suppliers.find((item: { id: string }) => item.id === seeded.supplierId);
+    assert.deepEqual(supplier.metadata.staffingPreferences.enabledEmployeeIds, [seeded.employeeId]);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('V2 employee dossier returns deterministic not-found error', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',

@@ -361,6 +361,64 @@ export class V2Repository {
     return row(this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(id))!;
   }
 
+  setSupplierStaffingPreferences(input: {
+    supplierId: string;
+    enabledEmployeeIds: string[];
+    defaultEmployeeId?: string | null;
+  }): Row {
+    const supplier = row(
+      this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(input.supplierId),
+    );
+    if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
+
+    const enabledEmployeeIds = [
+      ...new Set(input.enabledEmployeeIds.map((value) => value.trim()).filter(Boolean)),
+    ];
+    const employeeRows = rows(
+      this.db.prepare('SELECT id FROM v2_employees WHERE supplier_id=?').all(input.supplierId),
+    );
+    const employeeIds = new Set(employeeRows.map((value) => String(value.id)));
+    for (const employeeId of enabledEmployeeIds) {
+      if (!employeeIds.has(employeeId)) throw new Error('SUPPLIER_EMPLOYEE_MISMATCH');
+    }
+    const defaultEmployeeId = input.defaultEmployeeId?.trim() || null;
+    if (defaultEmployeeId && !employeeIds.has(defaultEmployeeId)) {
+      throw new Error('SUPPLIER_EMPLOYEE_MISMATCH');
+    }
+    if (defaultEmployeeId && !enabledEmployeeIds.includes(defaultEmployeeId)) {
+      throw new Error('DEFAULT_EMPLOYEE_MUST_BE_ENABLED');
+    }
+
+    const metadata = decode<JsonRecord>(supplier.metadata_json, {});
+    const timestamp = now();
+    const nextMetadata = {
+      ...metadata,
+      staffingPreferences: {
+        enabledEmployeeIds,
+        defaultEmployeeId,
+        updatedAt: timestamp,
+      },
+    };
+    this.db
+      .prepare('UPDATE v2_suppliers SET metadata_json=?,updated_at=? WHERE id=?')
+      .run(encode(nextMetadata), timestamp, input.supplierId);
+    this.emit({
+      type: 'supplier.staffing_preferences.changed',
+      entityType: 'Supplier',
+      entityId: input.supplierId,
+      payload: { enabledEmployeeIds, defaultEmployeeId },
+    });
+    return {
+      id: supplier.id,
+      slug: supplier.slug,
+      name: supplier.name,
+      lifecycle: supplier.lifecycle,
+      metadata: nextMetadata,
+      createdAt: supplier.created_at,
+      updatedAt: timestamp,
+    };
+  }
+
   getOrCreateSupplierModel(input: {
     supplierId: string;
     supplierModelKey: string;

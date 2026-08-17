@@ -44,6 +44,8 @@ interface RawCandidate {
   selector: RuntimeSelector | null;
   qualified: boolean;
   capacityAvailable: boolean;
+  supplierEnabled: boolean;
+  supplierPreferred: boolean;
   reasons: string[];
 }
 
@@ -124,6 +126,7 @@ export class RuntimePolicyService {
       (candidate) =>
         candidate.qualified &&
         candidate.capacityAvailable &&
+        candidate.supplierEnabled &&
         candidate.selector !== null &&
         candidate.employmentId !== null &&
         candidate.employeeLifecycle === 'ACTIVE' &&
@@ -294,9 +297,10 @@ export class RuntimePolicyService {
                   e.id employee_id,e.display_name employee_name,e.record_lifecycle,
                   em.id employment_id,em.supply_agreement_id,em.status employment_status,
                   agr.lifecycle agreement_lifecycle,em.model_offering_id,
-                  mo.commercial_metadata_json
+                  mo.commercial_metadata_json,s.metadata_json supplier_metadata_json
            FROM v2_appointments a
            JOIN v2_employees e ON e.id=a.employee_id
+           JOIN v2_suppliers s ON s.id=e.supplier_id
            LEFT JOIN v2_employments em
              ON em.employee_id=e.id AND em.status='CURRENT' AND em.effective_to IS NULL
            LEFT JOIN v2_supply_agreements agr ON agr.id=em.supply_agreement_id
@@ -309,6 +313,21 @@ export class RuntimePolicyService {
     );
     const candidates = values.map((value): RawCandidate => {
       const selector = selectorFromMetadata(value.commercial_metadata_json, runtimeKind);
+      const supplierMetadata = decode<JsonRecord>(value.supplier_metadata_json, {});
+      const rawPreferences = supplierMetadata.staffingPreferences;
+      const preferences =
+        rawPreferences && typeof rawPreferences === 'object' && !Array.isArray(rawPreferences)
+          ? (rawPreferences as JsonRecord)
+          : null;
+      const enabledEmployeeIds =
+        preferences && Array.isArray(preferences.enabledEmployeeIds)
+          ? preferences.enabledEmployeeIds.map(String)
+          : null;
+      const employeeId = String(value.employee_id);
+      const supplierEnabled =
+        enabledEmployeeIds === null || enabledEmployeeIds.includes(employeeId);
+      const supplierPreferred =
+        preferences != null && String(preferences.defaultEmployeeId ?? '') === employeeId;
       const qualification = this.#staffing.assessQualification(
         String(value.employee_id),
         positionId,
@@ -320,6 +339,7 @@ export class RuntimePolicyService {
         ...(qualification.reasons ?? []),
         ...capacity.reasons,
         ...(selector ? [] : ['RUNTIME_SELECTOR_MISSING']),
+        ...(supplierEnabled ? [] : ['SUPPLIER_EMPLOYEE_DISABLED']),
         ...(value.record_lifecycle === 'ACTIVE' ? [] : ['EMPLOYEE_NOT_ACTIVE']),
         ...(value.employment_status === 'CURRENT' ? [] : ['EMPLOYMENT_NOT_CURRENT']),
         ...(value.agreement_lifecycle === 'ACTIVE' ? [] : ['AGREEMENT_NOT_ACTIVE']),
@@ -328,7 +348,7 @@ export class RuntimePolicyService {
         appointmentId: String(value.appointment_id),
         appointmentClass: String(value.appointment_class) as RawCandidate['appointmentClass'],
         appointmentPriority: Number(value.appointment_priority ?? 0),
-        employeeId: String(value.employee_id),
+        employeeId,
         employeeName: String(value.employee_name),
         employeeLifecycle: String(value.record_lifecycle),
         employmentId: value.employment_id ? String(value.employment_id) : null,
@@ -339,6 +359,8 @@ export class RuntimePolicyService {
         selector,
         qualified: qualification.qualified,
         capacityAvailable: capacity.available,
+        supplierEnabled,
+        supplierPreferred,
         reasons,
       };
     });
@@ -346,6 +368,7 @@ export class RuntimePolicyService {
       (left, right) =>
         appointmentRank(left.appointmentClass) - appointmentRank(right.appointmentClass) ||
         right.appointmentPriority - left.appointmentPriority ||
+        Number(right.supplierPreferred) - Number(left.supplierPreferred) ||
         left.employeeId.localeCompare(right.employeeId),
     );
   }

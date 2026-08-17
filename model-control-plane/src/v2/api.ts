@@ -1239,6 +1239,39 @@ export function registerV2Routes(
     }),
   );
 
+  app.post<{ Params: { supplierId: string } }>(
+    '/api/v2/commands/suppliers/:supplierId/staffing-preferences',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supplier.staffing-preferences.set',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!Array.isArray(body.enabledEmployeeIds)) {
+            reply.code(400);
+            return { error: { code: 'ENABLED_EMPLOYEE_IDS_REQUIRED' } };
+          }
+          try {
+            return services.supply.setStaffingPreferences(request.params.supplierId, {
+              enabledEmployeeIds: body.enabledEmployeeIds.map(String),
+              defaultEmployeeId:
+                body.defaultEmployeeId == null ? null : String(body.defaultEmployeeId),
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'SUPPLIER_STAFFING_PREFERENCES_FAILED';
+            reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
   app.post('/api/v2/commands/supply-catalog/register', async (request, reply) =>
     runCommand({
       request,
