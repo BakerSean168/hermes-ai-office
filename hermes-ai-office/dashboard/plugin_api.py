@@ -127,7 +127,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
     },
     "custom": {
         "id": "custom",
-        "name": "自定义 OpenAI 兼容服务",
+        "name": "Custom OpenAI-compatible endpoint",
         "supplierSlug": "",
         "supplierName": "",
         "baseUrl": "",

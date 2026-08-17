@@ -68,7 +68,7 @@
       "shell.refresh": "Refresh",
       "shell.refreshing": "Refreshing…",
       "shell.lastSync": "Updated {time}",
-      "shell.localOnly": "Local control plane · provider credentials never enter this page",
+      "shell.localOnly": "Local control plane · API keys stay in Hermes credential storage and never enter workforce projections",
       "shell.loadError": "AI Office could not refresh",
       "shell.loading": "Loading company state…",
       "tabs.overview": "Overview",
@@ -179,16 +179,51 @@
       "workforce.basis.SUPPLIER_HINT": "supplier hint",
       "workforce.basis.UNIQUE_MODEL": "unique model",
       "suppliers.title": "Suppliers",
-      "suppliers.subtitle": "Commercial supply, employee identities, agreements, channels, and observed usage",
+      "suppliers.subtitle": "Keep the supplier list simple. Open details only when you need contracts, routes, or employee history.",
+      "suppliers.add": "Add supplier",
+      "suppliers.details": "View details",
+      "suppliers.close": "Close",
       "suppliers.employees": "Employees",
+      "suppliers.enabledEmployees": "Enabled employees",
+      "suppliers.defaultEmployee": "Default employee",
+      "suppliers.defaultEmployeeNone": "No preferred employee",
       "suppliers.agreements": "Agreements",
       "suppliers.channels": "Channels",
       "suppliers.observed": "Observed requests",
       "suppliers.noPlan": "No explicit plan metadata",
       "suppliers.noEmployees": "No employee identities",
-      "suppliers.unclassified": "Unclassified infrastructure",
+      "suppliers.legacySelection": "All existing employees are eligible until an explicit selection is saved.",
+      "suppliers.enabled": "Enabled",
+      "suppliers.disabled": "Not selected",
+      "suppliers.preferred": "Default",
+      "suppliers.detailTitle": "Supplier details",
+      "suppliers.detailSubtitle": "Business identity, selected employees, agreements, and technical evidence",
+      "suppliers.addTitle": "Add supplier",
+      "suppliers.addSubtitle": "Choose a common provider or use any OpenAI-compatible endpoint.",
+      "suppliers.chooseProvider": "1. Choose provider",
+      "suppliers.credentials": "2. Connection",
+      "suppliers.apiKey": "API Key",
+      "suppliers.apiKeyExisting": "Already configured in Hermes. Leave blank to reuse it.",
+      "suppliers.apiKeyRequired": "Paste the provider API key.",
+      "suppliers.baseUrl": "API request URL",
+      "suppliers.supplierName": "Supplier name (optional)",
+      "suppliers.supplierNameHint": "Leave blank and Hermes will generate a name from the URL.",
+      "suppliers.discover": "Fetch models",
+      "suppliers.discovering": "Fetching models…",
+      "suppliers.selectModels": "3. Choose employees",
+      "suppliers.selectModelsHint": "Only checked models become enabled employees. Pick one as the default employee.",
+      "suppliers.modelSearch": "Search discovered models",
+      "suppliers.selectedCount": "{count} selected",
+      "suppliers.saveSupplier": "Save supplier",
+      "suppliers.savingSupplier": "Saving supplier…",
+      "suppliers.saved": "Supplier saved. Workforce policy has been updated.",
+      "suppliers.security": "The API key is stored by Hermes credential management. AI Office stores only supplier, employment, and employee business records.",
+      "suppliers.custom": "Custom endpoint",
+      "suppliers.customHint": "OpenAI-compatible URL + API key",
+      "suppliers.configured": "Configured",
+      "suppliers.unclassified": "Unclassified technical routes",
       "suppliers.unclassifiedSubtitle":
-        "These routes remain technical evidence and cannot create supplier or employee identity",
+        "Technical evidence is kept separate and never fabricates supplier or employee identity.",
       "suppliers.gateway": "Gateway",
       "suppliers.channel": "Channel",
       "suppliers.health": "Health",
@@ -274,7 +309,7 @@
       "shell.refresh": "刷新",
       "shell.refreshing": "刷新中…",
       "shell.lastSync": "更新于 {time}",
-      "shell.localOnly": "本地控制面 · 供应商凭证不会进入此页面",
+      "shell.localOnly": "本地控制面 · API Key 仅进入 Hermes 本地凭证管理，不进入员工与经营投影",
       "shell.loadError": "AI 办公室刷新失败",
       "shell.loading": "正在加载公司状态…",
       "tabs.overview": "总览",
@@ -384,15 +419,50 @@
       "workforce.basis.SUPPLIER_HINT": "供应商提示",
       "workforce.basis.UNIQUE_MODEL": "唯一模型",
       "suppliers.title": "供应商",
-      "suppliers.subtitle": "商业供应、员工身份、协议、通道与观测用量",
+      "suppliers.subtitle": "供应商列表只保留关键状态；合同、路由和员工履历需要时再查看详情。",
+      "suppliers.add": "添加供应商",
+      "suppliers.details": "查看详情",
+      "suppliers.close": "关闭",
       "suppliers.employees": "员工",
-      "suppliers.agreements": "协议",
+      "suppliers.enabledEmployees": "启用员工",
+      "suppliers.defaultEmployee": "默认员工",
+      "suppliers.defaultEmployeeNone": "暂无默认员工",
+      "suppliers.agreements": "供应协议",
       "suppliers.channels": "通道",
       "suppliers.observed": "观测请求",
       "suppliers.noPlan": "暂无明确套餐元数据",
       "suppliers.noEmployees": "暂无员工身份",
-      "suppliers.unclassified": "未分类基础设施",
-      "suppliers.unclassifiedSubtitle": "这些路由仍是技术证据，不能创建供应商或员工身份",
+      "suppliers.legacySelection": "尚未保存显式员工选择；当前已有员工仍按原策略参与候选。",
+      "suppliers.enabled": "已启用",
+      "suppliers.disabled": "未选用",
+      "suppliers.preferred": "默认",
+      "suppliers.detailTitle": "供应商详情",
+      "suppliers.detailSubtitle": "供应商身份、员工选择、供应协议与技术证据",
+      "suppliers.addTitle": "添加供应商",
+      "suppliers.addSubtitle": "选择常用供应商，或者直接填写任意 OpenAI 兼容请求地址。",
+      "suppliers.chooseProvider": "1. 选择供应商",
+      "suppliers.credentials": "2. 连接信息",
+      "suppliers.apiKey": "API Key",
+      "suppliers.apiKeyExisting": "Hermes 已经配置过凭证；留空即可复用。",
+      "suppliers.apiKeyRequired": "粘贴该供应商的 API Key。",
+      "suppliers.baseUrl": "API 请求地址",
+      "suppliers.supplierName": "供应商名称（选填）",
+      "suppliers.supplierNameHint": "不填写时，Hermes 会根据请求地址自动生成。",
+      "suppliers.discover": "获取模型",
+      "suppliers.discovering": "正在获取模型…",
+      "suppliers.selectModels": "3. 挑选员工",
+      "suppliers.selectModelsHint": "只有勾选的模型会成为启用员工；再指定其中一名作为默认员工。",
+      "suppliers.modelSearch": "搜索已发现模型",
+      "suppliers.selectedCount": "已选择 {count} 个",
+      "suppliers.saveSupplier": "保存供应商",
+      "suppliers.savingSupplier": "正在保存…",
+      "suppliers.saved": "供应商已保存，员工策略已同步。",
+      "suppliers.security": "API Key 只由 Hermes 本地凭证管理保存；AI Office 只记录供应商、Employment 与员工等业务数据。",
+      "suppliers.custom": "自定义接口",
+      "suppliers.customHint": "OpenAI 兼容地址 + API Key",
+      "suppliers.configured": "已配置",
+      "suppliers.unclassified": "未分类技术路由",
+      "suppliers.unclassifiedSubtitle": "技术证据与业务身份严格分离，不会自动捏造供应商或员工。",
       "suppliers.gateway": "网关",
       "suppliers.channel": "通道",
       "suppliers.health": "健康状态",
@@ -653,6 +723,59 @@
         onClick: props.onClick,
       },
       props.children,
+    );
+  }
+
+  function Modal(props) {
+    React.useEffect(
+      function () {
+        if (!props.open) return undefined;
+        function onKeyDown(event) {
+          if (event.key === "Escape") props.onClose();
+        }
+        document.addEventListener("keydown", onKeyDown);
+        return function () {
+          document.removeEventListener("keydown", onKeyDown);
+        };
+      },
+      [props.open, props.onClose],
+    );
+    if (!props.open) return null;
+    return h(
+      "div",
+      {
+        className: "hao-modal-backdrop",
+        role: "presentation",
+        onMouseDown: function (event) {
+          if (event.target === event.currentTarget) props.onClose();
+        },
+      },
+      h(
+        "section",
+        {
+          className: "hao-modal " + (props.wide ? "hao-modal-wide" : ""),
+          role: "dialog",
+          "aria-modal": "true",
+          "aria-labelledby": props.labelledBy,
+        },
+        h(
+          "header",
+          { className: "hao-modal-head" },
+          h(
+            "div",
+            null,
+            h("h2", { id: props.labelledBy }, props.title),
+            props.subtitle ? h("p", null, props.subtitle) : null,
+          ),
+          h(
+            "button",
+            { className: "hao-modal-close", type: "button", onClick: props.onClose, "aria-label": props.closeLabel },
+            "×",
+          ),
+        ),
+        h("div", { className: "hao-modal-body" }, props.children),
+        props.footer ? h("footer", { className: "hao-modal-footer" }, props.footer) : null,
+      ),
     );
   }
 
@@ -1474,7 +1597,23 @@
     const supply = asObject(props.data.supply);
     const workforce = asObject(props.data.workforce);
     const error = sourceError(supply);
+    const [detailSupplier, setDetailSupplier] = React.useState(null);
+    const [addOpen, setAddOpen] = React.useState(false);
+    const [presets, setPresets] = React.useState([]);
+    const [presetId, setPresetId] = React.useState("opencode-go");
+    const [apiKey, setApiKey] = React.useState("");
+    const [baseUrl, setBaseUrl] = React.useState("");
+    const [supplierName, setSupplierName] = React.useState("");
+    const [models, setModels] = React.useState([]);
+    const [selectedModels, setSelectedModels] = React.useState([]);
+    const [defaultModel, setDefaultModel] = React.useState("");
+    const [modelQuery, setModelQuery] = React.useState("");
+    const [discovering, setDiscovering] = React.useState(false);
+    const [saving, setSaving] = React.useState(false);
+    const [formMessage, setFormMessage] = React.useState("");
+
     if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
+
     const workforceById = new Map(
       asArray(workforce.employees).map(function (employee) {
         return [employee.id, employee];
@@ -1483,34 +1622,169 @@
     const suppliers = asArray(supply.suppliers);
     const infrastructure = asObject(supply.unmappedInfrastructure);
     const infrastructureRows = asArray(infrastructure.groups);
+    const currentPreset =
+      presets.find(function (preset) {
+        return preset.id === presetId;
+      }) || null;
+    const visibleModels = models.filter(function (model) {
+      const needle = modelQuery.trim().toLowerCase();
+      return !needle || String(model.name || model.id).toLowerCase().includes(needle);
+    });
+
+    function resetOnboarding() {
+      setPresetId("opencode-go");
+      setApiKey("");
+      setBaseUrl("");
+      setSupplierName("");
+      setModels([]);
+      setSelectedModels([]);
+      setDefaultModel("");
+      setModelQuery("");
+      setFormMessage("");
+      setDiscovering(false);
+      setSaving(false);
+    }
+
+    async function openOnboarding() {
+      resetOnboarding();
+      setAddOpen(true);
+      try {
+        const result = await api("/providers/presets");
+        const items = asArray(result.items);
+        setPresets(items);
+        const preferred =
+          items.find(function (item) {
+            return item.id === "opencode-go";
+          }) || items[0];
+        if (preferred) setPresetId(preferred.id);
+      } catch (cause) {
+        setFormMessage(String(cause));
+      }
+    }
+
+    function choosePreset(id) {
+      setPresetId(id);
+      setModels([]);
+      setSelectedModels([]);
+      setDefaultModel("");
+      setModelQuery("");
+      setFormMessage("");
+      if (id !== "custom") {
+        setBaseUrl("");
+        setSupplierName("");
+      }
+    }
+
+    async function discoverModels() {
+      setDiscovering(true);
+      setFormMessage("");
+      try {
+        const result = await api("/providers/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            preset_id: presetId,
+            api_key: apiKey,
+            base_url: baseUrl,
+            supplier_name: supplierName,
+          }),
+        });
+        setModels(asArray(result.models));
+        setSelectedModels([]);
+        setDefaultModel("");
+      } catch (cause) {
+        setModels([]);
+        setFormMessage(String(cause));
+      } finally {
+        setDiscovering(false);
+      }
+    }
+
+    function toggleModel(modelId) {
+      setSelectedModels(function (current) {
+        if (current.includes(modelId)) {
+          const next = current.filter(function (value) {
+            return value !== modelId;
+          });
+          if (defaultModel === modelId) setDefaultModel(next[0] || "");
+          return next;
+        }
+        const next = current.concat([modelId]);
+        if (!defaultModel) setDefaultModel(modelId);
+        return next;
+      });
+    }
+
+    async function saveSupplier() {
+      if (!selectedModels.length) return;
+      setSaving(true);
+      setFormMessage("");
+      try {
+        await api("/providers/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            preset_id: presetId,
+            api_key: apiKey,
+            base_url: baseUrl,
+            supplier_name: supplierName,
+            selected_models: selectedModels,
+            default_model: defaultModel || selectedModels[0],
+          }),
+        });
+        setFormMessage(props.t("suppliers.saved"));
+        await props.onRefresh();
+        setAddOpen(false);
+        resetOnboarding();
+      } catch (cause) {
+        setFormMessage(String(cause));
+      } finally {
+        setSaving(false);
+      }
+    }
+
+    function supplierFacts(supplier) {
+      const employees = asArray(supplier.employees);
+      const agreements = asArray(supplier.agreements);
+      const channels = agreements.flatMap(function (agreement) {
+        return asArray(agreement.channels);
+      });
+      const metadata = asObject(supplier.metadata);
+      const preferences = asObject(metadata.staffingPreferences);
+      const explicitlySelected = Array.isArray(preferences.enabledEmployeeIds);
+      const enabledIds = explicitlySelected ? asArray(preferences.enabledEmployeeIds).map(String) : employees.map(function (employee) { return String(employee.id); });
+      const defaultEmployeeId = String(preferences.defaultEmployeeId || "");
+      const defaultEmployee = employees.find(function (employee) {
+        return String(employee.id) === defaultEmployeeId;
+      });
+      const observedRequests = employees.reduce(function (sum, employee) {
+        const workforceEmployee = workforceById.get(employee.id);
+        return sum + Number(asObject(asObject(workforceEmployee && workforceEmployee.career).observedUsage).requests || 0);
+      }, 0);
+      const healthyChannels = channels.filter(function (channel) {
+        return channel.health === "HEALTHY";
+      }).length;
+      return {
+        employees: employees,
+        agreements: agreements,
+        channels: channels,
+        enabledIds: enabledIds,
+        explicitlySelected: explicitlySelected,
+        defaultEmployee: defaultEmployee,
+        defaultEmployeeId: defaultEmployeeId,
+        observedRequests: observedRequests,
+        healthyChannels: healthyChannels,
+      };
+    }
+
     const infrastructureColumns = [
       { key: "gatewayName", label: props.t("suppliers.gateway"), render: function (row) { return row.gatewayName || row.gatewaySlug || "—"; } },
       { key: "channelName", label: props.t("suppliers.channel") },
-      {
-        key: "health",
-        label: props.t("suppliers.health"),
-        render: function (row) {
-          return h(
-            "div",
-            { className: "hao-inline-badges" },
-            asArray(row.health).map(function (value) {
-              return h(Status, { key: value, value: value, t: props.t });
-            }),
-          );
-        },
-      },
-      {
-        key: "modelHints",
-        label: props.t("suppliers.models"),
-        render: function (row) {
-          return asArray(row.modelHints).length
-            ? h("div", { className: "hao-code-list" }, asArray(row.modelHints).map(function (model) {
-                return h("code", { key: model, className: "hao-code" }, model);
-              }))
-            : "—";
-        },
-      },
+      { key: "health", label: props.t("suppliers.health"), render: function (row) { return h("div", { className: "hao-inline-badges" }, asArray(row.health).map(function (value) { return h(Status, { key: value, value: value, t: props.t }); })); } },
+      { key: "modelHints", label: props.t("suppliers.models"), render: function (row) { return asArray(row.modelHints).length ? h("div", { className: "hao-code-list" }, asArray(row.modelHints).map(function (model) { return h("code", { key: model, className: "hao-code" }, model); })) : "—"; } },
     ];
+
+    const detailFacts = detailSupplier ? supplierFacts(detailSupplier) : null;
 
     return h(
       "div",
@@ -1519,103 +1793,236 @@
         "div",
         { className: "hao-section-head" },
         h("div", null, h("h1", null, props.t("suppliers.title")), h("p", null, props.t("suppliers.subtitle"))),
-        h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(suppliers.length) })),
+        h(
+          "div",
+          { className: "hao-section-actions" },
+          h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(suppliers.length) })),
+          h(Button, { onClick: openOnboarding }, "+ " + props.t("suppliers.add")),
+        ),
       ),
-      h(
-        "div",
-        { className: "hao-supplier-grid" },
-        suppliers.map(function (supplier) {
-          const employees = asArray(supplier.employees);
-          const agreements = asArray(supplier.agreements);
-          const channels = agreements.flatMap(function (agreement) {
-            return asArray(agreement.channels);
-          });
-          const observedRequests = employees.reduce(function (sum, employee) {
-            const workforceEmployee = workforceById.get(employee.id);
-            return (
-              sum + Number(asObject(asObject(workforceEmployee && workforceEmployee.career).observedUsage).requests || 0)
-            );
-          }, 0);
-          const healthyChannels = channels.filter(function (channel) {
-            return channel.health === "HEALTHY";
-          }).length;
-          return h(
-            "article",
-            { className: "hao-supplier-card", key: supplier.id },
-            h(
-              "header",
-              { className: "hao-supplier-head" },
-              h(
-                "div",
-                { className: "hao-supplier-brand" },
-                h("span", { className: "hao-supplier-mark", "aria-hidden": "true" }, String(supplier.name || "S")[0]),
-                h("div", null, h("h2", null, supplier.name), h("p", null, supplier.slug)),
-              ),
-              h(Status, { value: supplier.lifecycle, t: props.t }),
-            ),
-            h(
-              "div",
-              { className: "hao-supplier-stats" },
-              h("div", null, h("span", null, props.t("suppliers.employees")), h("strong", null, props.number(employees.length))),
-              h("div", null, h("span", null, props.t("suppliers.agreements")), h("strong", null, props.number(agreements.length))),
-              h("div", null, h("span", null, props.t("suppliers.channels")), h("strong", null, props.number(healthyChannels) + "/" + props.number(channels.length))),
-              h("div", null, h("span", null, props.t("suppliers.observed")), h("strong", null, props.number(observedRequests))),
-            ),
-            h(
-              "div",
-              { className: "hao-supplier-section" },
-              h("h3", null, props.t("suppliers.employees")),
-              employees.length
-                ? h(
+      suppliers.length
+        ? h(
+            "div",
+            { className: "hao-supplier-list" },
+            suppliers.map(function (supplier) {
+              const facts = supplierFacts(supplier);
+              return h(
+                "article",
+                { className: "hao-supplier-row", key: supplier.id },
+                h(
+                  "div",
+                  { className: "hao-supplier-row-main" },
+                  h("span", { className: "hao-supplier-mark", "aria-hidden": "true" }, String(supplier.name || "S")[0]),
+                  h(
                     "div",
-                    { className: "hao-employee-cloud" },
-                    employees.map(function (employee) {
-                      const workforceEmployee = workforceById.get(employee.id);
-                      const hasObservation = signalTotal(
-                        asObject(asObject(workforceEmployee && workforceEmployee.career).observedUsage),
-                      );
-                      return h(
-                        "span",
-                        { className: "hao-employee-chip", key: employee.id },
-                        h("span", { className: hasObservation ? "hao-live-dot" : "hao-idle-dot" }),
-                        employee.displayName,
-                      );
-                    }),
-                  )
-                : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
-            ),
-            h(
-              "div",
-              { className: "hao-supplier-section" },
-              h("h3", null, props.t("suppliers.agreements")),
-              h(
-                "div",
-                { className: "hao-agreement-list" },
-                agreements.map(function (agreement) {
-                  return h(
-                    "div",
-                    { className: "hao-agreement-row", key: agreement.id },
-                    h("div", null, h("strong", null, agreement.name), h("small", null, agreement.planName || props.t("suppliers.noPlan"))),
-                    h(Status, { value: agreement.lifecycle, t: props.t }),
-                  );
-                }),
-              ),
-            ),
-          );
-        }),
-      ),
+                    { className: "hao-supplier-row-copy" },
+                    h("h2", null, supplier.name),
+                    h("p", null, supplier.slug),
+                  ),
+                ),
+                h(
+                  "div",
+                  { className: "hao-supplier-compact-stat" },
+                  h("span", null, props.t("suppliers.enabledEmployees")),
+                  h("strong", null, props.number(facts.enabledIds.length) + " / " + props.number(facts.employees.length)),
+                ),
+                h(
+                  "div",
+                  { className: "hao-supplier-default" },
+                  h("span", null, props.t("suppliers.defaultEmployee")),
+                  h("strong", null, facts.defaultEmployee ? facts.defaultEmployee.displayName : props.t("suppliers.defaultEmployeeNone")),
+                ),
+                h(
+                  "div",
+                  { className: "hao-supplier-row-status" },
+                  h(Status, { value: supplier.lifecycle, t: props.t }),
+                  facts.channels.length
+                    ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
+                    : null,
+                ),
+                h(Button, { kind: "quiet", onClick: function () { setDetailSupplier(supplier); } }, props.t("suppliers.details")),
+              );
+            }),
+          )
+        : h(Empty, null, props.t("common.noData")),
+      infrastructureRows.length
+        ? h(
+            "details",
+            { className: "hao-infrastructure-details" },
+            h("summary", null, props.t("suppliers.unclassified") + " · " + props.number(infrastructure.count || infrastructureRows.length)),
+            h("p", null, props.t("suppliers.unclassifiedSubtitle")),
+            h(DataTable, { columns: infrastructureColumns, rows: infrastructureRows, empty: props.t("common.noData") }),
+          )
+        : null,
       h(
-        Panel,
+        Modal,
         {
-          title: props.t("suppliers.unclassified"),
-          subtitle: props.t("suppliers.unclassifiedSubtitle"),
-          action: h("span", { className: "hao-count" }, props.number(infrastructure.count)),
+          open: Boolean(detailSupplier),
+          onClose: function () { setDetailSupplier(null); },
+          labelledBy: "hao-supplier-detail-title",
+          title: detailSupplier ? detailSupplier.name : props.t("suppliers.detailTitle"),
+          subtitle: props.t("suppliers.detailSubtitle"),
+          closeLabel: props.t("suppliers.close"),
+          wide: true,
+          footer: h(Button, { kind: "quiet", onClick: function () { setDetailSupplier(null); } }, props.t("suppliers.close")),
         },
-        h(DataTable, {
-          columns: infrastructureColumns,
-          rows: infrastructureRows,
-          empty: props.t("common.noData"),
-        }),
+        detailSupplier && detailFacts
+          ? h(
+              "div",
+              { className: "hao-supplier-detail" },
+              !detailFacts.explicitlySelected
+                ? h(Notice, { icon: "i" }, props.t("suppliers.legacySelection"))
+                : null,
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.employees")),
+                detailFacts.employees.length
+                  ? h(
+                      "div",
+                      { className: "hao-detail-employee-list" },
+                      detailFacts.employees.map(function (employee) {
+                        const id = String(employee.id);
+                        const enabled = detailFacts.enabledIds.includes(id);
+                        const preferred = detailFacts.defaultEmployeeId === id;
+                        return h(
+                          "div",
+                          { className: "hao-detail-employee", key: id },
+                          h(Avatar, { name: employee.displayName }),
+                          h("div", { className: "hao-detail-employee-copy" }, h("strong", null, employee.displayName), h("small", null, asObject(employee.supplierModel).key || "")),
+                          preferred
+                            ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.preferred"))
+                            : h("span", { className: "hao-badge" }, props.t(enabled ? "suppliers.enabled" : "suppliers.disabled")),
+                        );
+                      }),
+                    )
+                  : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
+              ),
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.agreements")),
+                detailFacts.agreements.length
+                  ? h(
+                      "div",
+                      { className: "hao-agreement-list" },
+                      detailFacts.agreements.map(function (agreement) {
+                        return h("div", { className: "hao-agreement-row", key: agreement.id }, h("div", null, h("strong", null, agreement.name), h("small", null, agreement.planName || props.t("suppliers.noPlan"))), h(Status, { value: agreement.lifecycle, t: props.t }));
+                      }),
+                    )
+                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
+              ),
+              h(
+                "div",
+                { className: "hao-detail-metrics" },
+                h("div", null, h("span", null, props.t("suppliers.channels")), h("strong", null, props.number(detailFacts.healthyChannels) + "/" + props.number(detailFacts.channels.length))),
+                h("div", null, h("span", null, props.t("suppliers.observed")), h("strong", null, props.number(detailFacts.observedRequests))),
+              ),
+            )
+          : null,
+      ),
+      h(
+        Modal,
+        {
+          open: addOpen,
+          onClose: function () { setAddOpen(false); },
+          labelledBy: "hao-supplier-add-title",
+          title: props.t("suppliers.addTitle"),
+          subtitle: props.t("suppliers.addSubtitle"),
+          closeLabel: props.t("suppliers.close"),
+          wide: true,
+          footer: models.length
+            ? h(
+                "div",
+                { className: "hao-onboarding-footer" },
+                h("span", null, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) })),
+                h(Button, { disabled: saving || !selectedModels.length, onClick: saveSupplier }, saving ? props.t("suppliers.savingSupplier") : props.t("suppliers.saveSupplier")),
+              )
+            : null,
+        },
+        h(
+          "div",
+          { className: "hao-onboarding" },
+          h(
+            "section",
+            { className: "hao-onboarding-step" },
+            h("h3", null, props.t("suppliers.chooseProvider")),
+            h(
+              "div",
+              { className: "hao-preset-grid" },
+              presets.map(function (preset) {
+                return h(
+                  "button",
+                  {
+                    className: "hao-preset-card",
+                    key: preset.id,
+                    type: "button",
+                    "aria-pressed": presetId === preset.id,
+                    onClick: function () { choosePreset(preset.id); },
+                  },
+                  h("span", { className: "hao-preset-mark", "aria-hidden": "true" }, preset.id === "custom" ? "+" : String(preset.name || "P")[0]),
+                  h("span", { className: "hao-preset-copy" }, h("strong", null, preset.id === "custom" ? props.t("suppliers.custom") : preset.name), h("small", null, preset.id === "custom" ? props.t("suppliers.customHint") : preset.supplierName || preset.name)),
+                  preset.configured ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.configured")) : null,
+                );
+              }),
+            ),
+          ),
+          h(
+            "section",
+            { className: "hao-onboarding-step" },
+            h("h3", null, props.t("suppliers.credentials")),
+            h(
+              "div",
+              { className: "hao-onboarding-form" },
+              presetId === "custom"
+                ? h(
+                    React.Fragment,
+                    null,
+                    h("label", { className: "hao-field hao-field-wide" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { type: "url", value: baseUrl, placeholder: "https://api.example.com/v1", onChange: function (event) { setBaseUrl(event.target.value); } })),
+                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { type: "text", value: supplierName, placeholder: props.t("suppliers.supplierNameHint"), onChange: function (event) { setSupplierName(event.target.value); } })),
+                  )
+                : null,
+              h(
+                "label",
+                { className: "hao-field " + (presetId === "custom" ? "" : "hao-field-wide") },
+                h("span", null, props.t("suppliers.apiKey")),
+                h("input", { type: "password", value: apiKey, autoComplete: "off", placeholder: currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired"), onChange: function (event) { setApiKey(event.target.value); } }),
+                h("small", null, currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired")),
+              ),
+              h("div", { className: "hao-discover-action" }, h(Button, { disabled: discovering || (presetId === "custom" && !baseUrl.trim()), onClick: discoverModels }, discovering ? props.t("suppliers.discovering") : props.t("suppliers.discover"))),
+            ),
+            h("p", { className: "hao-security-note" }, props.t("suppliers.security")),
+          ),
+          models.length
+            ? h(
+                "section",
+                { className: "hao-onboarding-step" },
+                h("div", { className: "hao-onboarding-step-head" }, h("div", null, h("h3", null, props.t("suppliers.selectModels")), h("p", null, props.t("suppliers.selectModelsHint"))), h("span", { className: "hao-count" }, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) }))),
+                h("input", { className: "hao-model-search", type: "search", value: modelQuery, placeholder: props.t("suppliers.modelSearch"), onChange: function (event) { setModelQuery(event.target.value); } }),
+                h(
+                  "div",
+                  { className: "hao-model-picker" },
+                  visibleModels.map(function (model) {
+                    const modelId = String(model.id);
+                    const checked = selectedModels.includes(modelId);
+                    return h(
+                      "label",
+                      { className: "hao-model-option", key: modelId },
+                      h("input", { type: "checkbox", checked: checked, onChange: function () { toggleModel(modelId); } }),
+                      h("span", { className: "hao-model-name" }, model.name || modelId),
+                      h(
+                        "span",
+                        { className: "hao-default-choice" },
+                        h("input", { type: "radio", name: "hao-default-employee", disabled: !checked, checked: defaultModel === modelId, onChange: function () { if (checked) setDefaultModel(modelId); } }),
+                        h("span", null, props.t("suppliers.preferred")),
+                      ),
+                    );
+                  }),
+                ),
+              )
+            : null,
+          formMessage ? h("div", { className: "hao-save-message", role: "status" }, formMessage) : null,
+        ),
       ),
     );
   }
@@ -1833,7 +2240,7 @@
     if (data) {
       if (tab === "organization") content = h(Organization, shared);
       else if (tab === "workforce") content = h(Workforce, shared);
-      else if (tab === "suppliers") content = h(Suppliers, shared);
+      else if (tab === "suppliers") content = h(Suppliers, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "operations") content = h(Operations, shared);
       else if (tab === "policy") content = h(RuntimePolicy, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "incidents") content = h(Incidents, shared);

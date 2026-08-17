@@ -295,6 +295,23 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('aria-selected', source)
         self.assertIn('className: "hao-data-table"', source)
 
+    def test_supplier_ui_is_compact_and_exposes_onboarding_flow(self) -> None:
+        source = (DASHBOARD / "dist" / "index.js").read_text()
+        css = (DASHBOARD / "dist" / "style.css").read_text()
+        self.assertIn('"suppliers.add": "添加供应商"', source)
+        self.assertIn('"suppliers.details": "查看详情"', source)
+        self.assertIn('api("/providers/presets")', source)
+        self.assertIn('api("/providers/discover"', source)
+        self.assertIn('api("/providers/register"', source)
+        self.assertIn('selected_models: selectedModels', source)
+        self.assertIn('default_model: defaultModel || selectedModels[0]', source)
+        self.assertIn('className: "hao-supplier-list"', source)
+        self.assertIn('className: "hao-modal ', source)
+        self.assertIn('className: "hao-preset-grid"', source)
+        self.assertIn('.hao-supplier-row {', css)
+        self.assertIn('.hao-modal-backdrop {', css)
+        self.assertIn('.hao-model-picker {', css)
+
     def test_active_tab_keeps_an_explicit_readable_label(self) -> None:
         css = (DASHBOARD / "dist" / "style.css").read_text()
         self.assertIn('.hao-tab[aria-selected="true"]', css)
