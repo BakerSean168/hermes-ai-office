@@ -2,27 +2,26 @@
 
 ## 1. Decision summary
 
-V2 should be implemented as a **modular monolith plus a replaceable external model gateway**.
+V2 is implemented as a **modular monolith plus runtime-specific access adapters**. A model gateway is optional infrastructure, not a mandatory hop.
 
 The first implementation deliberately avoids new distributed infrastructure.
 
 ```text
 Hermes / Codex / OpenCode
         |
-        | runtime observations + route selection
+        | runtime observations + staffing
         v
 AI Workforce Domain Service
 Node.js + TypeScript + Fastify
         |
         | SQLite facts/events
-        +-------------------+
-        |                   |
-        v                   v
-Gateway Ports          Projection API/SSE
+        +---------------------------+
+        |                           |
+        v                           v
+RuntimeAccessProfile          Projection API/SSE
         |
-        v
-LiteLLM Proxy (reference)
-CPA adapter (compatibility)
+        +-> native Agent config
+        +-> optional CPA/LiteLLM adapter
         |
         v
 Providers
@@ -42,8 +41,8 @@ Concrete choices:
 | Migrations             | explicit ordered SQL migrations with checksums                                                     |
 | Transactions           | explicit application-service transaction boundaries                                                |
 | Events                 | append-only SQLite event table + SSE replay; no Kafka/NATS/Redis                                   |
-| Gateway                | LiteLLM Proxy as reference adapter; CPA remains compatibility adapter                              |
-| Gateway deployment     | isolated Docker container, loopback only, pinned tested image/digest                               |
+| Runtime access         | native Agent configuration by default; CPA/LiteLLM are optional access/evidence adapters           |
+| Optional gateway       | isolated/loopback deployment when an Employment requires it; not required for native access        |
 | LiteLLM backing DB     | none for the first vertical slice                                                                  |
 | LiteLLM Redis          | none for the first vertical slice                                                                  |
 | Secrets                | gateway/environment/secret-manager owned; never stored in V2 business tables                       |

@@ -12,6 +12,7 @@ This directory records both the current engineering contracts and the historical
 | [`IMPLEMENTATION-STATUS.md`](IMPLEMENTATION-STATUS.md) | deployed capabilities and release evidence          | **current production truth**                       |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md)                   | service boundaries, ownership and control/data flow | current, with historical migration notes           |
 | [`GATEWAY-STRATEGY.md`](GATEWAY-STRATEGY.md)           | gateway-neutral ports and CPA/LiteLLM boundaries    | current                                            |
+| [`RUNTIME-ACCESS.md`](RUNTIME-ACCESS.md)               | Employment-to-Agent native/gateway access contract  | current                                            |
 | [`TECH-STACK.md`](TECH-STACK.md)                       | language, database, API, deployment and test stack  | current decisions + completed migration notes      |
 | [`PERSISTENCE.md`](PERSISTENCE.md)                     | V2 schema, temporal records, retention              | current                                            |
 | [`API-CONTRACT.md`](API-CONTRACT.md)                   | `/api/v2` commands, queries, errors, idempotency    | current                                            |

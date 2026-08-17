@@ -2,19 +2,19 @@
 
 ## 1. Objective
 
-The target architecture makes Hermes AI Office an organizational control surface over four authoritative business contexts while treating model transport as a replaceable infrastructure port.
+The target architecture makes Hermes AI Office an organizational control surface over four authoritative business contexts while treating external Agent configuration and model transport as replaceable infrastructure adapters.
 
-**Current production deployment is not a north-star constraint.** CPA is the currently deployed gateway and therefore matters to migration/rollback. LiteLLM Proxy is the reference gateway for V2 because it can absorb generic provider/protocol/routing infrastructure. Either can be replaced without changing Employee, Employment, Appointment, DutySession, or Usage business identity.
+**Current production deployment is not a north-star constraint.** The default external-Agent path is RuntimeAccessProfile -> native Agent configuration. CPA and LiteLLM remain optional adapters for concrete Employments that need account pools, compatibility transport, gateway evidence, or protocol conversion. None of these infrastructure choices changes Employee, Employment, Appointment, DutySession, or Usage business identity.
 
 The architecture must answer, without ambiguous identity translation:
 
 1. Which Positions exist and what do they require?
 2. Which durable Employees exist and through which Employments can they currently work?
 3. Who is appointed, who is working now, and why was that Employee selected?
-4. Which concrete Employment and gateway route handled every model attempt?
+4. Which concrete Employment and RuntimeAccessProfile was selected, and what physical access path handled the attempt?
 5. How does usage roll up to Employee career, procurement period, Position, WorkScope, and Run?
 
-See [Gateway Strategy](GATEWAY-STRATEGY.md) for the gateway-neutral boundary and LiteLLM reference mapping.
+See [Runtime Access](RUNTIME-ACCESS.md) for the primary Employment-to-Agent contract and [Gateway Strategy](GATEWAY-STRATEGY.md) for optional gateway boundaries.
 
 ## 2. North-star service boundaries
 
@@ -31,12 +31,12 @@ See [Gateway Strategy](GATEWAY-STRATEGY.md) for the gateway-neutral boundary and
 | Bridge/runtime    |     | V2 state + projections  |
 +-------------------+     +-------------+-------------+
         |                           |
-        | runtime observations      | Gateway Ports
+        | runtime observations      | selected Employment access
         v                           v
  Activity adapters          +-------+-------------------+
-                            | Gateway Adapter            |
-                            | reference: LiteLLM Proxy   |
-                            | compat: CPA                |
+                            | RuntimeAccessProfile       |
+                            | -> native Agent config     |
+                            | -> optional gateway        |
                             +------------+---------------+
                                          |
                                          v

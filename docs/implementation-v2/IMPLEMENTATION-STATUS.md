@@ -62,44 +62,46 @@ The decisive semantic boundary is now enforced in code:
 - `ExecutionNode.model` / `RuntimeSession.modelHint` is telemetry only and cannot create Employee identity.
 - Gateway/Channel identity affects routability, never durable Employee identity.
 
-## 2. Dynamic supplier onboarding and LiteLLM provisioning
+## 2. Supplier onboarding and native RuntimeAccess
 
-The supplier UI now supports a compact CC-Switch-style flow: choose a preset provider or custom OpenAI-compatible URL, provide/reuse a key, discover models, select only the models that should become Employees, and choose the supplier default Employee. Unselected discovered models remain catalog evidence only and are not materialized as active workforce.
+The supplier UI supports a compact CC-Switch-style flow: choose a preset provider or custom OpenAI-compatible URL, provide/reuse a key, discover models, select only the models that should become Employees, and choose the supplier default Employee. Unselected discovered models are not materialized as active workforce.
 
-For custom OpenAI-compatible suppliers the deployed path is now end-to-end routable:
+The default execution contract is now:
 
 ```text
 Hermes credential lifecycle
-  -> explicit Supplier/SupplierModel/Employee/Employment registration
-  -> GatewayProvisioningPort
-  -> LiteLLM Credential Store (one credential per SupplyAgreement)
-  -> DB-backed employment:<employmentId> deployment
-  -> Channel + GatewayBinding
-  -> runtime selector
-  -> OpenCode/Codex gateway provider
+  -> Supplier/SupplierModel/Employee/Employment
+  -> RuntimeAccessProfile
+  -> OpenCode/Codex native configuration adapter
+  -> provider endpoint
 ```
 
-The production LiteLLM reference gateway now has a dedicated PostgreSQL technical-state database on loopback and `store_model_in_db=true`. A separate protected LiteLLM virtual runtime key is used by OpenCode/Codex; the master key never enters runtime configuration. The original static CPA-backed reference route remains compatibility-only and was not modified by dynamic provisioning.
+`RuntimeAccessProfile` stores only safe access intent such as runtime kind, provider/model/profile reference, optional base URL, credential-slot reference, protocol/config hints, priority and lifecycle. Secret-like fields are rejected from its config JSON.
 
-A production integration smoke on 2026-08-17 used a temporary MCP/business database, provisioned a real LiteLLM Employment route, verified the route through the runtime key, completed one real upstream invocation, then deleted the temporary LiteLLM deployment and credential. The production workforce database was not polluted by smoke-test identities.
+OpenCode access resolves to a native `provider/model`; custom endpoints get a namespaced provider entry in `opencode.json`. Codex access resolves to a named profile in `config.toml`, and the launch command selects that profile. Credential values remain in Hermes credential storage and can be materialized to local `0600` runtime secret files when the target Agent requires a file/env bridge.
+
+Migration `012_runtime_access_profiles` introduces this first-class access object. The legacy ModelOffering `runtimeSelectors` metadata remains a temporary read fallback; an idempotent import command converts only explicit legacy selector facts. `hermes-office` selectors remain `GATEWAY`, while ordinary native selectors become `NATIVE_CONFIG`. No base URL, credential, or supplier identity is guessed during import.
+
+CPA and LiteLLM are retained as optional adapters. CPA remains valuable for account pools/quota/usage and may be the direct endpoint of an Employment. The existing DB-backed LiteLLM and GatewayProvisioningPort remain available for historical/compatibility or protocol-bridge access, but new supplier onboarding no longer provisions LiteLLM by default.
 
 ## 3. Persistence migrations deployed
 
 V2 uses immutable, checksum-verified additive migrations. Applied history must never be edited in place.
 
-| Migration                    | Capability                                                               |
-| ---------------------------- | ------------------------------------------------------------------------ |
-| `001_spine`                  | V2 identity, supply, staffing, run/duty/invocation/usage/event spine     |
-| `002_gateway_discovery`      | gateway discovery evidence                                               |
-| `003_usage_reconciliation`   | gateway usage evidence and reconciliation                                |
-| `004_supply_capacity`        | Plan, Offering and CapacityPool                                          |
-| `005_finance_evaluation`     | reference prices, valuation, allocation and evaluation                   |
-| `006_qualification_staffing` | capabilities, requirements, qualification, staffing rules/constraints    |
-| `007_organization_topology`  | RoleDefinition, PositionTemplate, PositionRelation, run-scoped positions |
-| `008_runtime_projection`     | RuntimeSession, RuntimeEdge, ActivityEvent and Hermes execution sync     |
-| `009_incidents_checkpoints`  | replayable Incident projection and projection checkpoints                |
-| `010_maintenance`            | safe maintenance run history and retention operations                    |
-| `011_runtime_launch_policy`  | persisted OpenCode/Codex runtime launch selection and audit              |
+| Migration                     | Capability                                                               |
+| ----------------------------- | ------------------------------------------------------------------------ |
+| `001_spine`                   | V2 identity, supply, staffing, run/duty/invocation/usage/event spine     |
+| `002_gateway_discovery`       | gateway discovery evidence                                               |
+| `003_usage_reconciliation`    | gateway usage evidence and reconciliation                                |
+| `004_supply_capacity`         | Plan, Offering and CapacityPool                                          |
+| `005_finance_evaluation`      | reference prices, valuation, allocation and evaluation                   |
+| `006_qualification_staffing`  | capabilities, requirements, qualification, staffing rules/constraints    |
+| `007_organization_topology`   | RoleDefinition, PositionTemplate, PositionRelation, run-scoped positions |
+| `008_runtime_projection`      | RuntimeSession, RuntimeEdge, ActivityEvent and Hermes execution sync     |
+| `009_incidents_checkpoints`   | replayable Incident projection and projection checkpoints                |
+| `010_maintenance`             | safe maintenance run history and retention operations                    |
+| `011_runtime_launch_policy`   | persisted OpenCode/Codex runtime launch selection and audit              |
+| `012_runtime_access_profiles` | first-class native/gateway Employment-to-Agent access configuration      |
 
 Production deployment uses a SQLite `.backup` before every new migration and validates `PRAGMA integrity_check` and `PRAGMA foreign_key_check` after restart.
 

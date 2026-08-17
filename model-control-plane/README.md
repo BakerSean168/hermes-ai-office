@@ -23,14 +23,13 @@ Employment = one concrete commercial access period
 
 Runtime model hints never create Employee identity. Gateway health changes routability, not durable workforce identity.
 
-## Gateway boundary
+## Runtime access and gateway boundary
 
-Model transport is delegated through gateway ports. The current adapters are:
+External coding Agents use a first-class `RuntimeAccessProfile` attached to Employment. New supplier onboarding creates native OpenCode/Codex access profiles by default; the plugin materializes each selected access into the official Agent's own configuration contract.
 
-- **LiteLLM Gateway** as the reference generic gateway.
-- **CPA Gateway** as an adapter for subscription/provider routes that are already managed through CPA/gatewayctl.
+CPA and LiteLLM remain optional infrastructure adapters. CPA is useful for account pools, route/health/quota/usage evidence and can itself be the endpoint for an Employment. LiteLLM remains available for protocol/gateway compatibility or historical routes, but is not a mandatory traffic hop.
 
-The MCP reads gateway route/health/usage evidence through adapters. It does not persist provider credentials in the workforce database. Explicit supplier onboarding may pass secret material ephemerally to a provisioning-capable adapter; the LiteLLM adapter stores it in LiteLLM Credential Store and returns only safe route/deployment references.
+The MCP never persists provider credential material in the workforce database. `RuntimeAccessProfile.credentialRef` is only a credential-slot name. Gateway provisioning is retained as an optional internal adapter path and must not become the default supplier onboarding flow.
 
 Gateway discovery records technical evidence only. Commercial Supplier/SupplierModel/Agreement identity is created through explicit V2 catalog registration, never inferred solely from a Channel name. Unclassified routes remain visible in the Supply projection until an operator supplies business identity.
 
@@ -58,10 +57,11 @@ Primary reads include:
 - `GET /api/v2/gateways`
 - `GET /api/v2/channels`
 - `GET /api/v2/runtime-sessions`
+- `GET /api/v2/runtime-access-profiles`
 - `GET /api/v2/incidents`
 - `GET /api/v2/events` (SSE)
 
-V2 commands cover organization, staffing, lifecycle, run/duty dispatch, invocation, finance/evaluation, gateway discovery/reconciliation, incident operations and safe maintenance. The internal Employment gateway-provisioning endpoint deliberately bypasses the generic persisted idempotency request cache so secret material cannot be retained there; provisioning itself is naturally idempotent by Employment route and gateway credential identity.
+V2 commands cover organization, staffing, lifecycle, run/duty dispatch, runtime access, invocation, finance/evaluation, gateway discovery/reconciliation, incident operations and safe maintenance. Runtime-access commands contain only safe references and use normal persistent idempotency. The internal Employment gateway-provisioning endpoint remains an optional compatibility path and deliberately bypasses persisted idempotency request storage because it may carry ephemeral secret material.
 
 `/api/v1/*` was retired in the V1-removal release. Pixel Office exposes only explicit `/api/model/v2/*` read/SSE facade routes.
 

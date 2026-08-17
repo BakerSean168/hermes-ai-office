@@ -2,184 +2,135 @@
 
 ## 1. Decision
 
-Hermes AI Office is **gateway-neutral**.
+Hermes AI Office is **runtime-native first and gateway-optional**.
 
-The business architecture must not depend on CPA, LiteLLM, or any other model gateway. Gateways implement infrastructure ports below the business domain.
-
-For the V2 implementation:
-
-- **Reference gateway:** LiteLLM Proxy.
-- **Compatibility gateway:** current CPA / CLIProxyAPI through a CPA adapter.
-- **Special-provider option:** CPA or another compatibility service may sit behind LiteLLM as one upstream deployment when LiteLLM does not natively support the required subscription/auth protocol.
-- **Direct provider adapters:** allowed only when a gateway adds no value or cannot represent the provider safely.
-
-Current production deployment affects migration order only. It does not define the north-star architecture.
-
-## 2. Why LiteLLM is the reference implementation
-
-As of the architecture review on 2026-08-16, LiteLLM documents a centralized Proxy/AI Gateway that provides OpenAI-compatible access across many providers, including `/chat/completions` and `/responses`, while its Router supports retry/fallback/load-balancing across deployments. The Proxy also provides authentication, rate limiting, budget/spend tracking, logging hooks, and cost tracking.
-
-Primary references:
-
-- [LiteLLM Getting Started](https://docs.litellm.ai/)
-- [LiteLLM repository](https://github.com/BerriAI/litellm)
-- [LiteLLM architecture](https://github.com/BerriAI/litellm/blob/litellm_internal_staging/ARCHITECTURE.md)
-
-This makes LiteLLM a good place to outsource generic transport concerns instead of rebuilding them in Hermes AI Office.
-
-LiteLLM is still an external dependency with evolving behavior. Gateway contract tests remain mandatory, and business-semantic failover must stay above the gateway.
-
-## 3. What we deliberately do not build
-
-The Hermes business/control service should not reimplement generic gateway infrastructure unless a verified product requirement cannot be expressed by the selected gateway.
-
-Do not build a second generic implementation of:
-
-- provider request/response transformation;
-- OpenAI/Anthropic/provider protocol normalization;
-- generic streaming adaptation;
-- generic provider exception normalization;
-- same-route request retry;
-- deployment load balancing within one business Employment;
-- generic gateway authentication/virtual keys;
-- generic gateway rate limiting;
-- generic provider spend logging;
-- generic deployment health probing when the gateway already supplies sufficient evidence;
-- generic provider credential storage.
-
-Hermes AI Office may project these facts into its own business views, but projections are not a second implementation of the underlying gateway feature.
-
-## 4. What remains our product
-
-The business service owns capabilities that generic gateways do not understand:
-
-- WorkScope and Position structure;
-- Employee identity (`Supplier x SupplierModel`);
-- Employment history and procurement semantics;
-- Appointment and StaffingRule policy;
-- role/capability qualification;
-- DispatchDecision: which Employee should staff a Position;
-- business-level Employment selection;
-- DutySession and StaffingSegment history;
-- Run/runtime correlation;
-- Employee/Position career statistics;
-- allocated subscription cost and market-value accounting;
-- business audit/explanation;
-- Office/Organization/Operations projections and animation semantics.
-
-## 5. Three routing layers
-
-Routing is intentionally split into three levels.
+The business domain selects Position -> Employee -> Employment. External coding Agents then use a `RuntimeAccessProfile` and runtime-specific adapter. A gateway participates only when that Employment explicitly needs one.
 
 ```text
-Position / DutySession
-        |
-        | staffing policy
-        v
-Employee
-        |
-        | procurement/business route policy
-        v
-Employment
-        |
-        | GatewayExecutionPort
-        v
-Gateway logical route
-        |
-        | generic gateway routing
-        v
-physical deployment / Channel
-        |
-        v
-provider
+Position / Duty
+    -> Employee
+    -> Employment
+    -> RuntimeAccessProfile
+          | NATIVE_CONFIG              | GATEWAY
+          v                            v
+       Agent config              Gateway adapter
+          |                            |
+          +-------------+--------------+
+                        v
+                     provider
 ```
 
-### Layer A — staffing
+Current adapters:
 
-Owned by Hermes domain.
+- **Native Agent configuration:** default for OpenCode and Codex onboarding.
+- **CPA:** supplier/account-pool, route/health/quota/usage evidence, and compatibility endpoint where applicable.
+- **LiteLLM:** optional protocol/gateway adapter and historical compatibility route; not a mandatory model traffic layer.
 
-Question:
+See [`RUNTIME-ACCESS.md`](RUNTIME-ACCESS.md) for the primary launch contract.
 
-> Which Employee should do this job?
+## 2. Ownership
 
-Changing this layer opens/closes StaffingSegments and is a business event.
+### AI Workforce Domain owns
 
-### Layer B — Employment selection
+- Employee and Employment identity;
+- staffing, qualification and appointment policy;
+- RuntimeAccessProfile selection;
+- business-level Employment failover;
+- duty/staffing/invocation history and business attribution.
 
-Owned by Hermes domain or a deterministic business route policy.
+### RuntimeAdapter owns
 
-Question:
+- materializing the selected access into the target Agent's supported config/CLI/environment contract;
+- keeping runtime-specific syntax outside business objects;
+- retrieving credential values from the credential owner at launch/materialization time;
+- observing the resulting technical runtime/session.
 
-> Through which current Employment may this Employee be used for this invocation?
+### Gateway adapter owns, when used
 
-This layer is where subscription preference, fixed-cost utilization, contract constraints, and cross-account policy belong.
+- protocol/request transformation;
+- physical forwarding;
+- same-Employment retry/load balancing across equivalent deployments;
+- gateway-specific health/usage evidence;
+- gateway-side credential storage when the adapter actually requires it.
 
-Changing Employment does **not** change Employee or StaffingSegment, but it must be recorded on InvocationAttempt.
+A gateway never owns Employee selection or cross-Employment failover.
 
-### Layer C — physical gateway routing
+## 3. Why gateways are optional
 
-Owned by the gateway.
+OpenCode, Codex, Claude Code and future Agents do not share one configuration contract. Forcing all of them through a single proxy creates a second configuration truth and hides capabilities already supported by the native tools.
 
-Question:
-
-> Within the selected Employment route, which concrete deployment/channel should carry this physical request?
-
-Retry/load balancing inside this boundary does not change business staffing identity.
-
-## 6. Failover ownership
-
-Canonical levels:
+The product therefore normalizes **business access intent**, not every HTTP request:
 
 ```text
-G0 same logical Employment route, gateway retries the request
-G1 same Employment, gateway chooses another equivalent deployment/channel
-B2 Hermes chooses another Employment for the same Employee
-B3 Hermes dispatches another appointed Employee
-B4 Hermes considers another qualified Employee permitted by policy
-B5 explicit escalation / operator decision
+RuntimeAccessProfile
+  providerRef / modelRef / profileRef
+  baseUrl (optional)
+  credentialRef (safe reference)
+  protocol/config hints
 ```
 
-The gateway must never silently perform B2-B5.
+Each RuntimeAdapter translates that safe intent into the native tool configuration it supports.
 
-A LiteLLM model group should therefore normally represent **one Employment route**, not all Employments or all Employees that happen to expose the same canonical model.
+## 4. CPA role
 
-## 7. Logical gateway naming
+CPA is a valid Supplier/infrastructure adapter, especially for account pools and subscription access.
 
-Recommended generated gateway model/group name:
+Useful CPA facts include:
+
+- account-pool availability;
+- quota/reset state;
+- route health;
+- aggregate usage;
+- provider/model evidence.
+
+If an Employee's real access endpoint is CPA, the Agent may be configured directly to that CPA endpoint. AI Office does not need another LiteLLM hop in front of it.
+
+CPA-specific channel names remain infrastructure evidence and never manufacture Supplier/Employee identity.
+
+## 5. LiteLLM role
+
+LiteLLM remains available for cases where a gateway is genuinely useful, for example:
+
+- protocol adaptation an Agent cannot perform natively;
+- a controlled gateway-only Employment;
+- historical/reference routes that must remain available during migration;
+- transport-level evidence or testing.
+
+The existing `GatewayProvisioningPort` and DB-backed LiteLLM deployment are therefore retained as an **optional adapter contract**. New supplier onboarding does not call it by default.
+
+When used, one logical gateway route still represents one selected Employment:
 
 ```text
 employment:<employment-id>
 ```
 
-Example:
+Do not put different Employees or commercially distinct Employments into one gateway fallback group.
+
+## 6. Failover ownership
+
+Canonical levels remain:
 
 ```text
-employment:empl_01K...
-  -> deployment A
-  -> deployment B
+G0 same Employment/access, transport retry
+G1 same Employment/access, equivalent physical route
+B2 another Employment for the same Employee
+B3 another appointed Employee
+B4 another qualified Employee permitted by staffing policy
+B5 operator/escalation decision
 ```
 
-Both deployments must represent routes that are business-equivalent under that Employment.
+Only G0/G1 may happen below the business domain. B2-B5 require an explicit Hermes business decision.
 
-Do not create one LiteLLM model group containing deployments for different Employees. Avoid mixing different Employments unless the domain has explicitly declared them commercially interchangeable and the adapter can still report the selected Employment accurately.
+## 7. Gateway ports
 
-`position:*` remains a product/domain logical identity. It should not be implemented as a static gateway fallback group that is allowed to select arbitrary Employees.
-
-The migration-era CPA `position:*` aliases were retired on 2026-08-16. Current physical routing uses Employment-scoped bindings/aliases; Position staffing decisions remain in the V2 domain and are never delegated to a static gateway fallback group.
-
-## 8. Gateway ports
+Gateway ports remain useful infrastructure abstractions:
 
 ### GatewayExecutionPort
 
-Minimum conceptual contract:
-
 ```text
 resolveRoute(employmentId) -> GatewayRouteRef | UNROUTABLE
-getRouteHealth(routeRef) -> GatewayHealth
-getRouteCapabilities(routeRef) -> capabilities
+invoke(...)                 -> normalized physical evidence
 ```
-
-The runtime may invoke the gateway directly using the returned logical route, or an adapter/facade may proxy the request. The business layer does not need to transform provider payloads.
 
 ### GatewayDiscoveryPort
 
@@ -187,166 +138,58 @@ The runtime may invoke the gateway directly using the returned logical route, or
 discover() -> GatewayDiscoverySnapshot
 ```
 
-Snapshot may contain:
-
-- gateway route/deployment references;
-- supplier/model hints;
-- protocols;
-- health evidence;
-- model capabilities advertised by the gateway/provider;
-- non-secret account/agreement hints;
-- quota/spend evidence when available.
-
-Discovery evidence is normalized into Supplier/SupplierModel/Employment/Channel projections. It never becomes canonical identity merely because the gateway used a particular row ID.
+Discovery is evidence, not workforce identity.
 
 ### GatewayUsagePort
 
 ```text
-streamUsage(callback) | pullUsage(cursor)
+pullUsage(...) -> normalized gateway usage evidence
 ```
 
-Normalized evidence should include, where available:
+Gateway evidence may be reconciled with business invocation identity when correlation is strong enough. Aggregate evidence stays separate from verified Employee ledger data.
 
-- gateway request/trace ID;
-- logical gateway route;
-- selected physical deployment;
-- model/provider identity;
-- token counts;
-- latency;
-- status/error class;
-- gateway/provider cost;
-- timestamps.
+### GatewayProvisioningPort
 
-The Usage Adapter attaches these physical facts to ModelInvocation/InvocationAttempt and business context.
+Optional administrative capability for a gateway-backed RuntimeAccessProfile. It must not become the default supplier onboarding path merely because an adapter implements it.
 
-### GatewayProvisioningPort — optional capability
+## 8. Secrets
 
-Provisioning is intentionally separate from execution/discovery and is now implemented for the LiteLLM reference adapter. It exists only for explicit supplier onboarding; discovery never creates workforce identity.
+The strongest invariant is:
 
-```text
-provisionRoute(
-  Employment,
-  upstream model/base URL,
-  ephemeral credential material
-) -> GatewayRouteRef
-```
+> AI Office business persistence stores no plaintext provider/gateway secret.
 
-The domain derives the public route as `employment:<employmentId>`. The LiteLLM adapter stores one reusable encrypted Credential Store record per SupplyAgreement and makes each DB-backed model deployment reference that credential. Secret material is never written to V2 business persistence or the idempotency cache.
+For native access, Hermes credential storage owns the user-side key and RuntimeAccessProfile stores only a credential-slot reference.
 
-The core V2 domain still works when this capability is absent; operators may manage a gateway natively and bind already-existing routes. Generic gateway administration remains outside the product domain.
+For a gateway-backed access profile, a gateway may keep its own encrypted copy if required by that adapter. This is infrastructure state, not business truth.
 
-## 9. Secrets
+No secret may enter V2 events, RuntimeAccessProfile config JSON, projections, or persisted idempotency request payloads.
 
-The preferred rule is stronger than the previous design:
+## 9. Usage and accounting
 
-> V2 business persistence contains no gateway/provider secret reference unless a concrete adapter cannot work without an opaque reference.
+Evidence ownership follows the actual path:
 
-Credentials belong to the selected gateway or an external secret manager.
+- native Agent/provider evidence is preferred when it identifies the physical request reliably;
+- CPA/LiteLLM evidence is authoritative only for requests they actually observed;
+- Hermes remains authoritative for Employee, Employment, Position, Duty and Run attribution.
 
-The control service stores only safe route/deployment references and business metadata.
+Do not invent request-level Employee usage from aggregate gateway statistics.
 
-AI Office credential onboarding is implemented as an isolated provisioning flow with explicit redaction. Hermes remains the user-facing credential lifecycle; LiteLLM owns its encrypted gateway credential copy; the workforce database stores neither plaintext keys nor generic secret references.
+## 10. Acceptance contract
 
-## 10. Usage and accounting boundary
+Every RuntimeAccess/Gateway adapter must prove:
 
-Gateway is authoritative for **physical request evidence it actually observed**.
+1. it cannot change durable Employee identity;
+2. it cannot silently cross Employment boundaries;
+3. credentials never enter business payloads/events/logs;
+4. selected provider/model/profile is auditable;
+5. runtime configuration is idempotent and namespaced where AI Office manages it;
+6. an unavailable access path becomes explicit unroutable/degraded evidence rather than an unrelated raw-model fallback;
+7. historical RuntimeAccess and staffing evidence survive configuration changes.
 
-Hermes domain is authoritative for **business attribution**.
+## 11. Decision summary
 
-```text
-Gateway telemetry
-  request/deployment/tokens/provider cost
-        |
-        v
-Usage Adapter
-        |
-        + business correlation
-        v
-InvocationAttempt + UsageEntry
-  Employee
-  Employment
-  Position
-  DutySession
-  Run
-```
-
-Do not recalculate provider token usage if trustworthy gateway/provider evidence already exists.
-
-Hermes-specific calculations remain ours:
-
-- allocated subscription/fixed cost;
-- market value;
-- lifetime Employee rollups;
-- Position/WorkScope/Run attribution;
-- role-aware performance.
-
-## 11. LiteLLM mapping
-
-Reference mapping:
-
-```text
-LiteLLM Proxy                  Hermes V2
-------------------------------------------------------------
-Proxy instance                 Gateway
-model_name / model group       GatewayRouteRef for Employment
-model deployment               Channel / physical route evidence
-provider model                 SupplierModel evidence
-request/spend log              InvocationAttempt/Usage evidence
-provider credential            gateway-owned secret
-router health/retry            G0/G1 physical routing evidence
-```
-
-This mapping is adapter-level. LiteLLM IDs are external references, never Hermes business IDs.
-
-## 12. CPA mapping
-
-CPA is a compatibility implementation of the same ports.
-
-```text
-CPA upstream/channel           Channel / GatewayRouteRef evidence
-gatewayctl                     optional GatewayAdminPort implementation
-CAP usage tracker              GatewayUsagePort evidence
-logical aliases                compatibility routing mechanism
-```
-
-CPA-specific code should live under a CPA gateway adapter and should not leak into staffing, persistence schemas, API names, or event vocabulary.
-
-## 13. CPA behind LiteLLM
-
-For a special subscription/auth protocol that CPA supports and LiteLLM does not natively support well:
-
-```text
-Hermes
-  -> LiteLLM reference gateway
-      -> CPA compatibility upstream
-          -> special provider/subscription
-```
-
-Use this only when it reduces complexity and preserves observability. It is not a mandatory topology.
-
-## 14. Gateway acceptance contract
-
-Every gateway adapter must prove:
-
-1. request compatibility for protocols used by Hermes/Codex/OpenCode;
-2. streaming correctness for supported request types;
-3. cancellation/disconnect behavior is understood;
-4. no cross-Employee or cross-Employment fallback occurs below the allowed boundary;
-5. selected physical route can be identified sufficiently for accounting/audit;
-6. token/usage evidence is reconcilable;
-7. health failure produces explicit degraded/unroutable evidence;
-8. credentials never enter Hermes business payloads/events/logs;
-9. repeated discovery is idempotent at the normalized identity layer;
-10. gateway outage does not corrupt Employee/Appointment history.
-
-## 15. Architecture decision summary
-
-1. Gateway choice is infrastructure, not domain identity.
-2. LiteLLM Proxy is the reference implementation because it lets us delete generic gateway work from our backlog.
-3. CPA remains supported only through an adapter/compatibility path unless later evidence justifies a broader role.
-4. Business dispatch never delegates cross-Employee selection to a gateway.
-5. Business route policy never delegates silent cross-Employment selection to a gateway.
-6. Gateway model groups represent a selected Employment route and may load-balance only across business-equivalent physical deployments.
-7. Usage is sourced from gateway/provider evidence and enriched with Hermes business attribution.
-8. Gateway provisioning is an optional infrastructure capability separated from the core business service.
-9. Runtime callers use a dedicated LiteLLM virtual key; the gateway master key is never written into OpenCode/Codex configuration.
+1. RuntimeAccessProfile is the primary Employment -> Agent access contract.
+2. Native Agent configuration is the default path for new supplier onboarding.
+3. CPA is primarily a supplier/account-pool and evidence adapter, and may also be the direct endpoint for a concrete Employment.
+4. LiteLLM is optional compatibility/protocol infrastructure, not the north-star model data plane.
+5. Gateway ports remain because some Employments genuinely need them; they no longer define the default architecture.
