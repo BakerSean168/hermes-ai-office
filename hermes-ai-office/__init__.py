@@ -21,6 +21,7 @@ import queue
 import re
 import shlex
 import threading
+import tomllib
 import time
 import urllib.error
 import urllib.request
@@ -404,6 +405,36 @@ def _replace_managed_toml_block(current: str, marker_type: str, marker_name: str
     return current.rstrip() + ("\n\n" if current.strip() else "") + managed
 
 
+def _existing_codex_provider(provider_ref: str) -> dict[str, str]:
+    for home in _runtime_homes():
+        path = home / ".codex" / "config.toml"
+        if not path.exists():
+            continue
+        try:
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        providers = parsed.get("model_providers")
+        if not isinstance(providers, dict):
+            continue
+        value = providers.get(provider_ref)
+        if not isinstance(value, dict):
+            continue
+        result: dict[str, str] = {}
+        for source, target in (
+            ("name", "name"),
+            ("base_url", "baseUrl"),
+            ("env_key", "credentialRef"),
+            ("wire_api", "wireApi"),
+        ):
+            item = value.get(source)
+            if isinstance(item, str) and item.strip():
+                result[target] = item.strip()
+        if result.get("baseUrl"):
+            return result
+    return {}
+
+
 def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
     access = _selected_access(decision)
     provider_ref = str(access.get("providerRef") or "").strip()
@@ -416,10 +447,24 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
     wire_api = str(config.get("wireApi") or ("responses" if protocol == "openai-responses" else "chat"))
     if not provider_ref or not profile_ref or not model:
         return False
-    if not base_url and not credential_ref:
-        return True
     if not base_url:
-        return False
+        existing = _existing_codex_provider(provider_ref)
+        base_url = existing.get("baseUrl", "")
+        credential_ref = credential_ref or existing.get("credentialRef", "")
+        wire_api = existing.get("wireApi", "") or wire_api
+        if not base_url:
+            return False
+        selected_access = decision.get("selectedAccess")
+        if isinstance(selected_access, dict):
+            if not selected_access.get("baseUrl"):
+                selected_access["baseUrl"] = base_url
+            if credential_ref and not selected_access.get("credentialRef"):
+                selected_access["credentialRef"] = credential_ref
+            if wire_api:
+                if not isinstance(selected_access.get("config"), dict):
+                    selected_access["config"] = {}
+                if not selected_access["config"].get("wireApi"):
+                    selected_access["config"]["wireApi"] = wire_api
     if credential_ref and not _runtime_secret_file(credential_ref):
         return False
 

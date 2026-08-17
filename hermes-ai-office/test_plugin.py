@@ -254,6 +254,51 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 self.assertIn('model = "gpt-5.6-sol"', text)
                 self.assertNotIn("codex-native-secret", text)
 
+    def test_imported_codex_access_materializes_profile_from_existing_provider(self) -> None:
+        decision = self.selected(runtime="CODEX", model="gpt-5.6-sol")
+        decision["selectedProfile"] = "anyrouter"
+        decision["selectedAccess"] = {
+            "id": "raccess_imported",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": "anyrouter",
+            "baseUrl": None,
+            "credentialRef": None,
+            "protocol": None,
+            "config": {"importedFrom": "MODEL_OFFERING_RUNTIME_SELECTOR"},
+        }
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ, {"HERMES_HOME": root}
+        ), mock.patch.object(plugin, "_credential_value", return_value="existing-provider-secret"), mock.patch.object(
+            plugin, "_resolve_runtime_policy", return_value=decision
+        ), mock.patch.object(plugin, "_enqueue"):
+            global_config = Path(root) / "home" / ".codex" / "config.toml"
+            global_config.parent.mkdir(parents=True, exist_ok=True)
+            global_config.write_text(
+                '[model_providers.anyrouter]\n'
+                'name = "AnyRouter"\n'
+                'base_url = "https://anyrouter.example/v1"\n'
+                'env_key = "ANYROUTER_API_KEY"\n'
+                'wire_api = "responses"\n',
+                encoding="utf-8",
+            )
+            plugin._CTX = FakeContext(profile="reviewer")
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "codex exec 'review'"},
+                tool_call_id="tool-imported-codex",
+            )
+            command = directive["args"]["command"]
+            self.assertIn("codex --profile anyrouter exec", command)
+            self.assertIn('ANYROUTER_API_KEY="$(cat ', command)
+            self.assertNotIn("existing-provider-secret", command)
+            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
+                text = (home / ".codex" / "config.toml").read_text()
+                self.assertIn('[profiles."anyrouter"]', text)
+                self.assertIn('model = "gpt-5.6-sol"', text)
+                self.assertIn('base_url = "https://anyrouter.example/v1"', text)
+                self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
+                self.assertNotIn("existing-provider-secret", text)
+
     def test_explicit_override_is_respected_in_prefer_mode(self) -> None:
         decision = {
             "id": "rlaunch_override",
