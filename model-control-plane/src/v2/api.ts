@@ -15,6 +15,7 @@ import type { InvocationService } from './invocation.js';
 import type { MaintenanceService } from './maintenance.js';
 import type { OrganizationRepository } from './organization.js';
 import type { OfficeProjectionService } from './projections.js';
+import type { PersonalChannelProjectionService } from './personalChannels.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
 import type {
@@ -53,6 +54,7 @@ export function registerV2Routes(
     idempotencyService?: IdempotencyService;
     runtimePolicy?: RuntimePolicyService;
     runtimeAccess?: RuntimeAccessRepository;
+    personalChannels?: PersonalChannelProjectionService;
   } = {},
 ): void {
   const runCommand = async <T>(input: {
@@ -94,6 +96,14 @@ export function registerV2Routes(
       return { error: { code } };
     }
   };
+
+  app.get('/api/v2/projections/personal-channels', async (_request, reply) => {
+    if (!services.personalChannels) {
+      reply.code(503);
+      return { error: { code: 'PERSONAL_CHANNEL_PROJECTION_UNAVAILABLE' } };
+    }
+    return services.personalChannels.projection();
+  });
 
   app.get('/api/v2/health', async () => ({
     status: 'ok',

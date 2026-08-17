@@ -23,6 +23,11 @@ import { IncidentProjectionService } from './v2/incidents.js';
 import { InvocationService } from './v2/invocation.js';
 import { WorkforceLifecycleService } from './v2/lifecycle.js';
 import { MaintenanceService } from './v2/maintenance.js';
+import {
+  CpaXaiPersonalChannelSource,
+  Grok2ApiPersonalChannelSource,
+  PersonalChannelProjectionService,
+} from './v2/personalChannels.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { OrganizationRepository } from './v2/organization.js';
 import { OfficeProjectionService } from './v2/projections.js';
@@ -37,6 +42,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 
 export interface CpaProbePort extends CpaStatusSource {
   test(name: string): Promise<unknown>;
+  models?(): Promise<string[]>;
 }
 
 export type CpaUsagePort = CpaAggregateUsageSource;
@@ -123,6 +129,8 @@ export async function buildControlPlane(
     (new CpaAdapter({
       gatewayctl: env.GATEWAYCTL ?? '/usr/local/sbin/gatewayctl',
       sudo: env.MODEL_CP_CPA_SUDO !== '0',
+      baseUrl: env.CPA_BASE_URL ?? 'http://127.0.0.1:8317',
+      configFile: env.CPA_CONFIG_FILE ?? '/opt/cpa/cpa/config.yaml',
     }) as CpaProbePort);
   const cpaUsage: CpaUsagePort =
     options.cpaUsage ??
@@ -155,6 +163,18 @@ export async function buildControlPlane(
       baseUrlHint: env.CPA_BASE_URL,
     },
   });
+  const personalChannels = new PersonalChannelProjectionService([
+    new CpaXaiPersonalChannelSource({
+      authDir: env.CPA_AUTH_DIR ?? '/opt/cpa/cpa/auth',
+      baseUrl: env.CPA_BASE_URL ?? 'http://127.0.0.1:8317',
+      models: { models: () => (cpa.models ? cpa.models() : Promise.resolve([])) },
+    }),
+    new Grok2ApiPersonalChannelSource({
+      dbFile:
+        env.GROK2API_DB_FILE ?? '/var/lib/docker/volumes/grok2api_grok2api-data/_data/backend.db',
+      baseUrl: env.GROK2API_BASE_URL ?? 'http://127.0.0.1:8000',
+    }),
+  ]);
   const usageReconciliationService = new UsageReconciliationService(v2, gateways);
   const gatewayProvisioning = new GatewayProvisioningService(v2, supply, gateways);
   const timers = new Set<NodeJS.Timeout>();
@@ -177,6 +197,7 @@ export async function buildControlPlane(
     idempotencyService,
     runtimePolicy,
     runtimeAccess,
+    personalChannels,
   });
 
   app.get('/api/health', async () => ({
