@@ -3,7 +3,7 @@
   "label": "AI Office",
   "description": "Organization, workforce suppliers, runtime staffing, and employee-aware Codex/OpenCode launch policy.",
   "icon": "Building2",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "tab": {
     "path": "/office",
     "position": "after:kanban"

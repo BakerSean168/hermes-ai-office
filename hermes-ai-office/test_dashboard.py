@@ -223,14 +223,37 @@ class DashboardBundleContractTest(unittest.TestCase):
 
     def test_dashboard_owns_high_contrast_content_tokens(self) -> None:
         css = (DASHBOARD / "dist" / "style.css").read_text()
-        self.assertIn("--hao-text: #f2f8fb", css)
-        self.assertIn("--hao-text-secondary: #c9d8e1", css)
-        self.assertNotIn("--hao-text: var(--text-primary", css)
+        self.assertIn('.hao-page[data-hao-theme="light"]', css)
+        self.assertIn('.hao-page[data-hao-theme="dark"]', css)
+        self.assertIn("--hao-text: #10232f", css)
+        self.assertIn("--hao-text: #f7fbfd", css)
+        self.assertIn("--hao-text-secondary: #314b59", css)
+        self.assertIn("--hao-text-secondary: #d6e4eb", css)
         self.assertRegex(css, r"\.hao-hero h1\s*\{[^}]*color: var\(--hao-text\) !important")
-        self.assertRegex(css, r"\.hao-data-table th[^}]*color: #dce8ef !important")
+        self.assertRegex(css, r"\.hao-data-table th[^}]*color: var\(--hao-table-head-text\) !important")
         self.assertRegex(css, r"\.hao-data-table th,\s*\.hao-data-table td[^}]*color: var\(--hao-text-secondary\) !important")
-        self.assertIn("color: #ffffff !important", css)
+        self.assertIn("-webkit-text-fill-color: currentColor", css)
         self.assertNotIn("--hao-text: var(--foreground", css)
+
+    def test_dashboard_follows_hermes_theme_without_a_plugin_specific_setting(self) -> None:
+        source = (DASHBOARD / "dist" / "index.js").read_text()
+        self.assertIn("function resolveHostTheme()", source)
+        self.assertIn("document.documentElement.dataset.theme", source)
+        self.assertIn('document.documentElement.classList.contains("dark")', source)
+        self.assertIn('window.matchMedia("(prefers-color-scheme: dark)")', source)
+        self.assertIn("new MutationObserver(sync)", source)
+        self.assertIn('"data-hao-theme": theme', source)
+
+    def test_critical_dark_theme_text_cannot_inherit_transparent_fill(self) -> None:
+        css = (DASHBOARD / "dist" / "style.css").read_text()
+        self.assertRegex(
+            css,
+            r"\.hao-tab,\s*\.hao-metric-value,[^{]*\{[^}]*-webkit-text-fill-color: currentColor",
+        )
+        self.assertRegex(
+            css,
+            r'\.hao-page\[data-hao-theme="dark"\][^{]*\{[^}]*--hao-tab-active-text: #ffffff',
+        )
 
 
 if __name__ == "__main__":

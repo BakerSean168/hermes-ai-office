@@ -20,6 +20,45 @@
       return { locale: locale };
     };
 
+  function resolveHostTheme() {
+    const root = document.documentElement;
+    const declared = String(document.documentElement.dataset.theme || "").toLowerCase();
+    if (declared === "dark" || declared === "light") return declared;
+    if (
+      document.documentElement.classList.contains("dark") ||
+      document.documentElement.classList.contains("dark-theme")
+    )
+      return "dark";
+    if (document.documentElement.classList.contains("light-theme")) return "light";
+    try {
+      return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    } catch (_error) {
+      return "light";
+    }
+  }
+
+  function useHostTheme() {
+    const [theme, setTheme] = React.useState(resolveHostTheme);
+    React.useEffect(function () {
+      const root = document.documentElement;
+      const media = window.matchMedia("(prefers-color-scheme: dark)");
+      const sync = function () {
+        setTheme(resolveHostTheme());
+      };
+      const observer = new MutationObserver(sync);
+      observer.observe(root, { attributes: true, attributeFilter: ["class", "data-theme"] });
+      if (typeof media.addEventListener === "function") media.addEventListener("change", sync);
+      else if (typeof media.addListener === "function") media.addListener(sync);
+      sync();
+      return function () {
+        observer.disconnect();
+        if (typeof media.removeEventListener === "function") media.removeEventListener("change", sync);
+        else if (typeof media.removeListener === "function") media.removeListener(sync);
+      };
+    }, []);
+    return theme;
+  }
+
   const COPY = {
     en: {
       "shell.kicker": "Hermes native organization",
@@ -1740,6 +1779,7 @@
   function OfficePage() {
     const i18n = useI18n();
     const locale = localeKey(i18n && i18n.locale);
+    const theme = useHostTheme();
     const t = React.useMemo(function () {
       return translator(locale);
     }, [locale]);
@@ -1802,7 +1842,7 @@
 
     return h(
       "main",
-      { className: "hao-page", "data-locale": locale },
+      { className: "hao-page", "data-locale": locale, "data-hao-theme": theme },
       h(
         "header",
         { className: "hao-hero" },

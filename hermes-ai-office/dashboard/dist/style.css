@@ -3,35 +3,98 @@
   box-sizing: border-box;
 }
 
-.hao-page {
-  /* Plugin-owned high-contrast palette. Do not inherit foreground/muted colors
-     from the host theme: some Hermes themes intentionally use low-contrast
-     decorative tokens that are unsuitable for dense operational tables. */
-  --hao-bg: #041614;
-  --hao-panel: #0b1c29;
-  --hao-panel-raised: #102638;
-  --hao-panel-soft: #0d202e;
-  --hao-border: #29465a;
-  --hao-border-strong: #4a7187;
-  --hao-text: #f2f8fb;
-  --hao-text-secondary: #c9d8e1;
-  --hao-muted: #adc0cc;
-  --hao-faint: #8fa6b5;
-  --hao-accent: #63e3dd;
-  --hao-accent-contrast: #032321;
-  --hao-accent-soft: #123b3e;
-  --hao-good: #75e4b8;
-  --hao-good-bg: #103d35;
-  --hao-warn: #f6d27d;
-  --hao-warn-bg: #47391c;
-  --hao-bad: #ffadb9;
-  --hao-bad-bg: #4a2530;
+.hao-page,
+.hao-page[data-hao-theme="light"] {
+  /* The plugin follows Hermes appearance, but owns contrast-safe semantic colors. */
+  --hao-bg: #f4f8f8;
+  --hao-panel: #ffffff;
+  --hao-panel-raised: #f3f7f9;
+  --hao-panel-soft: #f8fafb;
+  --hao-border: #c8d7df;
+  --hao-border-strong: #8fa8b5;
+  --hao-text: #10232f;
+  --hao-text-secondary: #314b59;
+  --hao-muted: #536b78;
+  --hao-faint: #607985;
+  --hao-accent: #087f7a;
+  --hao-accent-contrast: #ffffff;
+  --hao-accent-soft: #e2f5f3;
+  --hao-good: #0a7a58;
+  --hao-good-bg: #e6f7f0;
+  --hao-good-border: #57a98b;
+  --hao-good-text: #0d684e;
+  --hao-warn: #8a5a00;
+  --hao-warn-bg: #fff4d7;
+  --hao-warn-border: #c99b42;
+  --hao-warn-text: #6f4700;
+  --hao-bad: #a92d48;
+  --hao-bad-bg: #fdecef;
+  --hao-bad-border: #cf6a7c;
+  --hao-bad-text: #8f203a;
+  --hao-hero-start: #ffffff;
+  --hao-hero-end: #edf7f6;
+  --hao-hero-glow: rgba(8, 127, 122, 0.12);
+  --hao-shadow: rgba(15, 23, 42, 0.08);
+  --hao-tabs-bg: #f6f9fa;
+  --hao-control-bg: #f8fafb;
+  --hao-hover-bg: #e9f3f3;
+  --hao-active-bg: #d9efee;
+  --hao-row-alt-bg: #f8fafb;
+  --hao-table-head-bg: #edf3f6;
+  --hao-table-head-text: #243e4c;
+  --hao-code-bg: #eef5f5;
+  --hao-code-text: #096d69;
+  --hao-tab-active-text: #0b3838;
   width: min(100%, 1580px);
   min-height: 100%;
   margin: 0 auto;
   padding: clamp(16px, 2vw, 28px);
   color: var(--hao-text);
+  color-scheme: light;
   font-variant-numeric: tabular-nums;
+}
+
+.hao-page[data-hao-theme="dark"] {
+  --hao-bg: #041614;
+  --hao-panel: #0b1c29;
+  --hao-panel-raised: #102638;
+  --hao-panel-soft: #0d202e;
+  --hao-border: #35566a;
+  --hao-border-strong: #5e8194;
+  --hao-text: #f7fbfd;
+  --hao-text-secondary: #d6e4eb;
+  --hao-muted: #b7c8d1;
+  --hao-faint: #a4b8c3;
+  --hao-accent: #69e6df;
+  --hao-accent-contrast: #032321;
+  --hao-accent-soft: #123b3e;
+  --hao-good: #75e4b8;
+  --hao-good-bg: #103d35;
+  --hao-good-border: #4fb18e;
+  --hao-good-text: #bdf7de;
+  --hao-warn: #f6d27d;
+  --hao-warn-bg: #47391c;
+  --hao-warn-border: #b28e3d;
+  --hao-warn-text: #ffe6a7;
+  --hao-bad: #ffadb9;
+  --hao-bad-bg: #4a2530;
+  --hao-bad-border: #bd6378;
+  --hao-bad-text: #ffd3da;
+  --hao-hero-start: #0b1c29;
+  --hao-hero-end: #102d38;
+  --hao-hero-glow: rgba(105, 230, 223, 0.16);
+  --hao-shadow: rgba(0, 0, 0, 0.28);
+  --hao-tabs-bg: #091923;
+  --hao-control-bg: #081a24;
+  --hao-hover-bg: #163544;
+  --hao-active-bg: #1a4651;
+  --hao-row-alt-bg: #0d2230;
+  --hao-table-head-bg: #132d3f;
+  --hao-table-head-text: #e7f0f4;
+  --hao-code-bg: #071a20;
+  --hao-code-text: #96f4ee;
+  --hao-tab-active-text: #ffffff;
+  color-scheme: dark;
 }
 
 .hao-page button,
@@ -70,9 +133,9 @@
   border: 1px solid var(--hao-border);
   border-radius: 18px;
   background:
-    radial-gradient(circle at 92% 16%, rgba(99, 227, 221, 0.16), transparent 34%),
-    linear-gradient(135deg, #0b1c29, #102d38);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
+    radial-gradient(circle at 92% 16%, var(--hao-hero-glow), transparent 34%),
+    linear-gradient(135deg, var(--hao-hero-start), var(--hao-hero-end));
+  box-shadow: 0 18px 60px var(--hao-shadow);
 }
 
 .hao-hero-copy {
@@ -165,7 +228,7 @@
   overflow-x: auto;
   border: 1px solid var(--hao-border);
   border-radius: 12px;
-  background: #091923;
+  background: var(--hao-tabs-bg);
   scrollbar-width: thin;
 }
 
@@ -189,13 +252,13 @@
 
 .hao-tab:hover {
   color: var(--hao-text) !important;
-  background: #122a3a;
+  background: var(--hao-hover-bg);
 }
 
 .hao-tab[aria-selected="true"] {
-  border-color: #63e3dd;
-  background: #173a45;
-  color: #ffffff !important;
+  border-color: var(--hao-accent);
+  background: var(--hao-active-bg);
+  color: var(--hao-tab-active-text) !important;
   box-shadow: inset 0 -2px 0 var(--hao-accent);
 }
 
@@ -474,7 +537,7 @@
   padding: 8px 11px 8px 34px;
   border: 1px solid var(--hao-border);
   border-radius: 8px;
-  background: #071a20;
+  background: var(--hao-control-bg);
   color: var(--hao-text);
   font-size: 12px;
 }
@@ -491,7 +554,7 @@
   overflow-x: auto;
   border: 1px solid var(--hao-border);
   border-radius: 9px;
-  background: #081a24;
+  background: var(--hao-control-bg);
 }
 
 .hao-segment {
@@ -509,9 +572,9 @@
 }
 
 .hao-segment[aria-pressed="true"] {
-  border-color: #63e3dd;
-  background: #173a45;
-  color: #ffffff !important;
+  border-color: var(--hao-accent);
+  background: var(--hao-active-bg);
+  color: var(--hao-tab-active-text) !important;
 }
 
 .hao-table-shell {
@@ -524,7 +587,7 @@
 
 .hao-panel > .hao-table-shell {
   border-radius: 10px;
-  background: #081a24;
+  background: var(--hao-control-bg);
 }
 
 .hao-data-table {
@@ -545,8 +608,8 @@
 }
 
 .hao-data-table th {
-  background: #102638;
-  color: #dce8ef !important;
+  background: var(--hao-table-head-bg);
+  color: var(--hao-table-head-text) !important;
   font-size: 10px;
   font-weight: 750;
   letter-spacing: 0.055em;
@@ -563,7 +626,7 @@
 }
 
 .hao-data-table tbody tr:hover:not(.hao-empty-row) {
-  background: #102b36;
+  background: var(--hao-hover-bg);
 }
 
 .hao-number-cell {
@@ -606,8 +669,8 @@
   overflow: hidden;
   border: 1px solid var(--hao-border);
   border-radius: 6px;
-  background: #071a20;
-  color: #8df1eb;
+  background: var(--hao-code-bg);
+  color: var(--hao-code-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10px;
   text-overflow: ellipsis;
@@ -752,21 +815,21 @@
 }
 
 .hao-badge-good {
-  border-color: #3b9f7f;
+  border-color: var(--hao-good-border);
   background: var(--hao-good-bg);
-  color: #a7f3d0 !important;
+  color: var(--hao-good-text) !important;
 }
 
 .hao-badge-warn {
-  border-color: #9b7d36;
+  border-color: var(--hao-warn-border);
   background: var(--hao-warn-bg);
-  color: #fde7a5 !important;
+  color: var(--hao-warn-text) !important;
 }
 
 .hao-badge-bad {
-  border-color: #a55367;
+  border-color: var(--hao-bad-border);
   background: var(--hao-bad-bg);
-  color: #ffd0d8 !important;
+  color: var(--hao-bad-text) !important;
 }
 
 .hao-inline-badges {
@@ -1220,18 +1283,18 @@
   color: var(--hao-text);
 }
 .hao-data-table thead th {
-  color: #dce8ef !important;
-  background: #102638;
+  color: var(--hao-table-head-text) !important;
+  background: var(--hao-table-head-bg);
   font-weight: 720;
 }
 .hao-data-table tbody td {
   color: var(--hao-text-secondary) !important;
 }
 .hao-data-table tbody tr:nth-child(even) {
-  background: #0c202d;
+  background: var(--hao-row-alt-bg);
 }
 .hao-data-table tbody tr:hover {
-  background: #12313d;
+  background: var(--hao-hover-bg);
 }
 .hao-cell-empty,
 .hao-footer,
@@ -1246,8 +1309,8 @@
   opacity: 0.92;
 }
 .hao-tab[aria-selected="true"] {
-  color: #ffffff !important;
-  background: #173a45;
+  color: var(--hao-tab-active-text) !important;
+  background: var(--hao-active-bg);
 }
 .hao-badge {
   color: var(--hao-text);
@@ -1278,17 +1341,33 @@
 }
 
 .hao-page .hao-data-table tbody tr:nth-child(even) {
-  background: #0c202d;
+  background: var(--hao-row-alt-bg);
 }
 
 .hao-page .hao-data-table tbody tr:hover:not(.hao-empty-row) {
-  background: #12313d;
+  background: var(--hao-hover-bg);
 }
 
 @media (prefers-contrast: more) {
   .hao-page {
-    --hao-border: #54778a;
-    --hao-muted: #c4d2da;
-    --hao-faint: #aabcc7;
+    --hao-border: var(--hao-border-strong);
   }
+}
+
+/* Critical content must stay legible even if the host applies text effects. */
+.hao-tab,
+.hao-metric-value,
+.hao-data-table th,
+.hao-data-table td,
+.hao-badge,
+.hao-page strong,
+.hao-page h1,
+.hao-page h2,
+.hao-page h3 {
+  -webkit-text-fill-color: currentColor;
+  opacity: 1;
+}
+
+.hao-metric-value {
+  color: var(--hao-text) !important;
 }
