@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 import queue
 import re
 import shlex
@@ -35,6 +36,10 @@ _WORKER_LOCK = threading.Lock()
 _PENDING: dict[str, dict[str, Any]] = {}
 _PENDING_LOCK = threading.Lock()
 _CTX: Any = None
+_LITELLM_RUNTIME_PROVIDER = "hermes-office"
+_LITELLM_RUNTIME_BASE_URL = "http://127.0.0.1:4000/v1"
+_LITELLM_RUNTIME_KEY_FILE = "/opt/data/secrets/litellm-runtime.key"
+_LITELLM_RUNTIME_KEY_ENV = "HERMES_LITELLM_RUNTIME_KEY"
 
 _RUNTIME_COMMAND_RE = re.compile(
     r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
@@ -245,6 +250,122 @@ def _resolve_runtime_policy(
         return None
 
 
+def _runtime_homes() -> list[Path]:
+    root = Path(os.environ.get("HERMES_HOME", "/opt/data"))
+    homes = [root / "home"]
+    ctx = _CTX
+    profile = ""
+    if ctx is not None:
+        try:
+            profile = str(ctx.profile_name or "").strip()
+        except Exception:
+            profile = ""
+    if profile and profile not in {"default", "main"}:
+        homes.append(root / "profiles" / profile / "home")
+    unique: list[Path] = []
+    for home in homes:
+        if home not in unique:
+            unique.append(home)
+    return unique
+
+
+def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".hermes-office.tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+    except OSError:
+        pass
+    os.replace(temporary, path)
+
+
+def _ensure_opencode_gateway_model(model: str) -> bool:
+    prefix = _LITELLM_RUNTIME_PROVIDER + "/"
+    if not model.startswith(prefix):
+        return True
+    route = model[len(prefix) :].strip()
+    if not route.startswith("employment:"):
+        return False
+    for home in _runtime_homes():
+        path = home / ".config" / "opencode" / "opencode.json"
+        try:
+            current: dict[str, Any] = {}
+            if path.exists():
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(parsed, dict):
+                    return False
+                current = parsed
+            providers = current.get("provider")
+            if not isinstance(providers, dict):
+                providers = {}
+                current["provider"] = providers
+            existing = providers.get(_LITELLM_RUNTIME_PROVIDER)
+            provider = dict(existing) if isinstance(existing, dict) else {}
+            options = provider.get("options")
+            options = dict(options) if isinstance(options, dict) else {}
+            options.update(
+                {
+                    "baseURL": _LITELLM_RUNTIME_BASE_URL,
+                    "apiKey": "{file:%s}" % _LITELLM_RUNTIME_KEY_FILE,
+                }
+            )
+            models = provider.get("models")
+            models = dict(models) if isinstance(models, dict) else {}
+            model_config = models.get(route)
+            if not isinstance(model_config, dict):
+                models[route] = {"name": route}
+            provider.update(
+                {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Hermes AI Office",
+                    "options": options,
+                    "models": models,
+                }
+            )
+            providers[_LITELLM_RUNTIME_PROVIDER] = provider
+            _write_json_atomic(path, current)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+    return True
+
+
+def _ensure_codex_gateway_profile() -> bool:
+    managed = """# BEGIN HERMES AI OFFICE GATEWAY\n[model_providers.hermes-office]\nname = \"Hermes AI Office\"\nbase_url = \"http://127.0.0.1:4000/v1\"\nenv_key = \"HERMES_LITELLM_RUNTIME_KEY\"\nwire_api = \"responses\"\n\n[profiles.hermes-office]\nmodel_provider = \"hermes-office\"\n# END HERMES AI OFFICE GATEWAY\n"""
+    pattern = re.compile(
+        r"(?ms)^# BEGIN HERMES AI OFFICE GATEWAY\n.*?^# END HERMES AI OFFICE GATEWAY\n?"
+    )
+    for home in _runtime_homes():
+        path = home / ".codex" / "config.toml"
+        try:
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            if pattern.search(current):
+                updated = pattern.sub(managed, current)
+            else:
+                updated = current.rstrip() + ("\n\n" if current.strip() else "") + managed
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + ".hermes-office.tmp")
+            temporary.write_text(updated, encoding="utf-8")
+            try:
+                os.chmod(temporary, 0o600)
+            except OSError:
+                pass
+            os.replace(temporary, path)
+        except OSError:
+            return False
+    return True
+
+
+def _ensure_gateway_runtime(runtime: str, decision: dict[str, Any]) -> bool:
+    model = str(decision.get("selectedModel") or "").strip()
+    profile = str(decision.get("selectedProfile") or "").strip()
+    if runtime == "opencode":
+        return _ensure_opencode_gateway_model(model)
+    if runtime == "codex" and profile == _LITELLM_RUNTIME_PROVIDER:
+        return _ensure_codex_gateway_profile()
+    return True
+
+
 def _replace_model_flag(command: str, model: str) -> str:
     quoted = shlex.quote(model)
     pattern = re.compile(
@@ -302,6 +423,12 @@ def _inject_selection(command: str, runtime: str, decision: dict[str, Any]) -> s
     markers = " ".join(
         f"{key}={shlex.quote(str(value))}" for key, value in marker_values.items() if value
     )
+    if runtime == "codex" and str(decision.get("selectedProfile") or "") == _LITELLM_RUNTIME_PROVIDER:
+        runtime_key = '%s="$(cat %s)"' % (
+            _LITELLM_RUNTIME_KEY_ENV,
+            shlex.quote(_LITELLM_RUNTIME_KEY_FILE),
+        )
+        markers = (runtime_key + " " + markers).strip()
     return _prefix_runtime_executable(rewritten, runtime, markers)
 
 
@@ -355,6 +482,13 @@ def _on_pre_tool_call(
             % (runtime, ", ".join(map(str, decision.get("reasons") or []))),
         }
     if decision.get("status") != "SELECTED" or mode == "OBSERVE":
+        return None
+    if not _ensure_gateway_runtime(runtime, decision):
+        if mode == "ENFORCE":
+            return {
+                "action": "block",
+                "message": "Hermes AI Office could not configure the selected gateway runtime.",
+            }
         return None
     rewritten = _inject_selection(command, runtime, decision)
     if rewritten == command:

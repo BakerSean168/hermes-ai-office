@@ -2,23 +2,50 @@
 
 This deployment is the V2 reference implementation of the gateway ports. It is deliberately independent of the AI workforce domain database.
 
-- Binds only to `127.0.0.1:4000` through host networking.
-- Uses the digest-pinned LiteLLM v1.92.2 release image, whose container filesystem was verified as AArch64 on oracle2. The older v1.83.14-stable tag was rejected because its advertised ARM64 manifest contained x86-64 binaries.
-- Stores provider/gateway credentials only in `/srv/hermes-personal/secrets/litellm.env` (`0600`).
-- Starts with one controlled Employment-scoped route.
-- Uses CPA as a temporary downstream compatibility upstream; existing production traffic remains on CPA.
-- Does not require PostgreSQL or Redis for the first vertical slice.
+- Binds LiteLLM only to `127.0.0.1:4000` through host networking.
+- Uses a dedicated PostgreSQL instance bound to `127.0.0.1:54329` for LiteLLM technical state only. Business Supplier, Employee, Employment, Appointment, and usage-ledger identity remains in the Hermes domain database.
+- Uses the digest-pinned LiteLLM v1.92.2 release image verified as AArch64 on oracle2.
+- Stores the gateway master key, upstream compatibility key, and PostgreSQL credentials only in `/srv/hermes-personal/secrets/litellm.env` (`0600`).
+- Stores the separate low-privilege runtime virtual key at `/srv/hermes-personal/data/secrets/litellm-runtime.key` (`0600`), never in OpenCode/Codex config.
+- Keeps the original config-owned CPA compatibility route while allowing DB-backed `employment:<employmentId>` routes to be provisioned dynamically.
+- Each dynamic model route references a reusable LiteLLM Credential Store record instead of duplicating provider API keys into every deployment.
+- Gateway retry/fallback stays inside one Employment route. Cross-Employment and cross-Employee decisions remain owned by Hermes Staffing.
 
-Build the control-plane package, then bind an **already existing CURRENT Employment**. Gateway deployment never creates Supplier, Employee, Agreement, Appointment, or Employment identity:
+## Bootstrap / upgrade
+
+Build the control-plane package, then run:
 
 ```bash
-npm run build --workspace @hermes/model-control-plane
+sudo ./bootstrap-dynamic-gateway.sh
+```
+
+The bootstrap is idempotent. During the first upgrade from the static deployment it preserves the currently running LiteLLM master/reference values without printing them, creates the protected env file if it is missing, starts the dedicated PostgreSQL service, enables `store_model_in_db`, and creates a separate runtime virtual key.
+
+The original reference-route helper is still available for migration compatibility:
+
+```bash
 sudo ./configure-reference-route.sh
 ```
 
-Set `V2_REFERENCE_EMPLOYMENT_ID` for a new binding. If a current `employment:*` reference route is already present in the protected env file, the script may reuse that ID. The script validates the Employment against the V2 database, stores only the non-secret route name beside the gateway secrets, updates the CPA alias, restarts LiteLLM, and verifies the model list before retiring the previous reference alias. It never bootstraps business identity from a channel or model name.
+Set `V2_REFERENCE_EMPLOYMENT_ID` for a new compatibility binding. Gateway deployment never creates Supplier, Employee, Agreement, Appointment, or Employment identity from technical discovery.
 
-Operational commands:
+## Dynamic onboarding flow
+
+The intended path is:
+
+```text
+Hermes supplier onboarding
+  -> create/reuse Supplier + SupplierModel + Employee + Employment
+  -> gateway provisioning port
+  -> LiteLLM Credential Store (one credential per SupplyAgreement)
+  -> LiteLLM DB deployment named employment:<employmentId>
+  -> Channel + GatewayBinding projection
+  -> OpenCode/Codex runtime selector
+```
+
+Provider secrets cross the control-plane boundary only ephemerally during the explicit provisioning call. They are not stored in the Hermes business database, idempotency cache, events, Channel metadata, or runtime configuration.
+
+## Operations
 
 ```bash
 sudo systemctl status hermes-litellm
@@ -26,4 +53,4 @@ sudo journalctl -u hermes-litellm -f
 curl http://127.0.0.1:4000/health/liveliness
 ```
 
-The master key is never written to Git or printed by operational scripts.
+The master key and runtime key are never written to Git or printed by operational scripts.

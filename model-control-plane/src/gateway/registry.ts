@@ -1,10 +1,12 @@
 import {
   supportsGatewayDiscovery,
   supportsGatewayInvocation,
+  supportsGatewayProvisioning,
   supportsGatewayUsage,
   type GatewayDiscoveryPort,
   type GatewayExecutionPort,
   type GatewayInvocationPort,
+  type GatewayProvisioningPort,
   type GatewayUsagePort,
 } from './ports.js';
 
@@ -36,6 +38,11 @@ export class GatewayRegistry {
   getInvocation(gatewayId: string): (GatewayExecutionPort & GatewayInvocationPort) | null {
     const gateway = this.get(gatewayId);
     return gateway && supportsGatewayInvocation(gateway) ? gateway : null;
+  }
+
+  getProvisioning(gatewayId: string): (GatewayExecutionPort & GatewayProvisioningPort) | null {
+    const gateway = this.get(gatewayId);
+    return gateway && supportsGatewayProvisioning(gateway) ? gateway : null;
   }
 
   list(): GatewayExecutionPort[] {

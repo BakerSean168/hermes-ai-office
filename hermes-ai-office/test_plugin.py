@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -123,6 +125,61 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         command = directive["args"]["command"]
         self.assertIn("codex --model gpt-5.6-sol --profile anyrouter exec", command)
         self.assertIn("'review this diff'", command)
+
+    def test_gateway_selected_opencode_model_installs_profile_local_provider_config(self) -> None:
+        decision = self.selected(model="hermes-office/employment:empl_custom")
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ, {"HERMES_HOME": root}
+        ), mock.patch.object(plugin, "_resolve_runtime_policy", return_value=decision), mock.patch.object(
+            plugin, "_enqueue"
+        ):
+            plugin._CTX = FakeContext(profile="coder")
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "opencode run 'ship it'"},
+                tool_call_id="tool-gateway-opencode",
+            )
+            self.assertEqual(directive["action"], "modify")
+            self.assertIn(
+                "opencode run --model hermes-office/employment:empl_custom",
+                directive["args"]["command"],
+            )
+            for home in [Path(root) / "home", Path(root) / "profiles" / "coder" / "home"]:
+                config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
+                provider = config["provider"]["hermes-office"]
+                self.assertEqual(provider["options"]["baseURL"], "http://127.0.0.1:4000/v1")
+                self.assertEqual(
+                    provider["options"]["apiKey"],
+                    "{file:/opt/data/secrets/litellm-runtime.key}",
+                )
+                self.assertIn("employment:empl_custom", provider["models"])
+
+    def test_gateway_selected_codex_profile_injects_runtime_key_by_file_reference(self) -> None:
+        decision = self.selected(runtime="CODEX", model="employment:empl_custom")
+        decision["selectedProfile"] = "hermes-office"
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ, {"HERMES_HOME": root}
+        ), mock.patch.object(plugin, "_resolve_runtime_policy", return_value=decision), mock.patch.object(
+            plugin, "_enqueue"
+        ):
+            plugin._CTX = FakeContext(profile="reviewer")
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "codex exec 'review'"},
+                tool_call_id="tool-gateway-codex",
+            )
+            command = directive["args"]["command"]
+            self.assertIn("--model employment:empl_custom --profile hermes-office", command)
+            self.assertIn(
+                'HERMES_LITELLM_RUNTIME_KEY="$(cat /opt/data/secrets/litellm-runtime.key)"',
+                command,
+            )
+            self.assertNotIn("test-master", command)
+            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
+                text = (home / ".codex" / "config.toml").read_text()
+                self.assertIn("[model_providers.hermes-office]", text)
+                self.assertIn('env_key = "HERMES_LITELLM_RUNTIME_KEY"', text)
+                self.assertIn("[profiles.hermes-office]", text)
 
     def test_explicit_override_is_respected_in_prefer_mode(self) -> None:
         decision = {

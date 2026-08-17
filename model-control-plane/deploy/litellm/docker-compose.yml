@@ -1,11 +1,35 @@
 name: hermes-litellm
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hermes-litellm-postgres
+    env_file:
+      - ${HERMES_LITELLM_ENV_FILE:-/srv/hermes-personal/secrets/litellm.env}
+    ports:
+      - 127.0.0.1:54329:5432
+    volumes:
+      - litellm-postgres-data:/var/lib/postgresql/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
   litellm:
     image: ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
     container_name: hermes-litellm
     platform: linux/arm64
     network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
     command:
       - --config
       - /app/config.yaml
@@ -38,3 +62,7 @@ services:
       timeout: 5s
       retries: 8
       start_period: 30s
+
+volumes:
+  litellm-postgres-data:
+    name: hermes-litellm-postgres-data

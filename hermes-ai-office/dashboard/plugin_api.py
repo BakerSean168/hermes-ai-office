@@ -250,7 +250,7 @@ def _provider_descriptor(preset_id: str, base_url: str = "", supplier_name: str 
 
 def _existing_provider_key(descriptor: Mapping[str, Any]) -> str:
     provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
-    if provider_id and not provider_id.startswith("custom:"):
+    if provider_id and not provider_id == "custom" or provider_id.startswith("custom:"):
         try:
             from hermes_cli.auth import resolve_api_key_provider_credentials
             credentials = resolve_api_key_provider_credentials(provider_id)
@@ -344,6 +344,30 @@ def _runtime_selectors(descriptor: Mapping[str, Any], model: str) -> Dict[str, A
     if not prefix:
         return {}
     return {"OPENCODE": {"model": f"{prefix}/{model}", "provider": prefix}}
+
+
+def _gateway_provision_payload(
+    descriptor: Mapping[str, Any], model: str, api_key: str
+) -> Dict[str, Any]:
+    transport = str(descriptor.get("transport") or "openai_chat")
+    protocol = {
+        "codex_responses": "openai-responses",
+        "openai_chat": "openai-chat-completions",
+    }.get(transport)
+    if not protocol:
+        raise ValueError("该供应商协议暂不支持自动接入 LiteLLM")
+    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
+    upstream_provider = "openai" if provider_id == "custom" or provider_id.startswith("custom:") else provider_id
+    if upstream_provider == "openai-api":
+        upstream_provider = "openai"
+    return {
+        "gatewaySlug": "litellm-reference",
+        "protocol": protocol,
+        "upstreamProvider": upstream_provider,
+        "upstreamModel": model,
+        "upstreamBaseUrl": str(descriptor.get("baseUrl") or ""),
+        "secretMaterial": {"api_key": api_key},
+    }
 
 
 def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
@@ -648,6 +672,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
         if default_model not in selected:
             raise ValueError("默认员工必须来自已选择的模型")
 
+        route_api_key = body.api_key.strip() or _existing_provider_key(descriptor)
         if body.api_key.strip():
             await asyncio.to_thread(_save_provider_secret, descriptor, body.api_key)
         if body.preset_id == "custom":
@@ -674,6 +699,17 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                 raise RuntimeError("control plane did not return supplier/employee identity")
             supplier_id = str(supplier["id"])
             employee_id = str(employee["id"])
+            employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
+            employment_id = str(employment.get("id") or "")
+            route: Dict[str, Any] | None = None
+            if body.preset_id == "custom":
+                if not employment_id or not route_api_key:
+                    raise RuntimeError("control plane did not return routable employment identity")
+                route = await asyncio.to_thread(
+                    _post_json,
+                    f"/api/v2/internal/employments/{employment_id}/gateway-route",
+                    _gateway_provision_payload(descriptor, model, route_api_key),
+                )
             employee_ids.append(employee_id)
             if model == default_model:
                 default_employee_id = employee_id
@@ -682,6 +718,8 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                     "model": model,
                     "employeeId": employee_id,
                     "employeeName": employee.get("displayName") or model,
+                    "employmentId": employment_id or None,
+                    "route": route.get("route") if route else None,
                 }
             )
         preference = await asyncio.to_thread(

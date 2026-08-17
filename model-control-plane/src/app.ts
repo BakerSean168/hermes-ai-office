@@ -15,6 +15,7 @@ import { GatewayRegistry } from './gateway/registry.js';
 import { registerV2Routes } from './v2/api.js';
 import { DispatchService } from './v2/dispatch.js';
 import { GatewayDiscoveryService } from './v2/discovery.js';
+import { GatewayProvisioningService } from './v2/gatewayProvisioning.js';
 import { HermesExecutionSyncService } from './v2/execution.js';
 import { FinanceRepository } from './v2/finance.js';
 import { IdempotencyService } from './v2/idempotency.js';
@@ -153,6 +154,7 @@ export async function buildControlPlane(
     },
   });
   const usageReconciliationService = new UsageReconciliationService(v2, gateways);
+  const gatewayProvisioning = new GatewayProvisioningService(v2, supply, gateways);
   const timers = new Set<NodeJS.Timeout>();
 
   registerV2Routes(app, v2, {
@@ -160,6 +162,7 @@ export async function buildControlPlane(
     invocationService,
     lifecycleService,
     discoveryService,
+    gatewayProvisioning,
     usageReconciliationService,
     supply,
     finance,

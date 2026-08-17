@@ -10,6 +10,9 @@ import type {
   GatewayInvocationRequest,
   GatewayInvocationResult,
   GatewayProtocol,
+  GatewayProvisioningPort,
+  GatewayProvisionRouteInput,
+  GatewayProvisionRouteResult,
   GatewayRouteEvidence,
   GatewayRouteRef,
   GatewayRouteResolution,
@@ -100,7 +103,11 @@ export class StaticBearerTokenProvider implements GatewaySecretProvider {
 }
 
 export class LiteLlmGateway
-  implements GatewayExecutionPort, GatewayDiscoveryPort, GatewayInvocationPort
+  implements
+    GatewayExecutionPort,
+    GatewayDiscoveryPort,
+    GatewayInvocationPort,
+    GatewayProvisioningPort
 {
   readonly gatewayId: string;
   readonly #baseUrl: string;
@@ -138,8 +145,123 @@ export class LiteLlmGateway
     return response;
   }
 
-  async #requestJson(path: string): Promise<unknown> {
-    return (await this.#request(path)).json();
+  async #requestJson(path: string, init: RequestInit = {}): Promise<unknown> {
+    return (await this.#request(path, init)).json();
+  }
+
+  async #credentialExists(name: string): Promise<boolean> {
+    try {
+      await this.#requestJson(`/credentials/by_name/${encodeURIComponent(name)}`);
+      return true;
+    } catch (error) {
+      if (error instanceof Error && error.message === 'LITELLM_HTTP_404') return false;
+      throw error;
+    }
+  }
+
+  async #upsertCredential(input: GatewayProvisionRouteInput): Promise<void> {
+    const name = input.credential.name.trim();
+    if (!name) throw new Error('GATEWAY_CREDENTIAL_NAME_REQUIRED');
+    const credentialInfo: JsonRecord = {
+      custom_llm_provider: input.credential.provider,
+      ...(input.upstreamBaseUrl ? { api_base: input.upstreamBaseUrl } : {}),
+    };
+    const body = {
+      credential_name: name,
+      credential_info: credentialInfo,
+      credential_values: input.credential.secretMaterial,
+    };
+    if (await this.#credentialExists(name)) {
+      await this.#requestJson(`/credentials/${encodeURIComponent(name)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      });
+      return;
+    }
+    await this.#requestJson('/credentials', { method: 'POST', body: JSON.stringify(body) });
+  }
+
+  async #managedModelByRoute(externalRouteRef: string): Promise<JsonRecord | null> {
+    const payload = asRecord(await this.#requestJson('/model/info'));
+    const rows = Array.isArray(payload.data) ? payload.data : [];
+    const matches = rows.map(asRecord).filter((item) => item.model_name === externalRouteRef);
+    if (matches.length > 1) throw new Error('LITELLM_ROUTE_AMBIGUOUS');
+    return matches[0] ?? null;
+  }
+
+  async provisionRoute(input: GatewayProvisionRouteInput): Promise<GatewayProvisionRouteResult> {
+    if (!input.employmentId || input.externalRouteRef !== `employment:${input.employmentId}`) {
+      throw new Error('EMPLOYMENT_ROUTE_IDENTITY_MISMATCH');
+    }
+    if (!input.upstreamModel.trim()) throw new Error('UPSTREAM_MODEL_REQUIRED');
+    if (input.protocol === 'anthropic-messages') {
+      throw new Error('LITELLM_PROVISIONING_PROTOCOL_UNSUPPORTED');
+    }
+
+    await this.#upsertCredential(input);
+    const current = await this.#managedModelByRoute(input.externalRouteRef);
+    const modelInfo = asRecord(current?.model_info);
+    const currentId = typeof modelInfo.id === 'string' ? modelInfo.id : '';
+    if (current && modelInfo.db_model !== true) throw new Error('LITELLM_CONFIG_ROUTE_IMMUTABLE');
+
+    const litellmParams = {
+      model: input.upstreamModel,
+      litellm_credential_name: input.credential.name,
+      ...(input.upstreamBaseUrl ? { api_base: input.upstreamBaseUrl } : {}),
+      timeout: 120,
+      stream_timeout: 120,
+      max_retries: 1,
+    };
+    let created = false;
+    let externalDeploymentRef = currentId;
+    if (currentId) {
+      await this.#requestJson('/model/update', {
+        method: 'POST',
+        body: JSON.stringify({
+          model_name: input.externalRouteRef,
+          litellm_params: litellmParams,
+          model_info: { id: currentId },
+        }),
+      });
+    } else {
+      const result = asRecord(
+        await this.#requestJson('/model/new', {
+          method: 'POST',
+          body: JSON.stringify({
+            model_name: input.externalRouteRef,
+            litellm_params: litellmParams,
+            model_info: {
+              id: null,
+              base_model: input.upstreamModel,
+              metadata: {
+                owner: 'hermes-ai-office',
+                employmentId: input.employmentId,
+                ...input.metadata,
+              },
+            },
+          }),
+        }),
+      );
+      const createdInfo = asRecord(result.model_info);
+      externalDeploymentRef = typeof createdInfo.id === 'string' ? createdInfo.id : '';
+      created = true;
+    }
+
+    const ids = await this.#modelIds();
+    if (!ids.has(input.externalRouteRef)) throw new Error('LITELLM_ROUTE_NOT_VISIBLE');
+    const observedAt = Date.now();
+    return {
+      route: {
+        gatewayId: this.gatewayId,
+        employmentId: input.employmentId,
+        externalRouteRef: input.externalRouteRef,
+        protocol: input.protocol,
+      },
+      ...(externalDeploymentRef ? { externalDeploymentRef } : {}),
+      credentialName: input.credential.name,
+      created,
+      observedAt,
+    };
   }
 
   async #modelIds(): Promise<Set<string>> {

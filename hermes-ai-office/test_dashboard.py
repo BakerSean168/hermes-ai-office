@@ -243,6 +243,71 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preference["enabledEmployeeIds"], ["emp_deepseek-chat", "emp_deepseek-reasoner"])
         self.assertEqual(preference["defaultEmployeeId"], "emp_deepseek-reasoner")
 
+    async def test_custom_provider_provisions_selected_employment_routes_without_business_secret_leak(self) -> None:
+        descriptor = {
+            "id": "custom",
+            "providerId": "custom:abc123",
+            "name": "Team Router",
+            "supplierSlug": "custom-abc123",
+            "supplierName": "Team Router",
+            "keyEnv": "HERMES_AI_OFFICE_ABC123_API_KEY",
+            "baseUrl": "https://proxy.example.com/v1",
+            "transport": "openai_chat",
+        }
+        calls = []
+
+        def post(path, payload, idempotency_key=None):
+            calls.append((path, payload, idempotency_key))
+            if path.endswith("supply-catalog/register"):
+                model = payload["supplierModel"]["key"]
+                return {
+                    "supplier": {"id": "sup_custom"},
+                    "employee": {"id": f"emp_{model}", "displayName": model},
+                    "employment": {"id": f"empl_{model}"},
+                }
+            if path.endswith("gateway-route"):
+                employment_id = path.split("/")[-2]
+                return {
+                    "route": {
+                        "gatewayId": "litellm-reference",
+                        "employmentId": employment_id,
+                        "externalRouteRef": f"employment:{employment_id}",
+                        "protocol": "openai-chat-completions",
+                    }
+                }
+            if path.endswith("staffing-preferences"):
+                return {"metadata": {"staffingPreferences": payload}}
+            raise AssertionError(path)
+
+        body = api.ProviderRegisterRequest(
+            preset_id="custom",
+            api_key="secret-key-value",
+            base_url="https://proxy.example.com/v1",
+            supplier_name="Team Router",
+            selected_models=["alpha", "beta"],
+            default_model="beta",
+        )
+        with mock.patch.object(
+            api,
+            "_discover_provider_models",
+            return_value=(descriptor, ["alpha", "beta", "unused"], False),
+        ), mock.patch.object(api, "_post_json", side_effect=post), mock.patch.object(
+            api, "_save_provider_secret"
+        ), mock.patch.object(api, "_save_custom_provider"):
+            result = await api.register_provider(body)
+
+        self.assertTrue(result["ok"])
+        catalog_payloads = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
+        self.assertEqual(len(catalog_payloads), 2)
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_payloads))
+        route_calls = [(path, payload) for path, payload, _ in calls if path.endswith("gateway-route")]
+        self.assertEqual(len(route_calls), 2)
+        self.assertEqual(route_calls[0][1]["gatewaySlug"], "litellm-reference")
+        self.assertEqual(route_calls[0][1]["upstreamProvider"], "openai")
+        self.assertEqual(route_calls[0][1]["secretMaterial"], {"api_key": "secret-key-value"})
+        self.assertEqual(result["employees"][0]["route"]["externalRouteRef"], "employment:empl_alpha")
+        self.assertEqual(result["defaultEmployeeId"], "emp_beta")
+
     def test_custom_supplier_name_is_optional_and_identity_is_stable_by_endpoint(self) -> None:
         first = api._custom_supplier_identity("https://proxy.example.com/v1")
         second = api._custom_supplier_identity("https://proxy.example.com/v1/", "")

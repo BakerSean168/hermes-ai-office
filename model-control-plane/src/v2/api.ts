@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import type { DispatchService } from './dispatch.js';
 import type { GatewayDiscoveryService } from './discovery.js';
+import type { GatewayProvisioningService } from './gatewayProvisioning.js';
 import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
 import type { FinanceRepository } from './finance.js';
 import {
@@ -34,6 +35,7 @@ export function registerV2Routes(
     invocationService?: InvocationService;
     lifecycleService?: WorkforceLifecycleService;
     discoveryService?: GatewayDiscoveryService;
+    gatewayProvisioning?: GatewayProvisioningService;
     usageReconciliationService?: UsageReconciliationService;
     supply?: SupplyRepository;
     finance?: FinanceRepository;
@@ -95,6 +97,49 @@ export function registerV2Routes(
       .prepare('SELECT id,checksum,applied_at FROM v2_schema_migrations ORDER BY id')
       .all(),
   }));
+
+  app.post<{ Params: { employmentId: string } }>(
+    '/api/v2/internal/employments/:employmentId/gateway-route',
+    async (request, reply) => {
+      if (!services.gatewayProvisioning) {
+        reply.code(503);
+        return { error: { code: 'GATEWAY_PROVISIONING_SERVICE_UNAVAILABLE' } };
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const protocol = String(body.protocol ?? '');
+      if (!['openai-chat-completions', 'openai-responses'].includes(protocol)) {
+        reply.code(400);
+        return { error: { code: 'GATEWAY_PROVISIONING_PROTOCOL_INVALID' } };
+      }
+      if (!body.upstreamProvider || !body.upstreamModel || !body.secretMaterial) {
+        reply.code(400);
+        return { error: { code: 'GATEWAY_PROVISIONING_FIELDS_REQUIRED' } };
+      }
+      if (
+        typeof body.secretMaterial !== 'object' ||
+        body.secretMaterial === null ||
+        Array.isArray(body.secretMaterial)
+      ) {
+        reply.code(400);
+        return { error: { code: 'GATEWAY_SECRET_MATERIAL_INVALID' } };
+      }
+      try {
+        return await services.gatewayProvisioning.provisionEmploymentRoute({
+          employmentId: request.params.employmentId,
+          gatewaySlug: body.gatewaySlug ? String(body.gatewaySlug) : undefined,
+          protocol: protocol as 'openai-chat-completions' | 'openai-responses',
+          upstreamProvider: String(body.upstreamProvider),
+          upstreamModel: String(body.upstreamModel),
+          upstreamBaseUrl: body.upstreamBaseUrl ? String(body.upstreamBaseUrl) : undefined,
+          secretMaterial: body.secretMaterial as Record<string, unknown>,
+        });
+      } catch (error) {
+        const code = error instanceof Error ? error.message : 'GATEWAY_PROVISIONING_FAILED';
+        reply.code(code.endsWith('_NOT_FOUND') ? 404 : code.includes('UNAVAILABLE') ? 503 : 422);
+        return { error: { code } };
+      }
+    },
+  );
 
   app.get('/api/v2/employees', async () => ({ items: repository.listEmployees() }));
   app.get<{ Params: { employeeId: string } }>(

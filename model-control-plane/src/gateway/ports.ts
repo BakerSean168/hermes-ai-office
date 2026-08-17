@@ -111,6 +111,44 @@ export interface GatewayInvocationResult {
   metadata?: Record<string, unknown>;
 }
 
+export interface GatewayProvisionCredential {
+  name: string;
+  provider: string;
+  secretMaterial: Record<string, string>;
+}
+
+export interface GatewayProvisionRouteInput {
+  employmentId: string;
+  externalRouteRef: string;
+  protocol: GatewayProtocol;
+  upstreamModel: string;
+  upstreamBaseUrl?: string;
+  credential: GatewayProvisionCredential;
+  metadata?: Record<string, unknown>;
+}
+
+export interface GatewayProvisionRouteResult {
+  route: GatewayRouteRef;
+  externalDeploymentRef?: string;
+  credentialName: string;
+  created: boolean;
+  observedAt: number;
+}
+
+export interface GatewayProvisioningPort {
+  readonly gatewayId: string;
+  provisionRoute(input: GatewayProvisionRouteInput): Promise<GatewayProvisionRouteResult>;
+}
+
+export function supportsGatewayProvisioning(
+  gateway: GatewayExecutionPort,
+): gateway is GatewayExecutionPort & GatewayProvisioningPort {
+  return (
+    'provisionRoute' in gateway &&
+    typeof (gateway as Partial<GatewayProvisioningPort>).provisionRoute === 'function'
+  );
+}
+
 export interface GatewayInvocationPort {
   readonly gatewayId: string;
   invoke(request: GatewayInvocationRequest, signal?: AbortSignal): Promise<GatewayInvocationResult>;

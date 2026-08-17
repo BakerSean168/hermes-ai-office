@@ -6,9 +6,12 @@ import type {
   GatewayExecutionPort,
   GatewayInvocationPort,
   GatewayInvocationRequest,
+  GatewayProvisioningPort,
+  GatewayProvisionRouteInput,
   GatewayRouteRef,
 } from '../src/gateway/ports.js';
 import { GatewayRegistry } from '../src/gateway/registry.js';
+import { SupplyRepository } from '../src/v2/supply.js';
 
 const cpa: LegacyCpaPort = {
   async status() {
@@ -200,6 +203,101 @@ class ApiFakeGateway implements GatewayExecutionPort, GatewayInvocationPort {
     };
   }
 }
+
+class ProvisioningApiFakeGateway implements GatewayExecutionPort, GatewayProvisioningPort {
+  readonly gatewayId = 'litellm-reference';
+  provisioned: GatewayProvisionRouteInput | null = null;
+
+  async resolveRoute(_employmentId: string) {
+    return { route: null, routable: false, reasons: ['NOT_BOUND_YET'], observedAt: Date.now() };
+  }
+
+  async getRouteHealth(_route: GatewayRouteRef) {
+    return 'healthy' as const;
+  }
+
+  async provisionRoute(input: GatewayProvisionRouteInput) {
+    this.provisioned = input;
+    return {
+      route: {
+        gatewayId: this.gatewayId,
+        employmentId: input.employmentId,
+        externalRouteRef: input.externalRouteRef,
+        protocol: input.protocol,
+      },
+      externalDeploymentRef: 'deployment_custom',
+      credentialName: input.credential.name,
+      created: true,
+      observedAt: Date.now(),
+    };
+  }
+}
+
+test('internal gateway provisioning stores only safe Employment routing facts', async () => {
+  const gateway = new ProvisioningApiFakeGateway();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa,
+    cpaUsage: usage,
+    initialSync: false,
+    gateways: new GatewayRegistry([gateway]),
+  });
+  const supply = new SupplyRepository(runtime.v2);
+  runtime.v2.getOrCreateGateway({
+    slug: 'litellm-reference',
+    kind: 'LITELLM',
+    displayName: 'LiteLLM Reference Gateway',
+  });
+  const catalog = supply.registerCatalogEntry({
+    supplier: { slug: 'custom-router', name: 'Custom Router' },
+    supplierModel: { key: 'team-model', name: 'Team Model' },
+    agreement: { externalAccountRef: 'custom-router-primary', name: 'Custom Router Primary' },
+  });
+  const employment = catalog.employment as Record<string, unknown>;
+  try {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/internal/employments/${employment.id}/gateway-route`,
+      payload: {
+        gatewaySlug: 'litellm-reference',
+        protocol: 'openai-chat-completions',
+        upstreamProvider: 'openai',
+        upstreamModel: 'team-model',
+        upstreamBaseUrl: 'https://proxy.example/v1',
+        secretMaterial: { api_key: 'ephemeral-upstream-secret' },
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.equal(body.route.externalRouteRef, `employment:${employment.id}`);
+    assert.equal(body.runtimeSelectors.OPENCODE.model, `hermes-office/employment:${employment.id}`);
+    assert.equal(JSON.stringify(body).includes('ephemeral-upstream-secret'), false);
+    assert.equal(
+      gateway.provisioned?.credential.name,
+      `hermes-agreement-${employment.supplyAgreementId}`,
+    );
+    assert.deepEqual(gateway.provisioned?.credential.secretMaterial, {
+      api_key: 'ephemeral-upstream-secret',
+    });
+
+    const stored = JSON.stringify({
+      channels: runtime.v2.listChannels('litellm-reference'),
+      bindings: runtime.v2.findActiveGatewayBinding(String(employment.id), 'litellm-reference'),
+      events: runtime.v2.db
+        .prepare('SELECT type,entity_type,entity_id,payload_json FROM v2_events')
+        .all(),
+    });
+    assert.equal(stored.includes('ephemeral-upstream-secret'), false);
+    assert.equal(
+      runtime.v2.findActiveGatewayBinding(String(employment.id), 'litellm-reference')
+        ?.externalRouteRef,
+      `employment:${employment.id}`,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
 
 test('V2 command API opens a Run, Duty and dispatches current Employee', async () => {
   const gateway = new ApiFakeGateway();

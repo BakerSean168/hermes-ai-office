@@ -253,3 +253,145 @@ test('LiteLLM invocation normalizes Responses API evidence without exposing prov
     );
   }
 });
+
+test('LiteLLM provisioning keeps one Employment route and references a reusable credential', async () => {
+  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  let visible = false;
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== 'Bearer test-master') {
+      response.writeHead(401).end('{}');
+      return;
+    }
+    let body = '';
+    request.on('data', (chunk) => (body += chunk));
+    request.on('end', () => {
+      const payload = body ? (JSON.parse(body) as Record<string, unknown>) : undefined;
+      calls.push({ url: request.url ?? '', method: request.method ?? 'GET', body: payload });
+      response.setHeader('content-type', 'application/json');
+      if (request.url === '/credentials/by_name/hermes-agreement-agr_1') {
+        response.writeHead(404).end('{}');
+        return;
+      }
+      if (request.url === '/credentials' && request.method === 'POST') {
+        response.end(JSON.stringify({ credential_name: 'hermes-agreement-agr_1' }));
+        return;
+      }
+      if (request.url === '/model/info') {
+        response.end(JSON.stringify({ data: [] }));
+        return;
+      }
+      if (request.url === '/model/new' && request.method === 'POST') {
+        visible = true;
+        response.end(
+          JSON.stringify({
+            model_name: 'employment:empl_custom',
+            model_info: { id: 'deployment_1', db_model: true },
+          }),
+        );
+        return;
+      }
+      if (request.url === '/v1/models') {
+        response.end(JSON.stringify({ data: visible ? [{ id: 'employment:empl_custom' }] : [] }));
+        return;
+      }
+      response.writeHead(404).end('{}');
+    });
+  });
+  const port = await listen(server);
+  const gateway = new LiteLlmGateway({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secrets: new StaticBearerTokenProvider('test-master'),
+    bindings: new StaticGatewayBindingSource([]),
+  });
+
+  try {
+    const result = await gateway.provisionRoute({
+      employmentId: 'empl_custom',
+      externalRouteRef: 'employment:empl_custom',
+      protocol: 'openai-chat-completions',
+      upstreamModel: 'openai/custom-model',
+      upstreamBaseUrl: 'https://proxy.example/v1',
+      credential: {
+        name: 'hermes-agreement-agr_1',
+        provider: 'openai',
+        secretMaterial: { api_key: 'upstream-secret' },
+      },
+      metadata: { supplierId: 'sup_1' },
+    });
+
+    assert.equal(result.created, true);
+    assert.equal(result.externalDeploymentRef, 'deployment_1');
+    assert.equal(result.route.externalRouteRef, 'employment:empl_custom');
+    assert.equal(result.route.employmentId, 'empl_custom');
+    const credentialCall = calls.find((call) => call.url === '/credentials');
+    assert.deepEqual(credentialCall?.body, {
+      credential_name: 'hermes-agreement-agr_1',
+      credential_info: { custom_llm_provider: 'openai', api_base: 'https://proxy.example/v1' },
+      credential_values: { api_key: 'upstream-secret' },
+    });
+    const modelCall = calls.find((call) => call.url === '/model/new');
+    assert.equal(JSON.stringify(modelCall?.body).includes('upstream-secret'), false);
+    assert.equal(
+      (modelCall?.body?.litellm_params as Record<string, unknown>).litellm_credential_name,
+      'hermes-agreement-agr_1',
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
+
+test('LiteLLM provisioning refuses to mutate a config-owned route', async () => {
+  const server = createServer((request, response) => {
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/credentials/by_name/hermes-agreement-agr_1') {
+      response.end(JSON.stringify({ credential_name: 'hermes-agreement-agr_1' }));
+      return;
+    }
+    if (request.url === '/credentials/hermes-agreement-agr_1' && request.method === 'PATCH') {
+      response.end(JSON.stringify({ credential_name: 'hermes-agreement-agr_1' }));
+      return;
+    }
+    if (request.url === '/model/info') {
+      response.end(
+        JSON.stringify({
+          data: [
+            {
+              model_name: 'employment:empl_static',
+              model_info: { id: 'static_1', db_model: false },
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    response.writeHead(404).end('{}');
+  });
+  const port = await listen(server);
+  const gateway = new LiteLlmGateway({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secrets: new StaticBearerTokenProvider('test-master'),
+    bindings: new StaticGatewayBindingSource([]),
+  });
+  try {
+    await assert.rejects(
+      gateway.provisionRoute({
+        employmentId: 'empl_static',
+        externalRouteRef: 'employment:empl_static',
+        protocol: 'openai-chat-completions',
+        upstreamModel: 'openai/test',
+        credential: {
+          name: 'hermes-agreement-agr_1',
+          provider: 'openai',
+          secretMaterial: { api_key: 'secret' },
+        },
+      }),
+      /LITELLM_CONFIG_ROUTE_IMMUTABLE/,
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
+});
