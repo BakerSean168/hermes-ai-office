@@ -339,35 +339,92 @@ def _save_custom_provider(descriptor: Mapping[str, Any]) -> None:
     config_mod.save_config({"custom_providers": rows}, merge_existing=True)
 
 
-def _runtime_selectors(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
-    prefix = str(descriptor.get("opencodePrefix") or "").strip()
-    if not prefix:
-        return {}
-    return {"OPENCODE": {"model": f"{prefix}/{model}", "provider": prefix}}
+def _runtime_access_provider_ref(descriptor: Mapping[str, Any]) -> str:
+    preset_id = str(descriptor.get("id") or "").strip().lower()
+    if preset_id and preset_id != "custom":
+        prefix = str(descriptor.get("opencodePrefix") or preset_id).strip().lower()
+        if prefix:
+            return prefix[:120]
+    supplier_slug = str(descriptor.get("supplierSlug") or "custom").strip().lower()
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in supplier_slug)
+    return ("hao-" + safe).strip("-")[:120]
 
 
-def _gateway_provision_payload(
-    descriptor: Mapping[str, Any], model: str, api_key: str
-) -> Dict[str, Any]:
+def _codex_provider_ref(descriptor: Mapping[str, Any]) -> str:
+    supplier_slug = str(descriptor.get("supplierSlug") or "custom").strip().lower()
+    endpoint = str(descriptor.get("baseUrl") or "")
+    digest = hashlib.blake2b(endpoint.encode("utf-8"), digest_size=4).hexdigest()
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in supplier_slug)
+    return f"hao-{safe}-{digest}"[:120]
+
+
+def _codex_profile_ref(descriptor: Mapping[str, Any], model: str) -> str:
+    seed = f"{descriptor.get('supplierSlug')}|{descriptor.get('baseUrl')}|{model}"
+    digest = hashlib.blake2b(seed.encode("utf-8"), digest_size=5).hexdigest()
+    return f"hao-{str(descriptor.get('supplierSlug') or 'provider')[:40]}-{digest}"[:120]
+
+
+def _runtime_access_payloads(descriptor: Mapping[str, Any], model: str) -> list[Dict[str, Any]]:
     transport = str(descriptor.get("transport") or "openai_chat")
     protocol = {
         "codex_responses": "openai-responses",
         "openai_chat": "openai-chat-completions",
-    }.get(transport)
-    if not protocol:
-        raise ValueError("该供应商协议暂不支持自动接入 LiteLLM")
+        "anthropic_messages": "anthropic-messages",
+    }.get(transport, transport)
+    base_url = str(descriptor.get("baseUrl") or "").rstrip("/")
+    credential_ref = str(descriptor.get("keyEnv") or "").strip()
     provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
-    upstream_provider = "openai" if provider_id == "custom" or provider_id.startswith("custom:") else provider_id
-    if upstream_provider == "openai-api":
-        upstream_provider = "openai"
-    return {
-        "gatewaySlug": "litellm-reference",
-        "protocol": protocol,
-        "upstreamProvider": upstream_provider,
-        "upstreamModel": model,
-        "upstreamBaseUrl": str(descriptor.get("baseUrl") or ""),
-        "secretMaterial": {"api_key": api_key},
-    }
+    opencode_provider = _runtime_access_provider_ref(descriptor)
+    custom_provider = provider_id == "custom" or provider_id.startswith("custom:")
+
+    accesses: list[Dict[str, Any]] = []
+    if transport in {"openai_chat", "codex_responses"}:
+        accesses.append(
+            {
+                "runtimeKind": "OPENCODE",
+                "adapterKind": "NATIVE_CONFIG",
+                "providerRef": opencode_provider,
+                "modelRef": model,
+                "baseUrl": base_url if custom_provider else None,
+                "credentialRef": credential_ref or None,
+                "protocol": protocol,
+                "config": {
+                    "managedProvider": custom_provider,
+                    **({"package": "@ai-sdk/openai-compatible"} if custom_provider else {}),
+                },
+                "priority": 100,
+            }
+        )
+        codex_provider = _codex_provider_ref(descriptor)
+        accesses.append(
+            {
+                "runtimeKind": "CODEX",
+                "adapterKind": "NATIVE_CONFIG",
+                "providerRef": codex_provider,
+                "modelRef": model,
+                "profileRef": _codex_profile_ref(descriptor, model),
+                "baseUrl": base_url or None,
+                "credentialRef": credential_ref or None,
+                "protocol": protocol,
+                "config": {"wireApi": "responses" if transport == "codex_responses" else "chat"},
+                "priority": 100,
+            }
+        )
+    elif transport == "anthropic_messages":
+        accesses.append(
+            {
+                "runtimeKind": "CLAUDE_CODE",
+                "adapterKind": "NATIVE_CONFIG",
+                "providerRef": "anthropic",
+                "modelRef": model,
+                "baseUrl": base_url or None,
+                "credentialRef": credential_ref or None,
+                "protocol": protocol,
+                "config": {},
+                "priority": 100,
+            }
+        )
+    return accesses
 
 
 def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
@@ -386,9 +443,6 @@ def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any
     }
     if plan:
         payload["plan"] = dict(plan)
-    selectors = _runtime_selectors(descriptor, model)
-    if selectors:
-        payload["runtimeSelectors"] = selectors
     return payload
 
 def _model_config(value: Any) -> Dict[str, str]:
@@ -672,7 +726,6 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
         if default_model not in selected:
             raise ValueError("默认员工必须来自已选择的模型")
 
-        route_api_key = body.api_key.strip() or _existing_provider_key(descriptor)
         if body.api_key.strip():
             await asyncio.to_thread(_save_provider_secret, descriptor, body.api_key)
         if body.preset_id == "custom":
@@ -701,15 +754,21 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
             employee_id = str(employee["id"])
             employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
             employment_id = str(employment.get("id") or "")
-            route: Dict[str, Any] | None = None
-            if body.preset_id == "custom":
-                if not employment_id or not route_api_key:
-                    raise RuntimeError("control plane did not return routable employment identity")
-                route = await asyncio.to_thread(
+            runtime_accesses = []
+            if not employment_id:
+                raise RuntimeError("control plane did not return employment identity")
+            for access_payload in _runtime_access_payloads(descriptor, model):
+                runtime_access = await asyncio.to_thread(
                     _post_json,
-                    f"/api/v2/internal/employments/{employment_id}/gateway-route",
-                    _gateway_provision_payload(descriptor, model, route_api_key),
+                    f"/api/v2/commands/employments/{employment_id}/runtime-access",
+                    access_payload,
+                    idempotency_key=(
+                        f"office-runtime-access-{employment_id}-"
+                        f"{str(access_payload.get('runtimeKind') or '').lower()}-"
+                        f"{hashlib.blake2b(json.dumps(access_payload, sort_keys=True).encode('utf-8'), digest_size=5).hexdigest()}"
+                    ),
                 )
+                runtime_accesses.append(runtime_access)
             employee_ids.append(employee_id)
             if model == default_model:
                 default_employee_id = employee_id
@@ -719,7 +778,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                     "employeeId": employee_id,
                     "employeeName": employee.get("displayName") or model,
                     "employmentId": employment_id or None,
-                    "route": route.get("route") if route else None,
+                    "runtimeAccess": runtime_accesses,
                 }
             )
         preference = await asyncio.to_thread(

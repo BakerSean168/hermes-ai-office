@@ -188,7 +188,12 @@
       "suppliers.defaultEmployee": "Default employee",
       "suppliers.defaultEmployeeNone": "No preferred employee",
       "suppliers.agreements": "Agreements",
-      "suppliers.channels": "Channels",
+      "suppliers.channels": "Technical channels",
+      "suppliers.runtimeAccess": "Agent access",
+      "suppliers.nativeAccess": "Native config",
+      "suppliers.gatewayAccess": "Gateway adapter",
+      "suppliers.accessProvider": "Provider / profile",
+      "suppliers.accessModel": "Model",
       "suppliers.observed": "Observed requests",
       "suppliers.noPlan": "No explicit plan metadata",
       "suppliers.noEmployees": "No employee identities",
@@ -197,7 +202,7 @@
       "suppliers.disabled": "Not selected",
       "suppliers.preferred": "Default",
       "suppliers.detailTitle": "Supplier details",
-      "suppliers.detailSubtitle": "Business identity, selected employees, agreements, and technical evidence",
+      "suppliers.detailSubtitle": "Business identity, selected employees, native Agent access, agreements, and technical evidence",
       "suppliers.addTitle": "Add supplier",
       "suppliers.addSubtitle": "Choose a common provider or use any OpenAI-compatible endpoint.",
       "suppliers.chooseProvider": "1. Choose provider",
@@ -217,7 +222,7 @@
       "suppliers.saveSupplier": "Save supplier",
       "suppliers.savingSupplier": "Saving supplier…",
       "suppliers.saved": "Supplier saved. Workforce policy has been updated.",
-      "suppliers.security": "The API key stays inside the local Hermes/LiteLLM credential boundary. AI Office business storage keeps only supplier, employment, and employee records.",
+      "suppliers.security": "The API key stays in Hermes local credential storage. Agent calls use native OpenCode/Codex configuration by default; LiteLLM is only an optional compatibility adapter. AI Office business storage never stores the key.",
       "suppliers.custom": "Custom endpoint",
       "suppliers.customHint": "OpenAI-compatible URL + API key",
       "suppliers.configured": "Configured",
@@ -428,7 +433,12 @@
       "suppliers.defaultEmployee": "默认员工",
       "suppliers.defaultEmployeeNone": "暂无默认员工",
       "suppliers.agreements": "供应协议",
-      "suppliers.channels": "通道",
+      "suppliers.channels": "技术通道",
+      "suppliers.runtimeAccess": "Agent 接入",
+      "suppliers.nativeAccess": "原生配置",
+      "suppliers.gatewayAccess": "网关适配",
+      "suppliers.accessProvider": "Provider / Profile",
+      "suppliers.accessModel": "模型",
       "suppliers.observed": "观测请求",
       "suppliers.noPlan": "暂无明确套餐元数据",
       "suppliers.noEmployees": "暂无员工身份",
@@ -437,7 +447,7 @@
       "suppliers.disabled": "未选用",
       "suppliers.preferred": "默认",
       "suppliers.detailTitle": "供应商详情",
-      "suppliers.detailSubtitle": "供应商身份、员工选择、供应协议与技术证据",
+      "suppliers.detailSubtitle": "供应商身份、员工选择、Agent 原生接入、供应协议与技术证据",
       "suppliers.addTitle": "添加供应商",
       "suppliers.addSubtitle": "选择常用供应商，或者直接填写任意 OpenAI 兼容请求地址。",
       "suppliers.chooseProvider": "1. 选择供应商",
@@ -457,7 +467,7 @@
       "suppliers.saveSupplier": "保存供应商",
       "suppliers.savingSupplier": "正在保存…",
       "suppliers.saved": "供应商已保存，员工策略已同步。",
-      "suppliers.security": "API Key 只保存在 Hermes/LiteLLM 本地凭证边界；AI Office 业务库只记录供应商、Employment 与员工等业务数据。",
+      "suppliers.security": "API Key 只保存在 Hermes 本地凭证管理中。模型调用默认通过 OpenCode/Codex 等官方 Agent 的原生配置直连；LiteLLM 仅作为可选兼容适配器。AI Office 业务库永不保存 Key。",
       "suppliers.custom": "自定义接口",
       "suppliers.customHint": "OpenAI 兼容地址 + API Key",
       "suppliers.configured": "已配置",
@@ -1749,6 +1759,20 @@
       const channels = agreements.flatMap(function (agreement) {
         return asArray(agreement.channels);
       });
+      const employments = agreements.flatMap(function (agreement) {
+        return asArray(agreement.employments);
+      });
+      const runtimeAccess = employments.flatMap(function (employment) {
+        return asArray(employment.runtimeAccess).map(function (access) {
+          return Object.assign({ employeeName: employment.employeeName, employmentId: employment.id }, access);
+        });
+      });
+      const nativeAccess = runtimeAccess.filter(function (access) {
+        return access.adapterKind === "NATIVE_CONFIG" && access.lifecycle === "ACTIVE";
+      });
+      const gatewayAccess = runtimeAccess.filter(function (access) {
+        return access.adapterKind === "GATEWAY" && access.lifecycle === "ACTIVE";
+      });
       const metadata = asObject(supplier.metadata);
       const preferences = asObject(metadata.staffingPreferences);
       const explicitlySelected = Array.isArray(preferences.enabledEmployeeIds);
@@ -1768,6 +1792,10 @@
         employees: employees,
         agreements: agreements,
         channels: channels,
+        employments: employments,
+        runtimeAccess: runtimeAccess,
+        nativeAccess: nativeAccess,
+        gatewayAccess: gatewayAccess,
         enabledIds: enabledIds,
         explicitlySelected: explicitlySelected,
         defaultEmployee: defaultEmployee,
@@ -1836,9 +1864,11 @@
                   "div",
                   { className: "hao-supplier-row-status" },
                   h(Status, { value: supplier.lifecycle, t: props.t }),
-                  facts.channels.length
-                    ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
-                    : null,
+                  facts.nativeAccess.length
+                    ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.nativeAccess.length) + " " + props.t("suppliers.nativeAccess"))
+                    : facts.channels.length
+                      ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
+                      : null,
                 ),
                 h(Button, { kind: "quiet", onClick: function () { setDetailSupplier(supplier); } }, props.t("suppliers.details")),
               );
@@ -1897,6 +1927,31 @@
                       }),
                     )
                   : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
+              ),
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.runtimeAccess")),
+                detailFacts.runtimeAccess.length
+                  ? h(
+                      "div",
+                      { className: "hao-agreement-list" },
+                      detailFacts.runtimeAccess.map(function (access) {
+                        const provider = access.profileRef || access.providerRef || "—";
+                        return h(
+                          "div",
+                          { className: "hao-agreement-row", key: access.id },
+                          h(
+                            "div",
+                            null,
+                            h("strong", null, (access.employeeName || "") + " · " + (access.runtimeKind || "")),
+                            h("small", null, props.t("suppliers.accessProvider") + ": " + provider + " · " + props.t("suppliers.accessModel") + ": " + (access.modelRef || "—")),
+                          ),
+                          h("span", { className: access.adapterKind === "NATIVE_CONFIG" ? "hao-badge hao-badge-good" : "hao-badge" }, access.adapterKind === "NATIVE_CONFIG" ? props.t("suppliers.nativeAccess") : props.t("suppliers.gatewayAccess")),
+                        );
+                      }),
+                    )
+                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
               ),
               h(
                 "section",

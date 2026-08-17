@@ -181,6 +181,79 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 self.assertIn('env_key = "HERMES_LITELLM_RUNTIME_KEY"', text)
                 self.assertIn("[profiles.hermes-office]", text)
 
+    def test_native_opencode_access_materializes_provider_config_without_plaintext_key(self) -> None:
+        decision = self.selected(model="hao-custom-team/alpha")
+        decision["selectedAccess"] = {
+            "id": "raccess_1",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": "hao-custom-team",
+            "baseUrl": "https://proxy.example.com/v1",
+            "credentialRef": "HERMES_AI_OFFICE_TEAM_API_KEY",
+            "protocol": "openai-chat-completions",
+            "config": {"managedProvider": True, "package": "@ai-sdk/openai-compatible"},
+        }
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ, {"HERMES_HOME": root}
+        ), mock.patch.object(plugin, "_credential_value", return_value="native-secret-value"), mock.patch.object(
+            plugin, "_resolve_runtime_policy", return_value=decision
+        ), mock.patch.object(plugin, "_enqueue"):
+            plugin._CTX = FakeContext(profile="coder")
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "opencode run 'ship it'"},
+                tool_call_id="tool-native-opencode",
+            )
+            self.assertEqual(directive["action"], "modify")
+            self.assertIn("opencode run --model hao-custom-team/alpha", directive["args"]["command"])
+            self.assertNotIn("native-secret-value", directive["args"]["command"])
+            for home in [Path(root) / "home", Path(root) / "profiles" / "coder" / "home"]:
+                config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
+                provider = config["provider"]["hao-custom-team"]
+                self.assertEqual(provider["options"]["baseURL"], "https://proxy.example.com/v1")
+                self.assertTrue(provider["options"]["apiKey"].startswith("{file:"))
+                self.assertNotIn("native-secret-value", json.dumps(config))
+                self.assertIn("alpha", provider["models"])
+            secret_files = list((Path(root) / "secrets" / "hermes-ai-office").glob("*.key"))
+            self.assertEqual(len(secret_files), 1)
+            self.assertEqual(secret_files[0].read_text(), "native-secret-value")
+            self.assertEqual(secret_files[0].stat().st_mode & 0o777, 0o600)
+
+    def test_native_codex_access_uses_named_profile_and_env_key_file(self) -> None:
+        decision = self.selected(runtime="CODEX", model="gpt-5.6-sol")
+        decision["selectedProfile"] = "hao-anyrouter-a1b2c3"
+        decision["selectedAccess"] = {
+            "id": "raccess_2",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": "hao-anyrouter-1234",
+            "baseUrl": "https://anyrouter.top/v1",
+            "credentialRef": "ANYROUTER_API_KEY",
+            "protocol": "openai-responses",
+            "config": {"wireApi": "responses"},
+        }
+        with tempfile.TemporaryDirectory() as root, mock.patch.dict(
+            os.environ, {"HERMES_HOME": root}
+        ), mock.patch.object(plugin, "_credential_value", return_value="codex-native-secret"), mock.patch.object(
+            plugin, "_resolve_runtime_policy", return_value=decision
+        ), mock.patch.object(plugin, "_enqueue"):
+            plugin._CTX = FakeContext(profile="reviewer")
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "codex exec 'review'"},
+                tool_call_id="tool-native-codex",
+            )
+            command = directive["args"]["command"]
+            self.assertIn("codex --profile hao-anyrouter-a1b2c3 exec", command)
+            self.assertNotIn("--model", command)
+            self.assertIn('ANYROUTER_API_KEY="$(cat ', command)
+            self.assertNotIn("codex-native-secret", command)
+            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
+                text = (home / ".codex" / "config.toml").read_text()
+                self.assertIn('[model_providers."hao-anyrouter-1234"]', text)
+                self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
+                self.assertIn('[profiles."hao-anyrouter-a1b2c3"]', text)
+                self.assertIn('model = "gpt-5.6-sol"', text)
+                self.assertNotIn("codex-native-secret", text)
+
     def test_explicit_override_is_respected_in_prefer_mode(self) -> None:
         decision = {
             "id": "rlaunch_override",

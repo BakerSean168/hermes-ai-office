@@ -13,6 +13,7 @@ provider credentials are never sent to the Office control plane.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -280,6 +281,192 @@ def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _credential_value(reference: str) -> str:
+    name = reference.strip()
+    if not name:
+        return ""
+    try:
+        from hermes_cli import config as config_mod
+
+        if hasattr(config_mod, "get_env_value_prefer_dotenv"):
+            value = config_mod.get_env_value_prefer_dotenv(name)
+            if value:
+                return str(value).strip()
+        if hasattr(config_mod, "load_env"):
+            value = (config_mod.load_env() or {}).get(name)
+            if value:
+                return str(value).strip()
+    except Exception:
+        pass
+    return str(os.environ.get(name) or "").strip()
+
+
+def _runtime_secret_file(reference: str) -> str | None:
+    value = _credential_value(reference)
+    if not value:
+        return None
+    root = Path(os.environ.get("HERMES_HOME", "/opt/data")) / "secrets" / "hermes-ai-office"
+    digest = hashlib.blake2b(reference.encode("utf-8"), digest_size=8).hexdigest()
+    path = root / f"credential-{digest}.key"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(value, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        return str(path)
+    except OSError:
+        return None
+
+
+def _selected_access(decision: dict[str, Any]) -> dict[str, Any]:
+    value = decision.get("selectedAccess")
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _ensure_opencode_native_access(decision: dict[str, Any]) -> bool:
+    access = _selected_access(decision)
+    config = access.get("config") if isinstance(access.get("config"), dict) else {}
+    managed_provider = bool(config.get("managedProvider"))
+    provider_ref = str(access.get("providerRef") or "").strip()
+    selected_model = str(decision.get("selectedModel") or "").strip()
+    if not provider_ref or not selected_model.startswith(provider_ref + "/"):
+        return False
+    model_ref = selected_model[len(provider_ref) + 1 :].strip()
+    base_url = str(access.get("baseUrl") or "").strip()
+    credential_ref = str(access.get("credentialRef") or "").strip()
+    if not model_ref:
+        return False
+    if not managed_provider and not base_url and not credential_ref:
+        return True
+    if managed_provider and not base_url:
+        return False
+    secret_file = _runtime_secret_file(credential_ref) if credential_ref else None
+    if credential_ref and not secret_file:
+        return False
+    package = str(config.get("package") or "@ai-sdk/openai-compatible").strip()
+
+    for home in _runtime_homes():
+        path = home / ".config" / "opencode" / "opencode.json"
+        try:
+            current: dict[str, Any] = {}
+            if path.exists():
+                parsed = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(parsed, dict):
+                    return False
+                current = parsed
+            providers = current.get("provider")
+            if not isinstance(providers, dict):
+                providers = {}
+                current["provider"] = providers
+            existing = providers.get(provider_ref)
+            provider = dict(existing) if isinstance(existing, dict) else {}
+            options = provider.get("options")
+            options = dict(options) if isinstance(options, dict) else {}
+            if base_url:
+                options["baseURL"] = base_url.rstrip("/")
+            if secret_file:
+                options["apiKey"] = "{file:%s}" % secret_file
+            models = provider.get("models")
+            models = dict(models) if isinstance(models, dict) else {}
+            model_config = models.get(model_ref)
+            if not isinstance(model_config, dict):
+                models[model_ref] = {"name": model_ref}
+            provider.update(
+                {
+                    "name": str(provider.get("name") or ("Hermes AI Office · " + provider_ref)),
+                    "options": options,
+                    "models": models,
+                }
+            )
+            if managed_provider:
+                provider["npm"] = package
+            providers[provider_ref] = provider
+            _write_json_atomic(path, current)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return False
+    return True
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _replace_managed_toml_block(current: str, marker_type: str, marker_name: str, body: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "-", marker_name)[:120]
+    begin = f"# BEGIN HERMES AI OFFICE {marker_type} {safe_name}"
+    end = f"# END HERMES AI OFFICE {marker_type} {safe_name}"
+    managed = begin + "\n" + body.rstrip() + "\n" + end + "\n"
+    pattern = re.compile(rf"(?ms)^{re.escape(begin)}\n.*?^{re.escape(end)}\n?")
+    if pattern.search(current):
+        return pattern.sub(managed, current)
+    return current.rstrip() + ("\n\n" if current.strip() else "") + managed
+
+
+def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
+    access = _selected_access(decision)
+    provider_ref = str(access.get("providerRef") or "").strip()
+    profile_ref = str(decision.get("selectedProfile") or "").strip()
+    model = str(decision.get("selectedModel") or "").strip()
+    base_url = str(access.get("baseUrl") or "").strip()
+    credential_ref = str(access.get("credentialRef") or "").strip()
+    protocol = str(access.get("protocol") or "").strip()
+    config = access.get("config") if isinstance(access.get("config"), dict) else {}
+    wire_api = str(config.get("wireApi") or ("responses" if protocol == "openai-responses" else "chat"))
+    if not provider_ref or not profile_ref or not model:
+        return False
+    if not base_url and not credential_ref:
+        return True
+    if not base_url:
+        return False
+    if credential_ref and not _runtime_secret_file(credential_ref):
+        return False
+
+    provider_lines = [
+        f"[model_providers.{_toml_string(provider_ref)}]",
+        f"name = {_toml_string('Hermes AI Office · ' + provider_ref)}",
+        f"base_url = {_toml_string(base_url.rstrip('/'))}",
+    ]
+    if credential_ref:
+        provider_lines.append(f"env_key = {_toml_string(credential_ref)}")
+    provider_lines.append(f"wire_api = {_toml_string(wire_api)}")
+    profile_lines = [
+        f"[profiles.{_toml_string(profile_ref)}]",
+        f"model_provider = {_toml_string(provider_ref)}",
+        f"model = {_toml_string(model)}",
+    ]
+
+    for home in _runtime_homes():
+        path = home / ".codex" / "config.toml"
+        try:
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            updated = _replace_managed_toml_block(
+                current, "PROVIDER", provider_ref, "\n".join(provider_lines)
+            )
+            updated = _replace_managed_toml_block(
+                updated, "PROFILE", profile_ref, "\n".join(profile_lines)
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + ".hermes-office.tmp")
+            temporary.write_text(updated, encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+        except OSError:
+            return False
+    return True
+
+
+def _ensure_native_runtime_access(runtime: str, decision: dict[str, Any]) -> bool:
+    access = _selected_access(decision)
+    if str(access.get("adapterKind") or "") != "NATIVE_CONFIG":
+        return True
+    if runtime == "opencode":
+        return _ensure_opencode_native_access(decision)
+    if runtime == "codex":
+        return _ensure_codex_native_access(decision)
+    return True
+
 def _ensure_opencode_gateway_model(model: str) -> bool:
     prefix = _LITELLM_RUNTIME_PROVIDER + "/"
     if not model.startswith(prefix):
@@ -356,7 +543,10 @@ def _ensure_codex_gateway_profile() -> bool:
     return True
 
 
-def _ensure_gateway_runtime(runtime: str, decision: dict[str, Any]) -> bool:
+def _ensure_selected_runtime(runtime: str, decision: dict[str, Any]) -> bool:
+    access = _selected_access(decision)
+    if str(access.get("adapterKind") or "") == "NATIVE_CONFIG":
+        return _ensure_native_runtime_access(runtime, decision)
     model = str(decision.get("selectedModel") or "").strip()
     profile = str(decision.get("selectedProfile") or "").strip()
     if runtime == "opencode":
@@ -407,9 +597,13 @@ def _inject_selection(command: str, runtime: str, decision: dict[str, Any]) -> s
     else:
         pattern = re.compile(r"(?P<exe>(?:[^\s;&|]*/)?codex)\b", re.IGNORECASE)
         profile = str(decision.get("selectedProfile") or "").strip()
-        options = f" --model {shlex.quote(model)}"
-        if profile:
-            options += f" --profile {shlex.quote(profile)}"
+        access = _selected_access(decision)
+        if str(access.get("adapterKind") or "") == "NATIVE_CONFIG" and profile:
+            options = f" --profile {shlex.quote(profile)}"
+        else:
+            options = f" --model {shlex.quote(model)}"
+            if profile:
+                options += f" --profile {shlex.quote(profile)}"
         rewritten, count = pattern.subn(lambda m: m.group("exe") + options, command, count=1)
         if count == 0:
             return command
@@ -423,12 +617,24 @@ def _inject_selection(command: str, runtime: str, decision: dict[str, Any]) -> s
     markers = " ".join(
         f"{key}={shlex.quote(str(value))}" for key, value in marker_values.items() if value
     )
-    if runtime == "codex" and str(decision.get("selectedProfile") or "") == _LITELLM_RUNTIME_PROVIDER:
-        runtime_key = '%s="$(cat %s)"' % (
-            _LITELLM_RUNTIME_KEY_ENV,
-            shlex.quote(_LITELLM_RUNTIME_KEY_FILE),
-        )
-        markers = (runtime_key + " " + markers).strip()
+    if runtime == "codex":
+        access = _selected_access(decision)
+        if str(access.get("adapterKind") or "") == "NATIVE_CONFIG":
+            credential_ref = str(access.get("credentialRef") or "").strip()
+            if credential_ref:
+                secret_file = _runtime_secret_file(credential_ref)
+                if secret_file:
+                    runtime_key = '%s="$(cat %s)"' % (
+                        credential_ref,
+                        shlex.quote(secret_file),
+                    )
+                    markers = (runtime_key + " " + markers).strip()
+        elif str(decision.get("selectedProfile") or "") == _LITELLM_RUNTIME_PROVIDER:
+            runtime_key = '%s="$(cat %s)"' % (
+                _LITELLM_RUNTIME_KEY_ENV,
+                shlex.quote(_LITELLM_RUNTIME_KEY_FILE),
+            )
+            markers = (runtime_key + " " + markers).strip()
     return _prefix_runtime_executable(rewritten, runtime, markers)
 
 
@@ -483,7 +689,7 @@ def _on_pre_tool_call(
         }
     if decision.get("status") != "SELECTED" or mode == "OBSERVE":
         return None
-    if not _ensure_gateway_runtime(runtime, decision):
+    if not _ensure_selected_runtime(runtime, decision):
         if mode == "ENFORCE":
             return {
                 "action": "block",

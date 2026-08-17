@@ -210,11 +210,14 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             calls.append((path, payload, kwargs))
             if path.endswith("/staffing-preferences"):
                 return {"metadata": {"staffingPreferences": payload}}
+            if path.endswith("/runtime-access"):
+                return {"id": "raccess_" + str(payload["runtimeKind"]).lower(), **payload}
             model = payload["supplierModel"]["key"]
             suffix = model.replace("/", "-")
             return {
                 "supplier": {"id": "sup_deepseek"},
                 "employee": {"id": f"emp_{suffix}", "displayName": model},
+                "employment": {"id": f"empl_{suffix}"},
             }
 
         body = api.ProviderRegisterRequest(
@@ -243,7 +246,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(preference["enabledEmployeeIds"], ["emp_deepseek-chat", "emp_deepseek-reasoner"])
         self.assertEqual(preference["defaultEmployeeId"], "emp_deepseek-reasoner")
 
-    async def test_custom_provider_provisions_selected_employment_routes_without_business_secret_leak(self) -> None:
+    async def test_custom_provider_creates_native_runtime_access_without_business_secret_leak(self) -> None:
         descriptor = {
             "id": "custom",
             "providerId": "custom:abc123",
@@ -265,16 +268,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                     "employee": {"id": f"emp_{model}", "displayName": model},
                     "employment": {"id": f"empl_{model}"},
                 }
-            if path.endswith("gateway-route"):
-                employment_id = path.split("/")[-2]
-                return {
-                    "route": {
-                        "gatewayId": "litellm-reference",
-                        "employmentId": employment_id,
-                        "externalRouteRef": f"employment:{employment_id}",
-                        "protocol": "openai-chat-completions",
-                    }
-                }
+            if path.endswith("runtime-access"):
+                return {"id": "raccess_" + str(payload["runtimeKind"]).lower(), **payload}
             if path.endswith("staffing-preferences"):
                 return {"metadata": {"staffingPreferences": payload}}
             raise AssertionError(path)
@@ -300,12 +295,15 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         catalog_payloads = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_payloads), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_payloads))
-        route_calls = [(path, payload) for path, payload, _ in calls if path.endswith("gateway-route")]
-        self.assertEqual(len(route_calls), 2)
-        self.assertEqual(route_calls[0][1]["gatewaySlug"], "litellm-reference")
-        self.assertEqual(route_calls[0][1]["upstreamProvider"], "openai")
-        self.assertEqual(route_calls[0][1]["secretMaterial"], {"api_key": "secret-key-value"})
-        self.assertEqual(result["employees"][0]["route"]["externalRouteRef"], "employment:empl_alpha")
+        access_calls = [(path, payload) for path, payload, _ in calls if path.endswith("runtime-access")]
+        self.assertEqual(len(access_calls), 4)
+        self.assertTrue(all(payload["adapterKind"] == "NATIVE_CONFIG" for _, payload in access_calls))
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for _, payload in access_calls))
+        opencode = next(payload for _, payload in access_calls if payload["runtimeKind"] == "OPENCODE")
+        self.assertEqual(opencode["providerRef"], "hao-custom-abc123")
+        self.assertEqual(opencode["baseUrl"], "https://proxy.example.com/v1")
+        self.assertEqual(opencode["credentialRef"], "HERMES_AI_OFFICE_ABC123_API_KEY")
+        self.assertEqual(result["employees"][0]["runtimeAccess"][0]["adapterKind"], "NATIVE_CONFIG")
         self.assertEqual(result["defaultEmployeeId"], "emp_beta")
 
     def test_custom_supplier_name_is_optional_and_identity_is_stable_by_endpoint(self) -> None:
