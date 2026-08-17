@@ -1116,6 +1116,19 @@ async def workforce() -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.get("/employees/{employee_id}/dossier")
+async def employee_dossier(employee_id: str) -> Dict[str, Any]:
+    safe_id = employee_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid employee id")
+    try:
+        return await asyncio.to_thread(
+            _fetch_json, f"/api/v2/projections/employees/{safe_id}/dossier"
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/providers/hub")
 async def provider_hub(force: bool = False) -> Dict[str, Any]:
     try:

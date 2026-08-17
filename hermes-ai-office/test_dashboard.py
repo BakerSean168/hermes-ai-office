@@ -49,6 +49,14 @@ class FakeConfig:
 
 
 class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
+    async def test_employee_dossier_proxy_is_lazy_and_validated(self) -> None:
+        with mock.patch.object(api, "_fetch_json", return_value={"identity": {"id": "emp_1"}}) as fetch:
+            result = await api.employee_dossier("emp_1")
+        self.assertEqual(result["identity"]["id"], "emp_1")
+        fetch.assert_called_once_with("/api/v2/projections/employees/emp_1/dossier")
+        with self.assertRaises(Exception):
+            await api.employee_dossier("bad/id")
+
     async def test_overview_combines_partial_local_projections(self) -> None:
         payloads = {
             "/api/v2/projections/workforce": {"summary": {"employees": 2}},
@@ -449,10 +457,16 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('selected_models: selectedModels', source)
         self.assertIn('default_model: defaultModel || selectedModels[0]', source)
         self.assertIn('className: "hao-supplier-list"', source)
+        self.assertIn('className: "hao-supplier-row hao-supplier-row-head"', source)
+        self.assertIn('props.t("suppliers.internal")', source)
+        self.assertNotIn("const suppliers = asArray(supply.suppliers).filter", source)
+        self.assertIn('className: "hao-workforce-row"', source)
+        self.assertIn('props.t("workforce.contributionTokens")', source)
+        self.assertIn('api("/employees/" + encodeURIComponent(String(employee.id)) + "/dossier")', source)
         self.assertIn('className: "hao-modal ', source)
         self.assertIn('className: "hao-preset-grid"', source)
         self.assertNotIn('const personalChannels = asArray(personalChannelProjection.channels)', source)
-        self.assertIn('String(supplier.sourceKind || "EXTERNAL") !== "INTERNAL"', source)
+        self.assertIn("const suppliers = asArray(supply.suppliers);", source)
         self.assertIn('"workforce.filterInternal": "内部员工"', source)
         self.assertNotIn('personalGateways.length', source)
         self.assertNotIn('props.t("suppliers.cpaDeepseek")', source)

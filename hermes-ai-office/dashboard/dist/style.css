@@ -1070,8 +1070,8 @@
 
 .hao-supplier-row {
   display: grid;
-  grid-template-columns: minmax(220px, 1.35fr) minmax(110px, 0.45fr) minmax(220px, 1fr) auto auto;
-  min-height: 72px;
+  grid-template-columns: minmax(260px, 2fr) 120px minmax(210px, 1.15fr) 190px 104px;
+  min-height: 74px;
   align-items: center;
   gap: 18px;
   padding: 13px 15px;
@@ -2009,4 +2009,197 @@
 .hao-detail-website > span {
   color: var(--hao-muted);
   font-size: 12px;
+}
+
+
+/* 0.11: aligned supplier and workforce summary rows. */
+.hao-supplier-row-head,
+.hao-workforce-row-head {
+  min-height: 34px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  color: var(--hao-muted);
+  font-size: 10px;
+  font-weight: 680;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.hao-supplier-row-head > span:nth-child(4),
+.hao-supplier-row-head > span:nth-child(5) {
+  text-align: right;
+}
+
+.hao-supplier-row-copy h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.hao-badge-internal {
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.hao-workforce-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.hao-workforce-row {
+  display: grid;
+  grid-template-columns: minmax(300px, 2fr) 150px 150px 110px 120px 104px;
+  min-height: 70px;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--hao-border);
+  border-radius: 12px;
+  background: var(--hao-panel);
+}
+
+.hao-workforce-row:not(.hao-workforce-row-head):hover {
+  border-color: var(--hao-border-strong);
+  background: color-mix(in srgb, var(--hao-panel) 90%, var(--hao-hover-bg));
+}
+
+.hao-workforce-row > :nth-child(2),
+.hao-workforce-row > :nth-child(3),
+.hao-workforce-row > :nth-child(4) {
+  text-align: right;
+}
+
+.hao-workforce-row > :nth-child(5),
+.hao-workforce-row > :nth-child(6) {
+  justify-self: end;
+}
+
+.hao-workforce-employee {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.hao-workforce-employee-copy {
+  min-width: 0;
+}
+
+.hao-workforce-employee-copy strong,
+.hao-workforce-employee-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hao-workforce-employee-copy strong {
+  color: var(--hao-text);
+  font-size: 13px;
+  font-weight: 730;
+}
+
+.hao-workforce-employee-copy small {
+  margin-top: 3px;
+  color: var(--hao-muted);
+  font-size: 10px;
+}
+
+.hao-workforce-number {
+  color: var(--hao-text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.hao-detail-loading {
+  padding: 28px 4px;
+  color: var(--hao-muted);
+  text-align: center;
+}
+
+.hao-employee-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hao-employee-detail-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.hao-detail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.hao-detail-list-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: baseline;
+  padding: 9px 11px;
+  border: 1px solid var(--hao-border);
+  border-radius: 9px;
+}
+
+.hao-detail-list-row strong,
+.hao-detail-list-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hao-detail-list-row strong {
+  color: var(--hao-text);
+  font-size: 11px;
+}
+
+.hao-detail-list-row span {
+  color: var(--hao-muted);
+  font-size: 10px;
+}
+
+@media (max-width: 1100px) {
+  .hao-workforce-row {
+    grid-template-columns: minmax(250px, 2fr) 120px 120px 90px 100px 96px;
+    gap: 10px;
+  }
+}
+
+@media (max-width: 820px) {
+  .hao-workforce-row-head,
+  .hao-supplier-row-head {
+    display: none;
+  }
+
+  .hao-workforce-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+    min-height: auto;
+  }
+
+  .hao-workforce-row > :nth-child(2),
+  .hao-workforce-row > :nth-child(3),
+  .hao-workforce-row > :nth-child(4) {
+    text-align: left;
+  }
+
+  .hao-workforce-row > :nth-child(5),
+  .hao-workforce-row > :nth-child(6) {
+    justify-self: start;
+  }
+
+  .hao-employee-detail-metrics {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .hao-detail-list-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
 }

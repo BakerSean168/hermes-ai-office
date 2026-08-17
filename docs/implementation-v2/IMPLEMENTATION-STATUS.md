@@ -357,3 +357,9 @@ The supplier page no longer treats ordinary Gateway channels as personal channel
 The separate user-facing Personal Channels/Provider Hub surfaces were later retired. External provider connections now project into external Suppliers and are shown as connection details inside each Supplier. User-operated account pools such as **My CPA / xAI-Grok** and **Grok2API** project into INTERNAL workforce sources whose models become durable Employees and appear directly in Workforce. Provider Hub remains a backend shared connection registry for cross-Profile discovery; it is not a separate business navigation concept. Credentials never enter AI Office business storage.
 
 The old config-owned LiteLLM reference Employment route was retired with Planner Pool. LiteLLM now starts with an empty static `model_list` and accepts only explicit DB-backed optional gateway provisioning. The `configure-reference-route.sh` compatibility helper and `V2_REFERENCE_*` bootstrap preservation were removed.
+
+## 0.11 supplier/workforce presentation — 2026-08-18
+
+The business UI now presents both `EXTERNAL` and `INTERNAL` workforce sources in one Supplier list. Internal account pools such as My CPA and Grok2API are labelled **Internal supplier** rather than being split into a separate channel concept. Provider Hub remains backend-only shared connection infrastructure.
+
+Supplier and Workforce lists use aligned fixed-height desktop rows with compact summaries and lazy detail. Workforce defaults to descending **verified contribution tokens** (`input_tokens + output_tokens`) and shows API-equivalent `marketValue`, current Appointment count, state, and a details action. Aggregate gateway observation remains non-authoritative evidence and is shown only in employee detail rather than being promoted into verified contribution.

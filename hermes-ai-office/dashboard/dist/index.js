@@ -149,7 +149,7 @@
       "organization.appointed": "Appointed",
       "organization.onDuty": "On duty",
       "workforce.title": "Workforce",
-      "workforce.subtitle": "Durable employee identities, appointments, verified work, and observed supply usage",
+      "workforce.subtitle": "Employees ranked by verified contribution. Open details for positions, employment, and observed evidence.",
       "workforce.searchPlaceholder": "Search employee, supplier, model, or position",
       "workforce.filterAll": "All employees",
       "workforce.filterAppointed": "Appointed",
@@ -158,6 +158,27 @@
       "workforce.filterInternal": "Internal employees",
       "workforce.internalSource": "Internal",
       "workforce.employee": "Employee",
+      "workforce.contributionTokens": "Contribution tokens",
+      "workforce.apiEquivalent": "API-equivalent value",
+      "workforce.positionCount": "Positions",
+      "workforce.actions": "Actions",
+      "workforce.details": "View details",
+      "workforce.detailTitle": "Employee details",
+      "workforce.detailSubtitle": "Identity, verified contribution, appointments, employment, and observation evidence",
+      "workforce.verifiedContribution": "Verified contribution",
+      "workforce.positions": "Current positions",
+      "workforce.employments": "Current employment",
+      "workforce.currentWork": "Current work",
+      "workforce.observationEvidence": "Observation evidence",
+      "workforce.requests": "Requests",
+      "workforce.actualCost": "Actual cost",
+      "workforce.marketValue": "API-equivalent value",
+      "workforce.inputTokens": "Input tokens",
+      "workforce.outputTokens": "Output tokens",
+      "workforce.noPositions": "No current positions",
+      "workforce.noEmployments": "No current employment",
+      "workforce.noCurrentWork": "No current work",
+      "workforce.loadingDetails": "Loading employee details…",
       "workforce.appointment": "Current appointment",
       "workforce.verified": "Verified ledger",
       "workforce.observed": "Gateway observation",
@@ -181,7 +202,10 @@
       "workforce.basis.SUPPLIER_HINT": "supplier hint",
       "workforce.basis.UNIQUE_MODEL": "unique model",
       "suppliers.title": "Suppliers",
-      "suppliers.subtitle": "External suppliers and commercial access sources. Technical connections are folded into supplier details.",
+      "suppliers.supplier": "Supplier",
+      "suppliers.actions": "Actions",
+      "suppliers.internal": "Internal supplier",
+      "suppliers.subtitle": "All workforce suppliers in one place. Internal account pools are marked as internal suppliers; technical connections stay in details.",
       "suppliers.add": "Add supplier",
       "suppliers.details": "View details",
       "suppliers.website": "Website",
@@ -397,7 +421,7 @@
       "organization.appointed": "已任命",
       "organization.onDuty": "执行中",
       "workforce.title": "员工",
-      "workforce.subtitle": "持久员工身份、岗位任命、已核验工作与供应侧观测",
+      "workforce.subtitle": "按已核验贡献排序员工；岗位、Employment 与观测证据需要时再查看详情。",
       "workforce.searchPlaceholder": "搜索员工、供应商、模型或岗位",
       "workforce.filterAll": "全部员工",
       "workforce.filterAppointed": "已有岗位",
@@ -406,6 +430,27 @@
       "workforce.filterInternal": "内部员工",
       "workforce.internalSource": "内部",
       "workforce.employee": "员工",
+      "workforce.contributionTokens": "贡献 Token",
+      "workforce.apiEquivalent": "API 等价金额",
+      "workforce.positionCount": "担任职位",
+      "workforce.actions": "操作",
+      "workforce.details": "查看详情",
+      "workforce.detailTitle": "员工详情",
+      "workforce.detailSubtitle": "员工身份、已核验贡献、岗位、Employment 与观测证据",
+      "workforce.verifiedContribution": "已核验贡献",
+      "workforce.positions": "当前岗位",
+      "workforce.employments": "当前 Employment",
+      "workforce.currentWork": "当前工作",
+      "workforce.observationEvidence": "观测证据",
+      "workforce.requests": "请求数",
+      "workforce.actualCost": "实际成本",
+      "workforce.marketValue": "API 等价金额",
+      "workforce.inputTokens": "输入 Token",
+      "workforce.outputTokens": "输出 Token",
+      "workforce.noPositions": "暂无当前岗位",
+      "workforce.noEmployments": "暂无当前 Employment",
+      "workforce.noCurrentWork": "暂无当前工作",
+      "workforce.loadingDetails": "正在获取员工详情…",
       "workforce.appointment": "当前岗位",
       "workforce.verified": "已核验账本",
       "workforce.observed": "网关观测",
@@ -428,7 +473,10 @@
       "workforce.basis.SUPPLIER_HINT": "供应商提示",
       "workforce.basis.UNIQUE_MODEL": "唯一模型",
       "suppliers.title": "供应商",
-      "suppliers.subtitle": "这里只展示外部供应商和商业接入来源；技术连接已收进供应商详情，不再单独占一个业务页面。",
+      "suppliers.supplier": "供应商",
+      "suppliers.actions": "操作",
+      "suppliers.internal": "内部供应商",
+      "suppliers.subtitle": "统一管理所有员工来源；My CPA、Grok2API 等账号池作为内部供应商展示，技术连接仍收进详情。",
       "suppliers.add": "添加供应商",
       "suppliers.details": "查看详情",
       "suppliers.website": "官网",
@@ -1418,11 +1466,30 @@
     const error = sourceError(workforce);
     const [query, setQuery] = React.useState("");
     const [filter, setFilter] = React.useState("all");
+    const [detailEmployee, setDetailEmployee] = React.useState(null);
+    const [detail, setDetail] = React.useState(null);
+    const [detailLoading, setDetailLoading] = React.useState(false);
+    const [detailError, setDetailError] = React.useState("");
     if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
+
     const summary = asObject(workforce.summary);
     const observedSummary = asObject(summary.observedUsage);
     const normalized = query.trim().toLowerCase();
     const allEmployees = asArray(workforce.employees);
+
+    function verifiedUsage(employee) {
+      return asObject(asObject(employee.career).usage);
+    }
+
+    function contributionTokens(employee) {
+      const usage = verifiedUsage(employee);
+      return Number(usage.inputTokens || 0) + Number(usage.outputTokens || 0);
+    }
+
+    function marketValue(employee) {
+      return Number(verifiedUsage(employee).marketValue || 0);
+    }
+
     const employees = allEmployees
       .filter(function (employee) {
         const appointments = asArray(employee.currentAppointments);
@@ -1442,118 +1509,54 @@
           appointments.map(function (appointment) {
             return [appointment.workScopeName, appointment.positionName, appointment.positionSlug];
           }),
-        ]
-          .flat(2)
-          .join(" ")
-          .toLowerCase();
+        ].flat(2).join(" ").toLowerCase();
         return haystack.includes(normalized);
       })
       .sort(function (left, right) {
-        const leftAppointments = asArray(left.currentAppointments).length;
-        const rightAppointments = asArray(right.currentAppointments).length;
-        const leftObserved = Number(asObject(asObject(left.career).observedUsage).requests || 0);
-        const rightObserved = Number(asObject(asObject(right.career).observedUsage).requests || 0);
         return (
-          rightAppointments - leftAppointments ||
-          rightObserved - leftObserved ||
+          contributionTokens(right) - contributionTokens(left) ||
+          marketValue(right) - marketValue(left) ||
+          Number(right.currentAppointmentCount || 0) - Number(left.currentAppointmentCount || 0) ||
           String(left.displayName).localeCompare(String(right.displayName))
         );
       });
+
     const observedEmployees = allEmployees.filter(function (employee) {
       return signalTotal(asObject(asObject(employee.career).observedUsage)) > 0;
     }).length;
 
-    const columns = [
-      {
-        key: "employee",
-        label: props.t("workforce.employee"),
-        render: function (employee) {
-          const source = asObject(employee.supplier);
-          const sourcePrefix = String(source.sourceKind || "EXTERNAL") === "INTERNAL" ? props.t("workforce.internalSource") + " · " : "";
-          return h(PersonCell, {
-            name: employee.displayName,
-            detail:
-              sourcePrefix +
-              String(source.name || "") +
-              " · " +
-              String(asObject(employee.supplierModel).name || ""),
-          });
-        },
-      },
-      {
-        key: "appointment",
-        label: props.t("workforce.appointment"),
-        render: function (employee) {
-          const appointments = asArray(employee.currentAppointments);
-          if (!appointments.length) {
-            return h("span", { className: "hao-cell-empty" }, props.t("workforce.noAppointment"));
-          }
-          return h(
-            "div",
-            { className: "hao-stack-mini" },
-            appointments.map(function (appointment) {
-              return h(
-                "span",
-                { className: "hao-position-pill", key: appointment.id },
-                (appointment.workScopeName ? appointment.workScopeName + " / " : "") +
-                  appointment.positionName,
-                h("small", null, appointment.class),
-              );
-            }),
-          );
-        },
-      },
-      {
-        key: "verified",
-        label: props.t("workforce.verified"),
-        className: "hao-number-cell",
-        render: function (employee) {
-          return h(UsageCell, {
-            usage: asObject(asObject(employee.career).usage),
-            empty: props.t("workforce.noVerified"),
-            t: props.t,
-            number: props.number,
-            compact: props.compact,
-            percentage: props.percentage,
-          });
-        },
-      },
-      {
-        key: "observed",
-        label: props.t("workforce.observed"),
-        className: "hao-number-cell",
-        render: function (employee) {
-          return h(UsageCell, {
-            usage: asObject(employee.career).observedUsage,
-            observed: true,
-            empty: props.t("workforce.noObserved"),
-            t: props.t,
-            number: props.number,
-            compact: props.compact,
-            percentage: props.percentage,
-          });
-        },
-      },
-      {
-        key: "state",
-        label: props.t("workforce.state"),
-        render: function (employee) {
-          const working = asArray(employee.currentWork).length > 0;
-          return h(
-            "div",
-            { className: "hao-state-cell" },
-            h(Status, { value: working ? "WORKING" : employee.cooperationState, t: props.t }),
-            h(
-              "small",
-              null,
-              props.number(employee.currentEmploymentCount) +
-                " / " +
-                props.number(employee.currentAppointmentCount),
-            ),
-          );
-        },
-      },
-    ];
+    async function openEmployeeDetail(employee) {
+      setDetailEmployee(employee);
+      setDetail(null);
+      setDetailError("");
+      setDetailLoading(true);
+      try {
+        const result = await api("/employees/" + encodeURIComponent(String(employee.id)) + "/dossier");
+        setDetail(result);
+      } catch (cause) {
+        setDetailError(String(cause));
+      } finally {
+        setDetailLoading(false);
+      }
+    }
+
+    function closeEmployeeDetail() {
+      setDetailEmployee(null);
+      setDetail(null);
+      setDetailError("");
+      setDetailLoading(false);
+    }
+
+    const detailValue = asObject(detail);
+    const detailIdentity = asObject(detailValue.identity);
+    const detailSupplier = asObject(detailEmployee && detailEmployee.supplier);
+    const detailUsage = asObject(asObject(detailValue.career).usage);
+    const detailObserved = asObject(asObject(detailValue.career).observedUsage);
+    const detailCooperation = asObject(detailValue.cooperation);
+    const detailOrganization = asObject(detailValue.organization);
+    const detailAppointments = asArray(detailOrganization.currentAppointments);
+    const detailEmployments = asArray(detailCooperation.currentEmployments);
+    const detailWork = asArray(detailValue.currentWork);
 
     return h(
       "div",
@@ -1566,28 +1569,16 @@
       ),
       h(
         "div",
-        { className: "hao-provenance-grid" },
-        h(Notice, { title: props.t("workforce.verifiedHelp"), icon: "✓" }, props.t("workforce.verifiedHelpText")),
-        h(Notice, { title: props.t("workforce.observedHelp"), icon: "≈", tone: "observed" }, props.t("workforce.observedHelpText")),
-      ),
-      h(
-        "div",
         { className: "hao-mini-metrics" },
         h(Metric, {
           label: props.t("workforce.coverage"),
           value: props.percentage(observedSummary.attributedRequests, observedSummary.totalRequests),
-          hint: props.t("workforce.coverageHint", {
-            attributed: props.number(observedSummary.attributedRequests),
-            total: props.number(observedSummary.totalRequests),
-          }),
+          hint: props.t("workforce.coverageHint", { attributed: props.number(observedSummary.attributedRequests), total: props.number(observedSummary.totalRequests) }),
         }),
         h(Metric, {
           label: props.t("workforce.observedEmployees"),
           value: props.number(observedEmployees),
-          hint: props.t("workforce.observedEmployeesHint", {
-            count: props.number(observedEmployees),
-            total: props.number(allEmployees.length),
-          }),
+          hint: props.t("workforce.observedEmployeesHint", { count: props.number(observedEmployees), total: props.number(allEmployees.length) }),
         }),
         h(Metric, {
           label: props.t("workforce.unattributedRequests"),
@@ -1610,7 +1601,142 @@
           { value: "internal", label: props.t("workforce.filterInternal") },
         ],
       }),
-      h(DataTable, { columns: columns, rows: employees, empty: props.t("common.noResults") }),
+      h(
+        "div",
+        { className: "hao-workforce-list" },
+        h(
+          "div",
+          { className: "hao-workforce-row hao-workforce-row-head", "aria-hidden": "true" },
+          h("span", null, props.t("workforce.employee")),
+          h("span", null, props.t("workforce.contributionTokens")),
+          h("span", null, props.t("workforce.apiEquivalent")),
+          h("span", null, props.t("workforce.positionCount")),
+          h("span", null, props.t("workforce.state")),
+          h("span", null, props.t("workforce.actions")),
+        ),
+        employees.length
+          ? employees.map(function (employee) {
+              const source = asObject(employee.supplier);
+              const internal = String(source.sourceKind || "EXTERNAL") === "INTERNAL";
+              const tokens = contributionTokens(employee);
+              const positions = Number(employee.currentAppointmentCount || 0);
+              const working = Number(employee.currentDutyCount || 0) > 0;
+              return h(
+                "article",
+                { className: "hao-workforce-row", key: employee.id },
+                h(
+                  "div",
+                  { className: "hao-workforce-employee" },
+                  h(Avatar, { name: employee.displayName }),
+                  h(
+                    "div",
+                    { className: "hao-workforce-employee-copy" },
+                    h("strong", null, employee.displayName),
+                    h("small", null, (internal ? props.t("workforce.internalSource") + " · " : "") + String(source.name || "") + " · " + String(asObject(employee.supplierModel).name || "")),
+                  ),
+                ),
+                h("strong", { className: "hao-workforce-number" }, props.compact(tokens)),
+                h("strong", { className: "hao-workforce-number" }, props.money(marketValue(employee))),
+                h("strong", { className: "hao-workforce-number" }, props.number(positions)),
+                h(Status, { value: working ? "WORKING" : employee.cooperationState, t: props.t }),
+                h(Button, { kind: "quiet", onClick: function () { openEmployeeDetail(employee); } }, props.t("workforce.details")),
+              );
+            })
+          : h(Empty, null, props.t("common.noResults")),
+      ),
+      h(
+        Modal,
+        {
+          open: Boolean(detailEmployee),
+          onClose: closeEmployeeDetail,
+          labelledBy: "hao-employee-detail-title",
+          title: detailEmployee ? detailEmployee.displayName : props.t("workforce.detailTitle"),
+          subtitle: props.t("workforce.detailSubtitle"),
+          closeLabel: props.t("suppliers.close"),
+          wide: true,
+          footer: h(Button, { kind: "quiet", onClick: closeEmployeeDetail }, props.t("suppliers.close")),
+        },
+        detailLoading
+          ? h("div", { className: "hao-detail-loading" }, props.t("workforce.loadingDetails"))
+          : detailError
+            ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailError })
+            : detail
+              ? h(
+                  "div",
+                  { className: "hao-employee-detail" },
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("workforce.verifiedContribution")),
+                    h(
+                      "div",
+                      { className: "hao-detail-metrics hao-employee-detail-metrics" },
+                      h("div", null, h("span", null, props.t("workforce.contributionTokens")), h("strong", null, props.compact(Number(detailUsage.inputTokens || 0) + Number(detailUsage.outputTokens || 0)))),
+                      h("div", null, h("span", null, props.t("workforce.inputTokens")), h("strong", null, props.compact(detailUsage.inputTokens || 0))),
+                      h("div", null, h("span", null, props.t("workforce.outputTokens")), h("strong", null, props.compact(detailUsage.outputTokens || 0))),
+                      h("div", null, h("span", null, props.t("workforce.requests")), h("strong", null, props.number(detailUsage.requests || 0))),
+                      h("div", null, h("span", null, props.t("workforce.actualCost")), h("strong", null, props.money(detailUsage.actualCost || 0))),
+                      h("div", null, h("span", null, props.t("workforce.marketValue")), h("strong", null, props.money(detailUsage.marketValue || 0))),
+                    ),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("workforce.positions")),
+                    detailAppointments.length
+                      ? h("div", { className: "hao-detail-list" }, detailAppointments.map(function (appointment) {
+                          return h("div", { className: "hao-detail-list-row", key: appointment.id },
+                            h("strong", null, (appointment.work_scope_name ? appointment.work_scope_name + " / " : "") + (appointment.position_name || appointment.position_slug || "—")),
+                            h("span", null, [appointment.appointment_class, appointment.source].filter(Boolean).join(" · ")),
+                          );
+                        }))
+                      : h("span", { className: "hao-cell-empty" }, props.t("workforce.noPositions")),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("workforce.employments")),
+                    detailEmployments.length
+                      ? h("div", { className: "hao-detail-list" }, detailEmployments.map(function (employment) {
+                          return h("div", { className: "hao-detail-list-row", key: employment.id },
+                            h("strong", null, employment.agreement_name || employment.id),
+                            h("span", null, employment.status || "—"),
+                          );
+                        }))
+                      : h("span", { className: "hao-cell-empty" }, props.t("workforce.noEmployments")),
+                  ),
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("workforce.currentWork")),
+                    detailWork.length
+                      ? h("div", { className: "hao-detail-list" }, detailWork.map(function (work) {
+                          return h("div", { className: "hao-detail-list-row", key: work.id || work.staffingSegmentId },
+                            h("strong", null, work.position_name || work.positionName || work.position_id || "—"),
+                            h("span", null, [work.run_title || work.runTitle, work.current_activity || work.currentActivity].filter(Boolean).join(" · ")),
+                          );
+                        }))
+                      : h("span", { className: "hao-cell-empty" }, props.t("workforce.noCurrentWork")),
+                  ),
+                  signalTotal(detailObserved)
+                    ? h(
+                        "section",
+                        { className: "hao-detail-section" },
+                        h("h3", null, props.t("workforce.observationEvidence")),
+                        h(UsageCell, { usage: detailObserved, observed: true, empty: props.t("workforce.noObserved"), t: props.t, number: props.number, compact: props.compact, percentage: props.percentage }),
+                      )
+                    : null,
+                  h(
+                    "section",
+                    { className: "hao-detail-section" },
+                    h("h3", null, props.t("workforce.employee")),
+                    h("div", { className: "hao-detail-list" },
+                      h("div", { className: "hao-detail-list-row" }, h("strong", null, detailIdentity.displayName || detailEmployee.displayName), h("span", null, [String(detailSupplier.sourceKind || "EXTERNAL") === "INTERNAL" ? props.t("suppliers.internal") : "", asObject(detailIdentity.supplier).name || detailSupplier.name, asObject(detailIdentity.supplierModel).name].filter(Boolean).join(" · "))),
+                    ),
+                  ),
+                )
+              : null,
+      ),
     );
   }
 
@@ -1644,9 +1770,7 @@
         return [employee.id, employee];
       }),
     );
-    const suppliers = asArray(supply.suppliers).filter(function (supplier) {
-      return String(supplier.sourceKind || "EXTERNAL") !== "INTERNAL";
-    });
+    const suppliers = asArray(supply.suppliers);
     const currentPreset =
       presets.find(function (preset) {
         return preset.id === presetId;
@@ -1866,8 +1990,18 @@
         ? h(
             "div",
             { className: "hao-supplier-list" },
+            h(
+              "div",
+              { className: "hao-supplier-row hao-supplier-row-head", "aria-hidden": "true" },
+              h("span", null, props.t("suppliers.supplier")),
+              h("span", null, props.t("suppliers.enabledEmployees")),
+              h("span", null, props.t("suppliers.defaultEmployee")),
+              h("span", null, props.t("workforce.state")),
+              h("span", null, props.t("suppliers.actions")),
+            ),
             suppliers.map(function (supplier) {
               const facts = supplierFacts(supplier);
+              const internal = String(supplier.sourceKind || "EXTERNAL") === "INTERNAL";
               return h(
                 "article",
                 { className: "hao-supplier-row", key: supplier.id },
@@ -1878,7 +2012,7 @@
                   h(
                     "div",
                     { className: "hao-supplier-row-copy" },
-                    h("h2", null, supplier.name),
+                    h("h2", null, supplier.name, internal ? h("span", { className: "hao-badge hao-badge-internal" }, props.t("suppliers.internal")) : null),
                     h("p", null, supplier.slug),
                     supplier.websiteUrl
                       ? h("a", { className: "hao-external-link hao-supplier-website", href: supplier.websiteUrl, target: "_blank", rel: "noreferrer" }, supplier.websiteUrl)
