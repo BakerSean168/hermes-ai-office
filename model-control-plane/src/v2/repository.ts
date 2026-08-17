@@ -1544,60 +1544,64 @@ export class V2Repository {
 
   workforceProjection(): Row {
     const observedUsage = this.#gatewayObservedUsageProjection();
-    const employees: Row[] = this.listEmployees().map((employee): Row => {
-      const dossier = this.employeeDossier(String(employee.id), observedUsage.byEmployee);
-      const organization = (dossier?.organization ?? {}) as Row;
-      const career = (dossier?.career ?? {}) as Row;
-      const usage = (career.usage ?? {}) as Row;
-      const observed =
-        career.observedUsage && typeof career.observedUsage === 'object'
-          ? (career.observedUsage as Row)
-          : null;
-      const currentAppointments = Array.isArray(organization.currentAppointments)
-        ? (organization.currentAppointments as Row[])
-        : [];
-      const currentWork = Array.isArray(dossier?.currentWork) ? (dossier.currentWork as Row[]) : [];
-      return {
-        ...employee,
-        currentAppointments: currentAppointments.map((appointment) => ({
-          id: appointment.id,
-          positionId: appointment.position_id,
-          positionName: appointment.position_name,
-          positionSlug: appointment.position_slug,
-          positionKind: appointment.position_kind,
-          workScopeName: appointment.work_scope_name,
-          workScopeSlug: appointment.work_scope_slug,
-          class: appointment.appointment_class,
-          priority: Number(appointment.priority ?? 0),
-        })),
-        currentWork: currentWork.map((work) => ({
-          staffingSegmentId: work.id,
-          dutySessionId: work.duty_session_id,
-          positionId: work.position_id,
-          positionName: work.position_name,
-          positionSlug: work.position_slug,
-          runId: work.run_id,
-          runTitle: work.run_title,
-          activity: work.current_activity,
-          startedAt: work.started_at,
-        })),
-        career: {
-          staffingSegments: Number(career.staffingSegments ?? 0),
-          usage: {
-            requests: Number(usage.requests ?? 0),
-            inputTokens: Number(usage.inputTokens ?? 0),
-            outputTokens: Number(usage.outputTokens ?? 0),
-            cacheReadTokens: Number(usage.cacheReadTokens ?? 0),
-            cacheWriteTokens: Number(usage.cacheWriteTokens ?? 0),
-            reasoningTokens: Number(usage.reasoningTokens ?? 0),
-            actualCost: Number(usage.actualCost ?? 0),
-            allocatedCost: Number(usage.allocatedCost ?? 0),
-            marketValue: Number(usage.marketValue ?? 0),
+    const employees: Row[] = this.listEmployees()
+      .filter((employee) => employee.recordLifecycle === 'ACTIVE')
+      .map((employee): Row => {
+        const dossier = this.employeeDossier(String(employee.id), observedUsage.byEmployee);
+        const organization = (dossier?.organization ?? {}) as Row;
+        const career = (dossier?.career ?? {}) as Row;
+        const usage = (career.usage ?? {}) as Row;
+        const observed =
+          career.observedUsage && typeof career.observedUsage === 'object'
+            ? (career.observedUsage as Row)
+            : null;
+        const currentAppointments = Array.isArray(organization.currentAppointments)
+          ? (organization.currentAppointments as Row[])
+          : [];
+        const currentWork = Array.isArray(dossier?.currentWork)
+          ? (dossier.currentWork as Row[])
+          : [];
+        return {
+          ...employee,
+          currentAppointments: currentAppointments.map((appointment) => ({
+            id: appointment.id,
+            positionId: appointment.position_id,
+            positionName: appointment.position_name,
+            positionSlug: appointment.position_slug,
+            positionKind: appointment.position_kind,
+            workScopeName: appointment.work_scope_name,
+            workScopeSlug: appointment.work_scope_slug,
+            class: appointment.appointment_class,
+            priority: Number(appointment.priority ?? 0),
+          })),
+          currentWork: currentWork.map((work) => ({
+            staffingSegmentId: work.id,
+            dutySessionId: work.duty_session_id,
+            positionId: work.position_id,
+            positionName: work.position_name,
+            positionSlug: work.position_slug,
+            runId: work.run_id,
+            runTitle: work.run_title,
+            activity: work.current_activity,
+            startedAt: work.started_at,
+          })),
+          career: {
+            staffingSegments: Number(career.staffingSegments ?? 0),
+            usage: {
+              requests: Number(usage.requests ?? 0),
+              inputTokens: Number(usage.inputTokens ?? 0),
+              outputTokens: Number(usage.outputTokens ?? 0),
+              cacheReadTokens: Number(usage.cacheReadTokens ?? 0),
+              cacheWriteTokens: Number(usage.cacheWriteTokens ?? 0),
+              reasoningTokens: Number(usage.reasoningTokens ?? 0),
+              actualCost: Number(usage.actualCost ?? 0),
+              allocatedCost: Number(usage.allocatedCost ?? 0),
+              marketValue: Number(usage.marketValue ?? 0),
+            },
+            observedUsage: observed,
           },
-          observedUsage: observed,
-        },
-      };
-    });
+        };
+      });
     const gateways = this.listGateways();
     const totalUsage = employees.reduce<{
       requests: number;

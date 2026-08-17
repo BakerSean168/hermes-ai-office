@@ -197,6 +197,122 @@ test('supplier profile update renames generated employee labels without changing
   }
 });
 
+test('supplier retirement preserves history and removes the supplier from current projections', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    const seeded = runtime.v2.bootstrapReference({
+      supplierSlug: 'legacy-pool',
+      supplierName: 'Legacy Pool',
+      supplierModelKey: 'model-a',
+      supplierModelName: 'Model A',
+      agreementRef: 'legacy-pool-primary',
+      agreementName: 'Legacy Pool / Primary',
+      gatewaySlug: 'litellm-reference',
+      gatewayKind: 'LITELLM',
+      gatewayName: 'LiteLLM Reference Gateway',
+      workScopeSlug: 'development',
+      workScopeName: 'Development',
+      positionSlug: 'coding-review',
+      positionName: 'Coding Reviewer',
+      positionKind: 'REVIEWER',
+      runtimeKind: 'CODEX',
+      protocol: 'openai-responses',
+    });
+
+    const blocked = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/retire`,
+      headers: { 'idempotency-key': 'retire-legacy-pool-blocked' },
+      payload: { reason: 'MIGRATED_TO_NATIVE_ACCESS' },
+    });
+    assert.equal(blocked.statusCode, 409);
+    assert.equal(blocked.json().error.code, 'SUPPLIER_HAS_OPEN_RELATIONSHIPS');
+
+    const appointmentEnd = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/appointments/${seeded.appointmentId}/end`,
+      payload: { reason: 'SUPPLIER_RETIRED' },
+    });
+    assert.equal(appointmentEnd.statusCode, 200);
+    const employmentEnd = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/employments/${seeded.employmentId}/end`,
+      payload: { reason: 'SUPPLIER_RETIRED' },
+    });
+    assert.equal(employmentEnd.statusCode, 200);
+
+    const retired = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/retire`,
+      headers: { 'idempotency-key': 'retire-legacy-pool' },
+      payload: { reason: 'MIGRATED_TO_NATIVE_ACCESS' },
+    });
+    assert.equal(retired.statusCode, 200);
+    assert.equal(retired.json().lifecycle, 'RETIRED');
+
+    const replay = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/retire`,
+      headers: { 'idempotency-key': 'retire-legacy-pool' },
+      payload: { reason: 'MIGRATED_TO_NATIVE_ACCESS' },
+    });
+    assert.equal(replay.statusCode, 200);
+    assert.equal(replay.headers['idempotency-replayed'], 'true');
+
+    const supplyProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    assert.equal(supplyProjection.statusCode, 200);
+    assert.equal(supplyProjection.json().summary.suppliers, 0);
+    assert.deepEqual(supplyProjection.json().suppliers, []);
+
+    const workforceProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/workforce',
+    });
+    assert.equal(workforceProjection.statusCode, 200);
+    assert.equal(workforceProjection.json().summary.employees, 0);
+    assert.deepEqual(workforceProjection.json().employees, []);
+
+    const dossier = runtime.v2.employeeDossier(seeded.employeeId);
+    assert.equal((dossier?.identity as Record<string, unknown>).lifecycle, 'RETIRED');
+    assert.equal(
+      ((dossier?.organization as Record<string, unknown>).currentAppointments as unknown[]).length,
+      0,
+    );
+    assert.equal(
+      (
+        (
+          (dossier?.cooperation as Record<string, unknown>).employmentHistory as Array<
+            Record<string, unknown>
+          >
+        )[0] as Record<string, unknown>
+      ).status,
+      'ENDED',
+    );
+    assert.equal(runtime.v2.getAppointment(seeded.appointmentId)?.status, 'ENDED');
+    assert.equal(runtime.v2.getEmployment(seeded.employmentId)?.status, 'ENDED');
+    assert.equal(
+      runtime.v2.findGatewayBinding(
+        seeded.employmentId,
+        seeded.gatewayId,
+        `employment:${seeded.employmentId}`,
+      )?.lifecycle,
+      'RETIRED',
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('explicit supply catalog registration classifies gateway evidence without creating an Appointment', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',

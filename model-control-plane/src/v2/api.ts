@@ -1395,6 +1395,39 @@ export function registerV2Routes(
   );
 
   app.post<{ Params: { supplierId: string } }>(
+    '/api/v2/commands/suppliers/:supplierId/retire',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supplier.retire',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.supply.retireSupplier(
+              request.params.supplierId,
+              body.reason ? String(body.reason) : 'OPERATOR_RETIRED',
+            );
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'SUPPLIER_RETIRE_FAILED';
+            reply.code(
+              code === 'SUPPLIER_NOT_FOUND'
+                ? 404
+                : code === 'SUPPLIER_HAS_OPEN_RELATIONSHIPS'
+                  ? 409
+                  : 422,
+            );
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { supplierId: string } }>(
     '/api/v2/commands/suppliers/:supplierId/staffing-preferences',
     async (request, reply) =>
       runCommand({

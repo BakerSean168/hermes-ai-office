@@ -108,6 +108,132 @@ export class SupplyRepository {
     });
   }
 
+  retireSupplier(supplierId: string, reason = 'OPERATOR_RETIRED'): V2Row {
+    const supplier = row(
+      this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId),
+    );
+    if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
+    if (supplier.lifecycle === 'RETIRED') return supplier;
+
+    const openEmploymentCount = Number(
+      row(
+        this.#domain.db
+          .prepare(
+            `SELECT COUNT(*) count
+             FROM v2_employments em
+             JOIN v2_employees e ON e.id=em.employee_id
+             WHERE e.supplier_id=?
+               AND em.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+               AND em.effective_to IS NULL`,
+          )
+          .get(supplierId),
+      )?.count ?? 0,
+    );
+    const openAppointmentCount = Number(
+      row(
+        this.#domain.db
+          .prepare(
+            `SELECT COUNT(*) count
+             FROM v2_appointments a
+             JOIN v2_employees e ON e.id=a.employee_id
+             WHERE e.supplier_id=?
+               AND a.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+               AND a.effective_to IS NULL`,
+          )
+          .get(supplierId),
+      )?.count ?? 0,
+    );
+    if (openEmploymentCount > 0 || openAppointmentCount > 0) {
+      throw new Error('SUPPLIER_HAS_OPEN_RELATIONSHIPS');
+    }
+
+    const timestamp = now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_gateway_bindings
+                  SET lifecycle='RETIRED',updated_at=?
+                  WHERE employment_id IN (
+                    SELECT em.id FROM v2_employments em
+                    JOIN v2_employees e ON e.id=em.employee_id
+                    WHERE e.supplier_id=?
+                  ) AND lifecycle!='RETIRED'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_runtime_access_profiles
+                  SET lifecycle='RETIRED',updated_at=?
+                  WHERE employment_id IN (
+                    SELECT em.id FROM v2_employments em
+                    JOIN v2_employees e ON e.id=em.employee_id
+                    WHERE e.supplier_id=?
+                  ) AND lifecycle!='RETIRED'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_channels
+                  SET lifecycle='ARCHIVED',updated_at=?
+                  WHERE supply_agreement_id IN (
+                    SELECT id FROM v2_supply_agreements WHERE supplier_id=?
+                  ) AND lifecycle!='ARCHIVED'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_capacity_pools
+                  SET lifecycle='RETIRED',updated_at=?
+                  WHERE supply_agreement_id IN (
+                    SELECT id FROM v2_supply_agreements WHERE supplier_id=?
+                  ) AND lifecycle!='RETIRED'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          "UPDATE v2_model_offerings SET lifecycle='RETIRED',updated_at=? WHERE supplier_id=? AND lifecycle!='RETIRED'",
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          "UPDATE v2_plans SET lifecycle='RETIRED',updated_at=? WHERE supplier_id=? AND lifecycle!='RETIRED'",
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_supply_agreements
+                  SET lifecycle='TERMINATED',ended_at=COALESCE(ended_at,?),updated_at=?
+                  WHERE supplier_id=? AND lifecycle NOT IN ('TERMINATED','ARCHIVED')`,
+        )
+        .run(timestamp, timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_employees
+                  SET record_lifecycle='RETIRED',retired_at=COALESCE(retired_at,?),updated_at=?
+                  WHERE supplier_id=? AND record_lifecycle!='RETIRED'`,
+        )
+        .run(timestamp, timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_supplier_models
+                  SET lifecycle='RETIRED',retired_at=COALESCE(retired_at,?)
+                  WHERE supplier_id=? AND lifecycle!='RETIRED'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare("UPDATE v2_suppliers SET lifecycle='RETIRED',updated_at=? WHERE id=?")
+        .run(timestamp, supplierId);
+
+      this.#domain.emit({
+        type: 'supplier.retired',
+        entityType: 'Supplier',
+        entityId: supplierId,
+        payload: { reason },
+      });
+      return row(this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId))!;
+    });
+  }
+
   getOrCreatePlan(input: {
     supplierId: string;
     slug: string;
@@ -737,7 +863,7 @@ export class SupplyRepository {
       this.#domain.db
         .prepare(
           `SELECT id,slug,name,lifecycle,metadata_json,created_at,updated_at
-           FROM v2_suppliers ORDER BY name`,
+           FROM v2_suppliers WHERE lifecycle='ACTIVE' ORDER BY name`,
         )
         .all(),
     ).map((value) => ({
@@ -868,7 +994,9 @@ export class SupplyRepository {
       const supplierEmployments = employments.filter((item) => item.supplierId === supplierId);
       const employmentIds = new Set(supplierEmployments.map((item) => String(item.id)));
       const supplierEmployees = employees.filter(
-        (item) => (item.supplier as { id?: unknown } | undefined)?.id === supplierId,
+        (item) =>
+          (item.supplier as { id?: unknown } | undefined)?.id === supplierId &&
+          item.recordLifecycle === 'ACTIVE',
       );
       return {
         ...supplier,
@@ -993,21 +1121,75 @@ export class SupplyRepository {
       summary: {
         suppliers: supplierItems.length,
         activeSuppliers: supplierItems.filter((item) => item.lifecycle === 'ACTIVE').length,
-        supplierModels: supplierModels.length,
-        employees: employees.length,
-        plans: plans.length,
-        agreements: agreements.length,
-        activeAgreements: agreements.filter((item) => item.lifecycle === 'ACTIVE').length,
-        currentEmployments: employments.filter((item) => item.status === 'CURRENT').length,
-        capacityPools: capacityPools.length,
-        activeBindings: bindings.filter((item) => item.lifecycle === 'ACTIVE').length,
-        runtimeAccessProfiles: runtimeAccessProfiles.filter((item) => item.lifecycle === 'ACTIVE')
-          .length,
+        supplierModels: supplierModels.filter((item) =>
+          supplierItems.some((supplier) => supplier.id === item.supplierId),
+        ).length,
+        employees: supplierItems.reduce((count, supplier) => count + supplier.employees.length, 0),
+        plans: plans.filter(
+          (item) =>
+            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            item.lifecycle === 'ACTIVE',
+        ).length,
+        agreements: agreements.filter(
+          (item) =>
+            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            item.lifecycle === 'ACTIVE',
+        ).length,
+        activeAgreements: agreements.filter(
+          (item) =>
+            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            item.lifecycle === 'ACTIVE',
+        ).length,
+        currentEmployments: employments.filter(
+          (item) =>
+            supplierItems.some((supplier) => supplier.id === item.supplierId) &&
+            item.status === 'CURRENT',
+        ).length,
+        capacityPools: capacityPools.filter((pool) =>
+          agreements.some(
+            (agreement) =>
+              agreement.id === pool.supplyAgreementId &&
+              agreement.lifecycle === 'ACTIVE' &&
+              supplierItems.some((supplier) => supplier.id === agreement.supplierId),
+          ),
+        ).length,
+        activeBindings: bindings.filter(
+          (item) =>
+            item.lifecycle === 'ACTIVE' &&
+            employments.some(
+              (employment) =>
+                employment.id === item.employmentId &&
+                supplierItems.some((supplier) => supplier.id === employment.supplierId),
+            ),
+        ).length,
+        runtimeAccessProfiles: runtimeAccessProfiles.filter(
+          (item) =>
+            item.lifecycle === 'ACTIVE' &&
+            employments.some(
+              (employment) =>
+                employment.id === item.employmentId &&
+                supplierItems.some((supplier) => supplier.id === employment.supplierId),
+            ),
+        ).length,
         nativeRuntimeAccessProfiles: runtimeAccessProfiles.filter(
-          (item) => item.lifecycle === 'ACTIVE' && item.adapterKind === 'NATIVE_CONFIG',
+          (item) =>
+            item.lifecycle === 'ACTIVE' &&
+            item.adapterKind === 'NATIVE_CONFIG' &&
+            employments.some(
+              (employment) =>
+                employment.id === item.employmentId &&
+                supplierItems.some((supplier) => supplier.id === employment.supplierId),
+            ),
         ).length,
         gatewayRuntimeAccessProfiles: runtimeAccessProfiles.filter(
-          (item) => item.lifecycle === 'ACTIVE' && item.adapterKind === 'GATEWAY',
+          (item) =>
+            item.lifecycle === 'ACTIVE' &&
+            item.adapterKind === 'GATEWAY' &&
+            employments.some(
+              (employment) =>
+                employment.id === item.employmentId &&
+                supplierItems.some((supplier) => supplier.id === employment.supplierId),
+            ),
         ).length,
         gateways: gateways.length,
         unmappedChannels: unmappedChannels.length,
