@@ -36,8 +36,6 @@ preserve_value() {
 
 MASTER_KEY=$(preserve_value LITELLM_MASTER_KEY)
 CPA_DATA_API_KEY=$(preserve_value CPA_DATA_API_KEY)
-REFERENCE_ROUTE=$(preserve_value V2_REFERENCE_ROUTE)
-REFERENCE_MODEL=$(preserve_value V2_REFERENCE_UPSTREAM_MODEL)
 DB_PASSWORD=$(preserve_value POSTGRES_PASSWORD)
 
 [[ -n "$MASTER_KEY" ]] || MASTER_KEY="sk-hermes-$(openssl rand -hex 32)"
@@ -48,8 +46,6 @@ trap 'rm -f "$TEMP"' EXIT
 {
   printf 'LITELLM_MASTER_KEY=%s\n' "$MASTER_KEY"
   [[ -n "$CPA_DATA_API_KEY" ]] && printf 'CPA_DATA_API_KEY=%s\n' "$CPA_DATA_API_KEY"
-  [[ -n "$REFERENCE_ROUTE" ]] && printf 'V2_REFERENCE_ROUTE=%s\n' "$REFERENCE_ROUTE"
-  [[ -n "$REFERENCE_MODEL" ]] && printf 'V2_REFERENCE_UPSTREAM_MODEL=%s\n' "$REFERENCE_MODEL"
   printf 'POSTGRES_USER=litellm\n'
   printf 'POSTGRES_PASSWORD=%s\n' "$DB_PASSWORD"
   printf 'POSTGRES_DB=litellm\n'

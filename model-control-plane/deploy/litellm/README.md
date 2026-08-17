@@ -7,7 +7,7 @@ This deployment is the V2 reference implementation of the gateway ports. It is d
 - Uses the digest-pinned LiteLLM v1.92.2 release image verified as AArch64 on oracle2.
 - Stores the gateway master key, upstream compatibility key, and PostgreSQL credentials only in `/srv/hermes-personal/secrets/litellm.env` (`0600`).
 - Stores the separate low-privilege runtime virtual key at `/srv/hermes-personal/data/secrets/litellm-runtime.key` (`0600`), never in OpenCode/Codex config.
-- Keeps the original config-owned CPA compatibility route while allowing DB-backed `employment:<employmentId>` routes to be provisioned dynamically.
+- Starts with no config-owned model route. Any optional `employment:<employmentId>` gateway route must be provisioned explicitly through the DB-backed provisioning port.
 - Each dynamic model route references a reusable LiteLLM Credential Store record instead of duplicating provider API keys into every deployment.
 - Gateway retry/fallback stays inside one Employment route. Cross-Employment and cross-Employee decisions remain owned by Hermes Staffing.
 
@@ -19,15 +19,7 @@ Build the control-plane package, then run:
 sudo ./bootstrap-dynamic-gateway.sh
 ```
 
-The bootstrap is idempotent. During the first upgrade from the static deployment it preserves the currently running LiteLLM master/reference values without printing them, creates the protected env file if it is missing, starts the dedicated PostgreSQL service, enables `store_model_in_db`, and creates a separate runtime virtual key.
-
-The original reference-route helper is still available for migration compatibility:
-
-```bash
-sudo ./configure-reference-route.sh
-```
-
-Set `V2_REFERENCE_EMPLOYMENT_ID` for a new compatibility binding. Gateway deployment never creates Supplier, Employee, Agreement, Appointment, or Employment identity from technical discovery.
+The bootstrap is idempotent. It preserves the LiteLLM master key and database credentials without printing them, creates the protected env file if it is missing, starts the dedicated PostgreSQL service, enables `store_model_in_db`, and creates a separate runtime virtual key. Historical config-owned Employment routes are intentionally not recreated. Gateway deployment never creates Supplier, Employee, Agreement, Appointment, or Employment identity from technical discovery.
 
 ## Dynamic onboarding flow
 
