@@ -251,7 +251,7 @@ def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
     return _post_json(
         "/api/v2/commands/provider-connections/upsert",
         payload,
-        idempotency_key="provider-hub-v2-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+        idempotency_key="provider-hub-v3-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
     )
 
 
