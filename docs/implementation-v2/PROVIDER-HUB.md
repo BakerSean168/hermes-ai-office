@@ -1,49 +1,56 @@
 # Provider Hub
 
-Hermes AI Office treats provider connections as shared infrastructure rather than profile-local islands.
+Hermes AI Office keeps one shared technical registry of provider connections, but **Provider Hub is not a separate business concept in the product UI**.
 
-A `ProviderConnection` stores only safe connection metadata: provider identity, base URL, protocol, authentication kind, credential reference, credential scope, discovered model IDs, source profile, sharing scope, readiness and optional Supplier classification. Secret values never enter the V2 database.
+The user-facing model is intentionally simpler:
 
-A `ProfileProviderLink` records where a shared connection was discovered or explicitly used. The same public connection can therefore be known by every Hermes profile while retaining evidence about which profiles currently reference it.
+```text
+External provider/API connection -> External Supplier -> Employee
+Internal account pool            -> Internal Employee source -> Employee
+```
 
-## Discovery
+`ProviderConnection` remains a safe infrastructure record containing provider identity, endpoint, protocol, auth kind, credential reference, credential scope, discovered model IDs, source profile, share scope and readiness. Secret values never enter the V2 database.
 
-Profile-native discovery scans supported Agent configuration under each Hermes profile home:
+## Shared connection registry
+
+A `ProfileProviderLink` records which Hermes profiles currently use a connection. Any profile can add or discover a provider once and other profiles learn the current state by querying the central registry. Sharing is **query-based, not event-replication-based**; events are audit/refresh evidence rather than the source of truth.
+
+The Hermes plugin exposes:
+
+- `ai_office_add_provider`: URL + `api_key`/`key`, optional display name and website. The secret is written only to Hermes global credential storage. An external workforce source/Supplier is created immediately, while Employees are created only for explicitly selected models.
+- `ai_office_list_providers`: reads the shared registry so any profile can discover current connections, readiness, models, Supplier mapping and active Profile usage.
+
+`newapi_channel_conn`-style payloads are accepted by the add tool.
+
+## External suppliers
+
+External URL/API-key/OAuth providers are represented to operators as Suppliers. The ProviderConnection is folded into **Supplier details** instead of being shown as a separate top-level Channels page.
+
+A connection may exist before any model is hired. This means Worldclaw/Chybenzun-style endpoints can appear as Suppliers with zero Employees until the operator selects models. Provider discovery never hires an entire model catalogue implicitly.
+
+Supplier details load connection metadata lazily through:
+
+- `GET /api/v2/suppliers/:supplierId/provider-connections`
+
+The detail contains only safe metadata such as Base URL, credential reference, model IDs and Profile links. Credential values stay outside AI Office persistence.
+
+## Internal workforce sources
+
+Account pools operated by the user are not presented as external Suppliers. Current internal sources include My CPA/xAI-Grok and Grok2API.
+
+The control plane periodically projects their safe account-pool/model inventory into durable Employee identities. The compatibility table remains `v2_suppliers`, but `source_kind='INTERNAL'` distinguishes an internal workforce source from a commercial Supplier. The Supplier page filters INTERNAL sources; the Workforce page shows their Employees with an **Internal** source marker.
+
+Identity and execution readiness remain separate. Creating an internal Employee does not invent a RuntimeAccessProfile or credential. Runtime access is added only when a safe executable connection is known.
+
+## Native Agent discovery
+
+Profile-native discovery still scans supported Agent configuration:
 
 - Codex `config.toml` and `*.config.toml` provider/model selections;
 - Codex ChatGPT OAuth metadata without persisting OAuth material;
-- OpenCode `opencode.json` provider definitions and model catalogue;
+- OpenCode `opencode.json` providers/models;
 - Claude Code endpoint/credential references from profile client environment configuration.
 
-API-key connections discovered in a profile can be promoted into the Hermes global credential store. This makes the credential reference reusable by other profiles while keeping the secret out of AI Office persistence. OAuth profile credentials remain source-profile scoped and are globally visible as connection metadata only.
+API-key credentials can be promoted to Hermes global credential storage. OAuth profile credentials remain source-profile scoped unless explicitly shared.
 
-## Business classification
-
-Discovery and employment are separate facts. A Provider Hub connection can exist without creating an Employee. Only an explicitly selected model (for example a Codex `*.config.toml` model or a Hermes profile default) is eligible for automatic Supplier/Employee/Employment materialization. Merely listing a model in a provider catalogue does not hire it.
-
-Known business identities are classified conservatively. Existing Suppliers are reused; unknown or infrastructure-only connections stay unclassified until an operator confirms their commercial identity.
-
-## Runtime use
-
-`RuntimeAccessProfile` remains the executable boundary. The Provider Hub does not proxy model traffic. Codex, OpenCode and Claude Code continue to use their native configuration contracts. API-key connections promoted to the Hermes global credential store can be materialized for any profile without duplicating the secret into the business database.
-
-## Hermes-native shared channel tools
-
-The plugin exposes two tools in every Hermes profile:
-
-- `ai_office_add_provider`: accepts a provider URL plus `api_key`/`key`, optionally a name and website URL. The secret is written only to Hermes credential storage; the Provider Hub stores `credentialRef` and safe connection metadata. `newapi_channel_conn`-style payloads can be mapped directly.
-- `ai_office_list_providers`: reads the current central Provider Hub projection so any profile can see shared channels, readiness, models, supplier mapping, and which profiles already use them.
-
-Provider sharing is **query-based, not event-replication-based**. `ProviderConnection` created/updated domain events remain useful for audit and UI refresh, but another profile learns the current truth by querying the Provider Hub/tool. This avoids missed-event consistency problems.
-
-`websiteUrl` is first-class metadata on both `ProviderConnection` and `Supplier`. It is informational only and never participates in identity, staffing, or routing decisions.
-
-## Compact list and lazy detail
-
-The dashboard uses a dedicated compact projection for the Provider Hub list:
-
-- `GET /api/v2/projections/provider-hub-summary` returns only identity, availability, auth kind, model count, Profile count, and compact Supplier identity.
-- `GET /api/v2/provider-connections/:connectionId` returns full safe connection detail on demand, including endpoint, website, credential reference, discovered models, and Profile links.
-- The existing `GET /api/v2/projections/provider-hub` contract remains available for tools and compatibility.
-
-This keeps the main channel list readable and prevents endpoint URLs, credential references, and full model/Profile lists from being shipped to the dashboard until the operator opens **View details**. Secret credential values remain outside the control-plane database in all views.
+`RuntimeAccessProfile` remains the executable boundary. Provider Hub never becomes a global model proxy; Codex, OpenCode and Claude Code continue using their native configuration contracts.

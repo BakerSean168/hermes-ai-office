@@ -75,7 +75,6 @@
       "tabs.organization": "Organization",
       "tabs.workforce": "Workforce",
       "tabs.suppliers": "Suppliers",
-      "tabs.providers": "Channels",
       "tabs.operations": "Operations",
       "tabs.policy": "Runtime policy",
       "tabs.incidents": "Incidents",
@@ -156,6 +155,8 @@
       "workforce.filterAppointed": "Appointed",
       "workforce.filterObserved": "Observed activity",
       "workforce.filterWorking": "Working now",
+      "workforce.filterInternal": "Internal employees",
+      "workforce.internalSource": "Internal",
       "workforce.employee": "Employee",
       "workforce.appointment": "Current appointment",
       "workforce.verified": "Verified ledger",
@@ -180,7 +181,7 @@
       "workforce.basis.SUPPLIER_HINT": "supplier hint",
       "workforce.basis.UNIQUE_MODEL": "unique model",
       "suppliers.title": "Suppliers",
-      "suppliers.subtitle": "Keep the supplier list simple. Open details only when you need contracts, routes, or employee history.",
+      "suppliers.subtitle": "External suppliers and commercial access sources. Technical connections are folded into supplier details.",
       "suppliers.add": "Add supplier",
       "suppliers.details": "View details",
       "suppliers.website": "Website",
@@ -191,6 +192,9 @@
       "suppliers.defaultEmployeeNone": "No preferred employee",
       "suppliers.agreements": "Agreements",
       "suppliers.channels": "Technical channels",
+      "suppliers.connections": "Provider connections",
+      "suppliers.connectionsLoading": "Loading connection details…",
+      "suppliers.noConnections": "No provider connection metadata",
       "suppliers.runtimeAccess": "Agent access",
       "suppliers.nativeAccess": "Native config",
       "suppliers.gatewayAccess": "Gateway adapter",
@@ -228,62 +232,6 @@
       "suppliers.custom": "Custom endpoint",
       "suppliers.customHint": "OpenAI-compatible URL + API key",
       "suppliers.configured": "Configured",
-      "suppliers.personalChannels": "Personal channels",
-      "suppliers.personalChannelsSubtitle":
-        "Only account-pool sources imported or operated by you are shown here. Commercial supplier routes are not duplicated.",
-      "suppliers.accountPool": "Account pool",
-      "suppliers.readyAccounts": "ready",
-      "suppliers.reauthRequired": "reauth required",
-      "suppliers.source": "Source",
-      "suppliers.channel": "Channel",
-      "suppliers.mapping": "Business mapping",
-      "suppliers.mapped": "Mapped",
-      "suppliers.unmapped": "Not mapped to a supplier",
-      "suppliers.partial": "Partially mapped",
-      "suppliers.health": "Health",
-      "suppliers.models": "Models",
-      "suppliers.cpaDeepseek": "DeepSeek API",
-      "providers.title": "Provider Hub",
-      "providers.subtitle": "Shared provider connections discovered from every Hermes profile. Add once, see it everywhere.",
-      "providers.subtitleCompact": "A compact view of shared provider connections. Open details only when you need endpoints, credentials, models, or profile usage.",
-      "providers.actions": "Actions",
-      "providers.viewDetails": "View details",
-      "providers.detailTitle": "Provider details",
-      "providers.detailSubtitle": "Connection, credential reference, available models, and profile usage",
-      "providers.close": "Close",
-      "providers.loadingDetails": "Loading provider details…",
-      "providers.basicInfo": "Connection",
-      "providers.technicalInfo": "Technical details",
-      "providers.modelCount": "{count} models",
-      "providers.profileCount": "{count} profiles",
-      "providers.credentialScope": "Credential scope",
-      "providers.credentialRef": "Credential reference",
-      "providers.baseUrl": "API Base URL",
-      "providers.shareScope": "Share scope",
-      "providers.protocol": "Protocol",
-      "providers.sourceKind": "Source",
-      "providers.sourceProfile": "Source profile",
-      "providers.lastSeen": "Last seen",
-      "providers.updatedAt": "Updated",
-      "providers.noModels": "No models discovered yet",
-      "providers.authKind.API_KEY": "API Key",
-      "providers.authKind.OAUTH": "OAuth",
-      "providers.authKind.SUBSCRIPTION": "Subscription",
-      "providers.authKind.ACCOUNT_POOL": "Account pool",
-      "providers.authKind.NONE": "No credential",
-      "providers.sync": "Sync profiles",
-      "providers.connection": "Channel",
-      "providers.website": "Website",
-      "providers.status": "Availability",
-      "providers.auth": "Credential",
-      "providers.models": "Available models",
-      "providers.profiles": "Profiles using it",
-      "providers.supplier": "Business supplier",
-      "providers.shared": "Shared",
-      "providers.profileOnly": "Profile only",
-      "providers.noSupplier": "Not classified",
-      "providers.noProfiles": "Not used by a profile yet",
-      "providers.noConnections": "No provider connections discovered yet",
       "operations.title": "Operations",
       "operations.subtitle": "Current runs, activated duties, and technical runtime shells",
       "operations.runs": "Active runs",
@@ -375,7 +323,6 @@
       "tabs.organization": "组织架构",
       "tabs.workforce": "员工",
       "tabs.suppliers": "供应商",
-      "tabs.providers": "渠道",
       "tabs.operations": "运营",
       "tabs.policy": "运行时策略",
       "tabs.incidents": "事件",
@@ -456,6 +403,8 @@
       "workforce.filterAppointed": "已有岗位",
       "workforce.filterObserved": "有观测活动",
       "workforce.filterWorking": "正在工作",
+      "workforce.filterInternal": "内部员工",
+      "workforce.internalSource": "内部",
       "workforce.employee": "员工",
       "workforce.appointment": "当前岗位",
       "workforce.verified": "已核验账本",
@@ -479,7 +428,7 @@
       "workforce.basis.SUPPLIER_HINT": "供应商提示",
       "workforce.basis.UNIQUE_MODEL": "唯一模型",
       "suppliers.title": "供应商",
-      "suppliers.subtitle": "供应商列表只保留关键状态；合同、路由和员工履历需要时再查看详情。",
+      "suppliers.subtitle": "这里只展示外部供应商和商业接入来源；技术连接已收进供应商详情，不再单独占一个业务页面。",
       "suppliers.add": "添加供应商",
       "suppliers.details": "查看详情",
       "suppliers.website": "官网",
@@ -490,6 +439,9 @@
       "suppliers.defaultEmployeeNone": "暂无默认员工",
       "suppliers.agreements": "供应协议",
       "suppliers.channels": "技术通道",
+      "suppliers.connections": "接入连接",
+      "suppliers.connectionsLoading": "正在获取接入详情…",
+      "suppliers.noConnections": "暂无 Provider 连接信息",
       "suppliers.runtimeAccess": "Agent 接入",
       "suppliers.nativeAccess": "原生配置",
       "suppliers.gatewayAccess": "网关适配",
@@ -527,61 +479,6 @@
       "suppliers.custom": "自定义接口",
       "suppliers.customHint": "OpenAI 兼容地址 + API Key",
       "suppliers.configured": "已配置",
-      "suppliers.personalChannels": "个人渠道",
-      "suppliers.personalChannelsSubtitle": "这里只展示你自己导入或运营的账号池型渠道；商业供应商已经拥有的技术路由不会重复展示。",
-      "suppliers.accountPool": "账号池",
-      "suppliers.readyAccounts": "可用",
-      "suppliers.reauthRequired": "需重新认证",
-      "suppliers.source": "来源",
-      "suppliers.channel": "渠道",
-      "suppliers.mapping": "业务映射",
-      "suppliers.mapped": "已映射",
-      "suppliers.unmapped": "未映射到供应商",
-      "suppliers.partial": "部分映射",
-      "suppliers.health": "健康状态",
-      "suppliers.models": "模型",
-      "suppliers.cpaDeepseek": "DeepSeek API",
-      "providers.title": "渠道中心",
-      "providers.subtitle": "集中管理所有 Hermes Profile 发现的 Provider 连接：一个 Profile 添加后，其它 Profile 也能看到。",
-      "providers.subtitleCompact": "主列表只保留渠道摘要；需要查看接口、凭证引用、模型和 Profile 使用情况时再打开详情。",
-      "providers.actions": "操作",
-      "providers.viewDetails": "查看详情",
-      "providers.detailTitle": "渠道详情",
-      "providers.detailSubtitle": "连接信息、凭证引用、可用模型与 Profile 使用情况",
-      "providers.close": "关闭",
-      "providers.loadingDetails": "正在获取渠道详情…",
-      "providers.basicInfo": "基础信息",
-      "providers.technicalInfo": "技术信息",
-      "providers.modelCount": "{count} 个模型",
-      "providers.profileCount": "{count} 个 Profile",
-      "providers.credentialScope": "凭证范围",
-      "providers.credentialRef": "凭证引用",
-      "providers.baseUrl": "API 请求地址",
-      "providers.shareScope": "共享范围",
-      "providers.protocol": "协议",
-      "providers.sourceKind": "来源",
-      "providers.sourceProfile": "来源 Profile",
-      "providers.lastSeen": "最近发现",
-      "providers.updatedAt": "最近更新",
-      "providers.noModels": "暂未发现模型",
-      "providers.authKind.API_KEY": "API Key",
-      "providers.authKind.OAUTH": "OAuth",
-      "providers.authKind.SUBSCRIPTION": "订阅",
-      "providers.authKind.ACCOUNT_POOL": "账号池",
-      "providers.authKind.NONE": "无凭证",
-      "providers.sync": "同步 Profile",
-      "providers.connection": "渠道",
-      "providers.website": "官网",
-      "providers.status": "可用状态",
-      "providers.auth": "凭证",
-      "providers.models": "可用模型",
-      "providers.profiles": "正在使用的 Profile",
-      "providers.supplier": "业务供应商",
-      "providers.shared": "公共共享",
-      "providers.profileOnly": "仅本 Profile",
-      "providers.noSupplier": "尚未归类",
-      "providers.noProfiles": "尚无 Profile 使用",
-      "providers.noConnections": "还没有发现 Provider 渠道",
       "operations.title": "运营",
       "operations.subtitle": "当前运行、已激活职责与技术运行时外壳",
       "operations.runs": "活跃运行",
@@ -670,7 +567,6 @@
     "tabs.organization": "組織架構",
     "tabs.workforce": "員工",
     "tabs.suppliers": "供應商",
-    "tabs.providers": "渠道",
     "tabs.operations": "營運",
     "tabs.policy": "執行階段策略",
     "tabs.incidents": "事件",
@@ -1535,6 +1431,7 @@
         if (filter === "appointed" && appointments.length === 0) return false;
         if (filter === "observed" && !signalTotal(observed)) return false;
         if (filter === "working" && work.length === 0) return false;
+        if (filter === "internal" && String(asObject(employee.supplier).sourceKind || "EXTERNAL") !== "INTERNAL") return false;
         if (!normalized) return true;
         const haystack = [
           employee.displayName,
@@ -1571,10 +1468,13 @@
         key: "employee",
         label: props.t("workforce.employee"),
         render: function (employee) {
+          const source = asObject(employee.supplier);
+          const sourcePrefix = String(source.sourceKind || "EXTERNAL") === "INTERNAL" ? props.t("workforce.internalSource") + " · " : "";
           return h(PersonCell, {
             name: employee.displayName,
             detail:
-              String(asObject(employee.supplier).name || "") +
+              sourcePrefix +
+              String(source.name || "") +
               " · " +
               String(asObject(employee.supplierModel).name || ""),
           });
@@ -1707,248 +1607,10 @@
           { value: "appointed", label: props.t("workforce.filterAppointed") },
           { value: "observed", label: props.t("workforce.filterObserved") },
           { value: "working", label: props.t("workforce.filterWorking") },
+          { value: "internal", label: props.t("workforce.filterInternal") },
         ],
       }),
       h(DataTable, { columns: columns, rows: employees, empty: props.t("common.noResults") }),
-    );
-  }
-
-  function ProviderHub(props) {
-    const hub = asObject(props.data.providerHub);
-    const error = sourceError(hub);
-    const [syncing, setSyncing] = React.useState(false);
-    const [syncError, setSyncError] = React.useState("");
-    const [detailId, setDetailId] = React.useState("");
-    const [detail, setDetail] = React.useState(null);
-    const [detailLoading, setDetailLoading] = React.useState(false);
-    const [detailError, setDetailError] = React.useState("");
-    if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
-    const items = asArray(hub.items);
-
-    function authLabel(value) {
-      const key = String(value || "NONE").toUpperCase();
-      return props.t("providers.authKind." + key);
-    }
-
-    function formatTimestamp(value) {
-      const number = Number(value || 0);
-      if (!number) return "—";
-      try {
-        return new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(number));
-      } catch (_error) {
-        return new Date(number).toLocaleString();
-      }
-    }
-
-    async function syncNow() {
-      setSyncing(true);
-      setSyncError("");
-      try {
-        await api("/providers/hub?force=true");
-        await props.onRefresh();
-      } catch (cause) {
-        setSyncError(String(cause));
-      } finally {
-        setSyncing(false);
-      }
-    }
-
-    async function openDetail(item) {
-      const id = String(item.id || "");
-      if (!id) return;
-      setDetailId(id);
-      setDetail(null);
-      setDetailError("");
-      setDetailLoading(true);
-      try {
-        const result = await api("/providers/hub/" + encodeURIComponent(id));
-        setDetail(result);
-      } catch (cause) {
-        setDetailError(String(cause));
-      } finally {
-        setDetailLoading(false);
-      }
-    }
-
-    function closeDetail() {
-      setDetailId("");
-      setDetail(null);
-      setDetailError("");
-      setDetailLoading(false);
-    }
-
-    function DetailFact(label, value, className) {
-      return h(
-        "div",
-        { className: "hao-provider-fact " + (className || "") },
-        h("span", null, label),
-        h("strong", null, value || "—"),
-      );
-    }
-
-    const columns = [
-      {
-        key: "connection",
-        label: props.t("providers.connection"),
-        render: function (item) {
-          const supplier = asObject(item.supplier);
-          return h(
-            "div",
-            { className: "hao-primary-cell hao-provider-summary-name" },
-            h("strong", null, item.displayName || item.providerKey),
-            h("small", null, [item.providerKey, supplier.name].filter(Boolean).join(" · ") || props.t("providers.noSupplier")),
-          );
-        },
-      },
-      {
-        key: "health",
-        label: props.t("providers.status"),
-        render: function (item) {
-          return h(Status, { value: item.health, t: props.t });
-        },
-      },
-      {
-        key: "auth",
-        label: props.t("providers.auth"),
-        render: function (item) {
-          return h("span", { className: "hao-provider-auth-summary" }, authLabel(item.authKind));
-        },
-      },
-      {
-        key: "models",
-        label: props.t("providers.models"),
-        render: function (item) {
-          return h("strong", { className: "hao-provider-count" }, props.t("providers.modelCount", { count: props.number(item.modelCount) }));
-        },
-      },
-      {
-        key: "profiles",
-        label: props.t("providers.profiles"),
-        render: function (item) {
-          return Number(item.profileCount || 0) > 0
-            ? h("strong", { className: "hao-provider-count" }, props.t("providers.profileCount", { count: props.number(item.profileCount) }))
-            : h("span", { className: "hao-muted" }, props.t("providers.noProfiles"));
-        },
-      },
-      {
-        key: "actions",
-        label: props.t("providers.actions"),
-        render: function (item) {
-          return h(Button, { kind: "quiet", onClick: function () { openDetail(item); } }, props.t("providers.viewDetails"));
-        },
-      },
-    ];
-
-    const detailValue = asObject(detail);
-    const detailSupplier = asObject(detailValue.supplier);
-    const detailModels = asArray(detailValue.models);
-    const detailLinks = asArray(detailValue.profileLinks);
-    const website = detailValue.website_url || detailSupplier.websiteUrl || "";
-
-    return h(
-      "div",
-      { className: "hao-section-stack" },
-      h(
-        "div",
-        { className: "hao-section-head" },
-        h("div", null, h("h1", null, props.t("providers.title")), h("p", null, props.t("providers.subtitleCompact"))),
-        h(
-          "div",
-          { className: "hao-inline-actions" },
-          h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(items.length) })),
-          h(Button, { onClick: syncNow, disabled: syncing }, syncing ? props.t("shell.refreshing") : props.t("providers.sync")),
-        ),
-      ),
-      syncError ? h(ErrorBanner, { title: props.t("shell.loadError"), error: syncError }) : null,
-      h(DataTable, { columns: columns, rows: items, empty: props.t("providers.noConnections") }),
-      h(
-        Modal,
-        {
-          open: Boolean(detailId),
-          onClose: closeDetail,
-          labelledBy: "hao-provider-detail-title",
-          title: detailValue.display_name || detailValue.provider_key || props.t("providers.detailTitle"),
-          subtitle: detailValue.provider_key || props.t("providers.detailSubtitle"),
-          closeLabel: props.t("providers.close"),
-          wide: true,
-          footer: h(Button, { kind: "quiet", onClick: closeDetail }, props.t("providers.close")),
-        },
-        detailLoading
-          ? h("div", { className: "hao-provider-detail-loading" }, props.t("providers.loadingDetails"))
-          : detailError
-            ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailError })
-            : detail
-              ? h(
-                  "div",
-                  { className: "hao-provider-detail" },
-                  h(
-                    "section",
-                    { className: "hao-detail-section" },
-                    h("h3", null, props.t("providers.basicInfo")),
-                    h(
-                      "div",
-                      { className: "hao-provider-facts" },
-                      DetailFact(props.t("providers.status"), props.t("status." + String(detailValue.health || "UNKNOWN"))),
-                      DetailFact(props.t("providers.auth"), authLabel(detailValue.auth_kind)),
-                      DetailFact(props.t("providers.credentialScope"), detailValue.credential_scope || "—"),
-                      DetailFact(props.t("providers.credentialRef"), detailValue.credential_ref || "—", "hao-provider-fact-mono"),
-                      DetailFact(props.t("providers.baseUrl"), detailValue.base_url || "—", "hao-provider-fact-url"),
-                      website
-                        ? h(
-                            "div",
-                            { className: "hao-provider-fact hao-provider-fact-url" },
-                            h("span", null, props.t("providers.website")),
-                            h("a", { className: "hao-external-link", href: website, target: "_blank", rel: "noreferrer" }, website),
-                          )
-                        : DetailFact(props.t("providers.website"), "—"),
-                      DetailFact(props.t("providers.supplier"), detailSupplier.name || props.t("providers.noSupplier")),
-                      DetailFact(props.t("providers.shareScope"), detailValue.share_scope || "—"),
-                    ),
-                  ),
-                  h(
-                    "section",
-                    { className: "hao-detail-section" },
-                    h("div", { className: "hao-provider-section-head" }, h("h3", null, props.t("providers.models")), h("span", { className: "hao-count" }, props.number(detailModels.length))),
-                    detailModels.length
-                      ? h("div", { className: "hao-chip-row hao-provider-model-list" }, detailModels.map(function (model) { return h("code", { className: "hao-code", key: model }, model); }))
-                      : h("span", { className: "hao-muted" }, props.t("providers.noModels")),
-                  ),
-                  h(
-                    "section",
-                    { className: "hao-detail-section" },
-                    h("div", { className: "hao-provider-section-head" }, h("h3", null, props.t("providers.profiles")), h("span", { className: "hao-count" }, props.number(new Set(detailLinks.map(function (item) { return String(item.profile_id); })).size))),
-                    detailLinks.length
-                      ? h(
-                          "div",
-                          { className: "hao-provider-profile-list" },
-                          detailLinks.map(function (link) {
-                            return h(
-                              "div",
-                              { className: "hao-provider-profile-row", key: link.id },
-                              h("strong", null, link.profile_id || "profile"),
-                              h("span", null, [link.runtime_kind, link.provider_ref, link.model_ref, link.profile_ref].filter(Boolean).join(" · ")),
-                            );
-                          }),
-                        )
-                      : h("span", { className: "hao-muted" }, props.t("providers.noProfiles")),
-                  ),
-                  h(
-                    "section",
-                    { className: "hao-detail-section" },
-                    h("h3", null, props.t("providers.technicalInfo")),
-                    h(
-                      "div",
-                      { className: "hao-provider-facts" },
-                      DetailFact(props.t("providers.protocol"), detailValue.protocol || "—"),
-                      DetailFact(props.t("providers.sourceKind"), detailValue.source_kind || "—"),
-                      DetailFact(props.t("providers.sourceProfile"), detailValue.source_profile_id || "—"),
-                      DetailFact(props.t("providers.lastSeen"), formatTimestamp(detailValue.last_seen_at)),
-                      DetailFact(props.t("providers.updatedAt"), formatTimestamp(detailValue.updated_at)),
-                    ),
-                  ),
-                )
-              : null,
-      ),
     );
   }
 
@@ -1957,6 +1619,9 @@
     const workforce = asObject(props.data.workforce);
     const error = sourceError(supply);
     const [detailSupplier, setDetailSupplier] = React.useState(null);
+    const [detailConnections, setDetailConnections] = React.useState([]);
+    const [detailConnectionsLoading, setDetailConnectionsLoading] = React.useState(false);
+    const [detailConnectionsError, setDetailConnectionsError] = React.useState("");
     const [addOpen, setAddOpen] = React.useState(false);
     const [presets, setPresets] = React.useState([]);
     const [presetId, setPresetId] = React.useState("opencode-go");
@@ -1979,9 +1644,9 @@
         return [employee.id, employee];
       }),
     );
-    const suppliers = asArray(supply.suppliers);
-    const personalChannelProjection = asObject(props.data.personalChannels);
-    const personalChannels = asArray(personalChannelProjection.channels);
+    const suppliers = asArray(supply.suppliers).filter(function (supplier) {
+      return String(supplier.sourceKind || "EXTERNAL") !== "INTERNAL";
+    });
     const currentPreset =
       presets.find(function (preset) {
         return preset.id === presetId;
@@ -2004,6 +1669,28 @@
       setFormMessage("");
       setDiscovering(false);
       setSaving(false);
+    }
+
+    async function openSupplierDetail(supplier) {
+      setDetailSupplier(supplier);
+      setDetailConnections([]);
+      setDetailConnectionsError("");
+      setDetailConnectionsLoading(true);
+      try {
+        const result = await api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections");
+        setDetailConnections(asArray(result.items));
+      } catch (cause) {
+        setDetailConnectionsError(String(cause));
+      } finally {
+        setDetailConnectionsLoading(false);
+      }
+    }
+
+    function closeSupplierDetail() {
+      setDetailSupplier(null);
+      setDetailConnections([]);
+      setDetailConnectionsError("");
+      setDetailConnectionsLoading(false);
     }
 
     async function openOnboarding() {
@@ -2159,64 +1846,6 @@
       };
     }
 
-    const personalChannelColumns = [
-      {
-        key: "name",
-        label: props.t("suppliers.channel"),
-        render: function (row) {
-          return h(
-            "div",
-            { className: "hao-primary-cell" },
-            h("strong", null, row.name || row.id || "—"),
-            h("small", null, row.provider || row.sourceKind || ""),
-          );
-        },
-      },
-      {
-        key: "accounts",
-        label: props.t("suppliers.accountPool"),
-        render: function (row) {
-          const accounts = asObject(row.accounts);
-          const ready = Number(accounts.ready || 0);
-          const total = Number(accounts.total || 0);
-          const reauth = Number(accounts.reauthRequired || 0);
-          return h(
-            "div",
-            { className: "hao-primary-cell" },
-            h("strong", null, props.number(ready) + " / " + props.number(total) + " " + props.t("suppliers.readyAccounts")),
-            reauth > 0 ? h("small", null, props.number(reauth) + " " + props.t("suppliers.reauthRequired")) : null,
-          );
-        },
-      },
-      {
-        key: "health",
-        label: props.t("suppliers.health"),
-        render: function (row) {
-          return h(Status, { value: row.health, t: props.t });
-        },
-      },
-      {
-        key: "models",
-        label: props.t("suppliers.models"),
-        render: function (row) {
-          const models = asArray(row.models);
-          const visible = models.slice(0, 8);
-          return models.length
-            ? h(
-                "div",
-                { className: "hao-code-list" },
-                visible.map(function (model) {
-                  return h("code", { key: model.id, className: "hao-code" }, model.id || "—");
-                }),
-                models.length > visible.length
-                  ? h("span", { className: "hao-count" }, "+" + props.number(models.length - visible.length))
-                  : null,
-              )
-            : "—";
-        },
-      },
-    ];
-
     const detailFacts = detailSupplier ? supplierFacts(detailSupplier) : null;
 
     return h(
@@ -2278,44 +1907,22 @@
                       ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
                       : null,
                 ),
-                h(Button, { kind: "quiet", onClick: function () { setDetailSupplier(supplier); } }, props.t("suppliers.details")),
+                h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
               );
             }),
           )
         : h(Empty, null, props.t("common.noData")),
-      personalChannels.length
-        ? h(
-            "section",
-            { className: "hao-channel-section" },
-            h(
-              "div",
-              { className: "hao-section-head" },
-              h(
-                "div",
-                null,
-                h("h2", null, props.t("suppliers.personalChannels")),
-                h("p", null, props.t("suppliers.personalChannelsSubtitle")),
-              ),
-              h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(personalChannels.length) })),
-            ),
-            h(DataTable, {
-              columns: personalChannelColumns,
-              rows: personalChannels,
-              empty: props.t("common.noData"),
-            }),
-          )
-        : null,
       h(
         Modal,
         {
           open: Boolean(detailSupplier),
-          onClose: function () { setDetailSupplier(null); },
+          onClose: closeSupplierDetail,
           labelledBy: "hao-supplier-detail-title",
           title: detailSupplier ? detailSupplier.name : props.t("suppliers.detailTitle"),
           subtitle: props.t("suppliers.detailSubtitle"),
           closeLabel: props.t("suppliers.close"),
           wide: true,
-          footer: h(Button, { kind: "quiet", onClick: function () { setDetailSupplier(null); } }, props.t("suppliers.close")),
+          footer: h(Button, { kind: "quiet", onClick: closeSupplierDetail }, props.t("suppliers.close")),
         },
         detailSupplier && detailFacts
           ? h(
@@ -2354,6 +1961,43 @@
                       }),
                     )
                   : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
+              ),
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.connections")),
+                detailConnectionsLoading
+                  ? h("span", { className: "hao-muted" }, props.t("suppliers.connectionsLoading"))
+                  : detailConnectionsError
+                    ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailConnectionsError })
+                    : detailConnections.length
+                      ? h(
+                          "div",
+                          { className: "hao-agreement-list" },
+                          detailConnections.map(function (connection) {
+                            const models = asArray(connection.models);
+                            const links = asArray(connection.profileLinks);
+                            return h(
+                              "div",
+                              { className: "hao-agreement-row hao-supplier-connection", key: connection.id },
+                              h(
+                                "div",
+                                { className: "hao-primary-cell" },
+                                h("strong", null, connection.display_name || connection.provider_key),
+                                h("small", null, connection.base_url || "—"),
+                                h("small", null, [connection.auth_kind, connection.credential_ref].filter(Boolean).join(" · ") || "—"),
+                                models.length
+                                  ? h("div", { className: "hao-chip-row" }, models.slice(0, 6).map(function (model) { return h("code", { className: "hao-code", key: model }, model); }), models.length > 6 ? h("span", { className: "hao-count" }, "+" + props.number(models.length - 6)) : null)
+                                  : null,
+                                links.length
+                                  ? h("small", null, links.map(function (link) { return [link.profile_id, link.runtime_kind, link.model_ref].filter(Boolean).join(" / "); }).join(" · "))
+                                  : null,
+                              ),
+                              h(Status, { value: connection.health, t: props.t }),
+                            );
+                          }),
+                        )
+                      : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noConnections")),
               ),
               h(
                 "section",
@@ -2664,7 +2308,7 @@
     );
   }
 
-  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "providers", "operations", "policy", "incidents"];
+  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
 
   function OfficePage() {
     const i18n = useI18n();
@@ -2724,7 +2368,6 @@
       if (tab === "organization") content = h(Organization, shared);
       else if (tab === "workforce") content = h(Workforce, shared);
       else if (tab === "suppliers") content = h(Suppliers, Object.assign({}, shared, { onRefresh: load }));
-      else if (tab === "providers") content = h(ProviderHub, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "operations") content = h(Operations, shared);
       else if (tab === "policy") content = h(RuntimePolicy, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "incidents") content = h(Incidents, shared);

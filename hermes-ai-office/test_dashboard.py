@@ -53,8 +53,6 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         payloads = {
             "/api/v2/projections/workforce": {"summary": {"employees": 2}},
             "/api/v2/projections/supply": {"summary": {"suppliers": 1}},
-            "/api/v2/projections/personal-channels": {"channels": [{"id": "grok2api"}]},
-            "/api/v2/projections/provider-hub-summary": {"summary": {"connections": 2}, "items": []},
             "/api/v2/projections/office": {"summary": {"positions": 3}},
             "/api/v2/incidents?limit=200": {"items": []},
             "/api/v2/runtime-launch-decisions?limit=100": {"items": [{"id": "rlaunch_1"}]},
@@ -65,8 +63,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             result = await api.overview()
         self.assertEqual(result["workforce"]["summary"]["employees"], 2)
         self.assertEqual(result["supply"]["summary"]["suppliers"], 1)
-        self.assertEqual(result["personalChannels"]["channels"][0]["id"], "grok2api")
-        self.assertEqual(result["providerHub"]["summary"]["connections"], 2)
+        self.assertNotIn("personalChannels", result)
+        self.assertNotIn("providerHub", result)
         self.assertEqual(result["organization"]["summary"]["positions"], 3)
         self.assertEqual(result["runtimeDecisions"]["items"][0]["id"], "rlaunch_1")
         self.assertEqual(result["controlPlaneUrl"], "local")
@@ -230,6 +228,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                     "models": payload.get("models") or [],
                     "metadata": payload.get("metadata") or {},
                 }
+            if path.endswith("workforce-sources/upsert"):
+                return {"id": "sup_deepseek", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
             if path.endswith("/staffing-preferences"):
                 return {"metadata": {"staffingPreferences": payload}}
             if path.endswith("/runtime-access"):
@@ -264,6 +264,10 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         catalog_calls = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_calls), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_calls))
+        source_calls = [payload for path, payload, _ in calls if path.endswith("workforce-sources/upsert")]
+        self.assertGreaterEqual(len(source_calls), 1)
+        self.assertTrue(all(payload["sourceKind"] == "EXTERNAL" for payload in source_calls))
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in source_calls))
         hub_calls = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
         self.assertGreaterEqual(len(hub_calls), 1)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_calls))
@@ -304,6 +308,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                     "models": payload.get("models") or [],
                     "metadata": payload.get("metadata") or {},
                 }
+            if path.endswith("workforce-sources/upsert"):
+                return {"id": "sup_custom", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
             if path.endswith("supply-catalog/register"):
                 model = payload["supplierModel"]["key"]
                 return {
@@ -338,6 +344,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         catalog_payloads = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_payloads), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_payloads))
+        source_payloads = [payload for path, payload, _ in calls if path.endswith("workforce-sources/upsert")]
+        self.assertGreaterEqual(len(source_payloads), 1)
+        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in source_payloads))
         hub_payloads = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
         self.assertGreaterEqual(len(hub_payloads), 1)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_payloads))
@@ -382,14 +391,13 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["key_env"], "HERMES_AI_OFFICE_ABC123_API_KEY")
         self.assertNotIn("api_key", row)
 
-    def test_provider_hub_overview_is_compact_and_detail_is_lazy(self) -> None:
+    def test_provider_hub_remains_backend_registry_but_not_business_navigation(self) -> None:
         source = API_PATH.read_text(encoding="utf-8")
-        self.assertIn('"/api/v2/projections/provider-hub-summary"', source)
         self.assertIn('@router.get("/providers/hub/{connection_id}")', source)
+        self.assertIn('_sync_profile_native_provider_hub', source)
         bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('props.t("providers.viewDetails")', bundle)
-        self.assertIn('api("/providers/hub/" + encodeURIComponent(id))', bundle)
-        self.assertNotIn('label: props.t("providers.website"),\n        render: function (item)', bundle)
+        self.assertNotIn('tab === "providers"', bundle)
+        self.assertNotIn('"overview", "organization", "workforce", "suppliers", "providers"', bundle)
 
     def test_control_plane_url_is_forced_to_loopback(self) -> None:
         with mock.patch.dict(os.environ, {"HERMES_AI_OFFICE_CONTROL_PLANE_URL": "https://attacker.example"}):
@@ -406,9 +414,8 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertEqual(manifest["tab"]["path"], "/office")
         self.assertEqual(manifest["api"], "plugin_api.py")
         self.assertIn('registry.register("hermes-ai-office", OfficePage)', source)
-        self.assertIn('"providers", "operations"', source)
-        self.assertIn('function ProviderHub(props)', source)
-        self.assertIn('/providers/hub?force=true', source)
+        self.assertIn('"suppliers", "operations"', source)
+        self.assertNotIn('tab === "providers"', source)
         self.assertIn("window.__HERMES_PLUGIN_SDK__", source)
         self.assertNotIn('from "react"', source)
         self.assertNotIn("react.production.min", source)
@@ -421,13 +428,15 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('aria-selected', source)
         self.assertIn('className: "hao-data-table"', source)
 
-    def test_dashboard_exposes_provider_and_supplier_website_metadata(self) -> None:
+    def test_supplier_detail_owns_website_and_provider_connection_metadata(self) -> None:
         bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('detailValue.website_url', bundle)
         self.assertIn('supplier.websiteUrl', bundle)
-        self.assertIn('providers.website', bundle)
         self.assertIn('suppliers.website', bundle)
+        self.assertIn('api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections")', bundle)
+        self.assertIn('connection.base_url', bundle)
+        self.assertIn('connection.credential_ref', bundle)
         self.assertIn('hao-external-link', bundle)
+        self.assertNotIn('function ProviderHub(props)', bundle)
 
     def test_supplier_ui_is_compact_and_exposes_onboarding_flow(self) -> None:
         source = (DASHBOARD / "dist" / "index.js").read_text()
@@ -442,9 +451,9 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('className: "hao-supplier-list"', source)
         self.assertIn('className: "hao-modal ', source)
         self.assertIn('className: "hao-preset-grid"', source)
-        self.assertIn('"suppliers.personalChannels": "个人渠道"', source)
-        self.assertIn('"suppliers.accountPool": "账号池"', source)
-        self.assertIn('const personalChannels = asArray(personalChannelProjection.channels)', source)
+        self.assertNotIn('const personalChannels = asArray(personalChannelProjection.channels)', source)
+        self.assertIn('String(supplier.sourceKind || "EXTERNAL") !== "INTERNAL"', source)
+        self.assertIn('"workforce.filterInternal": "内部员工"', source)
         self.assertNotIn('personalGateways.length', source)
         self.assertNotIn('props.t("suppliers.cpaDeepseek")', source)
         self.assertNotIn('props.t("suppliers.unclassified")', source)
