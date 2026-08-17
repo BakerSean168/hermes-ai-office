@@ -205,3 +205,82 @@ test('technical CPA channel names remain evidence and do not fabricate business 
     await runtime.app.close();
   }
 });
+test('gateway discovery archives routes that disappear from the authoritative snapshot', async () => {
+  class MutableGateway implements GatewayExecutionPort, GatewayDiscoveryPort {
+    readonly gatewayId = 'cpa-compat';
+    routes = [
+      {
+        externalRouteRef: 'cpa/channel/deepseek-api/model/deepseek-v4-flash',
+        protocol: 'openai-chat-completions' as const,
+        health: 'healthy' as const,
+        supplierModelHint: 'deepseek-v4-flash',
+        capabilities: [],
+        deployments: [],
+        metadata: { channelName: 'deepseek-api' },
+      },
+      {
+        externalRouteRef: 'cpa/channel/deepseek-api/model/employment%3Aretired',
+        protocol: 'openai-chat-completions' as const,
+        health: 'healthy' as const,
+        supplierModelHint: 'employment:retired',
+        capabilities: [],
+        deployments: [],
+        metadata: { channelName: 'deepseek-api' },
+      },
+    ];
+
+    async resolveRoute() {
+      return { route: null, routable: false, reasons: ['NOT_USED'], observedAt: Date.now() };
+    }
+
+    async getRouteHealth(_route: GatewayRouteRef): Promise<GatewayHealth> {
+      return 'healthy';
+    }
+
+    async discover() {
+      return { gatewayId: this.gatewayId, observedAt: Date.now(), routes: this.routes };
+    }
+  }
+
+  const gateway = new MutableGateway();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa,
+    cpaUsage: usage,
+    initialSync: false,
+    gateways: new GatewayRegistry([gateway]),
+  });
+  try {
+    await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/internal/gateways/cpa-compat/discover',
+      payload: {},
+    });
+    assert.equal(
+      runtime.v2.listChannels('cpa-compat').filter((row) => row.lifecycle !== 'ARCHIVED').length,
+      2,
+    );
+
+    gateway.routes = gateway.routes.slice(0, 1);
+    await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/internal/gateways/cpa-compat/discover',
+      payload: {},
+    });
+
+    const channels = runtime.v2.listChannels('cpa-compat');
+    assert.equal(channels.length, 2);
+    assert.equal(
+      channels.find((row) => String(row.externalRouteRef).includes('employment%3Aretired'))
+        ?.lifecycle,
+      'ARCHIVED',
+    );
+    assert.equal(
+      channels.find((row) => String(row.externalRouteRef).endsWith('deepseek-v4-flash'))?.lifecycle,
+      'ENABLED',
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});

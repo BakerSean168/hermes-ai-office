@@ -985,6 +985,7 @@ export class SupplyRepository {
       metadata: decode<JsonRecord>(value.metadata_json, {}),
     }));
     const channels = this.#domain.listChannels();
+    const activeChannels = channels.filter((channel) => channel.lifecycle !== 'ARCHIVED');
     const gateways = this.#domain.listGateways();
 
     const supplierItems = suppliers.map((supplier) => {
@@ -1017,11 +1018,11 @@ export class SupplyRepository {
               ),
             })),
           capacityPools: capacityPools.filter((pool) => pool.supplyAgreementId === agreement.id),
-          channels: channels.filter((channel) => channel.supplyAgreementId === agreement.id),
+          channels: activeChannels.filter((channel) => channel.supplyAgreementId === agreement.id),
         })),
         infrastructure: {
           bindings: bindings.filter((binding) => employmentIds.has(String(binding.employmentId))),
-          channels: channels.filter(
+          channels: activeChannels.filter(
             (channel) =>
               channel.supplyAgreementId != null &&
               agreementIds.has(String(channel.supplyAgreementId)),
@@ -1063,31 +1064,67 @@ export class SupplyRepository {
       };
     });
 
-    const unmappedChannels = channels.filter((channel) => channel.supplyAgreementId == null);
-    const unmappedGroups = [
+    const currentAgreementById = new Map(
+      agreements
+        .filter((agreement) => agreement.lifecycle === 'ACTIVE')
+        .map((agreement) => [String(agreement.id), agreement]),
+    );
+    const activeSupplierById = new Map(
+      suppliers.map((supplier) => [String(supplier.id), supplier]),
+    );
+    const channelGroups = [
       ...new Set(
-        unmappedChannels.map(
+        activeChannels.map(
           (channel) => `${String(channel.gatewaySlug)}\u0000${String(channel.name)}`,
         ),
       ),
     ]
       .map((key) => {
         const [gatewaySlug = '', channelName = ''] = key.split('\u0000');
-        const groupChannels = unmappedChannels.filter(
+        const groupChannels = activeChannels.filter(
           (channel) => channel.gatewaySlug === gatewaySlug && channel.name === channelName,
         );
+        const mappedSuppliers = [
+          ...new Map(
+            groupChannels
+              .map((channel) =>
+                channel.supplyAgreementId == null
+                  ? null
+                  : currentAgreementById.get(String(channel.supplyAgreementId)),
+              )
+              .filter((agreement): agreement is V2Row => Boolean(agreement))
+              .map((agreement) => {
+                const supplier = activeSupplierById.get(String(agreement.supplierId));
+                return supplier
+                  ? [
+                      String(supplier.id),
+                      { id: supplier.id, slug: supplier.slug, name: supplier.name },
+                    ]
+                  : null;
+              })
+              .filter((entry): entry is [string, { id: unknown; slug: unknown; name: unknown }] =>
+                Boolean(entry),
+              ),
+          ).values(),
+        ];
+        const mappedRouteCount = groupChannels.filter(
+          (channel) =>
+            channel.supplyAgreementId != null &&
+            currentAgreementById.has(String(channel.supplyAgreementId)),
+        ).length;
+        const classification =
+          mappedRouteCount === 0
+            ? 'UNMAPPED'
+            : mappedRouteCount === groupChannels.length
+              ? 'MAPPED'
+              : 'PARTIAL';
         return {
           gatewaySlug,
           gatewayName: groupChannels[0]?.gatewayName,
           channelName,
+          classification,
+          mappedSuppliers,
           health: [...new Set(groupChannels.map((channel) => String(channel.health)))],
-          supplierHints: [
-            ...new Set(
-              groupChannels
-                .map((channel) => channel.supplierHint)
-                .filter((value): value is string => typeof value === 'string' && value.length > 0),
-            ),
-          ],
           modelHints: [
             ...new Set(
               groupChannels
@@ -1100,6 +1137,9 @@ export class SupplyRepository {
             externalRouteRef: channel.externalRouteRef,
             protocol: channel.protocol,
             health: channel.health,
+            mapped:
+              channel.supplyAgreementId != null &&
+              currentAgreementById.has(String(channel.supplyAgreementId)),
           })),
         };
       })
@@ -1108,11 +1148,42 @@ export class SupplyRepository {
           String(a.gatewayName).localeCompare(String(b.gatewayName)) ||
           a.channelName.localeCompare(b.channelName),
       );
+    const channelGateways = gateways
+      .map((gateway) => {
+        const groups = channelGroups.filter((group) => group.gatewaySlug === gateway.slug);
+        return {
+          id: gateway.id,
+          slug: gateway.slug,
+          name: gateway.displayName,
+          kind: gateway.kind,
+          lifecycle: gateway.lifecycle,
+          groups,
+          summary: {
+            channels: groups.length,
+            routes: groups.reduce((count, group) => count + group.routes.length, 0),
+            unmappedRoutes: groups.reduce(
+              (count, group) => count + group.routes.filter((route) => !route.mapped).length,
+              0,
+            ),
+          },
+        };
+      })
+      .filter((gateway) => gateway.groups.length > 0);
+    const unmappedChannels = activeChannels.filter(
+      (channel) =>
+        channel.supplyAgreementId == null ||
+        !currentAgreementById.has(String(channel.supplyAgreementId)),
+    );
+    const unmappedGroups = channelGroups.filter((group) => group.classification !== 'MAPPED');
     return {
       projectionVersion: 2,
       generatedAt: now(),
       suppliers: supplierItems,
       gateways,
+      channelInfrastructure: {
+        gateways: channelGateways,
+        count: activeChannels.length,
+      },
       unmappedInfrastructure: {
         channels: unmappedChannels,
         groups: unmappedGroups,

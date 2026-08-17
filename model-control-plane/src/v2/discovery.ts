@@ -198,6 +198,11 @@ export class GatewayDiscoveryService {
         for (const evidence of snapshot.routes) {
           this.#reconcileRoute(gatewayId, String(gateway.id), evidence, summary);
         }
+        this.#repository.archiveMissingChannels(
+          String(gateway.id),
+          snapshot.routes.map((route) => route.externalRouteRef),
+          snapshot.observedAt,
+        );
       });
       this.#repository.completeDiscoveryRun(String(discoveryRun.id), summary);
       return {

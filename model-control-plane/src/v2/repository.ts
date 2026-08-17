@@ -2815,6 +2815,46 @@ export class V2Repository {
     };
   }
 
+  archiveMissingChannels(
+    gatewayId: string,
+    observedRouteRefs: string[],
+    observedAt: number,
+  ): Row[] {
+    const observed = new Set(observedRouteRefs);
+    const current = rows(
+      this.db
+        .prepare(
+          `SELECT * FROM v2_channels
+           WHERE gateway_id=? AND lifecycle!='ARCHIVED'
+           ORDER BY created_at,id`,
+        )
+        .all(gatewayId),
+    );
+    const missing = current.filter((channel) => !observed.has(String(channel.external_route_ref)));
+    if (!missing.length) return [];
+    const timestamp = now();
+    const update = this.db.prepare(
+      `UPDATE v2_channels
+       SET lifecycle='ARCHIVED',health='UNKNOWN',updated_at=?
+       WHERE id=? AND lifecycle!='ARCHIVED'`,
+    );
+    for (const channel of missing) {
+      update.run(timestamp, String(channel.id));
+      this.emit({
+        type: 'channel.archived',
+        entityType: 'Channel',
+        entityId: String(channel.id),
+        actorRef: `gateway:${gatewayId}`,
+        payload: {
+          externalRouteRef: channel.external_route_ref,
+          reason: 'MISSING_FROM_AUTHORITATIVE_DISCOVERY',
+          observedAt,
+        },
+      });
+    }
+    return missing.map((channel) => ({ ...channel, lifecycle: 'ARCHIVED', health: 'UNKNOWN' }));
+  }
+
   startDiscoveryRun(gatewayId: string, observedAt: number): Row {
     const timestamp = now();
     const id = newId('disc', timestamp);

@@ -126,6 +126,24 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
   assert.equal(access.profileRef, 'hao-reviewer');
   assert.equal((agreement.capacityPools as unknown[]).length, 1);
   assert.equal((agreement.channels as Array<Record<string, unknown>>)[0]?.name, 'OpenCode Go');
+  const channelInfrastructure = projection.channelInfrastructure as {
+    gateways: Array<{ name: string; groups: Array<Record<string, unknown>> }>;
+    count: number;
+  };
+  assert.equal(channelInfrastructure.count, 2);
+  assert.equal(channelInfrastructure.gateways.length, 1);
+  assert.equal(channelInfrastructure.gateways[0]?.groups.length, 2);
+  assert.equal(
+    channelInfrastructure.gateways[0]?.groups.find((group) => group.channelName === 'OpenCode Go')
+      ?.classification,
+    'MAPPED',
+  );
+  assert.equal(
+    channelInfrastructure.gateways[0]?.groups.find(
+      (group) => group.channelName === 'Technical route only',
+    )?.classification,
+    'UNMAPPED',
+  );
   assert.equal((projection.unmappedInfrastructure as Record<string, unknown>).count, 1);
   const groups = (projection.unmappedInfrastructure as { groups: Array<Record<string, unknown>> })
     .groups;
