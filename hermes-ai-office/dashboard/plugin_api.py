@@ -316,6 +316,10 @@ def _codex_provider_catalog(profile_home: Path) -> tuple[Dict[str, Dict[str, Any
             for key, raw in (value.get("model_providers") or {}).items():
                 if isinstance(raw, Mapping):
                     providers[str(key)] = dict(raw)
+            selected_model = str(value.get("model") or "").strip()
+            selected_provider = str(value.get("model_provider") or "").strip()
+            if selected_model and selected_provider:
+                configs.append({"path": "config.toml", "model": selected_model, "provider": selected_provider})
         except Exception:
             pass
     for path in sorted(codex.glob("*.config.toml")):
@@ -337,9 +341,11 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
     if not profiles_root.exists():
         return []
     discovered: list[Dict[str, Any]] = []
-    for profile_dir in sorted(path for path in profiles_root.iterdir() if path.is_dir()):
-        profile_id = profile_dir.name
-        home = profile_dir / "home"
+    profile_entries = [(path.name, path, path / "home") for path in sorted(path for path in profiles_root.iterdir() if path.is_dir())]
+    global_home = Path(get_hermes_home()) / "home"
+    if global_home.exists() and not any(item[0] == "default" for item in profile_entries):
+        profile_entries.append(("default", Path(get_hermes_home()), global_home))
+    for profile_id, profile_dir, home in profile_entries:
         env = _read_env_file(home / ".clients.env")
         providers, configs = _codex_provider_catalog(home)
         auth_path = home / ".codex" / "auth.json"
