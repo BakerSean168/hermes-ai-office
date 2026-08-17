@@ -394,12 +394,23 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _managed_toml_pattern(marker_type: str, marker_name: str) -> re.Pattern[str]:
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]", "-", marker_name)[:120]
+    begin = f"# BEGIN HERMES AI OFFICE {marker_type} {safe_name}"
+    end = f"# END HERMES AI OFFICE {marker_type} {safe_name}"
+    return re.compile(rf"(?ms)^{re.escape(begin)}\n.*?^{re.escape(end)}\n?")
+
+
+def _remove_managed_toml_block(current: str, marker_type: str, marker_name: str) -> str:
+    return _managed_toml_pattern(marker_type, marker_name).sub("", current)
+
+
 def _replace_managed_toml_block(current: str, marker_type: str, marker_name: str, body: str) -> str:
     safe_name = re.sub(r"[^A-Za-z0-9_.-]", "-", marker_name)[:120]
     begin = f"# BEGIN HERMES AI OFFICE {marker_type} {safe_name}"
     end = f"# END HERMES AI OFFICE {marker_type} {safe_name}"
     managed = begin + "\n" + body.rstrip() + "\n" + end + "\n"
-    pattern = re.compile(rf"(?ms)^{re.escape(begin)}\n.*?^{re.escape(end)}\n?")
+    pattern = _managed_toml_pattern(marker_type, marker_name)
     if pattern.search(current):
         return pattern.sub(managed, current)
     return current.rstrip() + ("\n\n" if current.strip() else "") + managed
@@ -411,7 +422,9 @@ def _existing_codex_provider(provider_ref: str) -> dict[str, str]:
         if not path.exists():
             continue
         try:
-            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+            current = path.read_text(encoding="utf-8")
+            current = _remove_managed_toml_block(current, "PROVIDER", provider_ref)
+            parsed = tomllib.loads(current)
         except (OSError, tomllib.TOMLDecodeError):
             continue
         providers = parsed.get("model_providers")
@@ -485,12 +498,33 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
         path = home / ".codex" / "config.toml"
         try:
             current = path.read_text(encoding="utf-8") if path.exists() else ""
-            updated = _replace_managed_toml_block(
-                current, "PROVIDER", provider_ref, "\n".join(provider_lines)
+            without_managed_provider = _remove_managed_toml_block(
+                current, "PROVIDER", provider_ref
             )
+            try:
+                parsed = tomllib.loads(without_managed_provider) if without_managed_provider.strip() else {}
+            except tomllib.TOMLDecodeError:
+                return False
+            providers = parsed.get("model_providers") if isinstance(parsed, dict) else None
+            native_provider_exists = isinstance(providers, dict) and isinstance(
+                providers.get(provider_ref), dict
+            )
+            if native_provider_exists:
+                updated = without_managed_provider
+            else:
+                updated = _replace_managed_toml_block(
+                    without_managed_provider,
+                    "PROVIDER",
+                    provider_ref,
+                    "\n".join(provider_lines),
+                )
             updated = _replace_managed_toml_block(
                 updated, "PROFILE", profile_ref, "\n".join(profile_lines)
             )
+            try:
+                tomllib.loads(updated)
+            except tomllib.TOMLDecodeError:
+                return False
             path.parent.mkdir(parents=True, exist_ok=True)
             temporary = path.with_name(path.name + ".hermes-office.tmp")
             temporary.write_text(updated, encoding="utf-8")
