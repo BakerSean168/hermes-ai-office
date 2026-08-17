@@ -60,7 +60,7 @@ export class SupplyRepository {
     return this.#domain.setSupplierStaffingPreferences({ supplierId, ...input });
   }
 
-  updateSupplierProfile(supplierId: string, input: { name: string }): V2Row {
+  updateSupplierProfile(supplierId: string, input: { name: string; websiteUrl?: string }): V2Row {
     const name = input.name.trim();
     if (!name) throw new Error('SUPPLIER_NAME_REQUIRED');
     const existing = row(
@@ -68,12 +68,21 @@ export class SupplyRepository {
     );
     if (!existing) throw new Error('SUPPLIER_NOT_FOUND');
     const previousName = String(existing.name);
-    if (previousName === name) return existing;
+    const websiteUrl = input.websiteUrl?.trim().replace(/\/$/, '') || null;
+    if (websiteUrl && !/^https?:\/\//i.test(websiteUrl))
+      throw new Error('SUPPLIER_WEBSITE_URL_INVALID');
+    if (
+      previousName === name &&
+      String(existing.website_url ?? '') === String(websiteUrl ?? existing.website_url ?? '')
+    )
+      return existing;
     const timestamp = now();
     return this.#domain.transaction(() => {
       this.#domain.db
-        .prepare('UPDATE v2_suppliers SET name=?,updated_at=? WHERE id=?')
-        .run(name, timestamp, supplierId);
+        .prepare(
+          'UPDATE v2_suppliers SET name=?,website_url=COALESCE(?,website_url),updated_at=? WHERE id=?',
+        )
+        .run(name, websiteUrl, timestamp, supplierId);
 
       const employees = rows(
         this.#domain.db
@@ -102,7 +111,7 @@ export class SupplyRepository {
         type: 'supplier.profile.updated',
         entityType: 'Supplier',
         entityId: supplierId,
-        payload: { previousName, name },
+        payload: { previousName, name, websiteUrl },
       });
       return row(this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId))!;
     });
@@ -727,7 +736,7 @@ export class SupplyRepository {
   }
 
   registerCatalogEntry(input: {
-    supplier: { slug: string; name: string };
+    supplier: { slug: string; name: string; websiteUrl?: string };
     supplierModel: { key: string; name: string };
     agreement: { externalAccountRef: string; name: string };
     plan?: {
@@ -743,7 +752,11 @@ export class SupplyRepository {
     runtimeSelectors?: JsonRecord;
   }): V2Row {
     return this.#domain.transaction(() => {
-      const supplier = this.#domain.getOrCreateSupplier(input.supplier.slug, input.supplier.name);
+      const supplier = this.#domain.getOrCreateSupplier(
+        input.supplier.slug,
+        input.supplier.name,
+        input.supplier.websiteUrl,
+      );
       const supplierModel = this.#domain.getOrCreateSupplierModel({
         supplierId: String(supplier.id),
         supplierModelKey: input.supplierModel.key,
@@ -862,7 +875,7 @@ export class SupplyRepository {
     const suppliers = rows(
       this.#domain.db
         .prepare(
-          `SELECT id,slug,name,lifecycle,metadata_json,created_at,updated_at
+          `SELECT id,slug,name,website_url,lifecycle,metadata_json,created_at,updated_at
            FROM v2_suppliers WHERE lifecycle='ACTIVE' ORDER BY name`,
         )
         .all(),
@@ -870,6 +883,7 @@ export class SupplyRepository {
       id: value.id,
       slug: value.slug,
       name: value.name,
+      websiteUrl: value.website_url ?? null,
       lifecycle: value.lifecycle,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
       createdAt: value.created_at,

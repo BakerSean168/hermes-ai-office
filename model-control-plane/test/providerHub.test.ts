@@ -15,6 +15,7 @@ test('provider hub shares safe connection metadata across profiles without secre
     providerKey: 'fastaitoken',
     displayName: 'FastAI Token',
     baseUrl: 'https://www.fastaitoken.com',
+    websiteUrl: 'https://www.fastaitoken.com/',
     protocol: 'openai-responses',
     authKind: 'API_KEY',
     credentialRef: 'FASTAI_TOKEN_API_KEY',
@@ -27,6 +28,7 @@ test('provider hub shares safe connection metadata across profiles without secre
     metadata: { configFile: 'fastaitoken.config.toml' },
   });
   assert.equal(connection.credential_ref, 'FASTAI_TOKEN_API_KEY');
+  assert.equal(connection.website_url, 'https://www.fastaitoken.com');
   assert.deepEqual(connection.models, ['gpt-5.6-sol']);
   const link = hub.linkProfile({
     connectionId: String(connection.id),

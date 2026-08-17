@@ -142,6 +142,7 @@ export function registerV2Routes(
             displayName: String(body.displayName),
             supplierId: body.supplierId ? String(body.supplierId) : undefined,
             baseUrl: body.baseUrl ? String(body.baseUrl) : undefined,
+            websiteUrl: body.websiteUrl ? String(body.websiteUrl) : undefined,
             protocol: body.protocol ? String(body.protocol) : undefined,
             authKind: body.authKind ? (String(body.authKind) as any) : undefined,
             credentialRef: body.credentialRef ? String(body.credentialRef) : undefined,
@@ -1506,6 +1507,7 @@ export function registerV2Routes(
           try {
             return services.supply.updateSupplierProfile(request.params.supplierId, {
               name: String(body.name),
+              websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
             });
           } catch (error) {
             const code = error instanceof Error ? error.message : 'SUPPLIER_PROFILE_UPDATE_FAILED';
@@ -1628,7 +1630,11 @@ export function registerV2Routes(
         }
         try {
           return services.supply.registerCatalogEntry({
-            supplier: { slug: String(supplier.slug), name: String(supplier.name) },
+            supplier: {
+              slug: String(supplier.slug),
+              name: String(supplier.name),
+              websiteUrl: supplier.websiteUrl == null ? undefined : String(supplier.websiteUrl),
+            },
             supplierModel: { key: String(supplierModel.key), name: String(supplierModel.name) },
             agreement: {
               externalAccountRef: String(agreement.externalAccountRef),

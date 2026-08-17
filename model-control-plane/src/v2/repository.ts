@@ -341,22 +341,42 @@ export class V2Repository {
     return event;
   }
 
-  getOrCreateSupplier(slug: string, name: string): Row {
+  getOrCreateSupplier(slug: string, name: string, websiteUrl?: string): Row {
+    const normalizedWebsite = websiteUrl?.trim().replace(/\/$/, '') || null;
+    if (normalizedWebsite && !/^https?:\/\//i.test(normalizedWebsite))
+      throw new Error('SUPPLIER_WEBSITE_URL_INVALID');
     const existing = row(this.db.prepare('SELECT * FROM v2_suppliers WHERE slug=?').get(slug));
-    if (existing) return existing;
+    if (existing) {
+      if (normalizedWebsite && String(existing.website_url ?? '') !== normalizedWebsite) {
+        const timestamp = now();
+        this.db
+          .prepare('UPDATE v2_suppliers SET website_url=?,updated_at=? WHERE id=?')
+          .run(normalizedWebsite, timestamp, String(existing.id));
+        this.emit({
+          type: 'supplier.website.updated',
+          entityType: 'Supplier',
+          entityId: String(existing.id),
+          payload: { websiteUrl: normalizedWebsite },
+        });
+        return row(
+          this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(String(existing.id)),
+        )!;
+      }
+      return existing;
+    }
     const timestamp = now();
     const id = newId('sup', timestamp);
     this.db
       .prepare(
-        `INSERT INTO v2_suppliers(id,slug,name,lifecycle,metadata_json,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?)`,
+        `INSERT INTO v2_suppliers(id,slug,name,website_url,lifecycle,metadata_json,created_at,updated_at)
+         VALUES(?,?,?,?,?,?,?,?)`,
       )
-      .run(id, slug, name, 'ACTIVE', '{}', timestamp, timestamp);
+      .run(id, slug, name, normalizedWebsite, 'ACTIVE', '{}', timestamp, timestamp);
     this.emit({
       type: 'supplier.created',
       entityType: 'Supplier',
       entityId: id,
-      payload: { slug },
+      payload: { slug, websiteUrl: normalizedWebsite },
     });
     return row(this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(id))!;
   }

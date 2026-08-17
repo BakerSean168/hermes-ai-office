@@ -17,6 +17,7 @@ test('provider hub API persists shared connections and profile links', async (t)
       providerKey: 'fastaitoken',
       displayName: 'FastAI Token',
       baseUrl: 'https://www.fastaitoken.com',
+      websiteUrl: 'https://www.fastaitoken.com/',
       protocol: 'openai-responses',
       authKind: 'API_KEY',
       credentialRef: 'FASTAI_TOKEN_API_KEY',
@@ -48,5 +49,6 @@ test('provider hub API persists shared connections and profile links', async (t)
   });
   assert.equal(projection.statusCode, 200);
   assert.equal(projection.json().summary.connections, 1);
+  assert.equal(projection.json().items[0].website_url, 'https://www.fastaitoken.com');
   assert.equal(projection.json().items[0].profileLinks[0].profile_id, 'memoflow');
 });

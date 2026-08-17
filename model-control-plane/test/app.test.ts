@@ -171,7 +171,7 @@ test('supplier profile update renames generated employee labels without changing
       url: '/api/v2/commands/supply-catalog/register',
       headers: { 'idempotency-key': 'catalog-relay-one-opus' },
       payload: {
-        supplier: { slug: 'relay-one', name: 'Kiro' },
+        supplier: { slug: 'relay-one', name: 'Kiro', websiteUrl: 'https://relay.example/' },
         supplierModel: { key: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
         agreement: { externalAccountRef: 'relay-one-kiro', name: 'Kiro / Current access' },
       },
@@ -185,10 +185,19 @@ test('supplier profile update renames generated employee labels without changing
       method: 'POST',
       url: `/api/v2/commands/suppliers/${supplierId}/profile`,
       headers: { 'idempotency-key': 'supplier-profile-relay-one' },
-      payload: { name: 'Commercial Relay 1' },
+      payload: { name: 'Commercial Relay 1', websiteUrl: 'https://commercial-relay.example/' },
     });
     assert.equal(response.statusCode, 200);
     assert.equal(response.json().name, 'Commercial Relay 1');
+    assert.equal(response.json().website_url, 'https://commercial-relay.example');
+    const supplierProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    assert.equal(
+      supplierProjection.json().suppliers[0].websiteUrl,
+      'https://commercial-relay.example',
+    );
     const employee = runtime.v2.listEmployees().find((item) => item.id === employeeId);
     assert.equal(employee?.displayName, 'Claude Opus 4.6 @ Commercial Relay 1');
     assert.equal(employee?.id, employeeId);

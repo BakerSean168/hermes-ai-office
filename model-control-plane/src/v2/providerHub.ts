@@ -14,6 +14,7 @@ export interface ProviderConnectionInput {
   displayName: string;
   supplierId?: string;
   baseUrl?: string;
+  websiteUrl?: string;
   protocol?: string;
   authKind?: ProviderAuthKind;
   credentialRef?: string;
@@ -82,6 +83,9 @@ export class ProviderHubRepository {
     const baseUrl = clean(input.baseUrl, 1000);
     if (baseUrl && !/^https?:\/\//i.test(baseUrl))
       throw new Error('PROVIDER_CONNECTION_BASE_URL_INVALID');
+    const websiteUrl = clean(input.websiteUrl, 1000);
+    if (websiteUrl && !/^https?:\/\//i.test(websiteUrl))
+      throw new Error('PROVIDER_CONNECTION_WEBSITE_URL_INVALID');
     const credentialRef = clean(input.credentialRef, 240);
     const sourceProfileId = clean(input.sourceProfileId, 160);
     const models = [
@@ -113,12 +117,14 @@ export class ProviderHubRepository {
         this.#domain.db
           .prepare(
             `UPDATE v2_provider_connections SET
-               display_name=?,supplier_id=?,protocol=?,auth_kind=?,credential_scope=?,source_kind=?,share_scope=?,health=?,models_json=?,metadata_json=?,lifecycle='ACTIVE',last_seen_at=?,updated_at=?
+               display_name=?,supplier_id=?,website_url=?,protocol=?,auth_kind=?,credential_scope=?,source_kind=?,share_scope=?,health=?,models_json=?,metadata_json=?,lifecycle='ACTIVE',last_seen_at=?,updated_at=?
              WHERE id=?`,
           )
           .run(
             displayName,
             input.supplierId ?? (existing.supplier_id ? String(existing.supplier_id) : null),
+            websiteUrl?.replace(/\/$/, '') ??
+              (existing.website_url ? String(existing.website_url) : null),
             clean(input.protocol, 120),
             input.authKind ?? 'API_KEY',
             credentialScope,
@@ -135,9 +141,9 @@ export class ProviderHubRepository {
         this.#domain.db
           .prepare(
             `INSERT INTO v2_provider_connections(
-               id,provider_key,display_name,supplier_id,base_url,protocol,auth_kind,credential_ref,credential_scope,
+               id,provider_key,display_name,supplier_id,base_url,website_url,protocol,auth_kind,credential_ref,credential_scope,
                source_profile_id,source_kind,share_scope,health,models_json,metadata_json,lifecycle,last_seen_at,created_at,updated_at
-             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
           )
           .run(
             id,
@@ -145,6 +151,7 @@ export class ProviderHubRepository {
             displayName,
             input.supplierId ?? null,
             baseUrl?.replace(/\/$/, '') ?? null,
+            websiteUrl?.replace(/\/$/, '') ?? null,
             clean(input.protocol, 120),
             input.authKind ?? 'API_KEY',
             credentialRef,
@@ -308,7 +315,7 @@ export class ProviderHubRepository {
     return rows(
       this.#domain.db
         .prepare(
-          `SELECT pc.*,s.name supplier_name,s.slug supplier_slug,
+          `SELECT pc.*,s.name supplier_name,s.slug supplier_slug,s.website_url supplier_website_url,
              (SELECT COUNT(*) FROM v2_profile_provider_links pl WHERE pl.connection_id=pc.id AND pl.state='ACTIVE') profile_count
            FROM v2_provider_connections pc
            LEFT JOIN v2_suppliers s ON s.id=pc.supplier_id
@@ -372,6 +379,7 @@ export class ProviderHubRepository {
             id: value.supplier_id,
             name: value.supplier_name ?? null,
             slug: value.supplier_slug ?? null,
+            websiteUrl: value.supplier_website_url ?? null,
           }
         : null,
     };
