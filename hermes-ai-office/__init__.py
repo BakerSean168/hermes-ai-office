@@ -465,8 +465,7 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
                     selected_access["config"] = {}
                 if not selected_access["config"].get("wireApi"):
                     selected_access["config"]["wireApi"] = wire_api
-    if credential_ref and not _runtime_secret_file(credential_ref):
-        return False
+    credential_ready = not credential_ref or _runtime_secret_file(credential_ref) is not None
 
     provider_lines = [
         f"[model_providers.{_toml_string(provider_ref)}]",
@@ -499,7 +498,7 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
             os.replace(temporary, path)
         except OSError:
             return False
-    return True
+    return credential_ready
 
 
 def _ensure_native_runtime_access(runtime: str, decision: dict[str, Any]) -> bool:
@@ -735,10 +734,11 @@ def _on_pre_tool_call(
     if decision.get("status") != "SELECTED" or mode == "OBSERVE":
         return None
     if not _ensure_selected_runtime(runtime, decision):
-        if mode == "ENFORCE":
+        selected_access = _selected_access(decision)
+        if mode == "ENFORCE" or selected_access.get("id"):
             return {
                 "action": "block",
-                "message": "Hermes AI Office could not configure the selected gateway runtime.",
+                "message": "Hermes AI Office selected an employee, but that employee's runtime access is not ready.",
             }
         return None
     rewritten = _inject_selection(command, runtime, decision)

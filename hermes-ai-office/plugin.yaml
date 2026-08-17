@@ -1,5 +1,5 @@
 name: hermes-ai-office
-version: "0.6.1"
+version: "0.6.2"
 description: Native Hermes AI company dashboard, workforce policy, and runtime staffing for Codex and OpenCode.
 provides_hooks:
   - subagent_start

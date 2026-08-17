@@ -344,6 +344,28 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(unavailable["action"], "block")
         self.assertIn("could not reach", unavailable["message"].lower())
 
+    def test_prefer_blocks_when_selected_first_class_access_is_not_ready(self) -> None:
+        decision = self.selected(runtime="CODEX", model="gpt-5.6-sol")
+        decision["selectedProfile"] = "missing-profile"
+        decision["selectedAccess"] = {
+            "id": "raccess_missing",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": "missing-provider",
+            "baseUrl": None,
+            "credentialRef": None,
+            "config": {},
+        }
+        with mock.patch.object(plugin, "_resolve_runtime_policy", return_value=decision), mock.patch.object(
+            plugin, "_enqueue"
+        ):
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "codex exec task"},
+                tool_call_id="tool-access-not-ready",
+            )
+        self.assertEqual(directive["action"], "block")
+        self.assertIn("runtime access is not ready", directive["message"].lower())
+
     def test_prefer_fails_open_when_policy_service_is_unavailable(self) -> None:
         plugin._CTX = FakeContext({"runtime_policy.mode": "prefer"})
         with mock.patch.object(plugin, "_resolve_runtime_policy", return_value=None), mock.patch.object(
