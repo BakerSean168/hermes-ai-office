@@ -1,6 +1,6 @@
 # Hermes AI Office V2 — Implementation Status
 
-> Status date: 2026-08-16
+> Status date: 2026-08-17
 > Scope: product/domain/architecture implementation for the AI-company model described by `DOMAIN-MODEL-V2.md` and `implementation-v2/*`.
 > Rule: this document records what is deployed, what remains compatibility-only, and what must not be inferred from missing commercial evidence.
 
@@ -62,7 +62,28 @@ The decisive semantic boundary is now enforced in code:
 - `ExecutionNode.model` / `RuntimeSession.modelHint` is telemetry only and cannot create Employee identity.
 - Gateway/Channel identity affects routability, never durable Employee identity.
 
-## 2. Persistence migrations deployed
+## 2. Dynamic supplier onboarding and LiteLLM provisioning
+
+The supplier UI now supports a compact CC-Switch-style flow: choose a preset provider or custom OpenAI-compatible URL, provide/reuse a key, discover models, select only the models that should become Employees, and choose the supplier default Employee. Unselected discovered models remain catalog evidence only and are not materialized as active workforce.
+
+For custom OpenAI-compatible suppliers the deployed path is now end-to-end routable:
+
+```text
+Hermes credential lifecycle
+  -> explicit Supplier/SupplierModel/Employee/Employment registration
+  -> GatewayProvisioningPort
+  -> LiteLLM Credential Store (one credential per SupplyAgreement)
+  -> DB-backed employment:<employmentId> deployment
+  -> Channel + GatewayBinding
+  -> runtime selector
+  -> OpenCode/Codex gateway provider
+```
+
+The production LiteLLM reference gateway now has a dedicated PostgreSQL technical-state database on loopback and `store_model_in_db=true`. A separate protected LiteLLM virtual runtime key is used by OpenCode/Codex; the master key never enters runtime configuration. The original static CPA-backed reference route remains compatibility-only and was not modified by dynamic provisioning.
+
+A production integration smoke on 2026-08-17 used a temporary MCP/business database, provisioned a real LiteLLM Employment route, verified the route through the runtime key, completed one real upstream invocation, then deleted the temporary LiteLLM deployment and credential. The production workforce database was not polluted by smoke-test identities.
+
+## 3. Persistence migrations deployed
 
 V2 uses immutable, checksum-verified additive migrations. Applied history must never be edited in place.
 
@@ -78,10 +99,11 @@ V2 uses immutable, checksum-verified additive migrations. Applied history must n
 | `008_runtime_projection`     | RuntimeSession, RuntimeEdge, ActivityEvent and Hermes execution sync     |
 | `009_incidents_checkpoints`  | replayable Incident projection and projection checkpoints                |
 | `010_maintenance`            | safe maintenance run history and retention operations                    |
+| `011_runtime_launch_policy`  | persisted OpenCode/Codex runtime launch selection and audit              |
 
 Production deployment uses a SQLite `.backup` before every new migration and validates `PRAGMA integrity_check` and `PRAGMA foreign_key_check` after restart.
 
-## 3. Implemented execution invariants
+## 4. Implemented execution invariants
 
 ### 3.1 Stable organization, replaceable staffing
 
@@ -122,7 +144,7 @@ Run/Duty/Dispatch/Redispatch/Invoke and V2 control commands use persistent idemp
 - same key + different payload → conflict;
 - repeated Invoke does not make a second gateway call or create duplicate UsageEntry evidence.
 
-## 4. Hermes execution projection
+## 5. Hermes execution projection
 
 HermesProvider remains the normalizer for Bridge/native runtime data. Model Control Plane does **not** re-parse raw Bridge JSON.
 
@@ -139,7 +161,7 @@ Synchronization is failure-isolated, single-flight and latest-wins. A burst keep
 
 A runtime disappearing from one current snapshot is retained historically and marked cancelled. If the same technical session reappears, a new DutySession is opened without fabricating a new Employee.
 
-## 5. Purpose-built read models
+## 6. Purpose-built read models
 
 Pixel Office reads V2 projections rather than joining domain tables itself.
 
@@ -181,7 +203,7 @@ The latter never inflates staffed-position counts.
 - Position dossier: topology, appointments, duties, runtime sessions, qualification, evaluation and usage by Employee.
 - Run dossier: positions, duties, staffing history, runtime graph, activity and usage.
 
-## 6. Finance and performance evidence
+## 7. Finance and performance evidence
 
 The domain deliberately separates:
 
@@ -195,7 +217,7 @@ Evaluation evidence is Position-aware. Performance is aggregated by Position/rol
 
 **Production policy:** when no reliable price, subscription cost or evaluation source exists, the system records no invented number. Zero/empty evidence is preferable to fabricated business truth.
 
-## 7. Replayable operational governance
+## 8. Replayable operational governance
 
 `v2_events` is append-only operational/domain evidence. Incidents are derived projections with checkpoints.
 
@@ -203,7 +225,7 @@ Implemented incident triggers include dispatch failure, invocation failure, exec
 
 Recovery can be automatic when the event stream proves recovery. Operator ACK/Resolve actions themselves become V2 events, so deleting and rebuilding the Incident projection preserves operator decisions.
 
-## 8. Retention and maintenance
+## 9. Retention and maintenance
 
 The default retention rule is intentionally conservative:
 
@@ -218,7 +240,7 @@ Automatic maintenance currently touches only:
 
 Deployments use a maintenance dry-run first. The normal background interval is daily.
 
-## 9. V1 retirement state
+## 10. V1 retirement state
 
 V1 runtime compatibility was retired in production on 2026-08-16 after the V2 business model, execution sync, gateway discovery, Office projections, incident projection and maintenance path were already deployed and healthy.
 
@@ -238,7 +260,7 @@ The three old CPA aliases `position:hermes-brain`, `position:codex-general`, and
 
 The durable V2 gateway slug `cpa-compat` remains unchanged to preserve existing V2 foreign keys/bindings. Its name is now only an external reference; it does not imply a live V1 Worker compatibility model.
 
-## 10. Historical data retention after retirement
+## 11. Historical data retention after retirement
 
 Retirement removed code and public contracts, **not evidence**.
 
@@ -259,9 +281,9 @@ The pre-V2 tables remain physically present in the long-lived production databas
 - legacy events: 81,669
 - external usage snapshots: 7
 
-A fresh database does not create those tables. `openDb()` now only opens SQLite/applies pragmas; migrations `001_spine` through `010_maintenance` are the sole schema owner.
+A fresh database does not create those tables. `openDb()` now only opens SQLite/applies pragmas; migrations `001_spine` through `011_runtime_launch_policy` are the sole schema owner.
 
-## 11. Verification gate used for every batch
+## 12. Verification gate used for every batch
 
 A batch is releasable only after:
 
@@ -278,12 +300,12 @@ A batch is releasable only after:
 11. SQLite integrity and foreign-key checks;
 12. browser verification for material UI changes where Playwright is available.
 
-## 12. V1-retirement production verification — 2026-08-16
+## 13. V1-retirement production verification — 2026-08-16
 
 The cutover was verified against the running oracle2 services:
 
 - `hermes-model-control-plane.service`, `hermes-office.service`, and `hermes-office-bridge.service` remained active;
-- MCP root health now declares `apiVersion: 2`, and `/api/v2/health` reports migrations through `010_maintenance`;
+- MCP root health now declares `apiVersion: 2`, and `/api/v2/health` reports migrations through `011_runtime_launch_policy`;
 - `/api/v1/snapshot`, `/api/v1/dashboard/workforce`, and the old compatibility-status endpoint return 404;
 - Office unknown `/api/*` paths no longer fall through to `index.html`, so retired `/api/model/workforce`, `/api/model/config`, `/api/model/events`, and `/api/model/admin/*` return JSON 404;
 - Hermes execution synchronization continued after cutover with completed sync runs and no issues;
@@ -299,11 +321,11 @@ Final automated gates for the retirement release were MCP **86/86**, Webview **5
 
 The host still has no Chrome/Chromium executable for Playwright, so this release does not claim a browser screenshot pass. UI acceptance is based on the Webview suite, production build and live HTTP facade behavior.
 
-## 13. Remaining work classification
+## 14. Remaining work classification
 
 There is no live V1 compatibility runtime left to retire. Future work is normal V2 product evolution: richer supply discovery, additional staffing policy, evaluation/analytics, gateway adapters, and UI ergonomics. Reintroducing a V1 Worker/Assignment authority path or a generic Office gateway-admin proxy would be an architectural regression.
 
-## 13. AI Company console and supplier catalog — 2026-08-16
+## 15. AI Company console and supplier catalog — 2026-08-16
 
 The former single long Organization page has been split into first-class product sections:
 

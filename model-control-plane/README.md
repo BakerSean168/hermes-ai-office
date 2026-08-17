@@ -30,7 +30,7 @@ Model transport is delegated through gateway ports. The current adapters are:
 - **LiteLLM Gateway** as the reference generic gateway.
 - **CPA Gateway** as an adapter for subscription/provider routes that are already managed through CPA/gatewayctl.
 
-The MCP reads CPA route/health evidence and aggregate usage through the gateway adapter. It does not own CPA credentials or physical channel lifecycle administration.
+The MCP reads gateway route/health/usage evidence through adapters. It does not persist provider credentials in the workforce database. Explicit supplier onboarding may pass secret material ephemerally to a provisioning-capable adapter; the LiteLLM adapter stores it in LiteLLM Credential Store and returns only safe route/deployment references.
 
 Gateway discovery records technical evidence only. Commercial Supplier/SupplierModel/Agreement identity is created through explicit V2 catalog registration, never inferred solely from a Channel name. Unclassified routes remain visible in the Supply projection until an operator supplies business identity.
 
@@ -61,7 +61,7 @@ Primary reads include:
 - `GET /api/v2/incidents`
 - `GET /api/v2/events` (SSE)
 
-V2 commands cover organization, staffing, lifecycle, run/duty dispatch, invocation, finance/evaluation, gateway discovery/reconciliation, incident operations and safe maintenance. Effectful commands use persistent idempotency where appropriate.
+V2 commands cover organization, staffing, lifecycle, run/duty dispatch, invocation, finance/evaluation, gateway discovery/reconciliation, incident operations and safe maintenance. The internal Employment gateway-provisioning endpoint deliberately bypasses the generic persisted idempotency request cache so secret material cannot be retained there; provisioning itself is naturally idempotent by Employment route and gateway credential identity.
 
 `/api/v1/*` was retired in the V1-removal release. Pixel Office exposes only explicit `/api/model/v2/*` read/SSE facade routes.
 

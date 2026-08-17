@@ -219,20 +219,21 @@ Normalized evidence should include, where available:
 
 The Usage Adapter attaches these physical facts to ModelInvocation/InvocationAttempt and business context.
 
-### GatewayAdminPort — optional
+### GatewayProvisioningPort — optional capability
 
-Administration is intentionally separate from execution/discovery.
+Provisioning is intentionally separate from execution/discovery and is now implemented for the LiteLLM reference adapter. It exists only for explicit supplier onboarding; discovery never creates workforce identity.
 
 ```text
-createRoute(...)
-testRoute(...)
-enableRoute(...)
-disableRoute(...)
+provisionRoute(
+  Employment,
+  upstream model/base URL,
+  ephemeral credential material
+) -> GatewayRouteRef
 ```
 
-The core V2 domain must work even if this port is absent and operators manage the gateway using its native configuration/UI.
+The domain derives the public route as `employment:<employmentId>`. The LiteLLM adapter stores one reusable encrypted Credential Store record per SupplyAgreement and makes each DB-backed model deployment reference that credential. Secret material is never written to V2 business persistence or the idempotency cache.
 
-This optionality is important: a model-gateway admin product is not required to implement the AI workforce product.
+The core V2 domain still works when this capability is absent; operators may manage a gateway natively and bind already-existing routes. Generic gateway administration remains outside the product domain.
 
 ## 9. Secrets
 
@@ -244,7 +245,7 @@ Credentials belong to the selected gateway or an external secret manager.
 
 The control service stores only safe route/deployment references and business metadata.
 
-If AI Office later provides credential onboarding, it must be implemented as an isolated GatewayAdminPort flow with explicit redaction, not as generic business-table CRUD.
+AI Office credential onboarding is implemented as an isolated provisioning flow with explicit redaction. Hermes remains the user-facing credential lifecycle; LiteLLM owns its encrypted gateway credential copy; the workforce database stores neither plaintext keys nor generic secret references.
 
 ## 10. Usage and accounting boundary
 
@@ -347,4 +348,5 @@ Every gateway adapter must prove:
 5. Business route policy never delegates silent cross-Employment selection to a gateway.
 6. Gateway model groups represent a selected Employment route and may load-balance only across business-equivalent physical deployments.
 7. Usage is sourced from gateway/provider evidence and enriched with Hermes business attribution.
-8. Gateway administration is optional and separated from the core business service.
+8. Gateway provisioning is an optional infrastructure capability separated from the core business service.
+9. Runtime callers use a dedicated LiteLLM virtual key; the gateway master key is never written into OpenCode/Codex configuration.

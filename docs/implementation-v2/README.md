@@ -55,7 +55,7 @@ The pre-V2 tables still physically exist in the long-lived production SQLite fil
 - Hermes Bridge SSE and normalized OrgStore execution facts remain the runtime observation source.
 - `/api/v2/*` is the business/control API.
 - `/api/model/v2/*` is the Office read/SSE facade.
-- CPA credentials and physical route administration remain outside the business domain, behind `gatewayctl` / the model-gateway management workflow.
+- Provider/gateway credentials remain outside the business domain. LiteLLM credentials live in its protected credential boundary; CPA compatibility credentials remain behind `gatewayctl` while that adapter exists.
 - Existing durable V2 gateway/binding IDs are preserved across adapter refactors.
 - Historical business evidence is retained rather than destructively normalized.
 
