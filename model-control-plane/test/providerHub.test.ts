@@ -1,0 +1,62 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { openDb } from '../src/db.mjs';
+import { runV2Migrations } from '../src/v2/migrations.js';
+import { ProviderHubRepository } from '../src/v2/providerHub.js';
+import { V2Repository } from '../src/v2/repository.js';
+
+test('provider hub shares safe connection metadata across profiles without secrets', () => {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const domain = new V2Repository(db);
+  const hub = new ProviderHubRepository(domain);
+  const connection = hub.upsertConnection({
+    providerKey: 'fastaitoken',
+    displayName: 'FastAI Token',
+    baseUrl: 'https://www.fastaitoken.com',
+    protocol: 'openai-responses',
+    authKind: 'API_KEY',
+    credentialRef: 'FASTAI_TOKEN_API_KEY',
+    credentialScope: 'PROFILE_LOCAL',
+    sourceProfileId: 'memoflow',
+    sourceKind: 'CODEX_CONFIG',
+    shareScope: 'GLOBAL',
+    health: 'READY',
+    models: ['gpt-5.6-sol'],
+    metadata: { configFile: 'fastaitoken.config.toml' },
+  });
+  assert.equal(connection.credential_ref, 'FASTAI_TOKEN_API_KEY');
+  assert.deepEqual(connection.models, ['gpt-5.6-sol']);
+  const link = hub.linkProfile({
+    connectionId: String(connection.id),
+    profileId: 'memoflow',
+    runtimeKind: 'CODEX',
+    providerRef: 'fastaitoken',
+    modelRef: 'gpt-5.6-sol',
+    sourceKind: 'PROFILE_DISCOVERY',
+  });
+  assert.equal(link.profile_id, 'memoflow');
+  const projection = hub.projection();
+  assert.equal(projection.summary.connections, 1);
+  assert.equal(projection.summary.ready, 1);
+  assert.equal(projection.summary.profiles, 1);
+  assert.equal((projection.items as any[])[0].profileLinks.length, 1);
+  assert.equal(JSON.stringify(projection).includes('actual-secret'), false);
+});
+
+test('provider hub rejects secret-shaped metadata', () => {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const hub = new ProviderHubRepository(new V2Repository(db));
+  assert.throws(
+    () =>
+      hub.upsertConnection({
+        providerKey: 'bad',
+        displayName: 'Bad',
+        sourceKind: 'TEST',
+        metadata: { apiKey: 'do-not-store' },
+      }),
+    /PROVIDER_HUB_SECRET_FIELD_FORBIDDEN/,
+  );
+});

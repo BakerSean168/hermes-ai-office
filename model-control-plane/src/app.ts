@@ -30,6 +30,7 @@ import {
 } from './v2/personalChannels.js';
 import { runV2Migrations } from './v2/migrations.js';
 import { OrganizationRepository } from './v2/organization.js';
+import { ProviderHubRepository } from './v2/providerHub.js';
 import { OfficeProjectionService } from './v2/projections.js';
 import { RepositoryGatewayBindingSource, V2Repository } from './v2/repository.js';
 import { RuntimeAccessRepository } from './v2/runtimeAccess.js';
@@ -98,6 +99,7 @@ export async function buildControlPlane(
   });
   const dispatchService = new DispatchService(v2, gateways, supply, staffing);
   const runtimeAccess = new RuntimeAccessRepository(v2);
+  const providerHub = new ProviderHubRepository(v2);
   const runtimePolicy = new RuntimePolicyService(v2, supply, staffing, runtimeAccess);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
@@ -197,6 +199,7 @@ export async function buildControlPlane(
     idempotencyService,
     runtimePolicy,
     runtimeAccess,
+    providerHub,
     personalChannels,
   });
 

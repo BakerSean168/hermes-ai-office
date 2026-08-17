@@ -16,6 +16,7 @@ import type { MaintenanceService } from './maintenance.js';
 import type { OrganizationRepository } from './organization.js';
 import type { OfficeProjectionService } from './projections.js';
 import type { PersonalChannelProjectionService } from './personalChannels.js';
+import type { ProviderHubRepository, ProfileProviderRuntime } from './providerHub.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
 import type {
@@ -54,6 +55,7 @@ export function registerV2Routes(
     idempotencyService?: IdempotencyService;
     runtimePolicy?: RuntimePolicyService;
     runtimeAccess?: RuntimeAccessRepository;
+    providerHub?: ProviderHubRepository;
     personalChannels?: PersonalChannelProjectionService;
   } = {},
 ): void {
@@ -96,6 +98,116 @@ export function registerV2Routes(
       return { error: { code } };
     }
   };
+
+  app.get('/api/v2/projections/provider-hub', async (_request, reply) => {
+    if (!services.providerHub) {
+      reply.code(503);
+      return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+    }
+    return services.providerHub.projection();
+  });
+
+  app.get('/api/v2/provider-connections', async () => ({
+    items: services.providerHub?.listConnections() ?? [],
+  }));
+
+  app.get('/api/v2/profile-provider-links', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.providerHub?.listProfileLinks(
+          typeof query.profileId === 'string' ? query.profileId : undefined,
+        ) ?? [],
+    };
+  });
+
+  app.post('/api/v2/commands/provider-connections/upsert', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'provider-connection.upsert',
+      operation: () => {
+        if (!services.providerHub) {
+          reply.code(503);
+          return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        if (!body.providerKey || !body.displayName || !body.sourceKind) {
+          reply.code(400);
+          return { error: { code: 'PROVIDER_CONNECTION_FIELDS_REQUIRED' } };
+        }
+        try {
+          return services.providerHub.upsertConnection({
+            providerKey: String(body.providerKey),
+            displayName: String(body.displayName),
+            supplierId: body.supplierId ? String(body.supplierId) : undefined,
+            baseUrl: body.baseUrl ? String(body.baseUrl) : undefined,
+            protocol: body.protocol ? String(body.protocol) : undefined,
+            authKind: body.authKind ? (String(body.authKind) as any) : undefined,
+            credentialRef: body.credentialRef ? String(body.credentialRef) : undefined,
+            credentialScope: body.credentialScope
+              ? (String(body.credentialScope) as any)
+              : undefined,
+            sourceProfileId: body.sourceProfileId ? String(body.sourceProfileId) : undefined,
+            sourceKind: String(body.sourceKind),
+            shareScope: body.shareScope ? (String(body.shareScope) as any) : undefined,
+            health: body.health ? (String(body.health) as any) : undefined,
+            models: Array.isArray(body.models) ? body.models.map(String) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+            lastSeenAt: body.lastSeenAt == null ? undefined : Number(body.lastSeenAt),
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'PROVIDER_CONNECTION_UPSERT_FAILED';
+          reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/profile-links',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'profile-provider-link.upsert',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          const runtimeKind = String(body.runtimeKind ?? '').toUpperCase();
+          if (
+            !body.profileId ||
+            !['HERMES', 'OPENCODE', 'CODEX', 'CLAUDE_CODE'].includes(runtimeKind)
+          ) {
+            reply.code(400);
+            return { error: { code: 'PROFILE_PROVIDER_LINK_FIELDS_REQUIRED' } };
+          }
+          try {
+            return services.providerHub.linkProfile({
+              connectionId: request.params.connectionId,
+              profileId: String(body.profileId),
+              runtimeKind: runtimeKind as ProfileProviderRuntime,
+              providerRef: body.providerRef ? String(body.providerRef) : undefined,
+              modelRef: body.modelRef ? String(body.modelRef) : undefined,
+              profileRef: body.profileRef ? String(body.profileRef) : undefined,
+              sourceKind: body.sourceKind ? String(body.sourceKind) : 'MANUAL',
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROFILE_PROVIDER_LINK_UPSERT_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
 
   app.get('/api/v2/projections/personal-channels', async (_request, reply) => {
     if (!services.personalChannels) {

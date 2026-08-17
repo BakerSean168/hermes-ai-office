@@ -37,6 +37,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '010_maintenance',
     '011_runtime_launch_policy',
     '012_runtime_access_profiles',
+    '013_provider_hub',
   ]);
   assert.deepEqual(second.skipped, [
     '001_spine',
@@ -51,6 +52,7 @@ test('V2 schema migration is additive and idempotent', () => {
     '010_maintenance',
     '011_runtime_launch_policy',
     '012_runtime_access_profiles',
+    '013_provider_hub',
   ]);
   const tables = tableNames(db);
   assert.ok(!tables.includes('providers'));
@@ -92,6 +94,8 @@ test('V2 schema migration is additive and idempotent', () => {
   assert.ok(tables.includes('v2_maintenance_runs'));
   assert.ok(tables.includes('v2_runtime_launch_decisions'));
   assert.ok(tables.includes('v2_runtime_access_profiles'));
+  assert.ok(tables.includes('v2_provider_connections'));
+  assert.ok(tables.includes('v2_profile_provider_links'));
 });
 
 test('V2 migration checksums make edited history fail loudly', () => {
