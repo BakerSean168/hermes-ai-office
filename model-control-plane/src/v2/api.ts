@@ -17,6 +17,11 @@ import type { OrganizationRepository } from './organization.js';
 import type { OfficeProjectionService } from './projections.js';
 import type { WorkforceLifecycleService } from './lifecycle.js';
 import type { V2Event, V2Repository } from './repository.js';
+import type {
+  RuntimeAccessRepository,
+  RuntimeAccessKind,
+  RuntimeAccessAdapterKind,
+} from './runtimeAccess.js';
 import type { RuntimePolicyService, RuntimeKind, RuntimePolicyMode } from './runtimePolicy.js';
 import type { StaffingRepository, Requirement } from './staffing.js';
 import type { SupplyRepository } from './supply.js';
@@ -47,6 +52,7 @@ export function registerV2Routes(
     maintenance?: MaintenanceService;
     idempotencyService?: IdempotencyService;
     runtimePolicy?: RuntimePolicyService;
+    runtimeAccess?: RuntimeAccessRepository;
   } = {},
 ): void {
   const runCommand = async <T>(input: {
@@ -164,6 +170,80 @@ export function registerV2Routes(
     }),
   );
   app.get('/api/v2/employments', async () => ({ items: repository.listEmployments() }));
+  app.get('/api/v2/runtime-access-profiles', async (request) => {
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    return {
+      items:
+        services.runtimeAccess?.list(
+          typeof query.employmentId === 'string' ? query.employmentId : undefined,
+        ) ?? [],
+    };
+  });
+
+  app.post('/api/v2/commands/runtime-access/import-legacy', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'runtime-access.import-legacy',
+      operation: () => {
+        if (!services.runtimeAccess) {
+          reply.code(503);
+          return { error: { code: 'RUNTIME_ACCESS_SERVICE_UNAVAILABLE' } };
+        }
+        return services.runtimeAccess.importLegacySelectors();
+      },
+    }),
+  );
+
+  app.post<{ Params: { employmentId: string } }>(
+    '/api/v2/commands/employments/:employmentId/runtime-access',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'runtime-access.upsert',
+        operation: () => {
+          if (!services.runtimeAccess) {
+            reply.code(503);
+            return { error: { code: 'RUNTIME_ACCESS_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          const runtimeKind = String(body.runtimeKind ?? '').toUpperCase();
+          const adapterKind = String(body.adapterKind ?? 'NATIVE_CONFIG').toUpperCase();
+          if (!['OPENCODE', 'CODEX', 'CLAUDE_CODE'].includes(runtimeKind) || !body.modelRef) {
+            reply.code(400);
+            return { error: { code: 'RUNTIME_ACCESS_FIELDS_REQUIRED' } };
+          }
+          if (!['NATIVE_CONFIG', 'GATEWAY'].includes(adapterKind)) {
+            reply.code(400);
+            return { error: { code: 'RUNTIME_ACCESS_ADAPTER_INVALID' } };
+          }
+          try {
+            return services.runtimeAccess.upsert({
+              employmentId: request.params.employmentId,
+              runtimeKind: runtimeKind as RuntimeAccessKind,
+              adapterKind: adapterKind as RuntimeAccessAdapterKind,
+              providerRef: body.providerRef == null ? undefined : String(body.providerRef),
+              modelRef: String(body.modelRef),
+              profileRef: body.profileRef == null ? undefined : String(body.profileRef),
+              baseUrl: body.baseUrl == null ? undefined : String(body.baseUrl),
+              credentialRef: body.credentialRef == null ? undefined : String(body.credentialRef),
+              protocol: body.protocol == null ? undefined : String(body.protocol),
+              config:
+                body.config && typeof body.config === 'object' && !Array.isArray(body.config)
+                  ? (body.config as Record<string, unknown>)
+                  : undefined,
+              priority: body.priority == null ? undefined : Number(body.priority),
+            });
+          } catch (error) {
+            const code = error instanceof Error ? error.message : 'RUNTIME_ACCESS_UPSERT_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
   app.get('/api/v2/appointments', async () => ({ items: repository.listAppointments() }));
   app.get('/api/v2/positions', async () => ({ items: repository.listPositions() }));
   app.get('/api/v2/gateways', async () => ({ items: repository.listGateways() }));

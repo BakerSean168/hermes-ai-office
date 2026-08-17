@@ -4,6 +4,7 @@ import test from 'node:test';
 import { openDb } from '../src/db.mjs';
 import { runV2Migrations } from '../src/v2/migrations.js';
 import { V2Repository } from '../src/v2/repository.js';
+import { RuntimeAccessRepository } from '../src/v2/runtimeAccess.js';
 import { RuntimePolicyService } from '../src/v2/runtimePolicy.js';
 import { StaffingRepository } from '../src/v2/staffing.js';
 import { SupplyRepository } from '../src/v2/supply.js';
@@ -228,4 +229,35 @@ test('supplier staffing preferences reject Employees from another Supplier', () 
       }),
     /SUPPLIER_EMPLOYEE_MISMATCH/,
   );
+});
+
+test('first-class runtime access overrides legacy model-offering selector', () => {
+  const { repository, supply, staffing, catalog, position, employee } = make();
+  const access = new RuntimeAccessRepository(repository);
+  const employment = catalog.employment as Record<string, unknown>;
+  access.upsert({
+    employmentId: String(employment.id),
+    runtimeKind: 'OPENCODE',
+    adapterKind: 'NATIVE_CONFIG',
+    providerRef: 'hao-opencode-native',
+    modelRef: 'deepseek-v4-flash',
+    credentialRef: 'OPENCODE_GO_API_KEY',
+    protocol: 'openai-chat-completions',
+    priority: 200,
+  });
+  const policy = new RuntimePolicyService(repository, supply, staffing, access);
+  const decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'PREFER',
+    positionSlug: 'coding-executor',
+    toolCallId: 'native-access-wins',
+  });
+
+  assert.equal((decision.position as Record<string, unknown>).id, position.id);
+  assert.equal((decision.employee as Record<string, unknown>).id, employee.id);
+  assert.equal(decision.selectedModel, 'hao-opencode-native/deepseek-v4-flash');
+  const selectedAccess = decision.selectedAccess as Record<string, unknown>;
+  assert.equal(selectedAccess.adapterKind, 'NATIVE_CONFIG');
+  assert.equal(selectedAccess.providerRef, 'hao-opencode-native');
+  assert.equal(selectedAccess.credentialRef, 'OPENCODE_GO_API_KEY');
 });

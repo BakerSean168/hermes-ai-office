@@ -1,5 +1,6 @@
 import { newId } from './ids.js';
 import type { V2Repository, V2Row } from './repository.js';
+import { RuntimeAccessRepository } from './runtimeAccess.js';
 import type { StaffingRepository } from './staffing.js';
 import type { SupplyRepository } from './supply.js';
 
@@ -13,6 +14,12 @@ export interface RuntimeSelector {
   model: string;
   profile?: string;
   provider?: string;
+  accessProfileId?: string;
+  adapterKind?: string;
+  baseUrl?: string;
+  credentialRef?: string;
+  protocol?: string;
+  config?: JsonRecord;
 }
 
 export interface RuntimeLaunchResolveInput {
@@ -72,6 +79,29 @@ function appointmentRank(value: string): number {
   return 2;
 }
 
+function selectorFromAccess(value: V2Row | null, runtimeKind: RuntimeKind): RuntimeSelector | null {
+  if (!value) return null;
+  const modelRef = typeof value.modelRef === 'string' ? value.modelRef.trim() : '';
+  if (!modelRef) return null;
+  const provider = typeof value.providerRef === 'string' ? value.providerRef.trim() : '';
+  const profile = typeof value.profileRef === 'string' ? value.profileRef.trim() : '';
+  const model = runtimeKind === 'OPENCODE' && provider ? `${provider}/${modelRef}` : modelRef;
+  return {
+    model,
+    ...(profile ? { profile } : {}),
+    ...(provider ? { provider } : {}),
+    accessProfileId: String(value.id),
+    adapterKind: String(value.adapterKind ?? ''),
+    ...(value.baseUrl ? { baseUrl: String(value.baseUrl) } : {}),
+    ...(value.credentialRef ? { credentialRef: String(value.credentialRef) } : {}),
+    ...(value.protocol ? { protocol: String(value.protocol) } : {}),
+    config:
+      value.config && typeof value.config === 'object' && !Array.isArray(value.config)
+        ? (value.config as JsonRecord)
+        : {},
+  };
+}
+
 function selectorFromMetadata(value: unknown, runtimeKind: RuntimeKind): RuntimeSelector | null {
   const metadata = decode<JsonRecord>(value, {});
   const selectors = metadata.runtimeSelectors;
@@ -99,11 +129,18 @@ export class RuntimePolicyService {
   readonly #domain: V2Repository;
   readonly #supply: SupplyRepository;
   readonly #staffing: StaffingRepository;
+  readonly #runtimeAccess: RuntimeAccessRepository;
 
-  constructor(domain: V2Repository, supply: SupplyRepository, staffing: StaffingRepository) {
+  constructor(
+    domain: V2Repository,
+    supply: SupplyRepository,
+    staffing: StaffingRepository,
+    runtimeAccess = new RuntimeAccessRepository(domain),
+  ) {
     this.#domain = domain;
     this.#supply = supply;
     this.#staffing = staffing;
+    this.#runtimeAccess = runtimeAccess;
   }
 
   resolve(input: RuntimeLaunchResolveInput): V2Row {
@@ -171,9 +208,11 @@ export class RuntimePolicyService {
           `INSERT INTO v2_runtime_launch_decisions(
              id,runtime_kind,policy_mode,status,position_id,employee_id,employment_id,
              model_offering_id,appointment_id,session_id,task_id,tool_call_id,work_scope_hint,
-             position_hint,workdir_hint,requested_model,selected_model,selected_profile,command_name,
+             position_hint,workdir_hint,requested_model,selected_model,selected_profile,
+             selected_access_profile_id,selected_provider,selected_adapter_kind,selected_base_url,
+             selected_credential_ref,selected_protocol,selected_access_config_json,command_name,
              reasons_json,candidate_results_json,metadata_json,decided_at)
-           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -194,6 +233,13 @@ export class RuntimePolicyService {
           requestedModel,
           selected?.selector?.model ?? requestedModel,
           selected?.selector?.profile ?? null,
+          selected?.selector?.accessProfileId ?? null,
+          selected?.selector?.provider ?? null,
+          selected?.selector?.adapterKind ?? null,
+          selected?.selector?.baseUrl ?? null,
+          selected?.selector?.credentialRef ?? null,
+          selected?.selector?.protocol ?? null,
+          JSON.stringify(selected?.selector?.config ?? {}),
           input.commandName?.slice(0, 120) ?? null,
           JSON.stringify(reasons),
           JSON.stringify(candidateResults),
@@ -214,6 +260,8 @@ export class RuntimePolicyService {
           employmentId: selected?.employmentId ?? null,
           requestedModel,
           selectedModel: selected?.selector?.model ?? requestedModel,
+          selectedAccessProfileId: selected?.selector?.accessProfileId ?? null,
+          selectedAdapterKind: selected?.selector?.adapterKind ?? null,
           reasons,
         },
       });
@@ -312,7 +360,11 @@ export class RuntimePolicyService {
         .all(positionId),
     );
     const candidates = values.map((value): RawCandidate => {
-      const selector = selectorFromMetadata(value.commercial_metadata_json, runtimeKind);
+      const employmentId = value.employment_id ? String(value.employment_id) : null;
+      const access = employmentId ? this.#runtimeAccess.resolve(employmentId, runtimeKind) : null;
+      const selector =
+        selectorFromAccess(access, runtimeKind) ??
+        selectorFromMetadata(value.commercial_metadata_json, runtimeKind);
       const supplierMetadata = decode<JsonRecord>(value.supplier_metadata_json, {});
       const rawPreferences = supplierMetadata.staffingPreferences;
       const preferences =
@@ -351,7 +403,7 @@ export class RuntimePolicyService {
         employeeId,
         employeeName: String(value.employee_name),
         employeeLifecycle: String(value.record_lifecycle),
-        employmentId: value.employment_id ? String(value.employment_id) : null,
+        employmentId,
         supplyAgreementId: value.supply_agreement_id ? String(value.supply_agreement_id) : null,
         employmentStatus: value.employment_status ? String(value.employment_status) : null,
         agreementLifecycle: value.agreement_lifecycle ? String(value.agreement_lifecycle) : null,
@@ -407,6 +459,17 @@ export class RuntimePolicyService {
       requestedModel: value.requested_model,
       selectedModel: value.selected_model,
       selectedProfile: value.selected_profile,
+      selectedAccess: value.selected_access_profile_id
+        ? {
+            id: value.selected_access_profile_id,
+            providerRef: value.selected_provider,
+            adapterKind: value.selected_adapter_kind,
+            baseUrl: value.selected_base_url,
+            credentialRef: value.selected_credential_ref,
+            protocol: value.selected_protocol,
+            config: decode<JsonRecord>(value.selected_access_config_json, {}),
+          }
+        : null,
       commandName: value.command_name,
       reasons: decode<string[]>(value.reasons_json, []),
       candidateResults: decode<unknown[]>(value.candidate_results_json, []),

@@ -757,6 +757,34 @@ export class SupplyRepository {
       endedReason: value.ended_reason,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
     }));
+    const runtimeAccessProfiles = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT r.*,em.employee_id,em.supply_agreement_id
+           FROM v2_runtime_access_profiles r
+           JOIN v2_employments em ON em.id=r.employment_id
+           ORDER BY r.employment_id,r.runtime_kind,r.priority DESC,r.created_at,r.id`,
+        )
+        .all(),
+    ).map((value) => ({
+      id: value.id,
+      employmentId: value.employment_id,
+      employeeId: value.employee_id,
+      supplyAgreementId: value.supply_agreement_id,
+      runtimeKind: value.runtime_kind,
+      adapterKind: value.adapter_kind,
+      providerRef: value.provider_ref,
+      modelRef: value.model_ref,
+      profileRef: value.profile_ref,
+      baseUrl: value.base_url,
+      credentialRef: value.credential_ref,
+      protocol: value.protocol,
+      config: decode<JsonRecord>(value.config_json, {}),
+      priority: Number(value.priority ?? 0),
+      lifecycle: value.lifecycle,
+      createdAt: value.created_at,
+      updatedAt: value.updated_at,
+    }));
     const bindings = rows(
       this.#domain.db
         .prepare(
@@ -808,6 +836,9 @@ export class SupplyRepository {
               ...employment,
               employee: supplierEmployees.find((item) => item.id === employment.employeeId) ?? null,
               bindings: bindings.filter((binding) => binding.employmentId === employment.id),
+              runtimeAccess: runtimeAccessProfiles.filter(
+                (access) => access.employmentId === employment.id,
+              ),
             })),
           capacityPools: capacityPools.filter((pool) => pool.supplyAgreementId === agreement.id),
           channels: channels.filter((channel) => channel.supplyAgreementId === agreement.id),
@@ -835,6 +866,22 @@ export class SupplyRepository {
           activeBindings: bindings.filter(
             (binding) =>
               employmentIds.has(String(binding.employmentId)) && binding.lifecycle === 'ACTIVE',
+          ).length,
+          runtimeAccessProfiles: runtimeAccessProfiles.filter(
+            (access) =>
+              employmentIds.has(String(access.employmentId)) && access.lifecycle === 'ACTIVE',
+          ).length,
+          nativeRuntimeAccessProfiles: runtimeAccessProfiles.filter(
+            (access) =>
+              employmentIds.has(String(access.employmentId)) &&
+              access.lifecycle === 'ACTIVE' &&
+              access.adapterKind === 'NATIVE_CONFIG',
+          ).length,
+          gatewayRuntimeAccessProfiles: runtimeAccessProfiles.filter(
+            (access) =>
+              employmentIds.has(String(access.employmentId)) &&
+              access.lifecycle === 'ACTIVE' &&
+              access.adapterKind === 'GATEWAY',
           ).length,
         },
       };
@@ -906,6 +953,14 @@ export class SupplyRepository {
         currentEmployments: employments.filter((item) => item.status === 'CURRENT').length,
         capacityPools: capacityPools.length,
         activeBindings: bindings.filter((item) => item.lifecycle === 'ACTIVE').length,
+        runtimeAccessProfiles: runtimeAccessProfiles.filter((item) => item.lifecycle === 'ACTIVE')
+          .length,
+        nativeRuntimeAccessProfiles: runtimeAccessProfiles.filter(
+          (item) => item.lifecycle === 'ACTIVE' && item.adapterKind === 'NATIVE_CONFIG',
+        ).length,
+        gatewayRuntimeAccessProfiles: runtimeAccessProfiles.filter(
+          (item) => item.lifecycle === 'ACTIVE' && item.adapterKind === 'GATEWAY',
+        ).length,
         gateways: gateways.length,
         unmappedChannels: unmappedChannels.length,
       },

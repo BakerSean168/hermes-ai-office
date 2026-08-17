@@ -410,3 +410,155 @@ test('V2 command API opens a Run, Duty and dispatches current Employee', async (
     await runtime.app.close();
   }
 });
+
+test('runtime access API stores native Agent configuration without secret material', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    initialSync: false,
+    env: {
+      MODEL_CP_V2_LITELLM: '0',
+      MODEL_CP_V2_CPA_DISCOVERY: '0',
+      MODEL_CP_V2_DISCOVERY: '0',
+    },
+  });
+  try {
+    const supplier = runtime.v2.getOrCreateSupplier('custom-team', 'Custom Team');
+    const model = runtime.v2.getOrCreateSupplierModel({
+      supplierId: String(supplier.id),
+      supplierModelKey: 'alpha',
+      displayName: 'Alpha',
+    });
+    const employee = runtime.v2.getOrCreateEmployee({
+      supplierId: String(supplier.id),
+      supplierModelId: String(model.id),
+      displayName: 'Alpha @ Custom Team',
+    });
+    const agreement = runtime.v2.getOrCreateAgreement({
+      supplierId: String(supplier.id),
+      externalAccountRef: 'team-api',
+      name: 'Team API',
+    });
+    const employment = runtime.v2.getOrCreateCurrentEmployment({
+      employeeId: String(employee.id),
+      supplyAgreementId: String(agreement.id),
+    });
+
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/employments/${employment.id}/runtime-access`,
+      headers: { 'idempotency-key': 'native-runtime-access-alpha' },
+      payload: {
+        runtimeKind: 'OPENCODE',
+        adapterKind: 'NATIVE_CONFIG',
+        providerRef: 'hao-custom-team',
+        modelRef: 'alpha',
+        baseUrl: 'https://proxy.example.com/v1',
+        credentialRef: 'HERMES_AI_OFFICE_TEAM_API_KEY',
+        protocol: 'openai-chat-completions',
+        config: { package: '@ai-sdk/openai-compatible' },
+      },
+    });
+    assert.equal(created.statusCode, 200);
+    const body = created.json();
+    assert.equal(body.adapterKind, 'NATIVE_CONFIG');
+    assert.equal(body.credentialRef, 'HERMES_AI_OFFICE_TEAM_API_KEY');
+    assert.equal(JSON.stringify(body).includes('secret-key-value'), false);
+
+    const listed = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v2/runtime-access-profiles?employmentId=${employment.id}`,
+    });
+    assert.equal(listed.statusCode, 200);
+    assert.equal(listed.json().items.length, 1);
+    assert.equal(listed.json().items[0].providerRef, 'hao-custom-team');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('legacy runtime access import is an idempotent command and does not infer secrets', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    initialSync: false,
+    env: {
+      MODEL_CP_V2_LITELLM: '0',
+      MODEL_CP_V2_CPA_DISCOVERY: '0',
+      MODEL_CP_V2_DISCOVERY: '0',
+    },
+  });
+  try {
+    const supplier = runtime.v2.getOrCreateSupplier('opencode', 'OpenCode');
+    const model = runtime.v2.getOrCreateSupplierModel({
+      supplierId: String(supplier.id),
+      supplierModelKey: 'deepseek-v4-flash',
+      displayName: 'DeepSeek V4 Flash',
+    });
+    const employee = runtime.v2.getOrCreateEmployee({
+      supplierId: String(supplier.id),
+      supplierModelId: String(model.id),
+      displayName: 'DeepSeek V4 Flash @ OpenCode',
+    });
+    const agreement = runtime.v2.getOrCreateAgreement({
+      supplierId: String(supplier.id),
+      externalAccountRef: 'opencode-go',
+      name: 'OpenCode Go',
+    });
+    const employment = runtime.v2.getOrCreateCurrentEmployment({
+      employeeId: String(employee.id),
+      supplyAgreementId: String(agreement.id),
+    });
+    const offering = runtime.v2.db
+      .prepare(
+        `INSERT INTO v2_model_offerings(
+           id,supplier_id,supplier_model_id,supply_agreement_id,lifecycle,
+           advertised_capabilities_json,protocol_options_json,commercial_metadata_json,
+           created_at,updated_at)
+         VALUES('offer-import',?,?,?,'ACTIVE','[]','[]',?,1,1)
+         RETURNING *`,
+      )
+      .get(
+        String(supplier.id),
+        String(model.id),
+        String(agreement.id),
+        JSON.stringify({
+          runtimeSelectors: {
+            OPENCODE: { model: 'opencode-go/deepseek-v4-flash', provider: 'opencode-go' },
+          },
+        }),
+      );
+    runtime.v2.db
+      .prepare('UPDATE v2_employments SET model_offering_id=? WHERE id=?')
+      .run(String((offering as Record<string, unknown>).id), String(employment.id));
+
+    const first = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/runtime-access/import-legacy',
+      headers: { 'idempotency-key': 'import-runtime-access-v1' },
+      payload: {},
+    });
+    assert.equal(first.statusCode, 200);
+    assert.equal(first.json().imported, 1);
+    const second = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/runtime-access/import-legacy',
+      headers: { 'idempotency-key': 'import-runtime-access-v1' },
+      payload: {},
+    });
+    assert.equal(second.statusCode, 200);
+    assert.equal(second.headers['idempotency-replayed'], 'true');
+
+    const listed = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v2/runtime-access-profiles?employmentId=${employment.id}`,
+    });
+    assert.equal(listed.statusCode, 200);
+    assert.equal(listed.json().items.length, 1);
+    assert.equal(listed.json().items[0].providerRef, 'opencode-go');
+    assert.equal(listed.json().items[0].baseUrl, null);
+    assert.equal(listed.json().items[0].credentialRef, null);
+  } finally {
+    await runtime.app.close();
+  }
+});

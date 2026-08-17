@@ -4,6 +4,7 @@ import test from 'node:test';
 import { openDb } from '../src/db.mjs';
 import { runV2Migrations } from '../src/v2/migrations.js';
 import { V2Repository } from '../src/v2/repository.js';
+import { RuntimeAccessRepository } from '../src/v2/runtimeAccess.js';
 import { SupplyRepository } from '../src/v2/supply.js';
 
 function make() {
@@ -49,6 +50,18 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
     protocolOptions: ['openai-responses'],
   });
   supply.assignOfferingToEmployment(seeded.employmentId, String(offering.id));
+  const runtimeAccess = new RuntimeAccessRepository(repository);
+  runtimeAccess.upsert({
+    employmentId: seeded.employmentId,
+    runtimeKind: 'CODEX',
+    adapterKind: 'NATIVE_CONFIG',
+    providerRef: 'hao-opencode-test',
+    modelRef: 'deepseek-v4-flash',
+    profileRef: 'hao-reviewer',
+    baseUrl: 'https://example.test/v1',
+    credentialRef: 'TEST_PROVIDER_API_KEY',
+    protocol: 'openai-responses',
+  });
   supply.upsertCapacityPool({
     supplyAgreementId: seeded.agreementId,
     name: 'monthly-requests',
@@ -89,6 +102,9 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
     currentEmployments: 1,
     capacityPools: 1,
     activeBindings: 1,
+    runtimeAccessProfiles: 1,
+    nativeRuntimeAccessProfiles: 1,
+    gatewayRuntimeAccessProfiles: 0,
     gateways: 1,
     unmappedChannels: 1,
   });
@@ -103,6 +119,11 @@ test('Supply projection exposes HR supplier hierarchy without assigning unmapped
   const agreement = (supplier.agreements as Array<Record<string, unknown>>)[0]!;
   assert.equal(agreement.planName, 'OpenCode Go');
   assert.equal((agreement.employments as unknown[]).length, 1);
+  const employment = (agreement.employments as Array<Record<string, unknown>>)[0]!;
+  const access = (employment.runtimeAccess as Array<Record<string, unknown>>)[0]!;
+  assert.equal(access.adapterKind, 'NATIVE_CONFIG');
+  assert.equal(access.runtimeKind, 'CODEX');
+  assert.equal(access.profileRef, 'hao-reviewer');
   assert.equal((agreement.capacityPools as unknown[]).length, 1);
   assert.equal((agreement.channels as Array<Record<string, unknown>>)[0]?.name, 'OpenCode Go');
   assert.equal((projection.unmappedInfrastructure as Record<string, unknown>).count, 1);
