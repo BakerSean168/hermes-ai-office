@@ -24,6 +24,7 @@ import threading
 import tomllib
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -43,6 +44,34 @@ _LITELLM_RUNTIME_BASE_URL = "http://127.0.0.1:4000/v1"
 _LITELLM_RUNTIME_KEY_FILE = "/opt/data/secrets/litellm-runtime.key"
 _LITELLM_RUNTIME_KEY_ENV = "HERMES_LITELLM_RUNTIME_KEY"
 
+_CONTROL_PLANE_BASE = "http://127.0.0.1:8320"
+
+_ADD_PROVIDER_SCHEMA = {
+    "name": "ai_office_add_provider",
+    "description": (
+        "Add or update a shared provider connection in Hermes AI Office. "
+        "Use this when the user provides an API URL and API key. The key is stored only in Hermes credential storage; "
+        "the shared Provider Hub stores only a credential reference."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "url": {"type": "string", "description": "Provider API base URL. OpenAI-compatible endpoints may be given with or without /v1."},
+            "api_key": {"type": "string", "description": "Provider API key. Never echoed back by the tool."},
+            "key": {"type": "string", "description": "Alias for api_key, compatible with newapi_channel_conn payloads."},
+            "name": {"type": "string", "description": "Shared channel/provider name. Optional; derived from hostname when omitted."},
+            "website_url": {"type": "string", "description": "Official website URL. Optional; defaults to the API origin."},
+        },
+        "required": ["url"],
+    },
+}
+
+_LIST_PROVIDERS_SCHEMA = {
+    "name": "ai_office_list_providers",
+    "description": "List shared Provider Hub connections, availability, models, supplier mapping, and profiles currently using them.",
+    "parameters": {"type": "object", "properties": {}},
+}
+
 _RUNTIME_COMMAND_RE = re.compile(
     r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+\s+)*"
@@ -53,6 +82,233 @@ _RUNTIME_COMMAND_RE = re.compile(
 _MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s;&|]+)", re.IGNORECASE)
 _VERB_RE = re.compile(r"(?:^|[\s/])(opencode|codex)\s+([a-z][a-z0-9_-]*)", re.IGNORECASE)
 
+
+
+def _control_plane_request(
+    path: str,
+    *,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    idempotency_key: str = "",
+    timeout: float = 6.0,
+) -> dict[str, Any]:
+    if not path.startswith("/"):
+        raise ValueError("invalid control-plane path")
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if idempotency_key:
+        headers["Idempotency-Key"] = idempotency_key[:200]
+    request = urllib.request.Request(
+        _CONTROL_PLANE_BASE + path, data=body, headers=headers, method=method
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        value = json.load(response)
+    if not isinstance(value, dict):
+        raise RuntimeError("control plane returned a non-object payload")
+    return value
+
+
+def _normalize_shared_url(value: str) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("A valid HTTP(S) provider URL is required")
+    return raw
+
+
+def _shared_website_url(value: str, base_url: str) -> str:
+    explicit = str(value or "").strip()
+    if explicit:
+        return _normalize_shared_url(explicit)
+    parsed = urllib.parse.urlparse(base_url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _shared_provider_key(name: str, base_url: str) -> str:
+    hostname = urllib.parse.urlparse(base_url).hostname or "provider"
+    seed = str(name or "").strip().lower() or hostname.split(".")[0].lower()
+    cleaned = re.sub(r"[^a-z0-9]+", "-", seed).strip("-")
+    if not cleaned:
+        cleaned = "provider-" + hashlib.blake2b(base_url.encode("utf-8"), digest_size=4).hexdigest()
+    return cleaned[:80]
+
+
+def _shared_credential_ref(provider_key: str) -> str:
+    safe = re.sub(r"[^A-Z0-9]+", "_", provider_key.upper()).strip("_") or "PROVIDER"
+    return (safe[:100] + "_API_KEY")[:120]
+
+
+def _save_shared_credential(reference: str, value: str) -> None:
+    secret = str(value or "").strip()
+    if not secret:
+        raise ValueError("API key is required")
+    from hermes_cli.credential_lifecycle import save_provider_env_credential
+
+    save_provider_env_credential(reference, secret)
+
+
+def _discover_shared_models(api_key: str, base_url: str) -> tuple[str, list[str]]:
+    from hermes_cli.models import fetch_api_models
+
+    normalized = _normalize_shared_url(base_url)
+    candidates = [normalized]
+    parsed = urllib.parse.urlparse(normalized)
+    if not parsed.path.rstrip("/").endswith("/v1"):
+        candidates.append(normalized + "/v1")
+    for candidate in candidates:
+        try:
+            models = fetch_api_models(
+                api_key, candidate, timeout=8.0, api_mode="chat_completions"
+            )
+        except Exception:
+            models = None
+        cleaned = sorted(
+            {str(item).strip() for item in (models or []) if str(item).strip()}
+        )
+        if cleaned:
+            return candidate, cleaned[:800]
+    return normalized, []
+
+
+def _save_shared_custom_provider(
+    provider_key: str, display_name: str, base_url: str, credential_ref: str
+) -> None:
+    from hermes_cli import config as config_mod
+
+    current = config_mod.load_config_readonly() or {}
+    raw = current.get("custom_providers") if isinstance(current, dict) else None
+    rows = [dict(item) for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
+    replacement = {
+        "name": display_name,
+        "provider_key": provider_key,
+        "base_url": base_url.rstrip("/"),
+        "key_env": credential_ref,
+        "api_mode": "chat_completions",
+    }
+    found = False
+    for index, item in enumerate(rows):
+        if str(item.get("provider_key") or "") == provider_key:
+            rows[index] = {**item, **replacement}
+            found = True
+            break
+    if not found:
+        rows.append(replacement)
+    config_mod.save_config({"custom_providers": rows}, merge_existing=True)
+
+
+def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        raw_url = _normalize_shared_url(str(args.get("url") or ""))
+        api_key = str(args.get("api_key") or args.get("key") or "").strip()
+        if not api_key:
+            raise ValueError("API key is required")
+        requested_name = str(args.get("name") or "").strip()
+        provider_key = _shared_provider_key(requested_name, raw_url)
+        display_name = requested_name or provider_key.replace("-", " ").title()
+        credential_ref = _shared_credential_ref(provider_key)
+        website_url = _shared_website_url(str(args.get("website_url") or ""), raw_url)
+        selected_base_url, models = _discover_shared_models(api_key, raw_url)
+        _save_shared_credential(credential_ref, api_key)
+        _save_shared_custom_provider(
+            provider_key, display_name, selected_base_url, credential_ref
+        )
+        profile = ""
+        if _CTX is not None:
+            try:
+                profile = str(getattr(_CTX, "profile_name", "") or "").strip()
+            except Exception:
+                profile = ""
+        payload = {
+            "providerKey": provider_key,
+            "displayName": display_name,
+            "baseUrl": selected_base_url,
+            "websiteUrl": website_url,
+            "protocol": "openai-chat-completions",
+            "authKind": "API_KEY",
+            "credentialRef": credential_ref,
+            "credentialScope": "GLOBAL",
+            "sourceKind": "HERMES_TOOL_ONBOARDING",
+            "shareScope": "GLOBAL",
+            "health": "READY" if models else "DEGRADED",
+            "models": models,
+            "metadata": {
+                "addedFromProfile": profile or None,
+                "managedBy": "hermes-ai-office",
+            },
+        }
+        seed = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        connection = _control_plane_request(
+            "/api/v2/commands/provider-connections/upsert",
+            method="POST",
+            payload=payload,
+            idempotency_key="provider-tool-v1-"
+            + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "connectionId": connection.get("id"),
+                "name": display_name,
+                "providerKey": provider_key,
+                "baseUrl": selected_base_url,
+                "websiteUrl": website_url,
+                "credentialRef": credential_ref,
+                "health": connection.get("health") or payload["health"],
+                "models": models,
+                "shared": True,
+                "message": (
+                    "Added to the shared Provider Hub. Other profiles discover it by querying the Hub; "
+                    "the API key is stored only in Hermes credential storage."
+                ),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
+            ensure_ascii=False,
+        )
+
+
+def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
+        items = []
+        for item in hub.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            supplier = item.get("supplier") if isinstance(item.get("supplier"), dict) else {}
+            profiles = sorted(
+                {
+                    str(link.get("profile_id"))
+                    for link in (item.get("profileLinks") or [])
+                    if isinstance(link, dict) and link.get("profile_id")
+                }
+            )
+            items.append(
+                {
+                    "name": item.get("display_name"),
+                    "providerKey": item.get("provider_key"),
+                    "baseUrl": item.get("base_url"),
+                    "websiteUrl": item.get("website_url"),
+                    "health": item.get("health"),
+                    "credentialScope": item.get("credential_scope"),
+                    "models": item.get("models") or [],
+                    "supplier": supplier.get("name"),
+                    "profiles": profiles,
+                }
+            )
+        return json.dumps(
+            {"ok": True, "summary": hub.get("summary") or {}, "items": items},
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
+            ensure_ascii=False,
+        )
 
 def _session_id(kwargs: dict[str, Any]) -> str:
     return str(kwargs.get("session_id") or kwargs.get("task_id") or "")
@@ -843,6 +1099,22 @@ def register(ctx: Any) -> None:
     global _CTX
     _CTX = ctx
     _ensure_worker()
+    ctx.register_tool(
+        name="ai_office_add_provider",
+        toolset="ai_office",
+        schema=_ADD_PROVIDER_SCHEMA,
+        handler=_add_shared_provider_tool,
+        description=_ADD_PROVIDER_SCHEMA["description"],
+        emoji="🔌",
+    )
+    ctx.register_tool(
+        name="ai_office_list_providers",
+        toolset="ai_office",
+        schema=_LIST_PROVIDERS_SCHEMA,
+        handler=_list_shared_providers_tool,
+        description=_LIST_PROVIDERS_SCHEMA["description"],
+        emoji="📡",
+    )
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)

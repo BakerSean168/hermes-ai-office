@@ -22,12 +22,16 @@ class FakeContext:
         self.settings = settings or {}
         self.profile_name = profile
         self.hooks: dict[str, object] = {}
+        self.tools: dict[str, dict[str, object]] = {}
 
     def get_config(self, key: str, default: object = None) -> object:
         return self.settings.get(key, default)
 
     def register_hook(self, name: str, callback: object) -> None:
         self.hooks[name] = callback
+
+    def register_tool(self, **kwargs: object) -> None:
+        self.tools[str(kwargs["name"])] = dict(kwargs)
 
 
 class FakeResponse:
@@ -405,6 +409,67 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["profileName"], "coder")
         self.assertEqual(captured["timeout"], 0.8)
 
+    def test_add_shared_provider_stores_secret_only_in_hermes_and_sends_safe_hub_payload(self) -> None:
+        captured: dict[str, object] = {}
+
+        def control(path: str, **kwargs: object) -> dict[str, object]:
+            captured["path"] = path
+            captured["payload"] = kwargs.get("payload")
+            return {"id": "pconn_worldclaw", "health": "READY"}
+
+        with mock.patch.object(plugin, "_discover_shared_models", return_value=("https://worldclawpro.ai/v1", ["gpt-test"])), mock.patch.object(
+            plugin, "_save_shared_credential"
+        ) as save_credential, mock.patch.object(
+            plugin, "_save_shared_custom_provider"
+        ), mock.patch.object(plugin, "_control_plane_request", side_effect=control):
+            result = json.loads(
+                plugin._add_shared_provider_tool(
+                    {
+                        "url": "https://worldclawpro.ai",
+                        "api_key": "super-secret-key",
+                        "name": "worldclaw",
+                        "website_url": "https://worldclawpro.ai/",
+                    }
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["providerKey"], "worldclaw")
+        self.assertEqual(result["websiteUrl"], "https://worldclawpro.ai")
+        save_credential.assert_called_once_with("WORLDCLAW_API_KEY", "super-secret-key")
+        payload = captured["payload"]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["credentialRef"], "WORLDCLAW_API_KEY")
+        self.assertEqual(payload["websiteUrl"], "https://worldclawpro.ai")
+        self.assertNotIn("super-secret-key", json.dumps(payload))
+        self.assertNotIn("super-secret-key", json.dumps(result))
+
+    def test_list_shared_providers_reads_central_hub_state(self) -> None:
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            return_value={
+                "summary": {"connections": 1},
+                "items": [
+                    {
+                        "display_name": "worldclaw",
+                        "provider_key": "worldclaw",
+                        "base_url": "https://worldclawpro.ai/v1",
+                        "website_url": "https://worldclawpro.ai",
+                        "health": "READY",
+                        "credential_scope": "GLOBAL",
+                        "models": ["gpt-test"],
+                        "supplier": None,
+                        "profileLinks": [],
+                    }
+                ],
+            },
+        ):
+            result = json.loads(plugin._list_shared_providers_tool({}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["items"][0]["name"], "worldclaw")
+        self.assertEqual(result["items"][0]["websiteUrl"], "https://worldclawpro.ai")
+
     def test_register_exposes_native_hooks(self) -> None:
         ctx = FakeContext()
         with mock.patch.object(plugin, "_ensure_worker"):
@@ -412,6 +477,10 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(
             set(ctx.hooks),
             {"subagent_start", "subagent_stop", "pre_tool_call", "post_tool_call"},
+        )
+        self.assertEqual(
+            set(ctx.tools),
+            {"ai_office_add_provider", "ai_office_list_providers"},
         )
 
 

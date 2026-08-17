@@ -26,3 +26,14 @@ Known business identities are classified conservatively. Existing Suppliers are 
 ## Runtime use
 
 `RuntimeAccessProfile` remains the executable boundary. The Provider Hub does not proxy model traffic. Codex, OpenCode and Claude Code continue to use their native configuration contracts. API-key connections promoted to the Hermes global credential store can be materialized for any profile without duplicating the secret into the business database.
+
+## Hermes-native shared channel tools
+
+The plugin exposes two tools in every Hermes profile:
+
+- `ai_office_add_provider`: accepts a provider URL plus `api_key`/`key`, optionally a name and website URL. The secret is written only to Hermes credential storage; the Provider Hub stores `credentialRef` and safe connection metadata. `newapi_channel_conn`-style payloads can be mapped directly.
+- `ai_office_list_providers`: reads the current central Provider Hub projection so any profile can see shared channels, readiness, models, supplier mapping, and which profiles already use them.
+
+Provider sharing is **query-based, not event-replication-based**. `ProviderConnection` created/updated domain events remain useful for audit and UI refresh, but another profile learns the current truth by querying the Provider Hub/tool. This avoids missed-event consistency problems.
+
+`websiteUrl` is first-class metadata on both `ProviderConnection` and `Supplier`. It is informational only and never participates in identity, staffing, or routing decisions.

@@ -50,6 +50,7 @@ class ProviderDiscoverRequest(BaseModel):
     api_key: str = ""
     base_url: str = ""
     supplier_name: str = ""
+    website_url: str = ""
 
 
 class ProviderRegisterRequest(ProviderDiscoverRequest):
@@ -64,6 +65,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "opencode",
         "supplierName": "OpenCode",
         "baseUrl": "https://opencode.ai/zen/go/v1",
+        "websiteUrl": "https://opencode.ai",
         "keyEnv": "OPENCODE_GO_API_KEY",
         "transport": "openai_chat",
         "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"},
@@ -76,6 +78,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "deepseek",
         "supplierName": "DeepSeek",
         "baseUrl": "https://api.deepseek.com/v1",
+        "websiteUrl": "https://www.deepseek.com",
         "keyEnv": "DEEPSEEK_API_KEY",
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
@@ -88,6 +91,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "openrouter",
         "supplierName": "OpenRouter",
         "baseUrl": "https://openrouter.ai/api/v1",
+        "websiteUrl": "https://openrouter.ai",
         "keyEnv": "OPENROUTER_API_KEY",
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "OpenRouter API", "commercialType": "METERED"},
@@ -99,6 +103,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "openai",
         "supplierName": "OpenAI",
         "baseUrl": "https://api.openai.com/v1",
+        "websiteUrl": "https://openai.com",
         "keyEnv": "OPENAI_API_KEY",
         "transport": "codex_responses",
         "plan": {"slug": "api", "name": "OpenAI API", "commercialType": "METERED"},
@@ -110,6 +115,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "xai",
         "supplierName": "xAI",
         "baseUrl": "https://api.x.ai/v1",
+        "websiteUrl": "https://x.ai",
         "keyEnv": "XAI_API_KEY",
         "transport": "codex_responses",
         "plan": {"slug": "api", "name": "xAI API", "commercialType": "METERED"},
@@ -121,6 +127,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "nvidia",
         "supplierName": "NVIDIA",
         "baseUrl": "https://integrate.api.nvidia.com/v1",
+        "websiteUrl": "https://www.nvidia.com",
         "keyEnv": "NVIDIA_API_KEY",
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "NVIDIA NIM API", "commercialType": "METERED"},
@@ -132,6 +139,7 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "supplierSlug": "",
         "supplierName": "",
         "baseUrl": "",
+        "websiteUrl": "",
         "keyEnv": "",
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "Custom API", "commercialType": "METERED"},
@@ -146,12 +154,12 @@ _PROVIDER_HUB_LAST_SYNC = 0.0
 _PROVIDER_HUB_SYNC_TTL = 45.0
 
 _DISCOVERED_SUPPLIERS: Dict[str, Dict[str, Any]] = {
-    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED"},
-    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
-    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED"},
-    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED"},
-    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED"},
-    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
+    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED", "websiteUrl": "https://anyrouter.top"},
+    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "websiteUrl": "https://opencode.ai", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
+    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED", "websiteUrl": "https://www.fastaitoken.com"},
+    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED", "websiteUrl": "https://api.ark717.com"},
+    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED", "websiteUrl": "https://chybenzun.top"},
+    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "websiteUrl": "https://openai.com", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
 }
 
 
@@ -215,6 +223,29 @@ def _connection_supplier(provider_key: str) -> Mapping[str, Any] | None:
     return _DISCOVERED_SUPPLIERS.get(provider_key)
 
 
+def _connection_website(provider_key: str, base_url: str = "") -> str:
+    supplier = _connection_supplier(provider_key)
+    if supplier and supplier.get("websiteUrl"):
+        return str(supplier["websiteUrl"]).rstrip("/")
+    if base_url and str(base_url).startswith(("http://", "https://")):
+        return _website_origin(str(base_url))
+    return ""
+
+
+def _update_supplier_website(supplier: Mapping[str, Any], supplier_spec: Mapping[str, Any]) -> None:
+    supplier_id = str(supplier.get("id") or "")
+    name = str(supplier_spec.get("name") or supplier.get("name") or "").strip()
+    website_url = str(supplier_spec.get("websiteUrl") or "").strip()
+    if not supplier_id or not name or not website_url:
+        return
+    seed = f"{supplier_id}|{name}|{website_url}"
+    _post_json(
+        f"/api/v2/commands/suppliers/{supplier_id}/profile",
+        {"name": name, "websiteUrl": website_url},
+        idempotency_key="provider-supplier-site-v1-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+    )
+
+
 def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
     seed = json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
     return _post_json(
@@ -265,6 +296,7 @@ def _register_discovered_employee(
     )
     employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
     supplier_row = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
+    _update_supplier_website(supplier_row, supplier_spec)
     employment_id = str(employment.get("id") or "")
     if employment_id:
         access: Dict[str, Any] = {
@@ -291,6 +323,7 @@ def _register_discovered_employee(
             "displayName": connection.get("display_name"),
             "supplierId": supplier_row.get("id"),
             "baseUrl": connection.get("base_url"),
+            "websiteUrl": connection.get("website_url") or supplier_spec.get("websiteUrl"),
             "protocol": connection.get("protocol"),
             "authKind": connection.get("auth_kind"),
             "credentialRef": connection.get("credential_ref"),
@@ -366,6 +399,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 connection = _hub_upsert_connection({
                     "providerKey": "openai-team",
                     "displayName": "OpenAI Official · ChatGPT Team / Business",
+                    "websiteUrl": "https://openai.com",
                     "protocol": "codex-chatgpt-oauth",
                     "authKind": "OAUTH",
                     "credentialRef": f"codex-auth:{profile_id}",
@@ -397,6 +431,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 "providerKey": provider_ref,
                 "displayName": display,
                 "baseUrl": base_url,
+                "websiteUrl": _connection_website(provider_ref, base_url),
                 "protocol": "openai-responses" if wire_api == "responses" else wire_api,
                 "authKind": "API_KEY",
                 "credentialRef": credential_ref or None,
@@ -437,6 +472,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                     "providerKey": str(provider_ref),
                     "displayName": display,
                     "baseUrl": base_url,
+                    "websiteUrl": _connection_website(str(provider_ref), base_url),
                     "protocol": "openai-chat-completions",
                     "authKind": "API_KEY",
                     "credentialRef": credential_ref or None,
@@ -474,6 +510,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 "providerKey": "claude-code-access",
                 "displayName": "Claude Code access",
                 "baseUrl": anthropic_base,
+                "websiteUrl": _website_origin(anthropic_base),
                 "protocol": "anthropic-messages",
                 "authKind": "API_KEY",
                 "credentialRef": credential_ref,
@@ -577,7 +614,13 @@ def _normalize_base_url(value: str) -> str:
     return raw
 
 
-def _custom_supplier_identity(base_url: str, supplier_name: str = "") -> Dict[str, str]:
+def _website_origin(value: str) -> str:
+    raw = _normalize_base_url(value)
+    parsed = urllib.parse.urlparse(raw)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _custom_supplier_identity(base_url: str, supplier_name: str = "", website_url: str = "") -> Dict[str, str]:
     normalized = _normalize_base_url(base_url)
     digest = hashlib.blake2b(normalized.encode("utf-8"), digest_size=6).hexdigest()
     hostname = urllib.parse.urlparse(normalized).hostname or "custom"
@@ -588,16 +631,17 @@ def _custom_supplier_identity(base_url: str, supplier_name: str = "") -> Dict[st
         "supplierName": generated_name,
         "keyEnv": f"HERMES_AI_OFFICE_{digest.upper()}_API_KEY",
         "baseUrl": normalized,
+        "websiteUrl": _normalize_base_url(website_url) if website_url.strip() else _website_origin(normalized),
     }
 
 
-def _provider_descriptor(preset_id: str, base_url: str = "", supplier_name: str = "") -> Dict[str, Any]:
+def _provider_descriptor(preset_id: str, base_url: str = "", supplier_name: str = "", website_url: str = "") -> Dict[str, Any]:
     preset_key = _safe_provider_id(preset_id)
     preset = _PROVIDER_PRESETS.get(preset_key)
     if not preset:
         raise ValueError("未知供应商预设")
     if preset_key == "custom":
-        identity = _custom_supplier_identity(base_url, supplier_name)
+        identity = _custom_supplier_identity(base_url, supplier_name, website_url)
         return {**preset, **identity}
     descriptor = dict(preset)
     try:
@@ -637,7 +681,7 @@ def _existing_provider_key(descriptor: Mapping[str, Any]) -> str:
 
 
 def _discover_provider_models(body: ProviderDiscoverRequest) -> tuple[Dict[str, Any], list[str], bool]:
-    descriptor = _provider_descriptor(body.preset_id, body.base_url, body.supplier_name)
+    descriptor = _provider_descriptor(body.preset_id, body.base_url, body.supplier_name, body.website_url)
     api_key = body.api_key.strip() or _existing_provider_key(descriptor)
     if not api_key:
         raise ValueError("API Key 尚未配置")
@@ -1080,6 +1124,7 @@ async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
                 "name": descriptor.get("name"),
                 "supplierName": descriptor.get("supplierName"),
                 "baseUrl": descriptor.get("baseUrl") if body.preset_id == "custom" else None,
+                "websiteUrl": descriptor.get("websiteUrl"),
                 "configured": configured,
             },
             "models": [{"id": model, "name": model} for model in models],
@@ -1115,6 +1160,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                 "providerKey": str(descriptor.get("id") or descriptor.get("providerId") or body.preset_id),
                 "displayName": str(descriptor.get("name") or descriptor.get("supplierName") or body.preset_id),
                 "baseUrl": descriptor.get("baseUrl"),
+                "websiteUrl": descriptor.get("websiteUrl") or (_website_origin(str(descriptor.get("baseUrl"))) if descriptor.get("baseUrl") else None),
                 "protocol": {
                     "codex_responses": "openai-responses",
                     "anthropic_messages": "anthropic-messages",
@@ -1150,6 +1196,14 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
             if not supplier.get("id") or not employee.get("id"):
                 raise RuntimeError("control plane did not return supplier/employee identity")
             supplier_id = str(supplier["id"])
+            website_url = str(descriptor.get("websiteUrl") or "").strip()
+            if website_url:
+                await asyncio.to_thread(
+                    _post_json,
+                    f"/api/v2/commands/suppliers/{supplier_id}/profile",
+                    {"name": str(descriptor.get("supplierName") or supplier.get("name") or "Supplier"), "websiteUrl": website_url},
+                    idempotency_key="office-supplier-site-v1-" + hashlib.blake2b(f"{supplier_id}|{website_url}".encode("utf-8"), digest_size=8).hexdigest(),
+                )
             employee_id = str(employee["id"])
             employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
             employment_id = str(employment.get("id") or "")
@@ -1188,6 +1242,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                     "displayName": hub_connection.get("display_name"),
                     "supplierId": supplier_id,
                     "baseUrl": hub_connection.get("base_url"),
+                    "websiteUrl": hub_connection.get("website_url") or descriptor.get("websiteUrl"),
                     "protocol": hub_connection.get("protocol"),
                     "authKind": hub_connection.get("auth_kind"),
                     "credentialRef": hub_connection.get("credential_ref"),

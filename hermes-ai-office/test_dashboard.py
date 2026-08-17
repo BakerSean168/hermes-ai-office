@@ -407,6 +407,14 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('aria-selected', source)
         self.assertIn('className: "hao-data-table"', source)
 
+    def test_dashboard_exposes_provider_and_supplier_website_metadata(self) -> None:
+        bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
+        self.assertIn('item.website_url', bundle)
+        self.assertIn('supplier.websiteUrl', bundle)
+        self.assertIn('providers.website', bundle)
+        self.assertIn('suppliers.website', bundle)
+        self.assertIn('hao-external-link', bundle)
+
     def test_supplier_ui_is_compact_and_exposes_onboarding_flow(self) -> None:
         source = (DASHBOARD / "dist" / "index.js").read_text()
         css = (DASHBOARD / "dist" / "style.css").read_text()

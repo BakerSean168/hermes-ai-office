@@ -1972,3 +1972,41 @@
 .hao-channel-section > .hao-section-head {
   margin-bottom: 0;
 }
+
+.hao-external-link {
+  color: var(--hao-link, var(--hao-accent));
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: none;
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+}
+
+.hao-external-link:hover,
+.hao-external-link:focus-visible {
+  text-decoration: underline;
+}
+
+.hao-supplier-website {
+  display: block;
+  margin-top: 3px;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hao-detail-website {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--hao-border);
+  border-radius: 10px;
+  background: var(--hao-surface-soft);
+}
+
+.hao-detail-website > span {
+  color: var(--hao-muted);
+  font-size: 12px;
+}

@@ -183,6 +183,7 @@
       "suppliers.subtitle": "Keep the supplier list simple. Open details only when you need contracts, routes, or employee history.",
       "suppliers.add": "Add supplier",
       "suppliers.details": "View details",
+      "suppliers.website": "Website",
       "suppliers.close": "Close",
       "suppliers.employees": "Employees",
       "suppliers.enabledEmployees": "Enabled employees",
@@ -246,6 +247,7 @@
       "providers.subtitle": "Shared provider connections discovered from every Hermes profile. Add once, see it everywhere.",
       "providers.sync": "Sync profiles",
       "providers.connection": "Channel",
+      "providers.website": "Website",
       "providers.status": "Availability",
       "providers.auth": "Credential",
       "providers.models": "Available models",
@@ -451,6 +453,7 @@
       "suppliers.subtitle": "供应商列表只保留关键状态；合同、路由和员工履历需要时再查看详情。",
       "suppliers.add": "添加供应商",
       "suppliers.details": "查看详情",
+      "suppliers.website": "官网",
       "suppliers.close": "关闭",
       "suppliers.employees": "员工",
       "suppliers.enabledEmployees": "启用员工",
@@ -513,6 +516,8 @@
       "providers.subtitle": "集中管理所有 Hermes Profile 发现的 Provider 连接：一个 Profile 添加后，其它 Profile 也能看到。",
       "providers.sync": "同步 Profile",
       "providers.connection": "渠道",
+    "providers.website": "官網",
+      "providers.website": "官网",
       "providers.status": "可用状态",
       "providers.auth": "凭证",
       "providers.models": "可用模型",
@@ -1681,6 +1686,16 @@
         },
       },
       {
+        key: "website",
+        label: props.t("providers.website"),
+        render: function (item) {
+          const value = item.website_url || asObject(item.supplier).websiteUrl;
+          return value
+            ? h("a", { className: "hao-external-link", href: value, target: "_blank", rel: "noreferrer" }, value)
+            : h("span", { className: "hao-muted" }, "—");
+        },
+      },
+      {
         key: "health",
         label: props.t("providers.status"),
         render: function (item) { return h(Status, { value: item.health, t: props.t }); },
@@ -1757,6 +1772,7 @@
     const [apiKey, setApiKey] = React.useState("");
     const [baseUrl, setBaseUrl] = React.useState("");
     const [supplierName, setSupplierName] = React.useState("");
+    const [websiteUrl, setWebsiteUrl] = React.useState("");
     const [models, setModels] = React.useState([]);
     const [selectedModels, setSelectedModels] = React.useState([]);
     const [defaultModel, setDefaultModel] = React.useState("");
@@ -1789,6 +1805,7 @@
       setApiKey("");
       setBaseUrl("");
       setSupplierName("");
+      setWebsiteUrl("");
       setModels([]);
       setSelectedModels([]);
       setDefaultModel("");
@@ -1825,6 +1842,7 @@
       if (id !== "custom") {
         setBaseUrl("");
         setSupplierName("");
+        setWebsiteUrl("");
       }
     }
 
@@ -1840,6 +1858,7 @@
             api_key: apiKey,
             base_url: baseUrl,
             supplier_name: supplierName,
+            website_url: websiteUrl,
           }),
         });
         setModels(asArray(result.models));
@@ -1881,6 +1900,7 @@
             api_key: apiKey,
             base_url: baseUrl,
             supplier_name: supplierName,
+            website_url: websiteUrl,
             selected_models: selectedModels,
             default_model: defaultModel || selectedModels[0],
           }),
@@ -2040,6 +2060,9 @@
                     { className: "hao-supplier-row-copy" },
                     h("h2", null, supplier.name),
                     h("p", null, supplier.slug),
+                    supplier.websiteUrl
+                      ? h("a", { className: "hao-external-link hao-supplier-website", href: supplier.websiteUrl, target: "_blank", rel: "noreferrer" }, supplier.websiteUrl)
+                      : null,
                   ),
                 ),
                 h(
@@ -2107,6 +2130,12 @@
           ? h(
               "div",
               { className: "hao-supplier-detail" },
+              detailSupplier.websiteUrl
+                ? h("div", { className: "hao-detail-website" },
+                    h("span", null, props.t("suppliers.website")),
+                    h("a", { className: "hao-external-link", href: detailSupplier.websiteUrl, target: "_blank", rel: "noreferrer" }, detailSupplier.websiteUrl),
+                  )
+                : null,
               !detailFacts.explicitlySelected
                 ? h(Notice, { icon: "i" }, props.t("suppliers.legacySelection"))
                 : null,
@@ -2242,6 +2271,7 @@
                     null,
                     h("label", { className: "hao-field hao-field-wide" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { type: "url", value: baseUrl, placeholder: "https://api.example.com/v1", onChange: function (event) { setBaseUrl(event.target.value); } })),
                     h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { type: "text", value: supplierName, placeholder: props.t("suppliers.supplierNameHint"), onChange: function (event) { setSupplierName(event.target.value); } })),
+                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { type: "url", value: websiteUrl, placeholder: "https://example.com", onChange: function (event) { setWebsiteUrl(event.target.value); } })),
                   )
                 : null,
               h(
