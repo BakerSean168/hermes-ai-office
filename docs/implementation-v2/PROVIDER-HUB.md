@@ -37,3 +37,13 @@ The plugin exposes two tools in every Hermes profile:
 Provider sharing is **query-based, not event-replication-based**. `ProviderConnection` created/updated domain events remain useful for audit and UI refresh, but another profile learns the current truth by querying the Provider Hub/tool. This avoids missed-event consistency problems.
 
 `websiteUrl` is first-class metadata on both `ProviderConnection` and `Supplier`. It is informational only and never participates in identity, staffing, or routing decisions.
+
+## Compact list and lazy detail
+
+The dashboard uses a dedicated compact projection for the Provider Hub list:
+
+- `GET /api/v2/projections/provider-hub-summary` returns only identity, availability, auth kind, model count, Profile count, and compact Supplier identity.
+- `GET /api/v2/provider-connections/:connectionId` returns full safe connection detail on demand, including endpoint, website, credential reference, discovered models, and Profile links.
+- The existing `GET /api/v2/projections/provider-hub` contract remains available for tools and compatibility.
+
+This keeps the main channel list readable and prevents endpoint URLs, credential references, and full model/Profile lists from being shipped to the dashboard until the operator opens **View details**. Secret credential values remain outside the control-plane database in all views.

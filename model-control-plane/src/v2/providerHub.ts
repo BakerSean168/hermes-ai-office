@@ -306,9 +306,61 @@ export class ProviderHubRepository {
 
   getConnection(id: string): V2Row | null {
     const value = row(
-      this.#domain.db.prepare('SELECT * FROM v2_provider_connections WHERE id=?').get(id),
+      this.#domain.db
+        .prepare(
+          `SELECT pc.*,s.name supplier_name,s.slug supplier_slug,s.website_url supplier_website_url
+           FROM v2_provider_connections pc
+           LEFT JOIN v2_suppliers s ON s.id=pc.supplier_id
+           WHERE pc.id=?`,
+        )
+        .get(id),
     );
     return value ? this.#presentConnection(value) : null;
+  }
+
+  connectionDetail(id: string): V2Row | null {
+    const connection = this.getConnection(id);
+    if (!connection) return null;
+    return {
+      ...connection,
+      profileLinks: this.listProfileLinks().filter((item) => String(item.connection_id) === id),
+    };
+  }
+
+  summaryProjection(): V2Row {
+    const items = this.listConnections();
+    const links = this.listProfileLinks();
+    const profileCounts = new Map<string, Set<string>>();
+    for (const link of links) {
+      const connectionId = String(link.connection_id);
+      const profiles = profileCounts.get(connectionId) ?? new Set<string>();
+      profiles.add(String(link.profile_id));
+      profileCounts.set(connectionId, profiles);
+    }
+    return {
+      summary: {
+        connections: items.length,
+        ready: items.filter((item) => item.health === 'READY').length,
+        shared: items.filter((item) => item.share_scope === 'GLOBAL').length,
+        profiles: new Set(links.map((item) => String(item.profile_id))).size,
+      },
+      items: items.map((item) => ({
+        id: item.id,
+        providerKey: item.provider_key,
+        displayName: item.display_name,
+        health: item.health,
+        authKind: item.auth_kind,
+        modelCount: Array.isArray(item.models) ? item.models.length : 0,
+        profileCount: profileCounts.get(String(item.id))?.size ?? 0,
+        supplier: item.supplier
+          ? {
+              id: (item.supplier as V2Row).id,
+              name: (item.supplier as V2Row).name,
+              slug: (item.supplier as V2Row).slug,
+            }
+          : null,
+      })),
+    };
   }
 
   listConnections(includeRetired = false): V2Row[] {

@@ -107,6 +107,30 @@ export function registerV2Routes(
     return services.providerHub.projection();
   });
 
+  app.get('/api/v2/projections/provider-hub-summary', async (_request, reply) => {
+    if (!services.providerHub) {
+      reply.code(503);
+      return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+    }
+    return services.providerHub.summaryProjection();
+  });
+
+  app.get<{ Params: { connectionId: string } }>(
+    '/api/v2/provider-connections/:connectionId',
+    async (request, reply) => {
+      if (!services.providerHub) {
+        reply.code(503);
+        return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+      }
+      const detail = services.providerHub.connectionDetail(request.params.connectionId);
+      if (!detail) {
+        reply.code(404);
+        return { error: { code: 'PROVIDER_CONNECTION_NOT_FOUND' } };
+      }
+      return detail;
+    },
+  );
+
   app.get('/api/v2/provider-connections', async () => ({
     items: services.providerHub?.listConnections() ?? [],
   }));
