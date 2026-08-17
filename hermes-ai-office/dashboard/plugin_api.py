@@ -274,7 +274,7 @@ def _register_discovered_employee(
             "credentialRef": connection.get("credential_ref") or None,
             "protocol": protocol or connection.get("protocol") or None,
             "config": {"providerHubConnectionId": connection.get("id")},
-            "priority": 100,
+            "priority": 150,
         }
         if profile_ref:
             access["profileRef"] = profile_ref
