@@ -68,6 +68,8 @@ export interface HermesController {
 export interface HermesTeam {
   name: string;
   display?: string;
+  configured_provider?: string;
+  configured_model?: string;
   worker_total?: number;
   worker_active?: number;
   mission?: string;

@@ -704,6 +704,8 @@ describe('HermesProvider profile aggregation integration', () => {
         {
           name: 'memoflow',
           display: 'MemoFlow',
+          configured_provider: 'opencode-go',
+          configured_model: 'deepseek-v4-flash',
           mission: 'Sync Engine v2',
           workers: [{ id: 'w1', num: 1, runtime: 'opencode', status: 'coding', task: 'Wire API' }],
         },
@@ -734,6 +736,8 @@ describe('HermesProvider profile aggregation integration', () => {
       const profile = orgStore.profiles.get('memoflow')!;
       expect(profile.workload).toBe('EXECUTING');
       expect(profile.displayName).toBe('MemoFlow');
+      expect(profile.configuredProvider).toBe('opencode-go');
+      expect(profile.configuredModel).toBe('deepseek-v4-flash');
       expect(profile.mission).toBe('Sync Engine v2');
       expect(forwardedSnapshots.length).toBeGreaterThan(0);
       expect(forwardedSnapshots.at(-1)?.profiles[0]?.profileId).toBe('memoflow');

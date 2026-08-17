@@ -54,6 +54,26 @@ test('typed app factory exposes V2 only and retires public V1 routes', async () 
       outputTokens: 0,
       actualCost: 0,
       marketValue: 0,
+      observedUsage: {
+        authoritative: false,
+        scope: 'GATEWAY_AGGREGATE',
+        evidenceCount: 0,
+        attributedEvidenceCount: 0,
+        unattributedEvidenceCount: 0,
+        totalRequests: 0,
+        attributedRequests: 0,
+        unattributedRequests: 0,
+        failedRequests: 0,
+        successfulRequests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        actualCost: 0,
+        windows: [],
+        latestGeneratedAt: 0,
+      },
     });
 
     const supply = await runtime.app.inject({ method: 'GET', url: '/api/v2/projections/supply' });

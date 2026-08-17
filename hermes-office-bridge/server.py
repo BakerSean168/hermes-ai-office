@@ -526,11 +526,18 @@ def build_board():
     for s in sessions:
         teams_map.setdefault(_session_profile(s), []).append(s)
 
-    # 补上无 session 的空 profile (空团队)
+    # Hermes /api/profiles is the authoritative source for configured provider/model.
+    # Session model fields describe observed runtime execution and must not be used
+    # to infer a durable Employee identity on their own.
+    profile_config = {}
     for p in profiles_res.get("profiles") or []:
         name = p.get("name")
         if name:
             teams_map.setdefault(name, [])
+            profile_config[name] = {
+                "provider": p.get("provider") or None,
+                "model": p.get("model") or None,
+            }
 
     teams = []
     for name, sess_list in teams_map.items():
@@ -596,6 +603,8 @@ def build_board():
             {
                 "name": name,
                 "display": _display_name(name),
+                "configured_provider": (profile_config.get(name) or {}).get("provider"),
+                "configured_model": (profile_config.get(name) or {}).get("model"),
                 "worker_total": len(workers),
                 "worker_active": active,
                 "controller": {

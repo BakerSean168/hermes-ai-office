@@ -341,3 +341,88 @@ test('repeated terminal snapshots remain duty-idempotent', async () => {
   await execution.sync(terminal);
   assert.equal(repository.listDuties({ runId: String(run.id) }).length, firstDutyCount);
 });
+
+test('Hermes profile config creates and reconciles an automatic Profile Lead appointment', async () => {
+  const { repository: repo, execution: service } = make();
+  const supplier = repo.getOrCreateSupplier('opencode', 'OpenCode');
+  const model = repo.getOrCreateSupplierModel({
+    supplierId: String(supplier.id),
+    supplierModelKey: 'deepseek-v4-flash',
+    displayName: 'DeepSeek V4 Flash',
+  });
+  const employee = repo.getOrCreateEmployee({
+    supplierId: String(supplier.id),
+    supplierModelId: String(model.id),
+    displayName: 'DeepSeek V4 Flash @ OpenCode',
+  });
+  const agreement = repo.getOrCreateAgreement({
+    supplierId: String(supplier.id),
+    externalAccountRef: 'test:opencode-go',
+    name: 'OpenCode Go test',
+  });
+  repo.getOrCreateCurrentEmployment({
+    employeeId: String(employee.id),
+    supplyAgreementId: String(agreement.id),
+  });
+
+  const snapshot = {
+    profiles: [
+      {
+        profileId: 'coder',
+        displayName: 'Coder',
+        availability: 'ONLINE' as const,
+        workload: 'READY' as const,
+        configuredProvider: 'opencode-go',
+        configuredModel: 'deepseek-v4-flash',
+        lastSeenAt: 1000,
+      },
+    ],
+    runs: [],
+    nodes: [],
+    edges: [],
+  };
+  const first = await service.sync(snapshot);
+  assert.equal(first.issues.length, 0);
+  const lead = repo.listPositions().find((item) => item.slug === 'profile-lead');
+  assert.ok(lead);
+  const appointment = repo.listAppointments({ positionId: String(lead.id) })[0];
+  assert.equal(appointment.employeeId, employee.id);
+  assert.equal(appointment.source, 'HERMES_PROFILE_CONFIG');
+  assert.equal(appointment.metadata.provider, 'opencode-go');
+
+  const second = await service.sync({
+    ...snapshot,
+    profiles: [{ ...snapshot.profiles[0], configuredModel: 'deepseek-v4-pro', lastSeenAt: 2000 }],
+  });
+  assert.equal(second.issues[0]?.code, 'PROFILE_EMPLOYEE_NOT_REGISTERED');
+  const ended = repo.getAppointment(String(appointment.id));
+  // No replacement employee means we preserve the last valid automatic appointment
+  // instead of creating a false vacancy from an incomplete catalog.
+  assert.equal(ended?.status, 'CURRENT');
+});
+
+test('Hermes profile config does not guess an Employee from a bare model hint', async () => {
+  const { repository: repo, execution: service } = make();
+  const snapshot = {
+    profiles: [
+      {
+        profileId: 'coder',
+        displayName: 'Coder',
+        availability: 'ONLINE' as const,
+        workload: 'READY' as const,
+        configuredProvider: 'deepseek',
+        configuredModel: 'deepseek-v4-flash',
+        controllerModel: 'deepseek-v4-flash',
+        lastSeenAt: 1000,
+      },
+    ],
+    runs: [],
+    nodes: [],
+    edges: [],
+  };
+  const result = await service.sync(snapshot);
+  assert.equal(result.issues[0]?.code, 'PROFILE_EMPLOYEE_NOT_REGISTERED');
+  const lead = repo.listPositions().find((item) => item.slug === 'profile-lead');
+  assert.ok(lead);
+  assert.equal(repo.listAppointments({ positionId: String(lead.id) }).length, 0);
+});

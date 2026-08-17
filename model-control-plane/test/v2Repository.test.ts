@@ -73,6 +73,138 @@ test('a later Agreement creates another Employment but preserves Employee career
   assert.equal(dossier?.currentWork.length, 0);
 });
 
+test('workforce projection separates gateway-observed aggregates from verified employee usage', () => {
+  const { repository } = make();
+  const seeded = repository.bootstrapReference(reference);
+  repository.upsertGatewayUsageEvidence(seeded.gatewayId, {
+    kind: 'aggregate',
+    gatewayId: reference.gatewaySlug,
+    aggregateKey: '30d:openai-compatible-planner-pool:deepseek-v4-flash',
+    window: '30d',
+    generatedAt: 1_000,
+    externalRouteRef: 'cpa/channel/planner-pool/model/deepseek-v4-flash',
+    model: 'deepseek-v4-flash',
+    provider: 'openai-compatible-planner-pool',
+    requests: 4,
+    failedRequests: 1,
+    inputTokens: 120,
+    outputTokens: 24,
+    cacheReadTokens: 40,
+    cacheWriteTokens: 0,
+    reasoningTokens: 8,
+    actualCost: 0.12,
+    currency: 'USD',
+  });
+
+  const projection = repository.workforceProjection();
+  const employee = projection.employees[0];
+  assert.equal(employee?.career.usage.requests, 0);
+  assert.equal(employee?.career.observedUsage.requests, 4);
+  assert.equal(employee?.career.observedUsage.failedRequests, 1);
+  assert.equal(employee?.career.observedUsage.successfulRequests, 3);
+  assert.equal(employee?.career.observedUsage.inputTokens, 120);
+  assert.equal(employee?.career.observedUsage.attributionBases[0], 'SUPPLIER_HINT');
+  assert.equal(employee?.career.observedUsage.authoritative, false);
+  assert.equal(projection.summary.observedUsage.attributedRequests, 4);
+  assert.equal(projection.summary.observedUsage.unattributedRequests, 0);
+});
+
+test('gateway aggregate usage stays unattributed when a model maps to multiple employees', () => {
+  const { repository } = make();
+  const first = repository.bootstrapReference(reference);
+  repository.bootstrapReference({
+    ...reference,
+    supplierSlug: 'secondary-pool',
+    supplierName: 'Secondary Pool',
+    agreementRef: 'secondary-pool-primary',
+    agreementName: 'Secondary Pool Primary Supply',
+  });
+  repository.upsertGatewayUsageEvidence(first.gatewayId, {
+    kind: 'aggregate',
+    gatewayId: reference.gatewaySlug,
+    aggregateKey: '30d:generic:deepseek-v4-flash',
+    window: '30d',
+    generatedAt: 2_000,
+    externalRouteRef: 'cpa/channel/generic/model/deepseek-v4-flash',
+    model: 'deepseek-v4-flash',
+    provider: 'generic',
+    requests: 7,
+    failedRequests: 2,
+    inputTokens: 77,
+    outputTokens: 11,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    actualCost: 0,
+    currency: 'USD',
+  });
+
+  const projection = repository.workforceProjection();
+  assert.equal(
+    projection.employees.every(
+      (employee: Record<string, any>) => employee.career.observedUsage === null,
+    ),
+    true,
+  );
+  assert.equal(projection.summary.observedUsage.attributedRequests, 0);
+  assert.equal(projection.summary.observedUsage.unattributedRequests, 7);
+  assert.equal(projection.summary.observedUsage.unattributedEvidenceCount, 1);
+});
+
+test('an explicitly classified route disambiguates aggregate usage for duplicate model identities', () => {
+  const { repository } = make();
+  const first = repository.bootstrapReference(reference);
+  repository.bootstrapReference({
+    ...reference,
+    supplierSlug: 'secondary-pool',
+    supplierName: 'Secondary Pool',
+    agreementRef: 'secondary-pool-primary',
+    agreementName: 'Secondary Pool Primary Supply',
+  });
+  const route = 'cpa/channel/planner-pool/model/deepseek-v4-flash';
+  repository.upsertChannelObservation({
+    gatewayId: first.gatewayId,
+    supplyAgreementId: first.agreementId,
+    externalRouteRef: route,
+    name: 'planner-pool',
+    protocol: 'openai-responses',
+    health: 'HEALTHY',
+    supplierHint: 'planner-pool',
+    supplierModelHint: 'deepseek-v4-flash',
+    observedAt: 3_000,
+  });
+  repository.upsertGatewayUsageEvidence(first.gatewayId, {
+    kind: 'aggregate',
+    gatewayId: reference.gatewaySlug,
+    aggregateKey: '30d:generic:deepseek-v4-flash',
+    window: '30d',
+    generatedAt: 3_000,
+    externalRouteRef: route,
+    model: 'deepseek-v4-flash',
+    provider: 'generic',
+    requests: 9,
+    failedRequests: 0,
+    inputTokens: 90,
+    outputTokens: 18,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    actualCost: 0.09,
+    currency: 'USD',
+  });
+
+  const projection = repository.workforceProjection();
+  const selected = projection.employees.find(
+    (employee: Record<string, any>) => employee.id === first.employeeId,
+  );
+  const other = projection.employees.find(
+    (employee: Record<string, any>) => employee.id !== first.employeeId,
+  );
+  assert.equal(selected?.career.observedUsage.requests, 9);
+  assert.equal(selected?.career.observedUsage.attributionBases[0], 'CLASSIFIED_ROUTE');
+  assert.equal(other?.career.observedUsage, null);
+});
+
 test('repository gateway binding source returns gateway-neutral Employment route', async () => {
   const { repository } = make();
   const seeded = repository.bootstrapReference(reference);

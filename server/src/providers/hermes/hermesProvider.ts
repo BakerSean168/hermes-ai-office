@@ -786,6 +786,8 @@ export class HermesProvider implements HookProvider {
       controllerState,
       controllerStatus: team.controller?.status,
       controllerModel: team.controller?.model,
+      configuredProvider: team.configured_provider,
+      configuredModel: team.configured_model,
       controllerAction: team.controller?.action,
       controllerActive,
       mission: team.mission,

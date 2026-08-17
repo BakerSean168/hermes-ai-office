@@ -33,6 +33,8 @@ export interface HermesProfileControllerInput {
   controllerState?: NodeState;
   controllerStatus?: string;
   controllerModel?: string;
+  configuredProvider?: string;
+  configuredModel?: string;
   controllerAction?: string;
   controllerActive?: boolean;
   mission?: string;
@@ -151,6 +153,11 @@ function title(value: string): string {
     .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
     .join(' ');
 }
+function supplierSlugForHermesProvider(value: string): string {
+  const provider = slug(value);
+  if (provider === 'opencode-go' || provider === 'opencode-zen') return 'opencode';
+  return provider;
+}
 function terminalRun(status: RunStatus): boolean {
   return status === 'COMPLETED' || status === 'FAILED' || status === 'CANCELLED';
 }
@@ -264,6 +271,118 @@ export class HermesExecutionSyncService {
       name: 'Profile Lead',
       metadata: { source: 'HERMES_ORG' },
     });
+  }
+
+  #reconcileProfileLeadAppointment(
+    profile: HermesProfileControllerInput,
+    position: V2Row,
+  ): { employeeId?: string; issue?: Record<string, unknown> } {
+    const provider = profile.configuredProvider?.trim();
+    const model = profile.configuredModel?.trim();
+    const autoAppointments = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT * FROM v2_appointments
+           WHERE position_id=? AND source='HERMES_PROFILE_CONFIG'
+             AND status IN ('SCHEDULED','CURRENT','SUSPENDED') AND effective_to IS NULL`,
+        )
+        .all(String(position.id)),
+    );
+
+    // Older/partial execution snapshots may not carry profile config yet.
+    // Missing config is not an incident and must never trigger identity inference
+    // from controllerModel/modelHint alone.
+    if (!provider || !model) return {};
+
+    const supplierSlug = supplierSlugForHermesProvider(provider);
+    const matches = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT DISTINCT e.*
+           FROM v2_employees e
+           JOIN v2_suppliers s ON s.id=e.supplier_id
+           JOIN v2_supplier_models sm ON sm.id=e.supplier_model_id
+           JOIN v2_employments em ON em.employee_id=e.id
+           WHERE s.slug=? AND sm.supplier_model_key=?
+             AND e.record_lifecycle='ACTIVE' AND sm.lifecycle='ACTIVE'
+             AND em.status='CURRENT' AND em.effective_to IS NULL`,
+        )
+        .all(supplierSlug, model),
+    );
+    if (matches.length !== 1) {
+      return {
+        issue: {
+          code:
+            matches.length === 0 ? 'PROFILE_EMPLOYEE_NOT_REGISTERED' : 'PROFILE_EMPLOYEE_AMBIGUOUS',
+          profileId: profile.profileId,
+          provider,
+          model,
+          supplierSlug,
+          matches: matches.length,
+        },
+      };
+    }
+
+    const employeeId = String(matches[0]!.id);
+    for (const appointment of autoAppointments) {
+      if (String(appointment.employee_id) !== employeeId) {
+        this.#domain.endAppointment(
+          String(appointment.id),
+          'HERMES_PROFILE_CONFIG_CHANGED',
+          `profile:${profile.profileId}`,
+        );
+      }
+    }
+    const existing = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT * FROM v2_appointments
+           WHERE employee_id=? AND position_id=?
+             AND status IN ('SCHEDULED','CURRENT','SUSPENDED') AND effective_to IS NULL
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .all(employeeId, String(position.id)),
+    )[0];
+    if (existing) {
+      if (existing.status === 'SUSPENDED' && existing.source === 'HERMES_PROFILE_CONFIG') {
+        this.#domain.resumeAppointment(String(existing.id), `profile:${profile.profileId}`);
+      }
+      return { employeeId };
+    }
+
+    const timestamp = now();
+    const appointmentId = newId('apt', timestamp);
+    this.#domain.db
+      .prepare(
+        `INSERT INTO v2_appointments(
+           id,employee_id,position_id,appointment_class,priority,status,effective_from,source,metadata_json,created_at,updated_at
+         ) VALUES(?,?,?,?,?,'CURRENT',?,'HERMES_PROFILE_CONFIG',?,?,?)`,
+      )
+      .run(
+        appointmentId,
+        employeeId,
+        String(position.id),
+        'PRIMARY',
+        100,
+        timestamp,
+        encode({ profileId: profile.profileId, provider, model }),
+        timestamp,
+        timestamp,
+      );
+    this.#domain.emit({
+      type: 'appointment.started',
+      entityType: 'Appointment',
+      entityId: appointmentId,
+      correlationId: `profile:${profile.profileId}`,
+      payload: {
+        employeeId,
+        positionId: String(position.id),
+        source: 'HERMES_PROFILE_CONFIG',
+        provider,
+        model,
+      },
+    });
+    return { employeeId };
   }
 
   #ensureNodePosition(
@@ -862,7 +981,10 @@ export class HermesExecutionSyncService {
               String(scope.id),
             );
           scopeByProfile.set(profile.profileId, scope);
-          leadByProfile.set(profile.profileId, this.#ensureProfileLead(String(scope.id)));
+          const lead = this.#ensureProfileLead(String(scope.id));
+          leadByProfile.set(profile.profileId, lead);
+          const staffing = this.#reconcileProfileLeadAppointment(profile, lead);
+          if (staffing.issue) result.issues.push(staffing.issue);
         }
 
         const runByExternal = new Map<string, V2Row>();
@@ -922,6 +1044,8 @@ export class HermesExecutionSyncService {
               profileController: true,
               profileId: profile.profileId,
               controllerStatus: profile.controllerStatus ?? null,
+              configuredProvider: profile.configuredProvider ?? null,
+              configuredModel: profile.configuredModel ?? null,
               controllerAction: profile.controllerAction ?? null,
               mission: profile.mission ?? null,
             },

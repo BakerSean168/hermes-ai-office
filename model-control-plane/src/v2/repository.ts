@@ -52,6 +52,32 @@ function rows(value: unknown): Row[] {
   return Array.isArray(value) ? (value as Row[]) : [];
 }
 
+function normalizedIdentity(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase();
+}
+
+function routeChannelHint(value: unknown): string {
+  const match = /(?:^|\/)channel\/([^/]+)(?:\/|$)/i.exec(String(value ?? ''));
+  if (!match?.[1]) return '';
+  try {
+    return normalizedIdentity(decodeURIComponent(match[1]));
+  } catch {
+    return normalizedIdentity(match[1]);
+  }
+}
+
+function supplierHintMatches(hint: string, supplierSlug: string): boolean {
+  if (!hint || !supplierSlug) return false;
+  return (
+    hint === supplierSlug ||
+    hint.startsWith(`${supplierSlug}-`) ||
+    hint.endsWith(`-${supplierSlug}`) ||
+    hint.includes(`-${supplierSlug}-`)
+  );
+}
+
 export interface InvocationContext {
   dutySessionId: string;
   runId: string;
@@ -994,6 +1020,253 @@ export class V2Repository {
     };
   }
 
+  #gatewayObservedUsageProjection(): { byEmployee: Map<string, Row>; summary: Row } {
+    const candidateRows = rows(
+      this.db
+        .prepare(
+          `SELECT e.id employee_id,s.slug supplier_slug,sm.supplier_model_key,sm.aliases_json,
+                  em.supply_agreement_id
+           FROM v2_employees e
+           JOIN v2_suppliers s ON s.id=e.supplier_id
+           JOIN v2_supplier_models sm ON sm.id=e.supplier_model_id
+           JOIN v2_employments em
+             ON em.employee_id=e.id AND em.status='CURRENT' AND em.effective_to IS NULL
+           WHERE e.record_lifecycle='ACTIVE' AND sm.lifecycle='ACTIVE'
+           ORDER BY e.id,em.effective_from`,
+        )
+        .all(),
+    );
+    const candidates = new Map<
+      string,
+      {
+        employeeId: string;
+        supplierSlug: string;
+        modelKeys: Set<string>;
+        agreementIds: Set<string>;
+      }
+    >();
+    for (const value of candidateRows) {
+      const employeeId = String(value.employee_id);
+      let candidate = candidates.get(employeeId);
+      if (!candidate) {
+        candidate = {
+          employeeId,
+          supplierSlug: normalizedIdentity(value.supplier_slug),
+          modelKeys: new Set<string>(),
+          agreementIds: new Set<string>(),
+        };
+        candidates.set(employeeId, candidate);
+      }
+      const primaryModel = normalizedIdentity(value.supplier_model_key);
+      if (primaryModel) candidate.modelKeys.add(primaryModel);
+      for (const alias of decode<string[]>(value.aliases_json, [])) {
+        const normalized = normalizedIdentity(alias);
+        if (normalized) candidate.modelKeys.add(normalized);
+      }
+      if (value.supply_agreement_id) candidate.agreementIds.add(String(value.supply_agreement_id));
+    }
+
+    const evidenceRows = rows(
+      this.db
+        .prepare(
+          `SELECT e.*,g.slug gateway_slug,c.supply_agreement_id channel_supply_agreement_id,
+                  c.supplier_hint channel_supplier_hint,c.name channel_name
+           FROM v2_gateway_usage_evidence e
+           JOIN v2_gateways g ON g.id=e.gateway_id
+           LEFT JOIN v2_channels c
+             ON c.gateway_id=e.gateway_id AND c.external_route_ref=e.external_route_ref
+           WHERE e.evidence_kind='AGGREGATE'
+           ORDER BY e.generated_at,e.id`,
+        )
+        .all(),
+    );
+
+    const byEmployee = new Map<string, Row>();
+    const windows = new Set<string>();
+    let attributedEvidenceCount = 0;
+    let unattributedEvidenceCount = 0;
+    let totalRequests = 0;
+    let attributedRequests = 0;
+    let unattributedRequests = 0;
+    let failedRequests = 0;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
+    let reasoningTokens = 0;
+    let actualCost = 0;
+    let latestGeneratedAt = 0;
+
+    for (const evidence of evidenceRows) {
+      const model = normalizedIdentity(evidence.model);
+      const matchingModel = [...candidates.values()].filter((candidate) =>
+        candidate.modelKeys.has(model),
+      );
+      const classifiedAgreement = evidence.channel_supply_agreement_id
+        ? String(evidence.channel_supply_agreement_id)
+        : '';
+      const explicitSupplierHint = normalizedIdentity(evidence.channel_supplier_hint);
+      const inferredHints = [
+        normalizedIdentity(evidence.provider),
+        normalizedIdentity(evidence.channel_name),
+        routeChannelHint(evidence.external_route_ref),
+      ].filter(Boolean);
+
+      let selected:
+        | {
+            employeeId: string;
+            supplierSlug: string;
+            modelKeys: Set<string>;
+            agreementIds: Set<string>;
+          }
+        | undefined;
+      let attributionBasis = '';
+      if (classifiedAgreement) {
+        const scoped = matchingModel.filter((candidate) =>
+          candidate.agreementIds.has(classifiedAgreement),
+        );
+        if (scoped.length === 1) {
+          selected = scoped[0];
+          attributionBasis = 'CLASSIFIED_ROUTE';
+        }
+      } else if (explicitSupplierHint) {
+        const scoped = matchingModel.filter((candidate) =>
+          supplierHintMatches(explicitSupplierHint, candidate.supplierSlug),
+        );
+        if (scoped.length === 1) {
+          selected = scoped[0];
+          attributionBasis = 'SUPPLIER_HINT';
+        }
+      } else {
+        const hinted = matchingModel.filter((candidate) =>
+          inferredHints.some((hint) => supplierHintMatches(hint, candidate.supplierSlug)),
+        );
+        if (hinted.length === 1) {
+          selected = hinted[0];
+          attributionBasis = 'SUPPLIER_HINT';
+        } else if (matchingModel.length === 1) {
+          selected = matchingModel[0];
+          attributionBasis = 'UNIQUE_MODEL';
+        }
+      }
+
+      const requests = Number(evidence.requests ?? 0);
+      const failed = Number(evidence.failed_requests ?? 0);
+      const input = Number(evidence.input_tokens ?? 0);
+      const output = Number(evidence.output_tokens ?? 0);
+      const cacheRead = Number(evidence.cache_read_tokens ?? 0);
+      const cacheWrite = Number(evidence.cache_write_tokens ?? 0);
+      const reasoning = Number(evidence.reasoning_tokens ?? 0);
+      const cost = Number(evidence.actual_cost ?? 0);
+      const generatedAt = Number(evidence.generated_at ?? 0);
+      const window = String(evidence.window ?? '').trim();
+      if (window) windows.add(window);
+      totalRequests += requests;
+      failedRequests += failed;
+      inputTokens += input;
+      outputTokens += output;
+      cacheReadTokens += cacheRead;
+      cacheWriteTokens += cacheWrite;
+      reasoningTokens += reasoning;
+      actualCost += cost;
+      latestGeneratedAt = Math.max(latestGeneratedAt, generatedAt);
+
+      if (!selected) {
+        unattributedEvidenceCount += 1;
+        unattributedRequests += requests;
+        continue;
+      }
+      attributedEvidenceCount += 1;
+      attributedRequests += requests;
+      const current = byEmployee.get(selected.employeeId) ?? {
+        authoritative: false,
+        scope: 'GATEWAY_AGGREGATE',
+        windows: [],
+        requests: 0,
+        failedRequests: 0,
+        successfulRequests: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        actualCost: 0,
+        currency: String(evidence.currency ?? 'USD'),
+        evidenceCount: 0,
+        attributionBases: [],
+        latestGeneratedAt: 0,
+        latestObservedAt: 0,
+        sources: [],
+      };
+      current.requests = Number(current.requests ?? 0) + requests;
+      current.failedRequests = Number(current.failedRequests ?? 0) + failed;
+      current.successfulRequests = Math.max(
+        0,
+        Number(current.requests ?? 0) - Number(current.failedRequests ?? 0),
+      );
+      current.inputTokens = Number(current.inputTokens ?? 0) + input;
+      current.outputTokens = Number(current.outputTokens ?? 0) + output;
+      current.cacheReadTokens = Number(current.cacheReadTokens ?? 0) + cacheRead;
+      current.cacheWriteTokens = Number(current.cacheWriteTokens ?? 0) + cacheWrite;
+      current.reasoningTokens = Number(current.reasoningTokens ?? 0) + reasoning;
+      current.actualCost = Number(current.actualCost ?? 0) + cost;
+      current.evidenceCount = Number(current.evidenceCount ?? 0) + 1;
+      current.latestGeneratedAt = Math.max(Number(current.latestGeneratedAt ?? 0), generatedAt);
+      current.latestObservedAt = Math.max(
+        Number(current.latestObservedAt ?? 0),
+        Number(evidence.last_seen_at ?? 0),
+      );
+      const currentWindows = new Set(
+        Array.isArray(current.windows) ? current.windows.map(String) : [],
+      );
+      if (window) currentWindows.add(window);
+      current.windows = [...currentWindows].sort();
+      const currentBases = new Set(
+        Array.isArray(current.attributionBases) ? current.attributionBases.map(String) : [],
+      );
+      currentBases.add(attributionBasis);
+      current.attributionBases = [...currentBases].sort();
+      const sources = Array.isArray(current.sources) ? (current.sources as Row[]) : [];
+      sources.push({
+        gatewayId: evidence.gateway_slug,
+        externalRouteRef: evidence.external_route_ref,
+        provider: evidence.provider,
+        model: evidence.model,
+        window,
+        requests,
+        failedRequests: failed,
+        attributionBasis,
+        generatedAt,
+      });
+      current.sources = sources;
+      byEmployee.set(selected.employeeId, current);
+    }
+
+    return {
+      byEmployee,
+      summary: {
+        authoritative: false,
+        scope: 'GATEWAY_AGGREGATE',
+        evidenceCount: evidenceRows.length,
+        attributedEvidenceCount,
+        unattributedEvidenceCount,
+        totalRequests,
+        attributedRequests,
+        unattributedRequests,
+        failedRequests,
+        successfulRequests: Math.max(0, totalRequests - failedRequests),
+        inputTokens,
+        outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
+        reasoningTokens,
+        actualCost,
+        windows: [...windows].sort(),
+        latestGeneratedAt,
+      },
+    };
+  }
+
   listEmployees(): Row[] {
     return rows(
       this.db
@@ -1035,7 +1308,7 @@ export class V2Repository {
     }));
   }
 
-  employeeDossier(employeeId: string): Row | null {
+  employeeDossier(employeeId: string, observedUsageByEmployee?: Map<string, Row>): Row | null {
     const identity = row(
       this.db
         .prepare(
@@ -1114,6 +1387,10 @@ export class V2Repository {
           .get(employeeId),
       )?.amount ?? 0,
     );
+    const observedUsage =
+      (observedUsageByEmployee ?? this.#gatewayObservedUsageProjection().byEmployee).get(
+        employeeId,
+      ) ?? null;
     const derivedAllocatedCost = Number(
       row(
         this.db
@@ -1179,16 +1456,22 @@ export class V2Repository {
           allocatedCost: Number(usage.allocated_cost ?? 0) + derivedAllocatedCost,
           marketValue: Number(usage.market_value ?? 0) + derivedMarketValue,
         },
+        observedUsage,
       },
     };
   }
 
   workforceProjection(): Row {
+    const observedUsage = this.#gatewayObservedUsageProjection();
     const employees: Row[] = this.listEmployees().map((employee): Row => {
-      const dossier = this.employeeDossier(String(employee.id));
+      const dossier = this.employeeDossier(String(employee.id), observedUsage.byEmployee);
       const organization = (dossier?.organization ?? {}) as Row;
       const career = (dossier?.career ?? {}) as Row;
       const usage = (career.usage ?? {}) as Row;
+      const observed =
+        career.observedUsage && typeof career.observedUsage === 'object'
+          ? (career.observedUsage as Row)
+          : null;
       const currentAppointments = Array.isArray(organization.currentAppointments)
         ? (organization.currentAppointments as Row[])
         : [];
@@ -1230,6 +1513,7 @@ export class V2Repository {
             allocatedCost: Number(usage.allocatedCost ?? 0),
             marketValue: Number(usage.marketValue ?? 0),
           },
+          observedUsage: observed,
         },
       };
     });
@@ -1266,6 +1550,7 @@ export class V2Repository {
           0,
         ),
         ...totalUsage,
+        observedUsage: observedUsage.summary,
       },
     };
   }

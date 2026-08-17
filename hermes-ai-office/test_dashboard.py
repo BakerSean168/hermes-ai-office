@@ -76,6 +76,102 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["incidents"]["unavailable"])
         self.assertIn("incident projection unavailable", result["incidents"]["error"])
 
+    def test_profile_default_prevents_false_unfilled_state_without_guessing_employee(self) -> None:
+        organization = {
+            "summary": {"staffedPositions": 0, "unfilledPositions": 1},
+            "positions": [
+                {
+                    "id": "pos_profile",
+                    "runtimeKind": "HERMES_PROFILE",
+                    "status": "UNFILLED",
+                    "workScope": {"slug": "coder", "name": "Coder"},
+                    "currentAppointments": [],
+                }
+            ],
+        }
+        workforce = {
+            "employees": [
+                {
+                    "id": "emp_open",
+                    "displayName": "DeepSeek V4 Flash @ OpenCode",
+                    "supplier": {"slug": "opencode"},
+                    "supplierModel": {"key": "deepseek-v4-flash"},
+                },
+                {
+                    "id": "emp_pool",
+                    "displayName": "DeepSeek V4 Flash @ Planner Pool",
+                    "supplier": {"slug": "planner-pool"},
+                    "supplierModel": {"key": "deepseek-v4-flash"},
+                },
+            ]
+        }
+        with mock.patch.object(
+            api,
+            "_hermes_model_defaults",
+            return_value={
+                "coder": {
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "source": "HERMES_PROFILE_CONFIG",
+                }
+            },
+        ):
+            enriched = api._enrich_organization(organization, workforce)
+        position = enriched["positions"][0]
+        self.assertEqual(position["status"], "DEFAULT_MODEL")
+        self.assertEqual(position["effectiveStaffing"]["model"], "deepseek-v4-flash")
+        self.assertIsNone(position["effectiveStaffing"]["employeeId"])
+        self.assertEqual(enriched["summary"]["defaultedPositions"], 1)
+        self.assertEqual(enriched["summary"]["configuredPositions"], 1)
+        self.assertEqual(enriched["summary"]["staffedPositions"], 0)
+        self.assertEqual(enriched["summary"]["unfilledPositions"], 0)
+
+    def test_provider_specific_default_can_resolve_one_employee(self) -> None:
+        organization = {
+            "summary": {},
+            "positions": [
+                {
+                    "id": "pos_profile",
+                    "runtimeKind": "HERMES_PROFILE",
+                    "status": "UNFILLED",
+                    "workScope": {"slug": "default"},
+                    "currentAppointments": [],
+                }
+            ],
+        }
+        workforce = {
+            "employees": [
+                {
+                    "id": "emp_open",
+                    "displayName": "DeepSeek V4 Flash @ OpenCode",
+                    "supplier": {"slug": "opencode"},
+                    "supplierModel": {"key": "deepseek-v4-flash"},
+                },
+                {
+                    "id": "emp_pool",
+                    "displayName": "DeepSeek V4 Flash @ Planner Pool",
+                    "supplier": {"slug": "planner-pool"},
+                    "supplierModel": {"key": "deepseek-v4-flash"},
+                },
+            ]
+        }
+        with mock.patch.object(
+            api,
+            "_hermes_model_defaults",
+            return_value={
+                "*": {
+                    "provider": "opencode-go",
+                    "model": "deepseek-v4-flash",
+                    "source": "HERMES_GLOBAL_CONFIG",
+                }
+            },
+        ):
+            enriched = api._enrich_organization(organization, workforce)
+        effective = enriched["positions"][0]["effectiveStaffing"]
+        self.assertEqual(effective["state"], "DEFAULTED")
+        self.assertEqual(effective["employeeId"], "emp_open")
+        self.assertEqual(enriched["summary"]["unfilledPositions"], 0)
+
     async def test_runtime_policy_settings_round_trip_through_hermes_config(self) -> None:
         fake = FakeConfig()
         with mock.patch.object(api, "config_mod", fake):
@@ -111,6 +207,30 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn("window.__HERMES_PLUGIN_SDK__", source)
         self.assertNotIn('from "react"', source)
         self.assertNotIn("react.production.min", source)
+        self.assertIn("SDK.useI18n", source)
+        self.assertIn("hermes-locale", source)
+        self.assertIn("组织架构", source)
+        self.assertIn("网关观测", source)
+        self.assertIn("observedUsage", source)
+        self.assertIn('role: "tablist"', source)
+        self.assertIn('aria-selected', source)
+        self.assertIn('className: "hao-data-table"', source)
+
+    def test_active_tab_keeps_an_explicit_readable_label(self) -> None:
+        css = (DASHBOARD / "dist" / "style.css").read_text()
+        self.assertIn('.hao-tab[aria-selected="true"]', css)
+        self.assertRegex(css, r'\.hao-tab\[aria-selected="true"\][^{]*\{[^}]*color:')
+
+    def test_dashboard_owns_high_contrast_content_tokens(self) -> None:
+        css = (DASHBOARD / "dist" / "style.css").read_text()
+        self.assertIn("--hao-text: #f2f8fb", css)
+        self.assertIn("--hao-text-secondary: #c9d8e1", css)
+        self.assertNotIn("--hao-text: var(--text-primary", css)
+        self.assertRegex(css, r"\.hao-hero h1\s*\{[^}]*color: var\(--hao-text\) !important")
+        self.assertRegex(css, r"\.hao-data-table th[^}]*color: #dce8ef !important")
+        self.assertRegex(css, r"\.hao-data-table th,\s*\.hao-data-table td[^}]*color: var\(--hao-text-secondary\) !important")
+        self.assertIn("color: #ffffff !important", css)
+        self.assertNotIn("--hao-text: var(--foreground", css)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,9 @@ export interface ProfileController {
   controllerState?: NodeState;
   controllerStatus?: string;
   controllerModel?: string;
+  /** Effective provider/model configuration reported by Hermes /api/profiles. */
+  configuredProvider?: string;
+  configuredModel?: string;
   controllerAction?: string;
   controllerActive?: boolean;
   /** Profile mission (from the bridge team) — used as the run title fallback. */
