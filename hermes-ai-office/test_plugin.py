@@ -480,8 +480,71 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         )
         self.assertEqual(
             set(ctx.tools),
-            {"ai_office_add_provider", "ai_office_list_providers"},
+            {"ai_office_add_provider", "ai_office_list_providers", "ai_office_set_provider_state"},
         )
+
+    def test_set_provider_state_resolves_unambiguous_key_without_secret(self) -> None:
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=[
+            {"items": [{"id": "conn-1", "provider_key": "worldclaw"}]},
+            {"ok": True},
+        ]) as request:
+            result = json.loads(plugin._set_provider_state_tool({"provider_key": "worldclaw", "enabled": False, "reason": "maintenance"}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(request.call_args.args[0], "/api/v2/commands/provider-connections/conn-1/control")
+        self.assertEqual(request.call_args.kwargs["payload"], {"enabled": False, "reason": "maintenance"})
+
+    def test_pending_carries_provider_hub_connection_id(self) -> None:
+        decision = self.selected()
+        decision["selectedAccess"] = {"config": {"providerHubConnectionId": "conn-9"}}
+        with mock.patch.object(plugin, "_resolve_runtime_policy", return_value=decision), mock.patch.object(plugin, "_enqueue"):
+            plugin._on_pre_tool_call(tool_name="terminal", args={"command": "opencode run test"}, tool_call_id="carry-1")
+        self.assertEqual(plugin._PENDING["carry-1"]["providerHubConnectionId"], "conn-9")
+
+    def test_list_provider_includes_availability_projection_fields(self) -> None:
+        fields = {"adminState", "availabilityState", "effectiveState", "routable", "retryable", "consecutiveFailures", "totalSuccesses", "totalFailures", "lastSuccessAt", "lastFailureAt", "lastErrorKind", "lastErrorStatus", "lastErrorMessage", "retryAfterAt"}
+        with mock.patch.object(plugin, "_control_plane_request", return_value={"items": [{}]}):
+            item = json.loads(plugin._list_shared_providers_tool({}))["items"][0]
+        self.assertTrue(fields.issubset(item))
+        self.assertIn("authoritative", plugin._LIST_PROVIDERS_SCHEMA["description"])
+
+    def test_set_provider_state_rejects_string_boolean(self) -> None:
+        result = json.loads(plugin._set_provider_state_tool({"connection_id": "conn-1", "enabled": "false"}))
+        self.assertFalse(result["ok"])
+
+    def test_provider_attempt_sync_success_exact_payload(self) -> None:
+        plugin._PENDING["success"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": False, "pty": False}
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(tool_name="terminal", result={"status": "ok"}, tool_call_id="success")
+        self.assertEqual(request.call_args.args[0], "/api/v2/commands/provider-connections/conn-1/attempts")
+        self.assertEqual(request.call_args.kwargs["payload"], {"outcome": "SUCCESS"})
+
+    def test_provider_attempt_429_exact_payload(self) -> None:
+        plugin._PENDING["throttle"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": False, "pty": False}
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(tool_name="terminal", result={"error": "429 rate limit"}, tool_call_id="throttle")
+        self.assertEqual(request.call_args.kwargs["payload"], {"outcome": "THROTTLED", "errorKind": "RATE_LIMIT", "httpStatus": 429, "message": "429 rate limit"})
+
+    def test_provider_attempt_auth_redacts_and_posts(self) -> None:
+        plugin._PENDING["auth"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": False, "pty": False}
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(tool_name="terminal", result={"error": "401 Bearer abc sk-secret token=xyz password=hunter2"}, tool_call_id="auth")
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["outcome"], "FAILURE")
+        self.assertEqual(payload["errorKind"], "AUTH")
+        self.assertNotIn("abc", payload["message"])
+        self.assertNotIn("sk-secret", payload["message"])
+
+    def test_background_success_does_not_post(self) -> None:
+        plugin._PENDING["bg"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": True, "pty": False}
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(tool_name="terminal", result={"status": "ok"}, tool_call_id="bg")
+        request.assert_not_called()
+
+    def test_background_429_posts_failure(self) -> None:
+        plugin._PENDING["bg429"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": True, "pty": False}
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(tool_name="terminal", result={"error": "429 rate limit"}, tool_call_id="bg429")
+        self.assertEqual(request.call_args.kwargs["payload"]["outcome"], "THROTTLED")
 
 
 if __name__ == "__main__":

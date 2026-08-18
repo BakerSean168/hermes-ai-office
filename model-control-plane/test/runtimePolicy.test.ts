@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { openDb } from '../src/db.mjs';
 import { runV2Migrations } from '../src/v2/migrations.js';
+import { ProviderHubRepository } from '../src/v2/providerHub.js';
 import { V2Repository } from '../src/v2/repository.js';
 import { RuntimeAccessRepository } from '../src/v2/runtimeAccess.js';
 import { RuntimePolicyService } from '../src/v2/runtimePolicy.js';
@@ -260,4 +261,110 @@ test('first-class runtime access overrides legacy model-offering selector', () =
   assert.equal(selectedAccess.adapterKind, 'NATIVE_CONFIG');
   assert.equal(selectedAccess.providerRef, 'hao-opencode-native');
   assert.equal(selectedAccess.credentialRef, 'OPENCODE_GO_API_KEY');
+});
+
+test('runtime policy rejects candidates tied to disabled or unavailable provider connections', () => {
+  const { repository, supply, staffing, catalog, position } = make();
+  const hub = new ProviderHubRepository(repository);
+  const conn = hub.upsertConnection({
+    providerKey: 'deepseek',
+    displayName: 'DeepSeek',
+    sourceKind: 'TEST',
+  });
+  const connId = String(conn.id);
+
+  const access = new RuntimeAccessRepository(repository);
+  const employment = catalog.employment as Record<string, unknown>;
+  access.upsert({
+    employmentId: String(employment.id),
+    runtimeKind: 'OPENCODE',
+    adapterKind: 'NATIVE_CONFIG',
+    providerRef: 'deepseek',
+    modelRef: 'deepseek-v4-flash',
+    config: { providerHubConnectionId: connId },
+  });
+
+  const policy = new RuntimePolicyService(repository, supply, staffing, access, hub);
+
+  // 1. Initially UNKNOWN -> trial routable -> SELECTED
+  let decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'PREFER',
+    positionSlug: 'coding-executor',
+    toolCallId: 'trial-routable-1',
+  });
+  assert.equal(decision.status, 'SELECTED');
+
+  // 2. Disable connection -> candidate becomes ineligible with PROVIDER_CONNECTION_DISABLED
+  hub.setControl(connId, { enabled: false, reason: 'Operator disabled' });
+  decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'ENFORCE',
+    positionSlug: 'coding-executor',
+    toolCallId: 'disabled-conn',
+  });
+  assert.equal(decision.status, 'BLOCKED');
+  const candidate = (decision.candidateResults as Array<Record<string, unknown>>)[0];
+  assert.equal(candidate.providerRoutable, false);
+  assert.ok((candidate.reasons as string[]).includes('PROVIDER_CONNECTION_DISABLED'));
+
+  // 3. Re-enable connection -> reset to trial -> SELECTED
+  hub.setControl(connId, { enabled: true });
+  decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'PREFER',
+    positionSlug: 'coding-executor',
+    toolCallId: 're-enabled-conn',
+  });
+  assert.equal(decision.status, 'SELECTED');
+
+  // 4. Record 429 rate limit with backoff in the future -> candidate ineligible with PROVIDER_CONNECTION_BACKOFF
+  hub.recordAttempt(connId, {
+    outcome: 'THROTTLED',
+    errorKind: 'RATE_LIMIT',
+    httpStatus: 429,
+    retryAfterSeconds: 60,
+  });
+  decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'ENFORCE',
+    positionSlug: 'coding-executor',
+    toolCallId: 'congested-conn',
+  });
+  assert.equal(decision.status, 'BLOCKED');
+  const congestedCandidate = (decision.candidateResults as Array<Record<string, unknown>>)[0];
+  assert.equal(congestedCandidate.providerRoutable, false);
+  assert.ok((congestedCandidate.reasons as string[]).includes('PROVIDER_CONNECTION_BACKOFF'));
+
+  // 5. When backoff expires -> becomes trial routable again
+  hub.recordAttempt(connId, {
+    outcome: 'THROTTLED',
+    errorKind: 'RATE_LIMIT',
+    httpStatus: 429,
+    retryAfterAt: Date.now() - 1000, // expired window
+  });
+  decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'PREFER',
+    positionSlug: 'coding-executor',
+    toolCallId: 'expired-backoff-conn',
+  });
+  assert.equal(decision.status, 'SELECTED');
+
+  // 6. Record AUTH error -> UNAVAILABLE -> blocked until operator reset
+  hub.recordAttempt(connId, {
+    outcome: 'FAILURE',
+    errorKind: 'AUTH',
+    httpStatus: 401,
+  });
+  decision = policy.resolve({
+    runtimeKind: 'OPENCODE',
+    policyMode: 'ENFORCE',
+    positionSlug: 'coding-executor',
+    toolCallId: 'auth-failed-conn',
+  });
+  assert.equal(decision.status, 'BLOCKED');
+  const authCandidate = (decision.candidateResults as Array<Record<string, unknown>>)[0];
+  assert.equal(authCandidate.providerRoutable, false);
+  assert.ok((authCandidate.reasons as string[]).includes('PROVIDER_CONNECTION_UNAVAILABLE'));
 });

@@ -23,7 +23,7 @@ from typing import Any, Dict, Mapping, Sequence
 import yaml
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 try:
     from hermes_cli import config as config_mod
@@ -56,6 +56,11 @@ class ProviderDiscoverRequest(BaseModel):
 class ProviderRegisterRequest(ProviderDiscoverRequest):
     selected_models: list[str]
     default_model: str = ""
+
+
+class ProviderControlRequest(BaseModel):
+    enabled: bool
+    reason: str | None = Field(default=None, max_length=500)
 
 
 _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -802,7 +807,9 @@ def _codex_profile_ref(descriptor: Mapping[str, Any], model: str) -> str:
     return f"hao-{str(descriptor.get('supplierSlug') or 'provider')[:40]}-{digest}"[:120]
 
 
-def _runtime_access_payloads(descriptor: Mapping[str, Any], model: str) -> list[Dict[str, Any]]:
+def _runtime_access_payloads(
+    descriptor: Mapping[str, Any], model: str, provider_hub_connection_id: str | None = None
+) -> list[Dict[str, Any]]:
     transport = str(descriptor.get("transport") or "openai_chat")
     protocol = {
         "codex_responses": "openai-responses",
@@ -817,6 +824,11 @@ def _runtime_access_payloads(descriptor: Mapping[str, Any], model: str) -> list[
 
     accesses: list[Dict[str, Any]] = []
     if transport in {"openai_chat", "codex_responses"}:
+        connection_config = (
+            {"providerHubConnectionId": provider_hub_connection_id}
+            if provider_hub_connection_id
+            else {}
+        )
         accesses.append(
             {
                 "runtimeKind": "OPENCODE",
@@ -828,6 +840,7 @@ def _runtime_access_payloads(descriptor: Mapping[str, Any], model: str) -> list[
                 "protocol": protocol,
                 "config": {
                     "managedProvider": custom_provider,
+                    **connection_config,
                     **({"package": "@ai-sdk/openai-compatible"} if custom_provider else {}),
                 },
                 "priority": 100,
@@ -844,7 +857,10 @@ def _runtime_access_payloads(descriptor: Mapping[str, Any], model: str) -> list[
                 "baseUrl": base_url or None,
                 "credentialRef": credential_ref or None,
                 "protocol": protocol,
-                "config": {"wireApi": "responses" if transport == "codex_responses" else "chat"},
+                "config": {
+                    "wireApi": "responses" if transport == "codex_responses" else "chat",
+                    **connection_config,
+                },
                 "priority": 100,
             }
         )
@@ -1148,6 +1164,26 @@ async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.post("/providers/hub/{connection_id}/control")
+async def provider_hub_control(
+    connection_id: str, request: ProviderControlRequest
+) -> Dict[str, Any]:
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    payload: Dict[str, Any] = {"enabled": request.enabled}
+    if request.reason is not None:
+        payload["reason"] = request.reason
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/provider-connections/{safe_id}/control",
+            payload,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/suppliers/{supplier_id}/connections")
 async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
     safe_id = supplier_id.strip()
@@ -1275,7 +1311,9 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
             runtime_accesses = []
             if not employment_id:
                 raise RuntimeError("control plane did not return employment identity")
-            for access_payload in _runtime_access_payloads(descriptor, model):
+            for access_payload in _runtime_access_payloads(
+                descriptor, model, str(hub_connection.get("id") or "")
+            ):
                 runtime_access = await asyncio.to_thread(
                     _post_json,
                     f"/api/v2/commands/employments/{employment_id}/runtime-access",

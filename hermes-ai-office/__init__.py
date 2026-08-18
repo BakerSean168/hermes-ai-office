@@ -68,8 +68,19 @@ _ADD_PROVIDER_SCHEMA = {
 
 _LIST_PROVIDERS_SCHEMA = {
     "name": "ai_office_list_providers",
-    "description": "List shared Provider Hub connections, availability, models, supplier mapping, and profiles currently using them.",
+    "description": "This is the authoritative source for provider, supplier, model, and availability questions. You must use it before inferring anything from memory or the filesystem.",
     "parameters": {"type": "object", "properties": {}},
+}
+
+_SET_PROVIDER_STATE_SCHEMA = {
+    "name": "ai_office_set_provider_state",
+    "description": "Enable or disable a shared provider connection by connection_id or an unambiguous provider_key.",
+    "parameters": {"type": "object", "properties": {
+        "connection_id": {"type": "string"},
+        "provider_key": {"type": "string"},
+        "enabled": {"type": "boolean"},
+        "reason": {"type": "string"},
+    }, "required": ["enabled"]},
 }
 
 _RUNTIME_COMMAND_RE = re.compile(
@@ -310,6 +321,20 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
                     "baseUrl": item.get("base_url"),
                     "websiteUrl": item.get("website_url"),
                     "health": item.get("health"),
+                    "adminState": item.get("admin_state", item.get("adminState")),
+                    "availabilityState": item.get("availability_state", item.get("availabilityState")),
+                    "effectiveState": item.get("effective_state", item.get("effectiveState")),
+                    "routable": item.get("routable"),
+                    "retryable": item.get("retryable"),
+                    "consecutiveFailures": item.get("consecutive_failures", item.get("consecutiveFailures")),
+                    "totalSuccesses": item.get("total_successes", item.get("totalSuccesses")),
+                    "totalFailures": item.get("total_failures", item.get("totalFailures")),
+                    "lastSuccessAt": item.get("last_success_at", item.get("lastSuccessAt")),
+                    "lastFailureAt": item.get("last_failure_at", item.get("lastFailureAt")),
+                    "lastErrorKind": item.get("last_error_kind", item.get("lastErrorKind")),
+                    "lastErrorStatus": item.get("last_error_status", item.get("lastErrorStatus")),
+                    "lastErrorMessage": item.get("last_error_message", item.get("lastErrorMessage")),
+                    "retryAfterAt": item.get("retry_after_at", item.get("retryAfterAt")),
                     "credentialScope": item.get("credential_scope"),
                     "models": item.get("models") or [],
                     "supplier": supplier.get("name"),
@@ -325,6 +350,33 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
             {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
             ensure_ascii=False,
         )
+
+def _set_provider_state_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        connection_id = str(args.get("connection_id") or "").strip()
+        provider_key = str(args.get("provider_key") or "").strip()
+        if not connection_id:
+            if not provider_key:
+                raise ValueError("connection_id or provider_key is required")
+            hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
+            matches = [i for i in (hub.get("items") or []) if isinstance(i, dict) and str(i.get("provider_key") or "") == provider_key]
+            if len(matches) != 1:
+                raise ValueError("provider_key must resolve to exactly one connection")
+            match = matches[0]
+            connection_id = str(match.get("id") or match.get("connection_id") or (match.get("connection") or {}).get("id") or "").strip()
+        if not connection_id:
+            raise ValueError("provider connection id is unavailable")
+        enabled = args.get("enabled")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        payload = {"enabled": enabled}
+        reason = str(args.get("reason") or "").strip()
+        if reason:
+            payload["reason"] = reason[:300]
+        result = _control_plane_request(f"/api/v2/commands/provider-connections/{urllib.parse.quote(connection_id, safe='')}/control", method="POST", payload=payload)
+        return json.dumps({"ok": True, "connectionId": connection_id, "enabled": payload["enabled"], "result": result}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]}, ensure_ascii=False)
 
 def _session_id(kwargs: dict[str, Any]) -> str:
     return str(kwargs.get("session_id") or kwargs.get("task_id") or "")
@@ -1019,6 +1071,7 @@ def _on_pre_tool_call(
         "positionId": str((selected.get("position") or {}).get("id") or ""),
         "employeeId": str((selected.get("employee") or {}).get("id") or ""),
         "employmentId": str((selected.get("employment") or {}).get("id") or ""),
+        "providerHubConnectionId": str((_selected_access(selected).get("config") or {}).get("providerHubConnectionId") or ""),
     }
     with _PENDING_LOCK:
         _PENDING[key] = pending
@@ -1067,6 +1120,45 @@ def _parse_tool_result(result: Any) -> dict[str, Any]:
         return {}
 
 
+def _terminal_outcome(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    status = status.lower().strip()
+    text = " ".join(str(parsed.get(k) or "") for k in ("error", "message", "stderr")).strip()
+    lower = text.lower()
+    exit_code = parsed.get("exit_code", parsed.get("exitCode"))
+    try:
+        nonzero_exit = exit_code is not None and int(exit_code) != 0
+    except (TypeError, ValueError):
+        nonzero_exit = False
+    outcome, error_kind = "SUCCESS", None
+    if status not in {"", "ok", "success", "completed", "complete"} or lower or nonzero_exit:
+        outcome, error_kind = "FAILURE", "UNKNOWN"
+        if "429" in lower or "rate limit" in lower or "too many requests" in lower:
+            outcome, error_kind = "THROTTLED", "RATE_LIMIT"
+        elif re.search(r"\b(?:401|403)\b", lower) or "invalid key" in lower or "unauthorized" in lower or "authentication" in lower:
+            error_kind = "AUTH"
+        elif "quota" in lower or "insufficient balance" in lower or "insufficient funds" in lower:
+            error_kind = "QUOTA"
+        elif "timeout" in lower or "timed out" in lower:
+            error_kind = "TIMEOUT"
+        elif "network" in lower or "connection" in lower or "connection refused" in lower:
+            error_kind = "NETWORK"
+        elif re.search(r"\b5\d\d\b", lower) or "server error" in lower:
+            error_kind = "SERVER"
+    match = re.search(r"\b([45]\d\d)\b", lower)
+    safe = re.sub(r"\s+", " ", text).strip()
+    safe = re.sub(r"(?i)sk-[A-Za-z0-9_-]+", "[redacted]", safe)
+    safe = re.sub(r"(?i)Bearer\s+\S+", "Bearer [redacted]", safe)
+    safe = re.sub(r"(?i)\b[A-Z0-9_]*_API_KEY\s*=\s*\S+", "API_KEY=[redacted]", safe)
+    safe = re.sub(r"(?i)\b(token|password)\s*[:=]\s*\S+", r"\1=[redacted]", safe)
+    safe = safe[:160]
+    result: dict[str, Any] = {"outcome": outcome}
+    if error_kind:
+        result["errorKind"] = error_kind
+    if match:
+        result["httpStatus"] = int(match.group(1))
+    if safe and error_kind:
+        result["message"] = safe
+    return result
 def _on_post_tool_call(
     tool_name: str = "",
     args: dict[str, Any] | None = None,
@@ -1109,6 +1201,25 @@ def _on_post_tool_call(
             "success": str(kwargs.get("status") or "ok") == "ok",
         }
     )
+    background = bool(pending.get("background"))
+    pty = bool(pending.get("pty"))
+    status = str(kwargs.get("status") or parsed.get("status") or "").lower()
+    classification = _terminal_outcome(status, parsed)
+    should_record = classification["outcome"] == "SUCCESS" and not background and not pty
+    should_record = should_record or (
+        classification["outcome"] in {"FAILURE", "THROTTLED"}
+        and bool(classification.get("message"))
+    )
+    if should_record:
+        if pending.get("providerHubConnectionId"):
+            try:
+                _control_plane_request(
+                    f"/api/v2/commands/provider-connections/{urllib.parse.quote(str(pending.get('providerHubConnectionId')), safe='')}/attempts",
+                    method="POST",
+                    payload=classification,
+                )
+            except Exception:
+                pass
 
 
 def register(ctx: Any) -> None:
@@ -1122,6 +1233,14 @@ def register(ctx: Any) -> None:
         handler=_add_shared_provider_tool,
         description=_ADD_PROVIDER_SCHEMA["description"],
         emoji="🔌",
+    )
+    ctx.register_tool(
+        name="ai_office_set_provider_state",
+        toolset="ai_office",
+        schema=_SET_PROVIDER_STATE_SCHEMA,
+        handler=_set_provider_state_tool,
+        description=_SET_PROVIDER_STATE_SCHEMA["description"],
+        emoji="🔧",
     )
     ctx.register_tool(
         name="ai_office_list_providers",

@@ -249,6 +249,93 @@ export function registerV2Routes(
       }),
   );
 
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/attempts',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.attempt',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (!body.outcome) {
+            reply.code(400);
+            return { error: { code: 'PROVIDER_ATTEMPT_OUTCOME_REQUIRED' } };
+          }
+          try {
+            return services.providerHub.recordAttempt(request.params.connectionId, {
+              outcome: String(body.outcome) as any,
+              errorKind: body.errorKind ? String(body.errorKind) : undefined,
+              httpStatus: body.httpStatus == null ? undefined : Number(body.httpStatus),
+              message: body.message == null ? undefined : String(body.message),
+              observedAt: body.observedAt == null ? undefined : Number(body.observedAt),
+              source: body.source == null ? undefined : String(body.source),
+              retryAfterAt: body.retryAfterAt == null ? undefined : Number(body.retryAfterAt),
+              retryAfterSeconds:
+                body.retryAfterSeconds == null ? undefined : Number(body.retryAfterSeconds),
+              metadata:
+                body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+                  ? (body.metadata as Record<string, unknown>)
+                  : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_ATTEMPT_FAILED';
+            reply.code(
+              code.endsWith('_NOT_FOUND')
+                ? 404
+                : code.endsWith('_REQUIRED') || code.endsWith('_INVALID')
+                  ? 400
+                  : 422,
+            );
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/control',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.control',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          if (typeof body.enabled !== 'boolean') {
+            reply.code(400);
+            return { error: { code: 'PROVIDER_CONTROL_ENABLED_REQUIRED' } };
+          }
+          try {
+            return services.providerHub.setControl(request.params.connectionId, {
+              enabled: body.enabled,
+              reason: body.reason ? String(body.reason) : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_CONTROL_FAILED';
+            reply.code(
+              code.endsWith('_NOT_FOUND')
+                ? 404
+                : code.endsWith('_REQUIRED') || code.endsWith('_INVALID')
+                  ? 400
+                  : 422,
+            );
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
   app.post('/api/v2/commands/internal-workforce/sync', async (request, reply) =>
     runCommand({
       request,

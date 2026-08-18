@@ -101,7 +101,7 @@ export async function buildControlPlane(
   const dispatchService = new DispatchService(v2, gateways, supply, staffing);
   const runtimeAccess = new RuntimeAccessRepository(v2);
   const providerHub = new ProviderHubRepository(v2);
-  const runtimePolicy = new RuntimePolicyService(v2, supply, staffing, runtimeAccess);
+  const runtimePolicy = new RuntimePolicyService(v2, supply, staffing, runtimeAccess, providerHub);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {

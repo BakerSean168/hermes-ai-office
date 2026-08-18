@@ -4,6 +4,7 @@ description: Native Hermes AI company dashboard, workforce policy, and runtime s
 provides_tools:
   - ai_office_add_provider
   - ai_office_list_providers
+  - ai_office_set_provider_state
 provides_hooks:
   - subagent_start
   - subagent_stop

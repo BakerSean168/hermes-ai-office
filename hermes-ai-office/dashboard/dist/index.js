@@ -219,6 +219,21 @@
       "suppliers.connections": "Provider connections",
       "suppliers.connectionsLoading": "Loading connection details…",
       "suppliers.noConnections": "No provider connection metadata",
+      "suppliers.effectiveState": "Effective state",
+      "suppliers.adminState": "Admin state",
+      "suppliers.routable": "Routable",
+      "suppliers.retryable": "Retryable",
+      "suppliers.consecutiveFailures": "Consecutive failures",
+      "suppliers.lastError": "Last error",
+      "suppliers.lastSuccess": "Last success",
+      "suppliers.lastFailure": "Last failure",
+      "suppliers.retryAfter": "Retry after",
+      "suppliers.recentAttempts": "Recent attempts",
+      "suppliers.enable": "Enable / reset trial",
+      "suppliers.disable": "Disable",
+      "suppliers.retry": "Retry / reset trial",
+      "suppliers.controlBusy": "Updating…",
+      "suppliers.controlReason": "AI Office dashboard operator",
       "suppliers.runtimeAccess": "Agent access",
       "suppliers.nativeAccess": "Native config",
       "suppliers.gatewayAccess": "Gateway adapter",
@@ -490,6 +505,21 @@
       "suppliers.connections": "接入连接",
       "suppliers.connectionsLoading": "正在获取接入详情…",
       "suppliers.noConnections": "暂无 Provider 连接信息",
+      "suppliers.effectiveState": "生效状态",
+      "suppliers.adminState": "管理状态",
+      "suppliers.routable": "可路由",
+      "suppliers.retryable": "可重试",
+      "suppliers.consecutiveFailures": "连续失败",
+      "suppliers.lastError": "最近错误",
+      "suppliers.lastSuccess": "最近成功",
+      "suppliers.lastFailure": "最近失败",
+      "suppliers.retryAfter": "重试时间",
+      "suppliers.recentAttempts": "近期尝试",
+      "suppliers.enable": "启用 / 重置试用",
+      "suppliers.disable": "禁用",
+      "suppliers.retry": "重试 / 重置试用",
+      "suppliers.controlBusy": "更新中…",
+      "suppliers.controlReason": "AI Office 控制台操作员",
       "suppliers.runtimeAccess": "Agent 接入",
       "suppliers.nativeAccess": "原生配置",
       "suppliers.gatewayAccess": "网关适配",
@@ -1748,6 +1778,7 @@
     const [detailConnections, setDetailConnections] = React.useState([]);
     const [detailConnectionsLoading, setDetailConnectionsLoading] = React.useState(false);
     const [detailConnectionsError, setDetailConnectionsError] = React.useState("");
+    const [connectionActionId, setConnectionActionId] = React.useState("");
     const [addOpen, setAddOpen] = React.useState(false);
     const [presets, setPresets] = React.useState([]);
     const [presetId, setPresetId] = React.useState("opencode-go");
@@ -1808,6 +1839,28 @@
       } finally {
         setDetailConnectionsLoading(false);
       }
+    }
+
+    async function controlConnection(connection, enabled) {
+      setConnectionActionId(String(connection.id));
+      try {
+        await api("/providers/hub/" + encodeURIComponent(String(connection.id)) + "/control", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: Boolean(enabled), reason: "AI Office dashboard operator" }),
+        });
+        if (detailSupplier) await openSupplierDetail(detailSupplier);
+      } catch (cause) {
+        setDetailConnectionsError(String(cause));
+      } finally {
+        setConnectionActionId("");
+      }
+    }
+
+    function connectionTime(value) {
+      if (!value) return props.t("common.notRecorded");
+      const numeric = Number(value);
+      return props.relativeTime(Number.isFinite(numeric) && numeric ? numeric : Date.parse(String(value)));
     }
 
     function closeSupplierDetail() {
@@ -2111,6 +2164,22 @@
                           detailConnections.map(function (connection) {
                             const models = asArray(connection.models);
                             const links = asArray(connection.profileLinks);
+                            const adminState = String(connection.adminState || "DISABLED").toUpperCase();
+                            const effectiveState = String(connection.effectiveState || connection.health || "UNKNOWN").toUpperCase();
+                            const retryStates = ["UNAVAILABLE", "TEMP_UNAVAILABLE"];
+                            const actionEnabled = adminState === "DISABLED" || (adminState === "ENABLED" && retryStates.includes(effectiveState));
+                            const actionLabel = adminState === "DISABLED"
+                              ? props.t("suppliers.enable")
+                              : (adminState === "ENABLED" && retryStates.includes(effectiveState) ? props.t("suppliers.retry") : props.t("suppliers.disable"));
+                            const attempts = asArray(connection.recentAttempts).slice().sort(function (left, right) {
+                              const leftObservedAt = asObject(left).observedAt;
+                              const rightObservedAt = asObject(right).observedAt;
+                              const leftNumeric = Number(leftObservedAt);
+                              const rightNumeric = Number(rightObservedAt);
+                              const leftTime = leftObservedAt != null && leftObservedAt !== "" && Number.isFinite(leftNumeric) ? leftNumeric : Date.parse(String(leftObservedAt || ""));
+                              const rightTime = rightObservedAt != null && rightObservedAt !== "" && Number.isFinite(rightNumeric) ? rightNumeric : Date.parse(String(rightObservedAt || ""));
+                              return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+                            }).slice(0, 5);
                             return h(
                               "div",
                               { className: "hao-agreement-row hao-supplier-connection", key: connection.id },
@@ -2126,8 +2195,21 @@
                                 links.length
                                   ? h("small", null, links.map(function (link) { return [link.profile_id, link.runtime_kind, link.model_ref].filter(Boolean).join(" / "); }).join(" · "))
                                   : null,
+                                h("small", null, props.t("suppliers.effectiveState") + ": " + effectiveState + " · " + props.t("suppliers.adminState") + ": " + adminState),
+                                h("small", null, props.t("suppliers.routable") + ": " + (connection.routable ? "yes" : "no") + " · " + props.t("suppliers.retryable") + ": " + (connection.retryable ? "yes" : "no") + " · " + props.t("suppliers.consecutiveFailures") + ": " + String(connection.consecutiveFailures == null ? 0 : connection.consecutiveFailures)),
+                                connection.lastErrorKind || connection.lastErrorStatus || connection.lastErrorMessage
+                                  ? h("small", null, props.t("suppliers.lastError") + ": " + [connection.lastErrorKind, connection.lastErrorStatus, connection.lastErrorMessage].filter(Boolean).join(" · "))
+                                  : null,
+                                h("small", null, [props.t("suppliers.lastSuccess") + ": " + connectionTime(connection.lastSuccessAt), props.t("suppliers.lastFailure") + ": " + connectionTime(connection.lastFailureAt), props.t("suppliers.retryAfter") + ": " + connectionTime(connection.retryAfterAt)].join(" · ")),
+                                h("small", null, props.t("suppliers.recentAttempts") + ": " + props.number(attempts.length)),
+                                attempts.length
+                                  ? h("div", { className: "hao-supplier-attempts" }, attempts.map(function (attempt, index) {
+                                      const item = asObject(attempt);
+                                      return h("small", { key: String(item.id || item.observedAt || index) }, [item.outcome, item.errorKind, item.httpStatus, item.observedAt == null ? null : connectionTime(item.observedAt), item.errorMessage].filter(function (value) { return value != null && String(value) !== ""; }).map(String).join(" · "));
+                                    }))
+                                  : null,
                               ),
-                              h(Status, { value: connection.health, t: props.t }),
+                              h("div", { className: "hao-supplier-connection-actions" }, h(Status, { value: effectiveState, t: props.t }), h(Button, { kind: "quiet", disabled: connectionActionId === String(connection.id), onClick: function () { controlConnection(connection, actionEnabled); } }, connectionActionId === String(connection.id) ? props.t("suppliers.controlBusy") : actionLabel)),
                             );
                           }),
                         )

@@ -89,6 +89,24 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["incidents"]["unavailable"])
         self.assertIn("incident projection unavailable", result["incidents"]["error"])
 
+    async def test_provider_hub_control_forwards_enabled_and_reason(self) -> None:
+        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
+            result = await api.provider_hub_control(
+                "pconn_1", api.ProviderControlRequest(enabled=False, reason="maintenance")
+            )
+        self.assertEqual(result, {"ok": True})
+        post.assert_called_once_with(
+            "/api/v2/commands/provider-connections/pconn_1/control",
+            {"enabled": False, "reason": "maintenance"},
+        )
+
+    async def test_provider_hub_control_rejects_invalid_connection_id(self) -> None:
+        with self.assertRaises(api.HTTPException) as raised:
+            await api.provider_hub_control(
+                "bad/id", api.ProviderControlRequest(enabled=True)
+            )
+        self.assertEqual(raised.exception.status_code, 400)
+
     def test_profile_default_prevents_false_unfilled_state_without_guessing_employee(self) -> None:
         organization = {
             "summary": {"staffedPositions": 0, "unfilledPositions": 1},
@@ -366,6 +384,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(opencode["providerRef"], "hao-custom-abc123")
         self.assertEqual(opencode["baseUrl"], "https://proxy.example.com/v1")
         self.assertEqual(opencode["credentialRef"], "HERMES_AI_OFFICE_ABC123_API_KEY")
+        self.assertEqual(opencode["config"]["providerHubConnectionId"], "pconn_custom")
+        codex = next(payload for _, payload in access_calls if payload["runtimeKind"] == "CODEX")
+        self.assertEqual(codex["config"]["providerHubConnectionId"], "pconn_custom")
         self.assertEqual(result["employees"][0]["runtimeAccess"][0]["adapterKind"], "NATIVE_CONFIG")
         self.assertEqual(result["defaultEmployeeId"], "emp_beta")
 
@@ -445,6 +466,25 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('connection.credential_ref', bundle)
         self.assertIn('hao-external-link', bundle)
         self.assertNotIn('function ProviderHub(props)', bundle)
+
+    def test_provider_connection_controls_distinguish_admin_and_effective_state(self) -> None:
+        bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
+        self.assertIn('api("/providers/hub/" + encodeURIComponent(String(connection.id)) + "/control"', bundle)
+        self.assertIn('const adminState = String(connection.adminState || "DISABLED").toUpperCase()', bundle)
+        self.assertIn('const effectiveState = String(connection.effectiveState || connection.health || "UNKNOWN").toUpperCase()', bundle)
+        self.assertIn('const retryStates = ["UNAVAILABLE", "TEMP_UNAVAILABLE"]', bundle)
+        self.assertIn('props.t("suppliers.enable")', bundle)
+        self.assertIn('props.t("suppliers.retry")', bundle)
+        self.assertIn('props.t("suppliers.disable")', bundle)
+        self.assertIn('JSON.stringify({ enabled: Boolean(enabled)', bundle)
+        self.assertIn('asArray(connection.recentAttempts).slice().sort', bundle)
+        self.assertIn('Number.isFinite(leftNumeric) ? leftNumeric : Date.parse', bundle)
+        self.assertIn('Number.isFinite(rightNumeric) ? rightNumeric : Date.parse', bundle)
+        self.assertIn(').slice(0, 5)', bundle)
+        for field in ("outcome", "errorKind", "httpStatus", "observedAt", "errorMessage"):
+            self.assertIn('item.' + field, bundle)
+        self.assertIn('connectionTime(item.observedAt)', bundle)
+        self.assertNotIn('tab === "providers"', bundle)
 
     def test_supplier_ui_is_compact_and_exposes_onboarding_flow(self) -> None:
         source = (DASHBOARD / "dist" / "index.js").read_text()

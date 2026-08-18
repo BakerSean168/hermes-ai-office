@@ -1,4 +1,5 @@
 import { newId } from './ids.js';
+import { ProviderHubRepository } from './providerHub.js';
 import type { V2Repository, V2Row } from './repository.js';
 import { RuntimeAccessRepository } from './runtimeAccess.js';
 import type { StaffingRepository } from './staffing.js';
@@ -53,6 +54,7 @@ interface RawCandidate {
   capacityAvailable: boolean;
   supplierEnabled: boolean;
   supplierPreferred: boolean;
+  providerRoutable: boolean;
   reasons: string[];
 }
 
@@ -130,17 +132,20 @@ export class RuntimePolicyService {
   readonly #supply: SupplyRepository;
   readonly #staffing: StaffingRepository;
   readonly #runtimeAccess: RuntimeAccessRepository;
+  readonly #providerHub: ProviderHubRepository;
 
   constructor(
     domain: V2Repository,
     supply: SupplyRepository,
     staffing: StaffingRepository,
     runtimeAccess = new RuntimeAccessRepository(domain),
+    providerHub = new ProviderHubRepository(domain),
   ) {
     this.#domain = domain;
     this.#supply = supply;
     this.#staffing = staffing;
     this.#runtimeAccess = runtimeAccess;
+    this.#providerHub = providerHub;
   }
 
   resolve(input: RuntimeLaunchResolveInput): V2Row {
@@ -164,6 +169,7 @@ export class RuntimePolicyService {
         candidate.qualified &&
         candidate.capacityAvailable &&
         candidate.supplierEnabled &&
+        candidate.providerRoutable &&
         candidate.selector !== null &&
         candidate.employmentId !== null &&
         candidate.employeeLifecycle === 'ACTIVE' &&
@@ -387,9 +393,65 @@ export class RuntimePolicyService {
       const capacity = value.supply_agreement_id
         ? this.#supply.capacityForAgreement(String(value.supply_agreement_id))
         : { available: false, reasons: ['NO_CURRENT_EMPLOYMENT'], pools: [] };
+
+      const accessConfig =
+        access?.config && typeof access.config === 'object' && !Array.isArray(access.config)
+          ? (access.config as JsonRecord)
+          : {};
+      const selectorConfig = selector?.config ?? {};
+      const providerConnectionId =
+        accessConfig.providerHubConnectionId != null
+          ? String(accessConfig.providerHubConnectionId)
+          : selectorConfig.providerHubConnectionId != null
+            ? String(selectorConfig.providerHubConnectionId)
+            : null;
+
+      let providerRoutable = true;
+      const providerReasons: string[] = [];
+
+      if (providerConnectionId) {
+        const connection = this.#providerHub.getConnection(providerConnectionId);
+        if (!connection) {
+          providerRoutable = false;
+          providerReasons.push('PROVIDER_CONNECTION_NOT_FOUND');
+        } else {
+          const adminState = String(connection.adminState ?? connection.admin_state ?? 'ENABLED');
+          const availabilityState = String(
+            connection.availabilityState ?? connection.availability_state ?? 'UNKNOWN',
+          );
+          const retryAfterAt =
+            connection.retryAfterAt != null
+              ? Number(connection.retryAfterAt)
+              : connection.retry_after_at != null
+                ? Number(connection.retry_after_at)
+                : null;
+          const now = Date.now();
+          const inBackoff = retryAfterAt !== null && retryAfterAt > now;
+
+          if (adminState === 'DISABLED') {
+            providerRoutable = false;
+            providerReasons.push('PROVIDER_CONNECTION_DISABLED');
+          } else if (availabilityState === 'UNAVAILABLE') {
+            providerRoutable = false;
+            providerReasons.push('PROVIDER_CONNECTION_UNAVAILABLE');
+          } else if (availabilityState === 'TEMP_UNAVAILABLE') {
+            if (inBackoff) {
+              providerRoutable = false;
+              providerReasons.push('PROVIDER_CONNECTION_TEMP_UNAVAILABLE');
+            }
+          } else if (availabilityState === 'CONGESTED') {
+            if (inBackoff) {
+              providerRoutable = false;
+              providerReasons.push('PROVIDER_CONNECTION_BACKOFF');
+            }
+          }
+        }
+      }
+
       const reasons = [
         ...(qualification.reasons ?? []),
         ...capacity.reasons,
+        ...providerReasons,
         ...(selector ? [] : ['RUNTIME_SELECTOR_MISSING']),
         ...(supplierEnabled ? [] : ['SUPPLIER_EMPLOYEE_DISABLED']),
         ...(value.record_lifecycle === 'ACTIVE' ? [] : ['EMPLOYEE_NOT_ACTIVE']),
@@ -413,6 +475,7 @@ export class RuntimePolicyService {
         capacityAvailable: capacity.available,
         supplierEnabled,
         supplierPreferred,
+        providerRoutable,
         reasons,
       };
     });
