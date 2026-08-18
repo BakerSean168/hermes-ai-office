@@ -71,6 +71,19 @@ Hermes supports plugin subdirectories in Git repositories:
 hermes plugins install BakerSean168/hermes-ai-office/hermes-ai-office --enable
 ```
 
+When the default gateway uses `multiplex_profiles`, each routed profile has an
+isolated Hermes home and therefore its own plugin enablement. After installing
+or updating AI Office in the default home, sync the same plugin source into the
+existing profile homes:
+
+```bash
+./hermes-ai-office/scripts/sync-multiplex-profiles.sh
+```
+
+The script links the default AI Office plugin into each profile and enables it
+there without copying credentials. This is required for profile-routed Telegram
+threads such as `memoflow` to expose the `ai_office` toolset.
+
 For a local checkout:
 
 ```bash

@@ -476,7 +476,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin.register(ctx)
         self.assertEqual(
             set(ctx.hooks),
-            {"subagent_start", "subagent_stop", "pre_tool_call", "post_tool_call"},
+            {"subagent_start", "subagent_stop", "pre_llm_call", "pre_tool_call", "post_tool_call"},
         )
         self.assertEqual(
             set(ctx.tools),
@@ -545,6 +545,30 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
             plugin._on_post_tool_call(tool_name="terminal", result={"error": "429 rate limit"}, tool_call_id="bg429")
         self.assertEqual(request.call_args.kwargs["payload"]["outcome"], "THROTTLED")
+
+    def test_pre_llm_authority_context_recognizes_ai_office_and_current_provider_state(self) -> None:
+        hub = {
+            "summary": {"connections": 2, "available": 1, "congested": 1, "unavailable": 0, "disabled": 0},
+            "items": [
+                {"providerKey": "worldclaw", "displayName": "worldclaw", "effectiveState": "AVAILABLE", "routable": True},
+                {"providerKey": "anyrouter", "displayName": "AnyRouter", "effectiveState": "CONGESTED", "routable": False},
+            ],
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=hub) as request:
+            result = plugin._on_pre_llm_call(user_message="继续看当前可用供应商，能识别到 AI Office 吗")
+        self.assertIsNotNone(result)
+        context = result["context"]
+        self.assertIn("internal control-plane", context)
+        self.assertIn("ai_office_list_providers", context)
+        self.assertIn("worldclaw: AVAILABLE", context)
+        self.assertIn("AnyRouter: CONGESTED", context)
+        request.assert_called_once_with("/api/v2/projections/provider-hub-summary", timeout=2.0)
+
+    def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:
+        with mock.patch.object(plugin, "_control_plane_request") as request:
+            result = plugin._on_pre_llm_call(user_message="帮我修一下这个 CSS 布局")
+        self.assertIsNone(result)
+        request.assert_not_called()
 
 
 if __name__ == "__main__":

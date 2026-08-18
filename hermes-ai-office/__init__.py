@@ -83,6 +83,17 @@ _SET_PROVIDER_STATE_SCHEMA = {
     }, "required": ["enabled"]},
 }
 
+_AI_OFFICE_NAME_RE = re.compile(r"\bai[\s_-]*office\b", re.IGNORECASE)
+_PROVIDER_TOPIC_RE = re.compile(
+    r"(?:provider|supplier|供应商|提供商|模型|model|codex|opencode)",
+    re.IGNORECASE,
+)
+_PROVIDER_STATUS_RE = re.compile(
+    r"(?:available|availability|status|health|usable|current|which|list|"
+    r"可用|状态|健康|当前|现在|哪些|列表|拥挤|限流|不可用)",
+    re.IGNORECASE,
+)
+
 _RUNTIME_COMMAND_RE = re.compile(
     r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+\s+)*"
@@ -1159,6 +1170,70 @@ def _terminal_outcome(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
     if safe and error_kind:
         result["message"] = safe
     return result
+
+
+def _needs_ai_office_authority(user_message: Any) -> bool:
+    text = str(user_message or "").strip()
+    if not text:
+        return False
+    if _AI_OFFICE_NAME_RE.search(text):
+        return True
+    return bool(_PROVIDER_TOPIC_RE.search(text) and _PROVIDER_STATUS_RE.search(text))
+
+
+def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
+    """Inject current AI Office authority into relevant turns.
+
+    This hook is turn-scoped so long-lived profile sessions created before the
+    plugin was installed still receive the current authority contract.
+    """
+    if not _needs_ai_office_authority(user_message):
+        return None
+
+    header = (
+        "Hermes AI Office is an internal control-plane/dashboard capability, "
+        "not an upstream model provider. Do not search the filesystem or the "
+        "Hermes built-in provider catalog to decide whether AI Office exists. "
+        "For current provider/model/supplier availability, use the native "
+        "ai_office_list_providers tool first (use tool_search for 'ai_office' "
+        "if the tool is deferred). Memory and local config are fallback "
+        "troubleshooting evidence only."
+    )
+    try:
+        hub = _control_plane_request("/api/v2/projections/provider-hub-summary", timeout=2.0)
+        summary = hub.get("summary") if isinstance(hub.get("summary"), dict) else {}
+        items = hub.get("items") if isinstance(hub.get("items"), list) else []
+        facts: list[str] = []
+        for raw in items[:20]:
+            if not isinstance(raw, dict):
+                continue
+            name = str(raw.get("displayName") or raw.get("providerKey") or "provider").strip()
+            state = str(raw.get("effectiveState") or raw.get("health") or "UNKNOWN").strip()
+            if raw.get("routable") is True:
+                routable = "yes"
+            elif raw.get("routable") is False:
+                routable = "no"
+            else:
+                routable = "unknown"
+            facts.append(f"- {name}: {state}; routable={routable}")
+        counts = (
+            f"connections={summary.get('connections', '?')}, "
+            f"available={summary.get('available', '?')}, "
+            f"congested={summary.get('congested', '?')}, "
+            f"unavailable={summary.get('unavailable', '?')}, "
+            f"disabled={summary.get('disabled', '?')}"
+        )
+        snapshot = "AI Office Provider Hub turn snapshot: " + counts
+        if facts:
+            snapshot += "\n" + "\n".join(facts)
+        return {"context": header + "\n\n" + snapshot}
+    except Exception:
+        return {
+            "context": header
+            + "\n\nAI Office Provider Hub is currently unreachable. State that explicitly before any stale/local fallback."
+        }
+
+
 def _on_post_tool_call(
     tool_name: str = "",
     args: dict[str, Any] | None = None,
@@ -1252,5 +1327,6 @@ def register(ctx: Any) -> None:
     )
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
