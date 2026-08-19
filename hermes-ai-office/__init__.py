@@ -38,6 +38,11 @@ _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _PENDING: dict[str, dict[str, Any]] = {}
 _PENDING_LOCK = threading.Lock()
+_API_TELEMETRY_LOCK = threading.Lock()
+_PROVIDER_CONNECTION_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
+_API_SUCCESS_LAST_RECORDED: dict[str, float] = {}
+_PROVIDER_CACHE_TTL_SECONDS = 60.0
+_SUCCESS_EVIDENCE_MIN_INTERVAL_SECONDS = 60.0
 _CTX: Any = None
 _LITELLM_RUNTIME_PROVIDER = "hermes-office"
 _LITELLM_RUNTIME_BASE_URL = "http://127.0.0.1:4000/v1"
@@ -1172,6 +1177,279 @@ def _terminal_outcome(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _provider_item_value(item: dict[str, Any], camel: str, snake: str) -> Any:
+    value = item.get(camel)
+    return value if value is not None else item.get(snake)
+
+
+def _normalized_provider_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").strip().lower()).strip("-")
+
+
+def _normalized_endpoint(value: Any) -> str:
+    raw = str(value or "").strip().rstrip("/")
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+    except ValueError:
+        return raw.lower()
+    if not parsed.scheme or not parsed.netloc:
+        return raw.lower()
+    scheme = parsed.scheme.lower()
+    hostname = (parsed.hostname or "").lower()
+    port = parsed.port
+    default_port = (scheme == "https" and port == 443) or (scheme == "http" and port == 80)
+    authority = hostname if port is None or default_port else f"{hostname}:{port}"
+    path = (parsed.path or "").rstrip("/")
+    return f"{scheme}://{authority}{path}"
+
+
+def _active_profile_name() -> str:
+    if _CTX is None:
+        return "default"
+    try:
+        return str(getattr(_CTX, "profile_name", "") or "default")[:120]
+    except Exception:
+        return "default"
+
+
+def _resolve_provider_connection_id(provider: Any, base_url: Any) -> str:
+    provider_name = _normalized_provider_name(provider)
+    endpoint = _normalized_endpoint(base_url)
+    if not provider_name and not endpoint:
+        return ""
+    cache_key = (provider_name, endpoint)
+    now = time.monotonic()
+    with _API_TELEMETRY_LOCK:
+        cached = _PROVIDER_CONNECTION_CACHE.get(cache_key)
+        if cached and now - cached[0] < _PROVIDER_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    connection_id = ""
+    try:
+        hub = _control_plane_request("/api/v2/projections/provider-hub-summary", timeout=1.5)
+        items = [item for item in (hub.get("items") or []) if isinstance(item, dict)]
+        provider_matches = [
+            item
+            for item in items
+            if provider_name
+            and _normalized_provider_name(
+                _provider_item_value(item, "providerKey", "provider_key")
+            )
+            == provider_name
+        ]
+        candidates = provider_matches
+        if len(candidates) != 1 and endpoint:
+            narrowed = [
+                item
+                for item in candidates
+                if _normalized_endpoint(_provider_item_value(item, "baseUrl", "base_url"))
+                == endpoint
+            ]
+            if len(narrowed) == 1:
+                candidates = narrowed
+        if not candidates and endpoint:
+            endpoint_matches = [
+                item
+                for item in items
+                if _normalized_endpoint(_provider_item_value(item, "baseUrl", "base_url"))
+                == endpoint
+            ]
+            if len(endpoint_matches) == 1:
+                candidates = endpoint_matches
+        if len(candidates) == 1:
+            connection_id = str(
+                candidates[0].get("id")
+                or candidates[0].get("connectionId")
+                or candidates[0].get("connection_id")
+                or ""
+            ).strip()
+    except Exception:
+        connection_id = ""
+
+    with _API_TELEMETRY_LOCK:
+        _PROVIDER_CONNECTION_CACHE[cache_key] = (now, connection_id)
+    return connection_id
+
+
+def _safe_provider_error_text(*values: Any) -> str:
+    text = " ".join(str(value or "") for value in values if value).strip()
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(?i)sk-[A-Za-z0-9_-]+", "[redacted]", text)
+    text = re.sub(r"(?i)Bearer\s+\S+", "Bearer [redacted]", text)
+    text = re.sub(
+        r"(?i)\b[A-Z0-9_]*_API_KEY\s*[:=]\s*\S+", "API_KEY=[redacted]", text
+    )
+    text = re.sub(
+        r"(?i)\b(token|password|secret)\s*[:=]\s*\S+", r"\1=[redacted]", text
+    )
+    return text[:160]
+
+
+def _api_error_outcome(**kwargs: Any) -> dict[str, Any] | None:
+    raw_status = kwargs.get("status_code")
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+
+    error = kwargs.get("error")
+    error_type = kwargs.get("error_type")
+    error_message = kwargs.get("error_message")
+    if isinstance(error, dict):
+        error_type = error_type or error.get("type")
+        error_message = error_message or error.get("message")
+
+    reason = str(kwargs.get("reason") or "").strip().lower()
+    non_operational_reasons = {
+        "context_overflow",
+        "payload_too_large",
+        "image_too_large",
+        "model_not_found",
+        "provider_policy_blocked",
+        "content_policy_blocked",
+        "format_error",
+        "invalid_encrypted_content",
+        "multimodal_tool_content_unsupported",
+        "thinking_signature",
+        "long_context_tier",
+        "oauth_long_context_beta_forbidden",
+        "llama_cpp_grammar_pattern",
+    }
+    if reason in non_operational_reasons:
+        return None
+
+    safe = _safe_provider_error_text(
+        error_message,
+        error_type,
+        kwargs.get("error_code"),
+    )
+    lower = safe.lower()
+    outcome = "FAILURE"
+    kind = "UNKNOWN"
+    reason_kinds = {
+        "auth": "AUTH",
+        "auth_permanent": "AUTH",
+        "billing": "QUOTA",
+        "rate_limit": "RATE_LIMIT",
+        "upstream_rate_limit": "RATE_LIMIT",
+        "overloaded": "SERVER",
+        "server_error": "SERVER",
+        "timeout": "TIMEOUT",
+        "ssl_cert_verification": "NETWORK",
+    }
+    reason_kind = reason_kinds.get(reason)
+    if reason_kind == "RATE_LIMIT":
+        outcome, kind = "THROTTLED", "RATE_LIMIT"
+    elif reason_kind:
+        kind = reason_kind
+    elif status == 429 or "rate limit" in lower or "too many requests" in lower:
+        outcome, kind = "THROTTLED", "RATE_LIMIT"
+    elif status in {401, 403} or any(
+        marker in lower
+        for marker in ("unauthorized", "authentication", "invalid key", "invalid api key")
+    ):
+        kind = "AUTH"
+    elif any(
+        marker in lower
+        for marker in ("quota", "insufficient balance", "insufficient funds", "credits exhausted")
+    ):
+        kind = "QUOTA"
+    elif any(marker in lower for marker in ("timeout", "timed out", "deadline exceeded")):
+        kind = "TIMEOUT"
+    elif any(
+        marker in lower
+        for marker in ("network", "connection refused", "connection reset", "dns", "name resolution")
+    ):
+        kind = "NETWORK"
+    elif status is not None and 500 <= status <= 599:
+        kind = "SERVER"
+    elif status is not None and 400 <= status <= 499:
+        return None
+
+    result: dict[str, Any] = {"outcome": outcome, "errorKind": kind}
+    if status is not None and 400 <= status <= 599:
+        result["httpStatus"] = status
+    if safe:
+        result["message"] = safe
+    return result
+
+
+def _api_attempt_idempotency_key(kind: str, connection_id: str, kwargs: dict[str, Any]) -> str:
+    request_id = str(kwargs.get("api_request_id") or "").strip()
+    if request_id:
+        seed = request_id
+        if kind == "error":
+            seed += ":retry:" + str(kwargs.get("retry_count") or 0)
+    else:
+        seed = "|".join(
+            str(kwargs.get(key) or "")
+            for key in (
+                "session_id",
+                "task_id",
+                "turn_id",
+                "api_call_count",
+                "provider",
+                "model",
+            )
+        )
+    digest = hashlib.blake2b(seed.encode("utf-8"), digest_size=12).hexdigest()
+    return f"provider-api-{kind}-{connection_id}-{digest}"[:200]
+
+
+def _record_api_provider_attempt(
+    classification: dict[str, Any], *, event_kind: str, kwargs: dict[str, Any]
+) -> None:
+    connection_id = _resolve_provider_connection_id(
+        kwargs.get("provider"), kwargs.get("base_url")
+    )
+    if not connection_id:
+        return
+
+    if classification.get("outcome") == "SUCCESS":
+        now = time.monotonic()
+        with _API_TELEMETRY_LOCK:
+            last = _API_SUCCESS_LAST_RECORDED.get(connection_id)
+            if last is not None and now - last < _SUCCESS_EVIDENCE_MIN_INTERVAL_SECONDS:
+                return
+            _API_SUCCESS_LAST_RECORDED[connection_id] = now
+
+    payload = dict(classification)
+    payload["source"] = "HERMES_LLM_API"
+    payload["metadata"] = {
+        "provider": str(kwargs.get("provider") or "")[:120],
+        "model": str(kwargs.get("model") or "")[:240],
+        "profile": _active_profile_name(),
+        "apiMode": str(kwargs.get("api_mode") or "")[:80],
+    }
+    try:
+        _control_plane_request(
+            f"/api/v2/commands/provider-connections/{urllib.parse.quote(connection_id, safe='')}/attempts",
+            method="POST",
+            payload=payload,
+            idempotency_key=_api_attempt_idempotency_key(event_kind, connection_id, kwargs),
+            timeout=1.5,
+        )
+    except Exception:
+        if classification.get("outcome") == "SUCCESS":
+            with _API_TELEMETRY_LOCK:
+                _API_SUCCESS_LAST_RECORDED.pop(connection_id, None)
+
+
+def _on_post_api_request(**kwargs: Any) -> None:
+    _record_api_provider_attempt(
+        {"outcome": "SUCCESS"}, event_kind="success", kwargs=kwargs
+    )
+
+
+def _on_api_request_error(**kwargs: Any) -> None:
+    classification = _api_error_outcome(**kwargs)
+    if classification is None:
+        return
+    _record_api_provider_attempt(classification, event_kind="error", kwargs=kwargs)
+
+
 def _needs_ai_office_authority(user_message: Any) -> bool:
     text = str(user_message or "").strip()
     if not text:
@@ -1328,5 +1606,7 @@ def register(ctx: Any) -> None:
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("post_api_request", _on_post_api_request)
+    ctx.register_hook("api_request_error", _on_api_request_error)
     ctx.register_hook("pre_tool_call", _on_pre_tool_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)

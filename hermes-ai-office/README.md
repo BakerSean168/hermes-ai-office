@@ -84,6 +84,15 @@ The script links the default AI Office plugin into each profile and enables it
 there without copying credentials. This is required for profile-routed Telegram
 threads such as `memoflow` to expose the `ai_office` toolset.
 
+AI Office also consumes Hermes' request-scoped `post_api_request` and
+`api_request_error` hooks. Successful main-Agent LLM calls provide sampled
+operational evidence to the Provider Hub, while rate-limit/auth/quota/network/
+timeout/server failures are recorded immediately. Request-specific failures
+such as content-policy blocks, context overflow, bad payloads, and missing
+models are excluded so they cannot degrade supplier availability. Prompt,
+response, request-body, and provider secret content are never forwarded by
+this telemetry path.
+
 For a local checkout:
 
 ```bash

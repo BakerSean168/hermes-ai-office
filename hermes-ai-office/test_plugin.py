@@ -55,6 +55,8 @@ class HermesAiOfficePluginTest(unittest.TestCase):
     def setUp(self) -> None:
         plugin._CTX = FakeContext()
         plugin._PENDING.clear()
+        plugin._PROVIDER_CONNECTION_CACHE.clear()
+        plugin._API_SUCCESS_LAST_RECORDED.clear()
 
     def selected(self, *, runtime: str = "OPENCODE", model: str = "opencode-go/deepseek-v4-flash") -> dict[str, object]:
         return {
@@ -476,7 +478,15 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin.register(ctx)
         self.assertEqual(
             set(ctx.hooks),
-            {"subagent_start", "subagent_stop", "pre_llm_call", "pre_tool_call", "post_tool_call"},
+            {
+                "subagent_start",
+                "subagent_stop",
+                "pre_llm_call",
+                "post_api_request",
+                "api_request_error",
+                "pre_tool_call",
+                "post_tool_call",
+            },
         )
         self.assertEqual(
             set(ctx.tools),
@@ -545,6 +555,183 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):
             plugin._on_post_tool_call(tool_name="terminal", result={"error": "429 rate limit"}, tool_call_id="bg429")
         self.assertEqual(request.call_args.kwargs["payload"]["outcome"], "THROTTLED")
+
+    def test_provider_connection_resolver_prefers_exact_provider_key(self) -> None:
+        hub = {
+            "items": [
+                {
+                    "id": "conn-opencode",
+                    "providerKey": "opencode-go",
+                    "baseUrl": "https://opencode.ai/zen/go/v1",
+                },
+                {
+                    "id": "conn-other",
+                    "providerKey": "other",
+                    "baseUrl": "https://other.example/v1",
+                },
+            ]
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=hub) as request:
+            connection_id = plugin._resolve_provider_connection_id(
+                "OpenCode Go", "https://opencode.ai/zen/go/v1/"
+            )
+        self.assertEqual(connection_id, "conn-opencode")
+        request.assert_called_once_with("/api/v2/projections/provider-hub-summary", timeout=1.5)
+
+    def test_provider_connection_resolver_uses_unique_base_url_fallback(self) -> None:
+        hub = {
+            "items": [
+                {
+                    "id": "conn-proxy",
+                    "providerKey": "cpa",
+                    "baseUrl": "http://127.0.0.1:8317/v1",
+                }
+            ]
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=hub):
+            connection_id = plugin._resolve_provider_connection_id(
+                "deepseek", "http://127.0.0.1:8317/v1"
+            )
+        self.assertEqual(connection_id, "conn-proxy")
+
+    def test_post_api_request_records_success_for_main_agent_provider(self) -> None:
+        with mock.patch.object(
+            plugin, "_resolve_provider_connection_id", return_value="conn-opencode"
+        ), mock.patch.object(plugin, "_control_plane_request") as request:
+            plugin._on_post_api_request(
+                api_request_id="api-1",
+                session_id="session-1",
+                task_id="task-1",
+                turn_id="turn-1",
+                provider="opencode-go",
+                base_url="https://opencode.ai/zen/go/v1",
+                model="deepseek-v4-flash",
+                api_mode="chat_completions",
+                api_call_count=1,
+            )
+        self.assertEqual(
+            request.call_args.args[0],
+            "/api/v2/commands/provider-connections/conn-opencode/attempts",
+        )
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["outcome"], "SUCCESS")
+        self.assertEqual(payload["source"], "HERMES_LLM_API")
+        self.assertEqual(payload["metadata"]["provider"], "opencode-go")
+        self.assertEqual(payload["metadata"]["model"], "deepseek-v4-flash")
+        self.assertEqual(payload["metadata"]["profile"], "coder")
+        self.assertTrue(
+            request.call_args.kwargs["idempotency_key"].startswith(
+                "provider-api-success-conn-opencode-"
+            )
+        )
+
+    def test_post_api_request_samples_repeated_successes(self) -> None:
+        with mock.patch.object(
+            plugin, "_resolve_provider_connection_id", return_value="conn-opencode"
+        ), mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(
+            plugin.time, "monotonic", side_effect=[100.0, 110.0]
+        ):
+            plugin._on_post_api_request(
+                api_request_id="api-1", provider="opencode-go", model="deepseek-v4-flash"
+            )
+            plugin._on_post_api_request(
+                api_request_id="api-2", provider="opencode-go", model="deepseek-v4-flash"
+            )
+        self.assertEqual(request.call_count, 1)
+
+    def test_api_request_error_records_rate_limit_without_error_body(self) -> None:
+        with mock.patch.object(
+            plugin, "_resolve_provider_connection_id", return_value="conn-opencode"
+        ), mock.patch.object(plugin, "_control_plane_request") as request:
+            plugin._on_api_request_error(
+                api_request_id="api-429",
+                provider="opencode-go",
+                base_url="https://opencode.ai/zen/go/v1",
+                model="deepseek-v4-flash",
+                api_mode="chat_completions",
+                status_code=429,
+                error_message="429 rate limit Bearer abc sk-secret token=xyz",
+                error_body="PRIVATE PROMPT super-secret-body",
+            )
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["outcome"], "THROTTLED")
+        self.assertEqual(payload["errorKind"], "RATE_LIMIT")
+        self.assertEqual(payload["httpStatus"], 429)
+        self.assertNotIn("abc", payload["message"])
+        self.assertNotIn("sk-secret", payload["message"])
+        self.assertNotIn("super-secret-body", json.dumps(payload))
+        self.assertEqual(payload["source"], "HERMES_LLM_API")
+
+    def test_api_error_classifier_covers_auth_quota_timeout_and_server(self) -> None:
+        self.assertEqual(plugin._api_error_outcome(status_code=401)["errorKind"], "AUTH")
+        self.assertEqual(
+            plugin._api_error_outcome(error_message="insufficient balance")["errorKind"],
+            "QUOTA",
+        )
+        self.assertEqual(
+            plugin._api_error_outcome(error_message="request timed out")["errorKind"],
+            "TIMEOUT",
+        )
+        self.assertEqual(plugin._api_error_outcome(status_code=503)["errorKind"], "SERVER")
+        self.assertEqual(
+            plugin._api_error_outcome(
+                reason="rate_limit",
+                status_code=429,
+                error={"type": "RateLimitError", "message": "too many requests"},
+            )["errorKind"],
+            "RATE_LIMIT",
+        )
+
+    def test_api_request_error_ignores_request_and_policy_failures(self) -> None:
+        with mock.patch.object(plugin, "_record_api_provider_attempt") as record:
+            plugin._on_api_request_error(
+                reason="content_policy_blocked",
+                provider="opencode-go",
+                error={"type": "ContentPolicyBlocked", "message": "prompt rejected"},
+            )
+            plugin._on_api_request_error(
+                reason="format_error",
+                provider="opencode-go",
+                status_code=400,
+                error={"type": "BadRequest", "message": "bad payload"},
+            )
+            plugin._on_api_request_error(
+                reason="model_not_found",
+                provider="opencode-go",
+                status_code=404,
+                error={"type": "NotFound", "message": "missing model"},
+            )
+        record.assert_not_called()
+
+    def test_api_error_idempotency_distinguishes_retries(self) -> None:
+        base = {
+            "api_request_id": "turn-1:api:1",
+            "provider": "opencode-go",
+            "model": "deepseek-v4-flash",
+        }
+        first = plugin._api_attempt_idempotency_key(
+            "error", "conn-opencode", {**base, "retry_count": 0}
+        )
+        second = plugin._api_attempt_idempotency_key(
+            "error", "conn-opencode", {**base, "retry_count": 1}
+        )
+        success = plugin._api_attempt_idempotency_key(
+            "success", "conn-opencode", {**base, "retry_count": 1}
+        )
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(second, success)
+
+    def test_api_request_telemetry_skips_unresolved_provider(self) -> None:
+        with mock.patch.object(
+            plugin, "_resolve_provider_connection_id", return_value=""
+        ), mock.patch.object(plugin, "_control_plane_request") as request:
+            plugin._on_post_api_request(
+                api_request_id="api-missing",
+                provider="unmapped-provider",
+                base_url="https://unknown.example/v1",
+                model="model-x",
+            )
+        request.assert_not_called()
 
     def test_pre_llm_authority_context_recognizes_ai_office_and_current_provider_state(self) -> None:
         hub = {
