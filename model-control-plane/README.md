@@ -58,7 +58,7 @@ Primary reads include:
 - `GET /api/v2/channels`
 - `GET /api/v2/runtime-sessions`
 - `GET /api/v2/runtime-access-profiles`
-- `POST /api/v2/commands/execution/resolve` — simple intent-to-Employee/harness placement used by AI Office before coding-agent launch
+- `POST /api/v2/commands/execution/resolve` — per-execution intent-to-Employee placement; intent selects the work class, the chosen model family selects the preferred harness, and current compatibility selects the actual harness
 - `GET /api/v2/incidents`
 - `GET /api/v2/events` (SSE)
 

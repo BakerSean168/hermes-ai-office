@@ -89,9 +89,11 @@ _LIST_PROVIDERS_SCHEMA = {
 _RESOLVE_EXECUTION_SCHEMA = {
     "name": "ai_office_resolve_execution",
     "description": (
-        "Ask AI Office for a simple workforce placement before choosing a coding model or external coding harness. "
+        "Ask AI Office for a per-execution workforce placement before choosing a coding model or external coding harness. "
         "Use PLAN/REVIEW for high-end planning or review work and IMPLEMENT/DEBUG/TEST/QUICK_FIX for implementation work. "
-        "The response includes the Employee, safe provider connection metadata, preferred official harness, profile action, command template, and usage guidance."
+        "Intent selects a work class only; it never fixes the model or harness. The selected model family determines the preferred harness, "
+        "and runtime/provider compatibility determines the actual harness. The response includes the Employee, safe provider connection metadata, "
+        "preferred official harness, profile action, command template, and usage guidance."
     ),
     "parameters": {
         "type": "object",
@@ -2318,7 +2320,10 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
             "When this task may use an external coding Agent/harness, do not choose the model, provider, or harness from memory. "
             "Call ai_office_resolve_execution before launching Claude Code, Codex, DSH, OpenCode, or another coding Agent. "
             "Use PLAN/REVIEW for high-end planning or review and IMPLEMENT/DEBUG/TEST/QUICK_FIX for implementation work. "
-            "Follow the returned Employee, provider connection, preferred official harness, profileAction, commandTemplate, and guidance. "
+            "Intent selects the work class only; never infer a fixed mapping such as IMPLEMENT=DSH or REVIEW=CODEX. "
+            "The returned model family determines the preferred harness, while current runtime/provider compatibility determines the selected harness. "
+            "Treat every selection as per-execution and do not store a selected model or harness as a permanent Job Type mapping or memory rule. "
+            "Follow the returned Employee, provider connection, preferred official harness, selected harness, profileAction, commandTemplate, and guidance. "
             "If the official harness is unavailable, use only the fallback returned by AI Office."
         )
 

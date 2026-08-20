@@ -770,6 +770,11 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("ai_office_resolve_execution", result["context"])
         self.assertIn("IMPLEMENT", result["context"])
+        self.assertIn("Intent selects the work class only", result["context"])
+        self.assertIn("IMPLEMENT=DSH", result["context"])
+        self.assertIn("REVIEW=CODEX", result["context"])
+        self.assertIn("per-execution", result["context"])
+        self.assertIn("permanent Job Type mapping", result["context"])
         request.assert_not_called()
 
     def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:

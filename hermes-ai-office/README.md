@@ -46,15 +46,15 @@ Hermes can ask AI Office for an execution worker before choosing a coding harnes
 ai_office_resolve_execution(intent=IMPLEMENT|DEBUG|TEST|QUICK_FIX|PLAN|REVIEW|RESEARCH)
 ```
 
-The policy is deliberately small and opinionated. `PLAN`, `REVIEW`, and `RESEARCH` use the premium roster (current Claude Opus/Sonnet and GPT-5.6 Sol/Terra-class workers). Implementation intents use GPT-5.6 Luna, DeepSeek V4 Flash, or GLM-5.2 workers. Provider availability and credential scope remain hard routing gates rather than prompt hints.
+The policy is deliberately small and opinionated. `PLAN`, `REVIEW`, and `RESEARCH` select from the premium roster (current Claude Opus/Sonnet and GPT-5.6 Sol/Terra-class workers). Implementation intents select from GPT-5.6 Luna, DeepSeek V4 Flash, or GLM-5.2 workers. Intent determines only the work class; it never implies a fixed model or coding harness. The implementation roster uses a neutral model baseline so provider availability, reusable runtime access, official-harness compatibility, and explicit commercial rules can decide each execution. Provider availability and credential scope remain hard routing gates rather than prompt hints.
 
-Harness preference follows the model family: Claude -> Claude Code, GPT -> Codex, DeepSeek -> DSH, and GLM -> ZCode when an explicitly enabled ZCode runtime is available. Otherwise AI Office returns the supported fallback, normally OpenCode. Existing native profiles are reused; missing API-key profiles are materialized from safe ProviderConnection metadata. The response contains only a credential reference, never credential material.
+Harness preference follows the selected model family: Claude -> Claude Code, GPT -> Codex, DeepSeek -> DSH, and GLM -> ZCode when an explicitly enabled ZCode runtime is available. Otherwise AI Office returns the supported fallback, normally OpenCode. Existing native profiles are reused; missing API-key profiles are materialized from safe ProviderConnection metadata. The response contains only a credential reference, never credential material.
 
 DeepSeek V4 Flash has one time-sensitive commercial rule: Asia/Shanghai 09:00-18:00 applies a peak-price penalty only to OpenCode Go and the DeepSeek official API. Third-party commercial or sponsored relay connections are not time-priced by this policy. This is evaluated at decision time; no cron job mutates the active model.
 
 Before placement, AI Office reconciles only the fixed policy roster from Provider Hub into Employee/Employment records. Providers that do not expose a models endpoint may supply an explicit model list when they are added. This keeps large upstream catalogs out of the workforce model while allowing known endpoints such as limited contest/free APIs to participate.
 
-A selected execution response includes the Employee, Employment, safe ProviderConnection metadata, preferred/selected harness, profile action, launch template, reasons, and a short usage instruction. Hermes should treat the returned command template as the launch contract and replace only the task placeholder.
+A selected execution response includes the Employee, Employment, safe ProviderConnection metadata, preferred/selected harness, profile action, launch template, reasons, `decisionScope=PER_EXECUTION`, and a short usage instruction. Hermes should treat the returned command template as the launch contract and replace only the task placeholder. It must not generalize one selected model or harness into a permanent mapping such as `IMPLEMENT=DSH` or `REVIEW=CODEX`, and must not store such a mapping as a memory rule.
 
 ## Runtime policy modes
 

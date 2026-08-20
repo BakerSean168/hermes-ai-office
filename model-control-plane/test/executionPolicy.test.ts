@@ -29,6 +29,7 @@ function addCandidate(
     providerKey: string;
     providerName?: string;
     baseUrl?: string;
+    protocol?: string;
     runtimeKind?: 'OPENCODE' | 'CODEX' | 'CLAUDE_CODE';
     providerRef?: string;
     profileRef?: string;
@@ -51,7 +52,7 @@ function addCandidate(
     supplierId: String(supplier.id),
     baseUrl: input.baseUrl ?? `https://${input.providerKey}.example/v1`,
     credentialRef: `${input.providerKey.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
-    protocol: 'openai-chat-completions',
+    protocol: input.protocol ?? 'openai-chat-completions',
     sourceKind: 'TEST',
     availabilityState: 'AVAILABLE',
     models: [input.model],
@@ -106,6 +107,39 @@ test('implementation peak hours prefer Luna over time-priced OpenCode Go DeepSee
     (item) => item.model === 'deepseek-v4-flash',
   );
   assert.ok((deepseek?.reasons as string[]).includes('DEEPSEEK_PEAK_PRICE_PENALTY'));
+});
+
+test('implementation does not hard-code DeepSeek over a reusable healthy Luna route', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'charity-relay',
+    supplierName: 'Charity Relay',
+    model: 'deepseek-v4-flash',
+    providerKey: 'charity-relay',
+  });
+  addCandidate(state, {
+    supplierSlug: 'worldclaw',
+    supplierName: 'worldclaw',
+    model: 'gpt-5.6-luna',
+    providerKey: 'worldclaw',
+    runtimeKind: 'CODEX',
+    providerRef: 'worldclaw',
+    profileRef: 'worldclaw-luna',
+  });
+  const decision = state.policy.resolve({
+    intent: 'IMPLEMENT',
+    at: Date.UTC(2026, 7, 20, 13, 0, 0),
+    availableRuntimes: [
+      { kind: 'DSH', path: '/bin/dsh' },
+      { kind: 'CODEX', path: '/bin/codex' },
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal(selected.model, 'gpt-5.6-luna');
+  assert.equal(decision.decisionScope, 'PER_EXECUTION');
+  assert.equal(decision.routingPrinciple, 'INTENT_SELECTS_WORK_CLASS_MODEL_FAMILY_SELECTS_HARNESS');
+  assert.match(String(selected.guidance), /per-execution placement/i);
+  assert.match(String(selected.guidance), /not a fixed model or harness/i);
 });
 
 test('implementation off-peak prefers time-priced DeepSeek and uses DSH when available', () => {
@@ -166,6 +200,35 @@ test('DeepSeek through a third-party relay is not affected by peak pricing', () 
   assert.ok(!(selected.reasons as string[]).includes('DEEPSEEK_PEAK_PRICE_PENALTY'));
 });
 
+test('implementation can automatically choose GLM when other implementation routes are unavailable', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'worldclaw',
+    supplierName: 'worldclaw',
+    model: 'gpt-5.6-luna',
+    providerKey: 'worldclaw',
+    runtimeKind: 'CODEX',
+    providerRef: 'worldclaw',
+    profileRef: 'worldclaw-luna',
+  });
+  const glm = addCandidate(state, {
+    supplierSlug: 'teamorouter',
+    supplierName: 'teamorouter',
+    model: 'glm-5.2',
+    providerKey: 'teamorouter',
+  });
+  const decision = state.policy.resolve({
+    intent: 'IMPLEMENT',
+    availableRuntimes: [{ kind: 'OPENCODE', path: '/usr/bin/opencode' }],
+    availableProviderConnectionIds: [String(glm.connection.id)],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal(selected.model, 'glm-5.2');
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(runtime.preferredHarness, 'ZCODE');
+  assert.equal(runtime.selectedHarness, 'OPENCODE');
+});
+
 test('review selects a premium model and prefers the model vendor official harness', () => {
   const state = make();
   addCandidate(state, {
@@ -197,6 +260,29 @@ test('review selects a premium model and prefers the model vendor official harne
   assert.equal(runtime.profileAction, 'REUSE_EXISTING');
   assert.equal(runtime.profileRef, 'team-sol');
   assert.match(String(selected.guidance), /never place API keys/i);
+});
+
+test('review can select Claude and uses Claude Code when the provider is compatible', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'anthropic-official',
+    supplierName: 'Anthropic Official',
+    model: 'claude-opus-5',
+    providerKey: 'anthropic-official',
+    protocol: 'anthropic-messages',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    availableRuntimes: [
+      { kind: 'CLAUDE_CODE', path: '/opt/data/runtime/npm/bin/claude' },
+      { kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' },
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal(selected.model, 'claude-opus-5');
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(runtime.preferredHarness, 'CLAUDE_CODE');
+  assert.equal(runtime.selectedHarness, 'CLAUDE_CODE');
 });
 
 test('Claude model on an OpenAI-compatible relay does not force incompatible Claude Code', () => {

@@ -145,9 +145,13 @@ function baseRank(work: WorkClass, model: string): number {
     if (model.startsWith('claude-sonnet-')) return 30;
     return 100;
   }
-  if (model.startsWith('deepseek-v4-flash')) return 10;
+  // Implementation models share one neutral baseline. Availability, reusable runtime
+  // access, official-harness compatibility, and explicit commercial rules decide
+  // between DeepSeek, Luna, and GLM for each execution. Job type must not imply a
+  // fixed implementation model.
+  if (model.startsWith('deepseek-v4-flash')) return 20;
   if (model.startsWith('gpt-5.6-luna')) return 20;
-  if (model.startsWith('glm-5.2')) return 30;
+  if (model.startsWith('glm-5.2')) return 20;
   return 100;
 }
 
@@ -327,8 +331,10 @@ function guidance(candidate: Candidate, intent: ExecutionIntent): string {
       : ` The preferred official harness is ${candidate.officialHarness}, but it is not available in this runtime, so use ${candidate.harness}.`;
   return [
     `For ${intent}, use ${candidate.model} from ${familyLabel} through AI Office connection ${connectionId}.`,
+    'This is a per-execution placement: intent determines the work class, not a fixed model or harness.',
     `Prefer ${candidate.officialHarness} for this model family.${fallback}`,
     profileAction,
+    'Do not generalize this selected model or harness into a permanent Job Type mapping or memory rule.',
     'Resolve credentials only through credentialRef/profile configuration; never place API keys in prompts or command text.',
     'Keep the selected provider/model fixed for this execution unless AI Office returns a new decision or the route becomes unavailable.',
   ].join(' ');
@@ -473,6 +479,8 @@ export class ExecutionPolicyService {
     return {
       status: selected ? 'SELECTED' : 'UNRESOLVED',
       policyVersion: 'simple-placement-v1',
+      decisionScope: 'PER_EXECUTION',
+      routingPrinciple: 'INTENT_SELECTS_WORK_CLASS_MODEL_FAMILY_SELECTS_HARNESS',
       intent,
       workClass: desiredClass,
       evaluatedAt: at,
