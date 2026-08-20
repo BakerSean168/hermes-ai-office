@@ -89,6 +89,7 @@ test('implementation peak hours prefer Luna over time-priced OpenCode Go DeepSee
     supplierName: 'worldclaw',
     model: 'gpt-5.6-luna',
     providerKey: 'worldclaw',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'worldclaw',
     profileRef: 'worldclaw-luna',
@@ -122,6 +123,7 @@ test('implementation does not hard-code DeepSeek over a reusable healthy Luna ro
     supplierName: 'worldclaw',
     model: 'gpt-5.6-luna',
     providerKey: 'worldclaw',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'worldclaw',
     profileRef: 'worldclaw-luna',
@@ -158,6 +160,7 @@ test('implementation off-peak prefers time-priced DeepSeek and uses DSH when ava
     supplierName: 'worldclaw',
     model: 'gpt-5.6-luna',
     providerKey: 'worldclaw',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'worldclaw',
     profileRef: 'worldclaw-luna',
@@ -207,6 +210,7 @@ test('implementation can automatically choose GLM when other implementation rout
     supplierName: 'worldclaw',
     model: 'gpt-5.6-luna',
     providerKey: 'worldclaw',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'worldclaw',
     profileRef: 'worldclaw-luna',
@@ -236,6 +240,7 @@ test('review selects a premium model and prefers the model vendor official harne
     supplierName: 'OpenAI Official',
     model: 'gpt-5.6-sol',
     providerKey: 'openai-team',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'openai',
     profileRef: 'team-sol',
@@ -260,6 +265,33 @@ test('review selects a premium model and prefers the model vendor official harne
   assert.equal(runtime.profileAction, 'REUSE_EXISTING');
   assert.equal(runtime.profileRef, 'team-sol');
   assert.match(String(selected.guidance), /never place API keys/i);
+});
+
+test('GPT on a chat-completions-only relay does not force incompatible Codex', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'chat-relay',
+    supplierName: 'Chat Relay',
+    model: 'gpt-5.6-luna',
+    providerKey: 'chat-relay',
+    protocol: 'openai-chat-completions',
+    runtimeKind: 'CODEX',
+    providerRef: 'chat-relay',
+    profileRef: 'chat-relay-luna',
+  });
+  const decision = state.policy.resolve({
+    intent: 'IMPLEMENT',
+    requestedModel: 'gpt-5.6-luna',
+    availableRuntimes: [
+      { kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' },
+      { kind: 'OPENCODE', path: '/opt/data/runtime/npm/bin/opencode' },
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(runtime.preferredHarness, 'CODEX');
+  assert.equal(runtime.selectedHarness, 'OPENCODE');
+  assert.equal(runtime.officialHarnessAvailable, false);
 });
 
 test('review can select Claude and uses Claude Code when the provider is compatible', () => {
@@ -321,6 +353,7 @@ test('provider availability whitelist prevents selection of a credential-inacces
     supplierName: 'Relay A',
     model: 'gpt-5.6-luna',
     providerKey: 'relay-a',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'relay-a',
     profileRef: 'relay-a-luna',
@@ -330,6 +363,7 @@ test('provider availability whitelist prevents selection of a credential-inacces
     supplierName: 'Relay B',
     model: 'gpt-5.6-luna',
     providerKey: 'relay-b',
+    protocol: 'openai-responses',
     runtimeKind: 'CODEX',
     providerRef: 'relay-b',
     profileRef: 'relay-b-luna',

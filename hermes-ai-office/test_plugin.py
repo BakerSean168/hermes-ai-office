@@ -77,8 +77,42 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(plugin._detect_runtime("opencode run 'fix it'"), "opencode")
         self.assertEqual(plugin._detect_runtime("cd /workspace && codex exec 'review'"), "codex")
         self.assertEqual(plugin._detect_runtime("HOME=/tmp opencode run test"), "opencode")
+        self.assertEqual(
+            plugin._detect_runtime(
+                "HOME=/tmp /home/ubuntu/projects/agent-harness/bin/harnessctl exec --project /repo dsh -- --patch p.yml task"
+            ),
+            "dsh",
+        )
+        self.assertEqual(
+            plugin._detect_runtime("/home/ubuntu/projects/agent-harness/bin/harnessctl exec --project /repo claude -- task"),
+            "claude",
+        )
         self.assertIsNone(plugin._detect_runtime("echo opencode"))
         self.assertIsNone(plugin._detect_runtime("printf 'codex run'"))
+
+    def test_managed_harness_launch_keeps_telemetry_without_legacy_restaffing(self) -> None:
+        events: list[dict[str, object]] = []
+        command = (
+            "HOME=/opt/data/profiles/memoflow/home "
+            "/home/ubuntu/projects/agent-harness/bin/harnessctl exec "
+            "--project /home/ubuntu/projects/memoflow codex -- --profile team exec task"
+        )
+        with mock.patch.object(plugin, "_resolve_runtime_policy") as policy, mock.patch.object(
+            plugin, "_enqueue", side_effect=events.append
+        ):
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": command, "workdir": "/home/ubuntu/projects/memoflow"},
+                tool_call_id="managed-1",
+            )
+        self.assertIsNone(directive)
+        policy.assert_not_called()
+        self.assertEqual(plugin._PENDING["managed-1"]["runtime"], "codex")
+        self.assertEqual(
+            plugin._PENDING["managed-1"]["policyStatus"],
+            "PRE_RESOLVED_CAPABILITY_PLANE",
+        )
+        self.assertEqual(events[0]["event"], "runtime_spawn_requested")
 
     def test_pre_tool_modifies_opencode_with_selected_employee(self) -> None:
         events: list[dict[str, object]] = []
@@ -844,7 +878,9 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ), mock.patch.object(
             plugin, "_available_execution_provider_ids", return_value=["conn-1"]
         ), mock.patch.object(
-            plugin, "_prepare_execution_result", side_effect=lambda value: value
+            plugin, "_execution_project_path", return_value="/home/ubuntu/projects/memoflow"
+        ), mock.patch.object(
+            plugin, "_prepare_execution_result", side_effect=lambda value, **_kwargs: value
         ), mock.patch.object(plugin.time, "time", return_value=1000.0):
             result = json.loads(
                 plugin._resolve_execution_tool({"intent": "REVIEW", "requested_model": "gpt-5.6-sol"})
@@ -858,6 +894,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(payload["availableProviderConnectionIds"], ["conn-1"])
         self.assertEqual(payload["at"], 1_000_000)
         self.assertEqual(payload["metadata"]["profileName"], "coder")
+        self.assertEqual(payload["metadata"]["projectRoot"], "/home/ubuntu/projects/memoflow")
         self.assertNotIn("api_key", json.dumps(payload).lower())
         self.assertEqual(result["selected"]["runtime"]["preferredHarness"], "CODEX")
 
@@ -891,6 +928,27 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin, "_env_value_at_home", return_value="global-secret"
         ), mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(plugin._credential_value("SHARED_API_KEY"), "global-secret")
+
+    def test_prepare_codex_rejects_chat_completions_only_provider(self) -> None:
+        selected = {"model": "gpt-5.6-luna"}
+        runtime = {
+            "selectedHarness": "CODEX",
+            "preferredHarness": "CODEX",
+            "providerRef": "chat-relay",
+            "profileRef": "chat-relay-luna",
+        }
+        connection = {
+            "id": "pconn-chat-relay",
+            "providerKey": "chat-relay",
+            "authKind": "API_KEY",
+            "baseUrl": "https://chat-relay.example/v1",
+            "credentialRef": "CHAT_RELAY_API_KEY",
+            "protocol": "openai-chat-completions",
+        }
+        with mock.patch.object(plugin, "_ensure_codex_native_access") as ensure:
+            with self.assertRaisesRegex(RuntimeError, "does not support selected provider protocol"):
+                plugin._prepare_codex_execution(selected, runtime, connection)
+        ensure.assert_not_called()
 
     def test_prepare_codex_oauth_reuses_existing_profile_without_secret_materialization(self) -> None:
         selected = {"model": "gpt-5.6-sol"}
@@ -956,7 +1014,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 plugin._prepare_dsh_execution(selected, runtime, connection)
                 self.assertEqual(runtime["profileAction"], "REUSE_EXISTING")
 
-    def test_prepare_execution_result_marks_profile_ready_and_appends_launch_guidance(self) -> None:
+    def test_prepare_execution_result_routes_launch_through_agent_harness(self) -> None:
         result = {
             "status": "SELECTED",
             "selected": {
@@ -977,12 +1035,92 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
             os.environ, {"HERMES_HOME": tempdir}, clear=False
-        ), mock.patch.object(plugin, "_runtime_secret_file", return_value=f"{tempdir}/secret.key"):
-            prepared = plugin._prepare_execution_result(result)
+        ), mock.patch.object(
+            plugin, "_runtime_secret_file", return_value=f"{tempdir}/secret.key"
+        ), mock.patch.object(
+            plugin,
+            "_prepare_agent_harness_environment",
+            return_value={
+                "controller": "/home/ubuntu/projects/agent-harness/bin/harnessctl",
+                "profileHome": f"{tempdir}/profiles/coder/home",
+                "projectRoot": "/home/ubuntu/projects/memoflow",
+                "capabilityHash": "cap-hash",
+                "environmentId": "memoflow-cap-hash",
+                "environmentRoot": f"{tempdir}/capability-env",
+            },
+        ):
+            prepared = plugin._prepare_execution_result(
+                result, project_path="/home/ubuntu/projects/memoflow"
+            )
         selected = prepared["selected"]
-        self.assertTrue(selected["runtime"]["profileReady"])
-        self.assertIn("commandTemplate", selected["runtime"])
+        runtime = selected["runtime"]
+        self.assertTrue(runtime["profileReady"])
+        self.assertEqual(runtime["capabilityPlaneStatus"], "READY")
+        self.assertEqual(runtime["launchContract"], "HARNESSCTL_EXEC")
+        self.assertEqual(runtime["capabilityHash"], "cap-hash")
+        self.assertIn("harnessctl exec --project /home/ubuntu/projects/memoflow dsh", runtime["commandTemplate"])
+        self.assertIn("--patch", runtime["commandTemplate"])
+        self.assertIn("$(cat", runtime["commandTemplate"])
         self.assertIn("replace only <task>", selected["guidance"])
+
+    def test_prepare_execution_result_blocks_degraded_launch_without_project(self) -> None:
+        result = {
+            "status": "SELECTED",
+            "selected": {
+                "model": "gpt-5.6-sol",
+                "providerConnection": {
+                    "id": "pconn-team",
+                    "providerKey": "team",
+                    "authKind": "OAUTH",
+                    "credentialRef": "codex-auth:team",
+                },
+                "runtime": {
+                    "selectedHarness": "CODEX",
+                    "preferredHarness": "CODEX",
+                    "accessProfileId": "access-team",
+                    "profileRef": "team",
+                    "providerRef": "openai",
+                },
+                "guidance": "Use Codex.",
+            },
+        }
+        with mock.patch.object(plugin, "_codex_profile_exists", return_value=True):
+            prepared = plugin._prepare_execution_result(result)
+        runtime = prepared["selected"]["runtime"]
+        self.assertFalse(runtime["profileReady"])
+        self.assertEqual(runtime["capabilityPlaneStatus"], "PROJECT_REQUIRED")
+        self.assertEqual(runtime["launchContract"], "BLOCKED_UNTIL_PROJECT_RESOLVED")
+        self.assertNotIn("commandTemplate", runtime)
+        self.assertIn("project_path", prepared["selected"]["guidance"])
+
+    def test_prepare_agent_harness_environment_uses_profile_home(self) -> None:
+        completed = mock.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "environment": {
+                        "projectRoot": "/home/ubuntu/projects/memoflow",
+                        "capabilityHash": "abc123",
+                        "environmentId": "memoflow-abc123",
+                        "root": "/tmp/env-root",
+                    }
+                }
+            ),
+            stderr="",
+        )
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tempdir}, clear=False
+        ), mock.patch.object(
+            plugin, "_agent_harnessctl_path", return_value="/bin/harnessctl"
+        ), mock.patch.object(plugin.subprocess, "run", return_value=completed) as run:
+            value = plugin._prepare_agent_harness_environment("/home/ubuntu/projects/memoflow")
+        self.assertEqual(value["capabilityHash"], "abc123")
+        self.assertTrue(value["profileHome"].endswith("/profiles/coder/home"))
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/bin/harnessctl", "prepare", "/home/ubuntu/projects/memoflow", "--json"],
+        )
+        self.assertEqual(run.call_args.kwargs["env"]["HOME"], value["profileHome"])
 
 
 if __name__ == "__main__":

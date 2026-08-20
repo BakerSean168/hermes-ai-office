@@ -21,6 +21,7 @@ import queue
 import re
 import shlex
 import shutil
+import subprocess
 import threading
 import tomllib
 import time
@@ -106,6 +107,10 @@ _RESOLVE_EXECUTION_SCHEMA = {
                 "type": "string",
                 "description": "Optional exact model request. Omit to let AI Office choose from the fixed policy tiers.",
             },
+            "project_path": {
+                "type": "string",
+                "description": "Optional current project/repository path. Provide it for coding work so Agent Harness can materialize project MCP, Skills, and Instructions for the selected Harness.",
+            },
         },
         "required": ["intent"],
     },
@@ -143,6 +148,16 @@ _RUNTIME_COMMAND_RE = re.compile(
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+\s+)*"
     r"(?:env\s+(?:[^\s;&|()]+\s+)*|nohup\s+|command\s+|timeout\s+[^\s;&|()]+\s+)?"
     r"(?:[^\s;&|()]*/)?(?P<runtime>opencode|codex)(?=[\s;&|()]|$)",
+    re.IGNORECASE,
+)
+_MANAGED_HARNESS_COMMAND_RE = re.compile(
+    r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|()]+)\s+)*"
+    r"(?:env\s+(?:[^\s;&|()]+\s+)*)?"
+    r"(?:[^\s;&|()]*/)?harnessctl\s+exec\s+"
+    r"(?:--project\s+[^\s;&|()]+\s+)?"
+    r"(?:--profile\s+[^\s;&|()]+\s+)?"
+    r"(?P<runtime>codex|dsh|claude|opencode)(?=[\s;&|()]|$)",
     re.IGNORECASE,
 )
 _MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s;&|]+)", re.IGNORECASE)
@@ -364,6 +379,11 @@ def _policy_workforce_models(models: list[str]) -> list[str]:
     return selected
 
 
+def _codex_protocol_compatible(protocol: str) -> bool:
+    normalized = str(protocol or "").strip().lower()
+    return any(token in normalized for token in ("responses", "codex", "chatgpt"))
+
+
 def _register_shared_policy_workforce(
     *,
     provider_key: str,
@@ -372,6 +392,7 @@ def _register_shared_policy_workforce(
     supplier_slug: str | None = None,
     supplier_name: str | None = None,
     base_url: str,
+    protocol: str,
     credential_ref: str,
     connection_id: str,
     models: list[str],
@@ -413,7 +434,7 @@ def _register_shared_policy_workforce(
             "modelRef": model,
             "baseUrl": base_url,
             "credentialRef": credential_ref,
-            "protocol": "openai-chat-completions",
+            "protocol": protocol,
             "config": {
                 "managedProvider": True,
                 "package": "@ai-sdk/openai-compatible",
@@ -431,7 +452,7 @@ def _register_shared_policy_workforce(
         )
         accesses: list[dict[str, Any]] = [opencode]
 
-        if normalized.startswith("gpt-5.6"):
+        if normalized.startswith("gpt-5.6") and _codex_protocol_compatible(protocol):
             digest = hashlib.blake2b(
                 f"{provider_key}|{base_url}".encode("utf-8"), digest_size=4
             ).hexdigest()
@@ -447,9 +468,9 @@ def _register_shared_policy_workforce(
                 "profileRef": f"hao-{provider_key[:40]}-{profile_digest}"[:120],
                 "baseUrl": base_url,
                 "credentialRef": credential_ref,
-                "protocol": "openai-chat-completions",
+                "protocol": protocol,
                 "config": {
-                    "wireApi": "chat",
+                    "wireApi": "responses",
                     "providerHubConnectionId": connection_id,
                 },
                 "priority": 120,
@@ -579,6 +600,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 display_name=display_name,
                 website_url=website_url,
                 base_url=selected_base_url,
+                protocol="openai-chat-completions",
                 credential_ref=credential_ref,
                 connection_id=connection_id,
                 models=models,
@@ -748,6 +770,7 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
                     supplier_slug=supplier_slug or provider_key,
                     supplier_name=supplier_name or display_name,
                     base_url=base_url,
+                    protocol=str(connection.get("protocol") or "openai-chat-completions"),
                     credential_ref=credential_ref,
                     connection_id=connection_id,
                     models=missing,
@@ -819,6 +842,91 @@ def _execution_runtime_inventory() -> list[dict[str, str]]:
         if path:
             runtimes.append({"kind": "ZCODE", "path": path, "mode": "DESKTOP"})
     return runtimes
+
+
+def _agent_harnessctl_path() -> str:
+    configured = str(os.environ.get("HERMES_AI_OFFICE_HARNESSCTL") or "").strip()
+    candidates = [
+        configured,
+        "/home/ubuntu/projects/agent-harness/bin/harnessctl",
+        "/opt/data/runtime/agent-harness/bin/harnessctl",
+        str(Path.home() / ".local" / "share" / "agent-harness" / "current" / "bin" / "harnessctl"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        except OSError:
+            continue
+    return ""
+
+
+def _execution_project_path(args: dict[str, Any] | None = None) -> str:
+    requested = str((args or {}).get("project_path") or "").strip()
+    candidates: list[Path] = []
+    if requested:
+        candidates.append(Path(requested).expanduser())
+    configured = str(os.environ.get("HERMES_AI_OFFICE_PROJECT_ROOT") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    profile = _active_profile_name()
+    if profile and profile not in {"default", "main"}:
+        candidates.append(Path("/home/ubuntu/projects") / _safe_runtime_name(profile))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            current = resolved if resolved.is_dir() else resolved.parent
+            for root in (current, *current.parents):
+                if (root / ".git").exists():
+                    return str(root)
+        except OSError:
+            continue
+    return ""
+
+
+def _prepare_agent_harness_environment(project_path: str) -> dict[str, Any]:
+    harnessctl = _agent_harnessctl_path()
+    if not harnessctl:
+        raise RuntimeError("Agent Harness controller is not available")
+    if not project_path:
+        raise RuntimeError("Agent Harness project path is not available")
+    profile_home = _active_runtime_hermes_home() / "home"
+    profile_home.mkdir(parents=True, exist_ok=True)
+    _adopt_active_runtime_owner(profile_home)
+    env = os.environ.copy()
+    env["HOME"] = str(profile_home)
+    process = subprocess.run(
+        [harnessctl, "prepare", project_path, "--json"],
+        env=env,
+        cwd=project_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "Agent Harness prepare failed").strip()
+        raise RuntimeError(detail[:500])
+    try:
+        payload = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Agent Harness returned invalid JSON") from exc
+    environment = payload.get("environment") if isinstance(payload, dict) else None
+    if not isinstance(environment, dict):
+        raise RuntimeError("Agent Harness prepare did not return an environment")
+    return {
+        "controller": harnessctl,
+        "profileHome": str(profile_home),
+        "projectRoot": str(environment.get("projectRoot") or project_path),
+        "capabilityHash": str(environment.get("capabilityHash") or ""),
+        "environmentId": str(environment.get("environmentId") or ""),
+        "environmentRoot": str(environment.get("root") or ""),
+    }
 
 
 def _safe_runtime_name(value: str) -> str:
@@ -932,6 +1040,8 @@ def _prepare_codex_execution(
             }
         )
         return
+    if not _codex_protocol_compatible(protocol):
+        raise RuntimeError(f"Codex does not support selected provider protocol: {protocol or 'unknown'}")
     if not provider_ref:
         provider_ref = (
             "hao-"
@@ -957,7 +1067,7 @@ def _prepare_codex_execution(
             "baseUrl": base_url or None,
             "credentialRef": credential_ref or None,
             "protocol": protocol,
-            "config": {"wireApi": "responses" if "responses" in protocol else "chat"},
+            "config": {"wireApi": "responses"},
         },
     }
     if not _ensure_codex_native_access(synthetic):
@@ -1062,7 +1172,81 @@ def _prepare_claude_execution(
     )
 
 
-def _prepare_execution_result(result: dict[str, Any]) -> dict[str, Any]:
+def _apply_agent_harness_launch(
+    selected: dict[str, Any],
+    runtime: dict[str, Any],
+    connection: dict[str, Any],
+    environment: dict[str, Any],
+) -> None:
+    selected_harness = str(runtime.get("selectedHarness") or "").strip().upper()
+    host = {
+        "CODEX": "codex",
+        "CLAUDE_CODE": "claude",
+        "DSH": "dsh",
+        "OPENCODE": "opencode",
+    }.get(selected_harness)
+    if not host:
+        return
+    controller = str(environment["controller"])
+    profile_home = str(environment["profileHome"])
+    project_root = str(environment["projectRoot"])
+    base = (
+        f"HOME={shlex.quote(profile_home)} {shlex.quote(controller)} exec "
+        f"--project {shlex.quote(project_root)} {host} -- "
+    )
+    prefix = ""
+    args = ""
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    auth_kind = str(connection.get("authKind") or "API_KEY").strip().upper()
+    if selected_harness == "DSH":
+        provider_patch = str(runtime.get("managedProfilePath") or "").strip()
+        secret_file = _runtime_secret_file(credential_ref) if credential_ref else None
+        if not provider_patch or not credential_ref or not secret_file:
+            raise RuntimeError("DSH provider overlay is not ready for Agent Harness")
+        prefix = f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+        args = f"--patch {shlex.quote(provider_patch)} <task>"
+    elif selected_harness == "CODEX":
+        profile_ref = str(runtime.get("profileRef") or "").strip()
+        if not profile_ref:
+            raise RuntimeError("Codex profile is not ready for Agent Harness")
+        if credential_ref and auth_kind != "OAUTH":
+            secret_file = _runtime_secret_file(credential_ref)
+            if not secret_file:
+                raise RuntimeError("Codex provider credential is not ready for Agent Harness")
+            prefix = f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+        args = f"--profile {shlex.quote(profile_ref)} exec <task>"
+    elif selected_harness == "OPENCODE":
+        model = str(selected.get("model") or "").strip()
+        provider_ref = str(runtime.get("providerRef") or connection.get("providerKey") or "").strip()
+        if not model or not provider_ref:
+            raise RuntimeError("OpenCode provider/model is not ready for Agent Harness")
+        args = f"run --model {shlex.quote(provider_ref + '/' + model)} <task>"
+    elif selected_harness == "CLAUDE_CODE":
+        secret_file = _runtime_secret_file(credential_ref) if credential_ref else None
+        if not credential_ref or not secret_file:
+            raise RuntimeError("Claude Code provider credential is not ready for Agent Harness")
+        auth_env = "ANTHROPIC_AUTH_TOKEN" if "AUTH_TOKEN" in credential_ref.upper() else "ANTHROPIC_API_KEY"
+        parts = [f'{auth_env}="$(cat {shlex.quote(secret_file)})"']
+        base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+        if base_url:
+            parts.append(f"ANTHROPIC_BASE_URL={shlex.quote(base_url)}")
+        prefix = " ".join(parts) + " "
+        args = "<task>"
+    runtime.update(
+        {
+            "capabilityPlane": "AGENT_HARNESS_V1",
+            "capabilityPlaneStatus": "READY",
+            "capabilityHash": environment.get("capabilityHash"),
+            "capabilityEnvironmentId": environment.get("environmentId"),
+            "capabilityEnvironmentRoot": environment.get("environmentRoot"),
+            "projectRoot": project_root,
+            "launchContract": "HARNESSCTL_EXEC",
+            "commandTemplate": prefix + base + args,
+        }
+    )
+
+
+def _prepare_execution_result(result: dict[str, Any], project_path: str = "") -> dict[str, Any]:
     if str(result.get("status") or "") != "SELECTED":
         return result
     selected, runtime, connection = _execution_selected(result)
@@ -1075,9 +1259,27 @@ def _prepare_execution_result(result: dict[str, Any]) -> dict[str, Any]:
         _prepare_opencode_execution(selected, runtime, connection)
     elif harness == "CLAUDE_CODE":
         _prepare_claude_execution(selected, runtime, connection)
+    if harness in {"DSH", "CODEX", "OPENCODE", "CLAUDE_CODE"}:
+        if not project_path:
+            runtime.update(
+                {
+                    "capabilityPlane": "AGENT_HARNESS_V1",
+                    "capabilityPlaneStatus": "PROJECT_REQUIRED",
+                    "profileReady": False,
+                    "launchContract": "BLOCKED_UNTIL_PROJECT_RESOLVED",
+                }
+            )
+            runtime.pop("commandTemplate", None)
+            selected["guidance"] = (
+                str(selected.get("guidance") or "").strip()
+                + " A repository path is required before launch so Agent Harness can materialize project MCP, Skills, and Instructions. Resolve this execution again with project_path."
+            ).strip()
+            return result
+        environment = _prepare_agent_harness_environment(project_path)
+        _apply_agent_harness_launch(selected, runtime, connection, environment)
     selected["guidance"] = (
         str(selected.get("guidance") or "").strip()
-        + " AI Office has prepared the returned runtime/profile information; use commandTemplate as the launch contract and replace only <task>."
+        + " AI Office prepared provider access and Agent Harness prepared the project capability environment. Use commandTemplate as the per-execution launch contract and replace only <task>."
     ).strip()
     return result
 
@@ -1102,13 +1304,18 @@ def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             available_connections = _available_execution_provider_ids(profile)
         except Exception:
             available_connections = []
+        project_path = _execution_project_path(args)
         payload: dict[str, Any] = {
             "intent": intent,
             "availableRuntimes": _execution_runtime_inventory(),
             "availableProviderConnectionIds": available_connections,
             "at": int(time.time() * 1000),
             "timezone": "Asia/Shanghai",
-            "metadata": {"profileName": profile, "source": "hermes-ai-office-tool"},
+            "metadata": {
+                "profileName": profile,
+                "source": "hermes-ai-office-tool",
+                "projectRoot": project_path or None,
+            },
         }
         requested_model = str(args.get("requested_model") or "").strip()
         if requested_model:
@@ -1119,7 +1326,7 @@ def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             payload=payload,
             timeout=3.0,
         )
-        prepared = _prepare_execution_result(result)
+        prepared = _prepare_execution_result(result, project_path=project_path)
         return json.dumps(
             {"ok": True, "workforceReconciliation": reconciliation, **prepared},
             ensure_ascii=False,
@@ -1174,7 +1381,18 @@ def _correlation_key(tool_name: str, kwargs: dict[str, Any]) -> str:
     )
 
 
+def _detect_managed_harness_runtime(command: str) -> str | None:
+    match = _MANAGED_HARNESS_COMMAND_RE.search(command or "")
+    if not match:
+        return None
+    runtime = match.group("runtime").lower()
+    return "claude" if runtime == "claude" else runtime
+
+
 def _detect_runtime(command: str) -> str | None:
+    managed = _detect_managed_harness_runtime(command)
+    if managed:
+        return managed
     match = _RUNTIME_COMMAND_RE.search(command or "")
     return match.group("runtime").lower() if match else None
 
@@ -1910,12 +2128,38 @@ def _on_pre_tool_call(
         return None
     args = dict(args or {})
     command = str(args.get("command") or "")
-    runtime = _detect_runtime(command)
+    managed_runtime = _detect_managed_harness_runtime(command)
+    runtime = managed_runtime or _detect_runtime(command)
     if not runtime:
         return None
 
-    decision = _resolve_runtime_policy(runtime, command, args, kwargs)
     mode = _policy_mode()
+    if managed_runtime:
+        base = _base_event(kwargs)
+        key = _correlation_key(tool_name, kwargs)
+        pending = {
+            **base,
+            "correlationId": key,
+            "runtime": managed_runtime,
+            "cwd": str(args.get("workdir") or args.get("cwd") or ""),
+            "model": str(_model_from_command(command) or ""),
+            "command": _command_summary(command, managed_runtime),
+            "background": bool(args.get("background")),
+            "pty": bool(args.get("pty")),
+            "policyMode": mode,
+            "policyStatus": "PRE_RESOLVED_CAPABILITY_PLANE",
+            "runtimeLaunchDecisionId": "",
+            "positionId": "",
+            "employeeId": "",
+            "employmentId": "",
+            "providerHubConnectionId": "",
+        }
+        with _PENDING_LOCK:
+            _PENDING[key] = pending
+        _enqueue({"event": "runtime_spawn_requested", **pending})
+        return None
+
+    decision = _resolve_runtime_policy(runtime, command, args, kwargs)
     base = _base_event(kwargs)
     key = _correlation_key(tool_name, kwargs)
     selected = decision or {}
@@ -2318,12 +2562,12 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
     if execution_placement:
         sections.append(
             "When this task may use an external coding Agent/harness, do not choose the model, provider, or harness from memory. "
-            "Call ai_office_resolve_execution before launching Claude Code, Codex, DSH, OpenCode, or another coding Agent. "
+            "Call ai_office_resolve_execution before launching Claude Code, Codex, DSH, OpenCode, or another coding Agent; when working in a repository, pass its current project_path so Agent Harness can materialize project MCP, Skills, and Instructions. "
             "Use PLAN/REVIEW for high-end planning or review and IMPLEMENT/DEBUG/TEST/QUICK_FIX for implementation work. "
             "Intent selects the work class only; never infer a fixed mapping such as IMPLEMENT=DSH or REVIEW=CODEX. "
             "The returned model family determines the preferred harness, while current runtime/provider compatibility determines the selected harness. "
             "Treat every selection as per-execution and do not store a selected model or harness as a permanent Job Type mapping or memory rule. "
-            "Follow the returned Employee, provider connection, preferred official harness, selected harness, profileAction, commandTemplate, and guidance. "
+            "Follow the returned Employee, provider connection, preferred official harness, selected harness, capabilityPlaneStatus, profileAction, commandTemplate, and guidance. Never bypass a PROJECT_REQUIRED capabilityPlaneStatus with a direct Harness launch. "
             "If the official harness is unavailable, use only the fallback returned by AI Office."
         )
 

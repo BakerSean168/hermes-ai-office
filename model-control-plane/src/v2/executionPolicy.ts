@@ -204,14 +204,9 @@ function harnessCompatible(
     );
   }
   if (harness === 'CODEX') {
-    return (
-      family === 'OPENAI' &&
-      (Boolean(access) ||
-        (hasManagedConnection &&
-          (protocol.includes('openai') ||
-            protocol.includes('responses') ||
-            protocol.includes('chat'))))
-    );
+    const codexProtocol =
+      protocol.includes('responses') || protocol.includes('codex') || protocol.includes('chatgpt');
+    return family === 'OPENAI' && codexProtocol && (Boolean(access) || hasManagedConnection);
   }
   if (harness === 'DSH') {
     return (
