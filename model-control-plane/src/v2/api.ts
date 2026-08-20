@@ -5,6 +5,11 @@ import type { GatewayDiscoveryService } from './discovery.js';
 import type { GatewayProvisioningService } from './gatewayProvisioning.js';
 import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
 import type { FinanceRepository } from './finance.js';
+import type {
+  ExecutionHarness,
+  ExecutionIntent,
+  ExecutionPolicyService,
+} from './executionPolicy.js';
 import {
   IdempotencyConflictError,
   IdempotencyInProgressError,
@@ -57,6 +62,7 @@ export function registerV2Routes(
     maintenance?: MaintenanceService;
     idempotencyService?: IdempotencyService;
     runtimePolicy?: RuntimePolicyService;
+    executionPolicy?: ExecutionPolicyService;
     runtimeAccess?: RuntimeAccessRepository;
     providerHub?: ProviderHubRepository;
     personalChannels?: PersonalChannelProjectionService;
@@ -1624,6 +1630,64 @@ export function registerV2Routes(
               ? (body.metadata as Record<string, unknown>)
               : undefined,
         });
+      },
+    }),
+  );
+
+  app.post('/api/v2/commands/execution/resolve', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'execution.resolve',
+      operation: () => {
+        if (!services.executionPolicy) {
+          reply.code(503);
+          return { error: { code: 'EXECUTION_POLICY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const intent = String(body.intent ?? '').toUpperCase();
+        if (
+          !['PLAN', 'REVIEW', 'IMPLEMENT', 'DEBUG', 'TEST', 'RESEARCH', 'QUICK_FIX'].includes(
+            intent,
+          )
+        ) {
+          reply.code(400);
+          return { error: { code: 'EXECUTION_INTENT_INVALID' } };
+        }
+        const runtimeKinds = new Set(['CLAUDE_CODE', 'CODEX', 'DSH', 'ZCODE', 'OPENCODE']);
+        const availableRuntimes = Array.isArray(body.availableRuntimes)
+          ? body.availableRuntimes
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  Boolean(item) && typeof item === 'object' && !Array.isArray(item),
+              )
+              .map((item) => ({
+                kind: String(item.kind ?? '').toUpperCase() as ExecutionHarness,
+                path: item.path == null ? undefined : String(item.path),
+                mode: item.mode == null ? undefined : String(item.mode),
+              }))
+              .filter((item) => runtimeKinds.has(item.kind))
+          : undefined;
+        try {
+          return services.executionPolicy.resolve({
+            intent: intent as ExecutionIntent,
+            requestedModel: body.requestedModel ? String(body.requestedModel) : undefined,
+            availableRuntimes,
+            availableProviderConnectionIds: Array.isArray(body.availableProviderConnectionIds)
+              ? body.availableProviderConnectionIds.map(String)
+              : undefined,
+            at: body.at == null ? undefined : Number(body.at),
+            timezone: body.timezone ? String(body.timezone) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'EXECUTION_RESOLVE_FAILED';
+          reply.code(code.endsWith('_INVALID') ? 400 : 422);
+          return { error: { code } };
+        }
       },
     }),
   );

@@ -1,9 +1,10 @@
 name: hermes-ai-office
-version: "0.11.3"
-description: Native Hermes AI company dashboard, workforce policy, and runtime staffing for Codex and OpenCode.
+version: "0.12.0"
+description: Native Hermes AI company dashboard, provider hub, and intent-driven workforce placement for coding harnesses.
 provides_tools:
   - ai_office_add_provider
   - ai_office_list_providers
+  - ai_office_resolve_execution
   - ai_office_set_provider_state
 provides_hooks:
   - subagent_start

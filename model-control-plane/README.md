@@ -58,6 +58,7 @@ Primary reads include:
 - `GET /api/v2/channels`
 - `GET /api/v2/runtime-sessions`
 - `GET /api/v2/runtime-access-profiles`
+- `POST /api/v2/commands/execution/resolve` — simple intent-to-Employee/harness placement used by AI Office before coding-agent launch
 - `GET /api/v2/incidents`
 - `GET /api/v2/events` (SSE)
 

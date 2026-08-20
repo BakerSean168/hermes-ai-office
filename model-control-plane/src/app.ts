@@ -18,6 +18,7 @@ import { GatewayDiscoveryService } from './v2/discovery.js';
 import { GatewayProvisioningService } from './v2/gatewayProvisioning.js';
 import { HermesExecutionSyncService } from './v2/execution.js';
 import { FinanceRepository } from './v2/finance.js';
+import { ExecutionPolicyService } from './v2/executionPolicy.js';
 import { IdempotencyService } from './v2/idempotency.js';
 import { IncidentProjectionService } from './v2/incidents.js';
 import { InvocationService } from './v2/invocation.js';
@@ -102,6 +103,7 @@ export async function buildControlPlane(
   const runtimeAccess = new RuntimeAccessRepository(v2);
   const providerHub = new ProviderHubRepository(v2);
   const runtimePolicy = new RuntimePolicyService(v2, supply, staffing, runtimeAccess, providerHub);
+  const executionPolicy = new ExecutionPolicyService(v2, runtimeAccess, providerHub);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {
@@ -200,6 +202,7 @@ export async function buildControlPlane(
     maintenance,
     idempotencyService,
     runtimePolicy,
+    executionPolicy,
     runtimeAccess,
     providerHub,
     personalChannels,

@@ -57,6 +57,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         plugin._PENDING.clear()
         plugin._PROVIDER_CONNECTION_CACHE.clear()
         plugin._API_SUCCESS_LAST_RECORDED.clear()
+        plugin._PLACEMENT_RECONCILE_LAST = 0.0
 
     def selected(self, *, runtime: str = "OPENCODE", model: str = "opencode-go/deepseek-v4-flash") -> dict[str, object]:
         return {
@@ -150,15 +151,15 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 "opencode run --model hermes-office/employment:empl_custom",
                 directive["args"]["command"],
             )
-            for home in [Path(root) / "home", Path(root) / "profiles" / "coder" / "home"]:
-                config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
-                provider = config["provider"]["hermes-office"]
-                self.assertEqual(provider["options"]["baseURL"], "http://127.0.0.1:4000/v1")
-                self.assertEqual(
-                    provider["options"]["apiKey"],
-                    "{file:/opt/data/secrets/litellm-runtime.key}",
-                )
-                self.assertIn("employment:empl_custom", provider["models"])
+            home = Path(root) / "profiles" / "coder" / "home"
+            config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
+            provider = config["provider"]["hermes-office"]
+            self.assertEqual(provider["options"]["baseURL"], "http://127.0.0.1:4000/v1")
+            self.assertEqual(
+                provider["options"]["apiKey"],
+                "{file:/opt/data/secrets/litellm-runtime.key}",
+            )
+            self.assertIn("employment:empl_custom", provider["models"])
 
     def test_gateway_selected_codex_profile_injects_runtime_key_by_file_reference(self) -> None:
         decision = self.selected(runtime="CODEX", model="employment:empl_custom")
@@ -181,11 +182,12 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 command,
             )
             self.assertNotIn("test-master", command)
-            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
-                text = (home / ".codex" / "config.toml").read_text()
-                self.assertIn("[model_providers.hermes-office]", text)
-                self.assertIn('env_key = "HERMES_LITELLM_RUNTIME_KEY"', text)
-                self.assertIn("[profiles.hermes-office]", text)
+            home = Path(root) / "profiles" / "reviewer" / "home"
+            text = (home / ".codex" / "config.toml").read_text()
+            self.assertIn("[model_providers.hermes-office]", text)
+            self.assertIn('env_key = "HERMES_LITELLM_RUNTIME_KEY"', text)
+            profile_text = (home / ".codex" / "hermes-office.config.toml").read_text()
+            self.assertIn('model_provider = "hermes-office"', profile_text)
 
     def test_native_opencode_access_materializes_provider_config_without_plaintext_key(self) -> None:
         decision = self.selected(model="hao-custom-team/alpha")
@@ -212,14 +214,16 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             self.assertEqual(directive["action"], "modify")
             self.assertIn("opencode run --model hao-custom-team/alpha", directive["args"]["command"])
             self.assertNotIn("native-secret-value", directive["args"]["command"])
-            for home in [Path(root) / "home", Path(root) / "profiles" / "coder" / "home"]:
-                config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
-                provider = config["provider"]["hao-custom-team"]
-                self.assertEqual(provider["options"]["baseURL"], "https://proxy.example.com/v1")
-                self.assertTrue(provider["options"]["apiKey"].startswith("{file:"))
-                self.assertNotIn("native-secret-value", json.dumps(config))
-                self.assertIn("alpha", provider["models"])
-            secret_files = list((Path(root) / "secrets" / "hermes-ai-office").glob("*.key"))
+            home = Path(root) / "profiles" / "coder" / "home"
+            config = json.loads((home / ".config" / "opencode" / "opencode.json").read_text())
+            provider = config["provider"]["hao-custom-team"]
+            self.assertEqual(provider["options"]["baseURL"], "https://proxy.example.com/v1")
+            self.assertTrue(provider["options"]["apiKey"].startswith("{file:"))
+            self.assertNotIn("native-secret-value", json.dumps(config))
+            self.assertIn("alpha", provider["models"])
+            secret_files = list(
+                (Path(root) / "profiles" / "coder" / "secrets" / "hermes-ai-office").glob("*.key")
+            )
             self.assertEqual(len(secret_files), 1)
             self.assertEqual(secret_files[0].read_text(), "native-secret-value")
             self.assertEqual(secret_files[0].stat().st_mode & 0o777, 0o600)
@@ -252,13 +256,14 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             self.assertNotIn("--model", command)
             self.assertIn('ANYROUTER_API_KEY="$(cat ', command)
             self.assertNotIn("codex-native-secret", command)
-            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
-                text = (home / ".codex" / "config.toml").read_text()
-                self.assertIn('[model_providers."hao-anyrouter-1234"]', text)
-                self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
-                self.assertIn('[profiles."hao-anyrouter-a1b2c3"]', text)
-                self.assertIn('model = "gpt-5.6-sol"', text)
-                self.assertNotIn("codex-native-secret", text)
+            home = Path(root) / "profiles" / "reviewer" / "home"
+            text = (home / ".codex" / "config.toml").read_text()
+            self.assertIn('[model_providers."hao-anyrouter-1234"]', text)
+            self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
+            self.assertNotIn("codex-native-secret", text)
+            profile_text = (home / ".codex" / "hao-anyrouter-a1b2c3.config.toml").read_text()
+            self.assertIn('model_provider = "hao-anyrouter-1234"', profile_text)
+            self.assertIn('model = "gpt-5.6-sol"', profile_text)
 
     def test_imported_codex_access_materializes_profile_from_existing_provider(self) -> None:
         decision = self.selected(runtime="CODEX", model="gpt-5.6-sol")
@@ -277,9 +282,9 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ), mock.patch.object(plugin, "_credential_value", return_value="existing-provider-secret"), mock.patch.object(
             plugin, "_resolve_runtime_policy", return_value=decision
         ), mock.patch.object(plugin, "_enqueue"):
-            global_config = Path(root) / "home" / ".codex" / "config.toml"
-            global_config.parent.mkdir(parents=True, exist_ok=True)
-            global_config.write_text(
+            profile_config = Path(root) / "profiles" / "reviewer" / "home" / ".codex" / "config.toml"
+            profile_config.parent.mkdir(parents=True, exist_ok=True)
+            profile_config.write_text(
                 '[model_providers.anyrouter]\n'
                 'name = "AnyRouter"\n'
                 'base_url = "https://anyrouter.example/v1"\n'
@@ -297,13 +302,14 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             self.assertIn("codex --profile anyrouter exec", command)
             self.assertIn('ANYROUTER_API_KEY="$(cat ', command)
             self.assertNotIn("existing-provider-secret", command)
-            for home in [Path(root) / "home", Path(root) / "profiles" / "reviewer" / "home"]:
-                text = (home / ".codex" / "config.toml").read_text()
-                self.assertIn('[profiles."anyrouter"]', text)
-                self.assertIn('model = "gpt-5.6-sol"', text)
-                self.assertIn('base_url = "https://anyrouter.example/v1"', text)
-                self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
-                self.assertNotIn("existing-provider-secret", text)
+            home = Path(root) / "profiles" / "reviewer" / "home"
+            text = (home / ".codex" / "config.toml").read_text()
+            self.assertIn('base_url = "https://anyrouter.example/v1"', text)
+            self.assertIn('env_key = "ANYROUTER_API_KEY"', text)
+            self.assertNotIn("existing-provider-secret", text)
+            profile_text = (home / ".codex" / "anyrouter.config.toml").read_text()
+            self.assertIn('model_provider = "anyrouter"', profile_text)
+            self.assertIn('model = "gpt-5.6-sol"', profile_text)
 
     def test_explicit_override_is_respected_in_prefer_mode(self) -> None:
         decision = {
@@ -423,6 +429,8 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin, "_save_shared_credential"
         ) as save_credential, mock.patch.object(
             plugin, "_save_shared_custom_provider"
+        ), mock.patch.object(
+            plugin, "_register_shared_policy_workforce", return_value=[]
         ), mock.patch.object(plugin, "_control_plane_request", side_effect=control):
             result = json.loads(
                 plugin._add_shared_provider_tool(
@@ -490,7 +498,12 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         )
         self.assertEqual(
             set(ctx.tools),
-            {"ai_office_add_provider", "ai_office_list_providers", "ai_office_set_provider_state"},
+            {
+                "ai_office_add_provider",
+                "ai_office_list_providers",
+                "ai_office_resolve_execution",
+                "ai_office_set_provider_state",
+            },
         )
 
     def test_set_provider_state_resolves_unambiguous_key_without_secret(self) -> None:
@@ -751,11 +764,220 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIn("AnyRouter: CONGESTED", context)
         request.assert_called_once_with("/api/v2/projections/provider-hub-summary", timeout=2.0)
 
-    def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:
+    def test_pre_llm_execution_context_requires_ai_office_placement_before_coding_harness(self) -> None:
         with mock.patch.object(plugin, "_control_plane_request") as request:
             result = plugin._on_pre_llm_call(user_message="帮我修一下这个 CSS 布局")
+        self.assertIsNotNone(result)
+        self.assertIn("ai_office_resolve_execution", result["context"])
+        self.assertIn("IMPLEMENT", result["context"])
+        request.assert_not_called()
+
+    def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:
+        with mock.patch.object(plugin, "_control_plane_request") as request:
+            result = plugin._on_pre_llm_call(user_message="给我解释一下番茄炒蛋为什么出水")
         self.assertIsNone(result)
         request.assert_not_called()
+
+    def test_policy_workforce_model_filter_keeps_only_small_fixed_roster(self) -> None:
+        models = [
+            "gpt-5.6-luna",
+            "gpt-5.6-luna-fast",
+            "gpt-5.6-sol",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "glm-5.2",
+            "glm-5.3",
+            "claude-opus-5",
+            "claude-haiku-4-5",
+        ]
+        self.assertEqual(
+            plugin._policy_workforce_models(models),
+            ["gpt-5.6-luna", "gpt-5.6-sol", "deepseek-v4-flash", "glm-5.2", "claude-opus-5"],
+        )
+
+    def test_execution_runtime_inventory_uses_persistent_runtime_paths(self) -> None:
+        mapping = {
+            "claude": "/opt/data/runtime/npm/bin/claude",
+            "codex": "/opt/data/runtime/npm/bin/codex",
+            "dsh": "/opt/data/runtime/npm/bin/dsh",
+            "opencode": "",
+        }
+        with mock.patch.object(plugin, "_runtime_binary", side_effect=lambda name: mapping.get(name, "")):
+            inventory = plugin._execution_runtime_inventory()
+        self.assertEqual(
+            inventory,
+            [
+                {"kind": "CLAUDE_CODE", "path": "/opt/data/runtime/npm/bin/claude", "mode": "HEADLESS"},
+                {"kind": "CODEX", "path": "/opt/data/runtime/npm/bin/codex", "mode": "HEADLESS"},
+                {"kind": "DSH", "path": "/opt/data/runtime/npm/bin/dsh", "mode": "HEADLESS"},
+            ],
+        )
+
+    def test_resolve_execution_tool_sends_safe_runtime_inventory_and_returns_guidance(self) -> None:
+        captured: dict[str, object] = {}
+
+        def control(path: str, **kwargs: object) -> dict[str, object]:
+            captured["path"] = path
+            captured["payload"] = kwargs.get("payload")
+            return {
+                "status": "SELECTED",
+                "policyVersion": "simple-placement-v1",
+                "selected": {
+                    "model": "gpt-5.6-sol",
+                    "providerConnection": {"id": "conn-1", "credentialRef": "OPENAI_API_KEY"},
+                    "runtime": {"preferredHarness": "CODEX", "profileAction": "REUSE_EXISTING"},
+                    "guidance": "Use Codex and resolve credentials through credentialRef.",
+                },
+            }
+
+        with mock.patch.object(
+            plugin,
+            "_execution_runtime_inventory",
+            return_value=[{"kind": "CODEX", "path": "/opt/data/runtime/npm/bin/codex", "mode": "HEADLESS"}],
+        ), mock.patch.object(plugin, "_control_plane_request", side_effect=control), mock.patch.object(
+            plugin, "_reconcile_policy_workforce_from_hub", return_value={"connections": 0, "models": 0}
+        ), mock.patch.object(
+            plugin, "_available_execution_provider_ids", return_value=["conn-1"]
+        ), mock.patch.object(
+            plugin, "_prepare_execution_result", side_effect=lambda value: value
+        ), mock.patch.object(plugin.time, "time", return_value=1000.0):
+            result = json.loads(
+                plugin._resolve_execution_tool({"intent": "REVIEW", "requested_model": "gpt-5.6-sol"})
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["path"], "/api/v2/commands/execution/resolve")
+        payload = captured["payload"]
+        self.assertEqual(payload["intent"], "REVIEW")
+        self.assertEqual(payload["requestedModel"], "gpt-5.6-sol")
+        self.assertEqual(payload["timezone"], "Asia/Shanghai")
+        self.assertEqual(payload["availableProviderConnectionIds"], ["conn-1"])
+        self.assertEqual(payload["at"], 1_000_000)
+        self.assertEqual(payload["metadata"]["profileName"], "coder")
+        self.assertNotIn("api_key", json.dumps(payload).lower())
+        self.assertEqual(result["selected"]["runtime"]["preferredHarness"], "CODEX")
+
+    def test_global_provider_credential_can_be_promoted_from_source_profile_without_echoing_value(self) -> None:
+        connection = {
+            "credential_ref": "TEAMOROUTER_GPT_5_6_API_KEY",
+            "credential_scope": "GLOBAL",
+            "auth_kind": "API_KEY",
+            "metadata": {"addedFromProfile": "memoflow"},
+        }
+        global_home = Path("/opt/data")
+        profile_home = Path("/opt/data/profiles/memoflow")
+        reads = {
+            (str(global_home), "TEAMOROUTER_GPT_5_6_API_KEY"): ["", "secret-value"],
+            (str(profile_home), "TEAMOROUTER_GPT_5_6_API_KEY"): ["secret-value"],
+        }
+
+        def read(home: Path, ref: str) -> str:
+            values = reads[(str(home), ref)]
+            return values.pop(0) if len(values) > 1 else values[0]
+
+        with mock.patch.object(plugin, "_global_hermes_home", return_value=global_home), mock.patch.object(
+            plugin, "_env_value_at_home", side_effect=read
+        ), mock.patch.object(plugin, "_save_shared_credential") as save:
+            ready = plugin._provider_connection_credential_ready(connection, "coder")
+        self.assertTrue(ready)
+        save.assert_called_once_with("TEAMOROUTER_GPT_5_6_API_KEY", "secret-value")
+
+    def test_credential_value_falls_back_to_global_home(self) -> None:
+        with mock.patch.object(plugin, "_global_hermes_home", return_value=Path("/opt/data")), mock.patch.object(
+            plugin, "_env_value_at_home", return_value="global-secret"
+        ), mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(plugin._credential_value("SHARED_API_KEY"), "global-secret")
+
+    def test_prepare_codex_oauth_reuses_existing_profile_without_secret_materialization(self) -> None:
+        selected = {"model": "gpt-5.6-sol"}
+        runtime = {
+            "selectedHarness": "CODEX",
+            "preferredHarness": "CODEX",
+            "executable": "/opt/data/runtime/npm/bin/codex",
+            "accessProfileId": "raccess-oauth",
+            "profileRef": "team",
+            "providerRef": "openai",
+        }
+        connection = {
+            "id": "pconn-openai-team",
+            "providerKey": "openai-team",
+            "authKind": "OAUTH",
+            "credentialScope": "OAUTH_PROFILE",
+            "sourceProfileId": "memoflow",
+            "credentialRef": "codex-auth:memoflow",
+            "protocol": "codex-chatgpt-oauth",
+        }
+        with mock.patch.object(plugin, "_runtime_secret_file") as secret_file, mock.patch.object(
+            plugin, "_ensure_codex_native_access"
+        ) as ensure, mock.patch.object(plugin, "_codex_profile_exists", return_value=True):
+            plugin._prepare_codex_execution(selected, runtime, connection)
+        secret_file.assert_not_called()
+        ensure.assert_not_called()
+        self.assertEqual(runtime["profileAction"], "REUSE_EXISTING")
+        self.assertTrue(runtime["profileReady"])
+        self.assertEqual(
+            runtime["commandTemplate"],
+            "/opt/data/runtime/npm/bin/codex --profile team exec <task>",
+        )
+
+    def test_prepare_dsh_execution_materializes_provider_patch_without_plaintext_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            selected = {"model": "deepseek-v4-flash"}
+            runtime = {
+                "selectedHarness": "DSH",
+                "preferredHarness": "DSH",
+                "executable": "/opt/data/runtime/npm/bin/dsh",
+            }
+            connection = {
+                "id": "pconn-opencode",
+                "providerKey": "opencode-go",
+                "baseUrl": "https://opencode.ai/zen/go/v1",
+                "credentialRef": "OPENCODE_GO_API_KEY",
+            }
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tempdir}, clear=False), mock.patch.object(
+                plugin, "_runtime_secret_file", return_value=f"{tempdir}/secrets/opencode.key"
+            ):
+                plugin._prepare_dsh_execution(selected, runtime, connection)
+                patch = Path(runtime["managedProfilePath"])
+                self.assertTrue(patch.exists())
+                content = patch.read_text(encoding="utf-8")
+                self.assertIn("provider: deepseek-official", content)
+                self.assertIn('model: "deepseek-v4-flash"', content)
+                self.assertIn('apiKeyEnv: "OPENCODE_GO_API_KEY"', content)
+                self.assertIn('baseURL: "https://opencode.ai/zen/go/v1"', content)
+                self.assertNotIn("secret-value", content)
+                self.assertEqual(runtime["profileAction"], "CREATE_MANAGED")
+                self.assertIn("--profile headless --patch", runtime["commandTemplate"])
+                self.assertIn("$(cat", runtime["commandTemplate"])
+                plugin._prepare_dsh_execution(selected, runtime, connection)
+                self.assertEqual(runtime["profileAction"], "REUSE_EXISTING")
+
+    def test_prepare_execution_result_marks_profile_ready_and_appends_launch_guidance(self) -> None:
+        result = {
+            "status": "SELECTED",
+            "selected": {
+                "model": "deepseek-v4-flash",
+                "providerConnection": {
+                    "id": "pconn-deepseek",
+                    "providerKey": "deepseek",
+                    "baseUrl": "https://api.deepseek.com",
+                    "credentialRef": "DEEPSEEK_API_KEY",
+                },
+                "runtime": {
+                    "selectedHarness": "DSH",
+                    "preferredHarness": "DSH",
+                    "executable": "/opt/data/runtime/npm/bin/dsh",
+                },
+                "guidance": "Use DSH.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tempdir}, clear=False
+        ), mock.patch.object(plugin, "_runtime_secret_file", return_value=f"{tempdir}/secret.key"):
+            prepared = plugin._prepare_execution_result(result)
+        selected = prepared["selected"]
+        self.assertTrue(selected["runtime"]["profileReady"])
+        self.assertIn("commandTemplate", selected["runtime"])
+        self.assertIn("replace only <task>", selected["guidance"])
 
 
 if __name__ == "__main__":
