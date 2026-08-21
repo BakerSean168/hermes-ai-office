@@ -670,6 +670,33 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin._on_post_tool_call(tool_name="terminal", result={"error": "429 rate limit"}, tool_call_id="throttle")
         self.assertEqual(request.call_args.kwargs["payload"], {"outcome": "THROTTLED", "errorKind": "RATE_LIMIT", "httpStatus": 429, "message": "429 rate limit"})
 
+    def test_terminal_quota_records_capacity_exhaustion_with_reset(self) -> None:
+        plugin._PENDING["quota-terminal"] = {
+            "providerHubConnectionId": "conn-go",
+            "runtime": "dsh",
+            "model": "deepseek-v4-flash",
+            "background": False,
+            "pty": False,
+        }
+        with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(
+            plugin, "_record_capacity_exhaustion_for_connection"
+        ) as capacity, mock.patch.object(plugin, "_enqueue"):
+            plugin._on_post_tool_call(
+                tool_name="terminal",
+                result={
+                    "error": "QUOTA: Weekly usage limit reached. Resets in 2 days.",
+                    "exitCode": 1,
+                },
+                tool_call_id="quota-terminal",
+            )
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["errorKind"], "QUOTA")
+        self.assertEqual(payload["resetAfterSeconds"], 172800)
+        capacity.assert_called_once()
+        self.assertEqual(capacity.call_args.args[0], "conn-go")
+        self.assertEqual(capacity.call_args.args[1]["errorKind"], "QUOTA")
+        self.assertEqual(capacity.call_args.args[2]["model"], "deepseek-v4-flash")
+
     def test_provider_attempt_auth_redacts_and_posts(self) -> None:
         plugin._PENDING["auth"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": False, "pty": False}
         with mock.patch.object(plugin, "_control_plane_request") as request, mock.patch.object(plugin, "_enqueue"):

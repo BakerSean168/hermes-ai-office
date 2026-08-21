@@ -3095,11 +3095,22 @@ def _on_post_tool_call(
     if should_record:
         if pending.get("providerHubConnectionId"):
             try:
+                connection_id = str(pending.get("providerHubConnectionId"))
                 _control_plane_request(
-                    f"/api/v2/commands/provider-connections/{urllib.parse.quote(str(pending.get('providerHubConnectionId')), safe='')}/attempts",
+                    f"/api/v2/commands/provider-connections/{urllib.parse.quote(connection_id, safe='')}/attempts",
                     method="POST",
                     payload=classification,
                 )
+                if classification.get("errorKind") == "QUOTA":
+                    _record_capacity_exhaustion_for_connection(
+                        connection_id,
+                        classification,
+                        {
+                            "provider": "",
+                            "model": pending.get("model") or "",
+                            "profile": _active_profile_name(),
+                        },
+                    )
             except Exception:
                 pass
 
