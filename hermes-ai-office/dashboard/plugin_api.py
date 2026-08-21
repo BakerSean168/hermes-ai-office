@@ -57,7 +57,7 @@ _SUPPLY_ORIGINS = (
 _COMMERCIAL_TYPES = ("FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER")
 _ROUTING_POLICIES = ("AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED")
 _ECONOMICS_QUICK_PROFILES = (
-    {"id": "community-free", "supplyOrigin": "COMMUNITY_RELAY", "commercialType": "SPONSORED", "routingPolicy": "AUTO"},
+    {"id": "community-free", "supplyOrigin": "COMMUNITY_RELAY", "commercialType": "FREE", "routingPolicy": "AUTO"},
     {"id": "event-free", "supplyOrigin": "EVENT_GRANT", "commercialType": "SPONSORED", "routingPolicy": "AUTO"},
     {"id": "personal-hosted", "supplyOrigin": "PERSONAL_HOSTED", "commercialType": "OTHER", "routingPolicy": "MANUAL_ONLY"},
     {"id": "commercial-metered", "supplyOrigin": "COMMERCIAL_RELAY", "commercialType": "METERED", "routingPolicy": "AUTO"},
@@ -244,8 +244,8 @@ _DISCOVERED_SUPPLIERS: Dict[str, Dict[str, Any]] = {
     "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://api.ark717.com"},
     "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://chybenzun.top"},
     "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "supplyOrigin": "OFFICIAL", "routingPolicy": "AUTO", "websiteUrl": "https://openai.com", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
-    "abrdns-deepseek-1m-think": {"slug": "abrdns-deepseek-1m-think", "name": "abrdns (公益站 DeepSeek 1M think)", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://new-api.abrdns.com"},
-    "llm-pm-deepseek-opus": {"slug": "llm-pm-deepseek-opus", "name": "llm-pm (公益站 deepseek-opus)", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://llm.pm"},
+    "abrdns-deepseek-1m-think": {"slug": "abrdns-deepseek-1m-think", "name": "abrdns (公益站 DeepSeek 1M think)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://new-api.abrdns.com"},
+    "llm-pm-deepseek-opus": {"slug": "llm-pm-deepseek-opus", "name": "llm-pm (公益站 deepseek-opus)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://llm.pm"},
     "wechat-miniapp-free": {"slug": "wechat-miniapp-free", "name": "wechat-miniapp (微信小程序开发大赛 free)", "commercialType": "SPONSORED", "supplyOrigin": "EVENT_GRANT", "routingPolicy": "AUTO", "websiteUrl": "https://developers.weixin.qq.com"},
     "worldclawpro": {"slug": "worldclawpro", "name": "worldclawpro.ai", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://worldclawpro.ai"},
 }

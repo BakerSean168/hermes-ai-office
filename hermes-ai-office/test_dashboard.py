@@ -167,7 +167,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("deepseek", ids)
         self.assertIn("opencode-go", ids)
         profiles = {item["id"]: item for item in result["quickProfiles"]}
-        self.assertEqual(profiles["community-free"]["commercialType"], "SPONSORED")
+        self.assertEqual(profiles["community-free"]["commercialType"], "FREE")
         self.assertEqual(profiles["event-free"]["supplyOrigin"], "EVENT_GRANT")
         self.assertEqual(profiles["personal-hosted"]["routingPolicy"], "MANUAL_ONLY")
         opencode = next(item for item in result["items"] if item["id"] == "opencode-go")
