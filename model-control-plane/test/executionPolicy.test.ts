@@ -62,14 +62,12 @@ function addCandidate(
       externalAccountRef: `${input.providerKey}:${input.model}`,
       name: `${input.providerName ?? input.providerKey} access`,
     },
-    plan: input.commercialType
-      ? {
-          slug: `${input.providerKey}-plan`,
-          name: `${input.providerName ?? input.providerKey} plan`,
-          commercialType: input.commercialType,
-          terms: input.planTerms,
-        }
-      : undefined,
+    plan: {
+      slug: `${input.providerKey}-plan`,
+      name: `${input.providerName ?? input.providerKey} plan`,
+      commercialType: input.commercialType ?? 'METERED',
+      terms: input.planTerms,
+    },
   });
   const supplier = catalog.supplier as Record<string, unknown>;
   const employee = catalog.employee as Record<string, unknown>;
@@ -813,6 +811,42 @@ test('stale RuntimeAccess cannot override provider model inventory after a model
   assert.ok(
     (decision.excludedCandidates as Array<Record<string, unknown>>).some((item) =>
       (item.reasons as string[]).includes('PROVIDER_MODEL_NOT_ADVERTISED'),
+    ),
+  );
+});
+
+test('unclassified commercial supply never enters automatic placement', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'unknown-relay',
+    supplierName: 'Unknown Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'unknown-relay',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'UNKNOWN',
+    commercialType: 'OTHER',
+  });
+  addCandidate(state, {
+    supplierSlug: 'metered',
+    supplierName: 'Metered Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'metered',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'COMMERCIAL_RELAY',
+    commercialType: 'METERED',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    availableRuntimes: [{ kind: 'CODEX', path: '/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal((selected.providerConnection as Record<string, unknown>).providerKey, 'metered');
+  assert.ok(
+    (decision.excludedCandidates as Array<Record<string, unknown>>).some((item) =>
+      (item.reasons as string[]).includes('COMMERCIAL_CLASSIFICATION_REQUIRED'),
     ),
   );
 });

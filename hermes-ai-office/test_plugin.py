@@ -798,12 +798,70 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertNotIn("super-secret-body", json.dumps(payload))
         self.assertEqual(payload["source"], "HERMES_LLM_API")
 
+    def test_quota_evidence_updates_capacity_pool_with_observed_reset(self) -> None:
+        calls = []
+
+        def control(path: str, **kwargs: object) -> dict[str, object]:
+            calls.append((path, kwargs))
+            if path == "/api/v2/projections/provider-hub":
+                return {
+                    "items": [
+                        {
+                            "id": "conn-go",
+                            "provider_key": "opencode-go",
+                            "supplier": {"id": "sup-go", "name": "OpenCode"},
+                        }
+                    ]
+                }
+            if path == "/api/v2/projections/supply":
+                return {
+                    "suppliers": [
+                        {
+                            "id": "sup-go",
+                            "agreements": [
+                                {"id": "agr-go", "lifecycle": "ACTIVE", "commercialType": "SUBSCRIPTION"}
+                            ],
+                        }
+                    ]
+                }
+            if path == "/api/v2/commands/capacity-pools/upsert":
+                return {"id": "pool-go"}
+            raise AssertionError(path)
+
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=control), mock.patch.object(
+            plugin.time, "time", return_value=1_000.0
+        ):
+            plugin._record_capacity_exhaustion_for_connection(
+                "conn-go",
+                {"outcome": "FAILURE", "errorKind": "QUOTA", "resetAfterSeconds": 172800},
+                {"provider": "opencode-go", "model": "deepseek-v4-flash"},
+            )
+        capacity = next(item for item in calls if item[0] == "/api/v2/commands/capacity-pools/upsert")
+        payload = capacity[1]["payload"]
+        self.assertEqual(payload["supplyAgreementId"], "agr-go")
+        self.assertEqual(payload["remaining"], 0)
+        self.assertEqual(payload["dimension"], "CUSTOM")
+        self.assertEqual(payload["resetAt"], (1_000 + 172800) * 1000)
+        self.assertEqual(payload["resetPolicy"]["seconds"], 172800)
+        self.assertNotIn("apiKey", json.dumps(payload))
+
     def test_api_error_classifier_covers_auth_quota_timeout_and_server(self) -> None:
         self.assertEqual(plugin._api_error_outcome(status_code=401)["errorKind"], "AUTH")
         self.assertEqual(
             plugin._api_error_outcome(error_message="insufficient balance")["errorKind"],
             "QUOTA",
         )
+        quota = plugin._api_error_outcome(
+            error_message="QUOTA: Weekly usage limit reached. Resets in 2 days."
+        )
+        self.assertEqual(quota["errorKind"], "QUOTA")
+        self.assertEqual(quota["resetAfterSeconds"], 2 * 24 * 60 * 60)
+        terminal = plugin._terminal_outcome(
+            "error",
+            {"stderr": "QUOTA: Weekly usage limit reached. Resets in 2 days."},
+        )
+        self.assertEqual(terminal["errorKind"], "QUOTA")
+        self.assertEqual(terminal["resetAfterSeconds"], 2 * 24 * 60 * 60)
         self.assertEqual(
             plugin._api_error_outcome(error_message="request timed out")["errorKind"],
             "TIMEOUT",

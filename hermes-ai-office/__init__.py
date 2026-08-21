@@ -2559,6 +2559,10 @@ def _terminal_outcome(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"outcome": outcome}
     if error_kind:
         result["errorKind"] = error_kind
+    if error_kind == "QUOTA":
+        reset_after_seconds = _quota_reset_after_seconds(safe)
+        if reset_after_seconds is not None:
+            result["resetAfterSeconds"] = reset_after_seconds
     if match:
         result["httpStatus"] = int(match.group(1))
     if safe and error_kind:
@@ -2676,6 +2680,118 @@ def _safe_provider_error_text(*values: Any) -> str:
     return text[:160]
 
 
+def _quota_reset_after_seconds(value: Any) -> int | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    match = re.search(
+        r"\bresets?\s+in\s+(\d+(?:\.\d+)?)\s*(seconds?|minutes?|hours?|days?)\b",
+        text,
+    )
+    if not match:
+        return None
+    amount = float(match.group(1))
+    unit = match.group(2)
+    multiplier = 1
+    if unit.startswith("minute"):
+        multiplier = 60
+    elif unit.startswith("hour"):
+        multiplier = 60 * 60
+    elif unit.startswith("day"):
+        multiplier = 24 * 60 * 60
+    seconds = int(amount * multiplier)
+    return max(1, seconds)
+
+
+def _record_capacity_exhaustion_for_connection(
+    connection_id: str,
+    classification: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> None:
+    if str(classification.get("errorKind") or "").upper() != "QUOTA":
+        return
+    try:
+        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=1.5)
+        connection = next(
+            (
+                item
+                for item in (hub.get("items") or [])
+                if isinstance(item, dict) and str(item.get("id") or "") == connection_id
+            ),
+            None,
+        )
+        if not connection:
+            return
+        supplier = connection.get("supplier") if isinstance(connection.get("supplier"), dict) else {}
+        supplier_id = str(
+            connection.get("supplier_id") or supplier.get("id") or ""
+        ).strip()
+        if not supplier_id:
+            return
+        supply = _control_plane_request("/api/v2/projections/supply", timeout=1.5)
+        supplier_row = next(
+            (
+                item
+                for item in (supply.get("suppliers") or [])
+                if isinstance(item, dict) and str(item.get("id") or "") == supplier_id
+            ),
+            None,
+        )
+        if not supplier_row:
+            return
+        reset_after = classification.get("resetAfterSeconds")
+        try:
+            reset_after_seconds = int(reset_after) if reset_after is not None else None
+        except (TypeError, ValueError):
+            reset_after_seconds = None
+        reset_at = (
+            int(time.time() * 1000) + max(1, reset_after_seconds) * 1000
+            if reset_after_seconds is not None
+            else None
+        )
+        provider = str(kwargs.get("provider") or connection.get("provider_key") or "")[:120]
+        model = str(kwargs.get("model") or "")[:240]
+        for agreement in supplier_row.get("agreements") or []:
+            if not isinstance(agreement, dict):
+                continue
+            if str(agreement.get("lifecycle") or "").upper() != "ACTIVE":
+                continue
+            agreement_id = str(agreement.get("id") or "").strip()
+            if not agreement_id:
+                continue
+            payload: dict[str, Any] = {
+                "supplyAgreementId": agreement_id,
+                "name": "Observed quota availability",
+                "dimension": "CUSTOM",
+                "remaining": 0,
+                "unit": "quota",
+                "source": "HERMES_LLM_API_QUOTA",
+                "metadata": {
+                    "provider": provider,
+                    "model": model,
+                    "providerConnectionId": connection_id,
+                    "evidence": "QUOTA_ERROR",
+                },
+            }
+            if reset_at is not None:
+                payload["resetAt"] = reset_at
+                payload["resetPolicy"] = {
+                    "kind": "OBSERVED_RESET_AFTER",
+                    "seconds": reset_after_seconds,
+                }
+            seed = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            _control_plane_request(
+                "/api/v2/commands/capacity-pools/upsert",
+                method="POST",
+                payload=payload,
+                idempotency_key="provider-quota-capacity-v1-"
+                + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+                timeout=1.5,
+            )
+    except Exception:
+        return
+
+
 def _api_error_outcome(**kwargs: Any) -> dict[str, Any] | None:
     raw_status = kwargs.get("status_code")
     try:
@@ -2758,6 +2874,10 @@ def _api_error_outcome(**kwargs: Any) -> dict[str, Any] | None:
         return None
 
     result: dict[str, Any] = {"outcome": outcome, "errorKind": kind}
+    if kind == "QUOTA":
+        reset_after_seconds = _quota_reset_after_seconds(safe)
+        if reset_after_seconds is not None:
+            result["resetAfterSeconds"] = reset_after_seconds
     if status is not None and 400 <= status <= 599:
         result["httpStatus"] = status
     if safe:
@@ -2820,6 +2940,8 @@ def _record_api_provider_attempt(
             idempotency_key=_api_attempt_idempotency_key(event_kind, connection_id, kwargs),
             timeout=1.5,
         )
+        if classification.get("errorKind") == "QUOTA":
+            _record_capacity_exhaustion_for_connection(connection_id, classification, kwargs)
     except Exception:
         if classification.get("outcome") == "SUCCESS":
             with _API_TELEMETRY_LOCK:

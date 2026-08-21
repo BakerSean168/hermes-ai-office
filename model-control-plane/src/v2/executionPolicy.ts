@@ -512,7 +512,15 @@ export class ExecutionPolicyService {
           });
           continue;
         }
-        if (economics.routingPolicy !== 'AUTO' || !economics.capacityEligible) {
+        if (
+          economics.routingPolicy !== 'AUTO' ||
+          economics.spendTier === 'UNKNOWN' ||
+          !economics.capacityEligible
+        ) {
+          const eligibilityReasons = [...economics.reasons];
+          if (economics.spendTier === 'UNKNOWN') {
+            eligibilityReasons.push('COMMERCIAL_CLASSIFICATION_REQUIRED');
+          }
           excludedCandidates.push({
             employeeId: employee.id,
             employeeName: employee.displayName,
@@ -520,7 +528,7 @@ export class ExecutionPolicyService {
             supplierId: supplier.id,
             supplierName: supplier.name,
             supplyEconomics: economics,
-            reasons: economics.reasons,
+            reasons: eligibilityReasons,
           });
           continue;
         }
