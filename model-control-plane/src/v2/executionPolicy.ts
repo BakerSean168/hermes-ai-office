@@ -497,6 +497,21 @@ export class ExecutionPolicyService {
           capacityPools: this.#supply.listCapacityPools(String(employment.supplyAgreementId)),
           at,
         });
+        if (
+          supplierConnections.length > 0 &&
+          !supplierConnections.some((connection) => supportsModel(connection, model))
+        ) {
+          excludedCandidates.push({
+            employeeId: employee.id,
+            employeeName: employee.displayName,
+            model,
+            supplierId: supplier.id,
+            supplierName: supplier.name,
+            supplyEconomics: economics,
+            reasons: [...economics.reasons, 'PROVIDER_MODEL_NOT_ADVERTISED'],
+          });
+          continue;
+        }
         if (economics.routingPolicy !== 'AUTO' || !economics.capacityEligible) {
           excludedCandidates.push({
             employeeId: employee.id,
@@ -517,6 +532,19 @@ export class ExecutionPolicyService {
         if (availableConnectionIds !== null && !runtime.connection) continue;
         const selectedAccess = runtime.access;
         const connection = runtime.connection;
+        if (connection && !supportsModel(connection, model)) {
+          excludedCandidates.push({
+            employeeId: employee.id,
+            employeeName: employee.displayName,
+            model,
+            supplierId: supplier.id,
+            supplierName: supplier.name,
+            providerConnectionId: connection.id,
+            supplyEconomics: economics,
+            reasons: [...economics.reasons, 'PROVIDER_MODEL_NOT_ADVERTISED'],
+          });
+          continue;
+        }
         const rankingClass = requested ? candidateClass : desiredClass;
         const modelRank = baseRank(rankingClass, model);
         let rank = 0;

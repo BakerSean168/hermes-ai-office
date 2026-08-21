@@ -768,3 +768,51 @@ test('manual-only free supply is excluded from automatic placement', () => {
     ),
   );
 });
+
+test('stale RuntimeAccess cannot override provider model inventory after a model is withdrawn', () => {
+  const state = make();
+  const stale = addCandidate(state, {
+    supplierSlug: 'event-grant',
+    supplierName: 'Event Grant',
+    model: 'deepseek-v4-flash',
+    providerKey: 'event-grant',
+    protocol: 'openai-chat-completions',
+    runtimeKind: 'OPENCODE',
+    supplyOrigin: 'EVENT_GRANT',
+    commercialType: 'SPONSORED',
+  });
+  state.hub.updateConnection(String(stale.connection.id), { models: [] });
+  addCandidate(state, {
+    supplierSlug: 'subscription',
+    supplierName: 'Subscription',
+    model: 'deepseek-v4-flash',
+    providerKey: 'subscription',
+    protocol: 'openai-chat-completions',
+    runtimeKind: 'OPENCODE',
+    supplyOrigin: 'OFFICIAL',
+    commercialType: 'SUBSCRIPTION',
+  });
+
+  const decision = state.policy.resolve({
+    intent: 'IMPLEMENT',
+    requestedModel: 'deepseek-v4-flash',
+    availableRuntimes: [
+      { kind: 'DSH', path: '/bin/dsh' },
+      { kind: 'OPENCODE', path: '/bin/opencode' },
+    ],
+    availableProviderConnectionIds: [
+      String(stale.connection.id),
+      ...state.hub.listConnections().map((item) => String(item.id)),
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal(
+    (selected.providerConnection as Record<string, unknown>).providerKey,
+    'subscription',
+  );
+  assert.ok(
+    (decision.excludedCandidates as Array<Record<string, unknown>>).some((item) =>
+      (item.reasons as string[]).includes('PROVIDER_MODEL_NOT_ADVERTISED'),
+    ),
+  );
+});
