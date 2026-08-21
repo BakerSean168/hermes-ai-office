@@ -1,0 +1,12 @@
+[Unit]
+Description=Safely activate pending Hermes AI Office runtime deployment
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+SuccessExitStatus=75
+ExecStart=/usr/local/sbin/hermes-ai-office-deploy --reconcile
+User=root
+Group=root
+Nice=10

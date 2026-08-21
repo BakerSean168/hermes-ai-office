@@ -1,0 +1,11 @@
+[Unit]
+Description=Retry pending Hermes AI Office deployment when Gateway is idle
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=45s
+AccuracySec=5s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

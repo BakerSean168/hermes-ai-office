@@ -146,3 +146,38 @@ python -m unittest hermes-ai-office/test_plugin.py hermes-ai-office/test_dashboa
 node --check hermes-ai-office/dashboard/dist/index.js
 hermes plugins doctor hermes-ai-office --ci
 ```
+
+## Safe oracle2 deployment
+
+The oracle2 production gateway multiplexes multiple Hermes profiles. Recreating
+`hermes-personal` for an AI Office update interrupts unrelated in-flight turns
+(such as MemoFlow), so plugin deployment is intentionally separated from
+container deployment.
+
+Install the host deployer once:
+
+```bash
+sudo ./hermes-ai-office/scripts/install-oracle2-safe-deploy.sh
+```
+
+Then deploy changes with:
+
+```bash
+sudo /usr/local/sbin/hermes-ai-office-deploy --deploy
+```
+
+`dashboard/**` changes are hot-synced and the dashboard plugin cache is
+rescanned without restarting the Gateway. Runtime plugin changes are staged; if
+Hermes is busy, a systemd timer keeps them pending. Once the Gateway is idle,
+the deployer requests Hermes' native drain, activates the staged plugin,
+reconciles multiplex profile links, calls the native Gateway restart endpoint,
+and cancels the drain after the new Gateway is healthy. The
+`hermes-personal` container is not recreated.
+
+Useful diagnostics:
+
+```bash
+sudo /usr/local/sbin/hermes-ai-office-deploy --plan
+sudo /usr/local/sbin/hermes-ai-office-deploy --guard-only
+systemctl status hermes-ai-office-deploy-reconcile.timer
+```
