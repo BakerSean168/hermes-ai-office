@@ -227,6 +227,7 @@
       "suppliers.close": "Close",
       "suppliers.employees": "Employees",
       "suppliers.enabledEmployees": "Enabled employees",
+      "suppliers.enabledOfTotal": "Enabled / total",
       "suppliers.defaultEmployee": "Default employee",
       "suppliers.defaultEmployeeNone": "No preferred employee",
       "suppliers.agreements": "Agreements",
@@ -557,6 +558,7 @@
       "suppliers.close": "关闭",
       "suppliers.employees": "员工",
       "suppliers.enabledEmployees": "启用员工",
+      "suppliers.enabledOfTotal": "已启用 / 总数",
       "suppliers.defaultEmployee": "默认员工",
       "suppliers.defaultEmployeeNone": "暂无默认员工",
       "suppliers.agreements": "供应协议",
@@ -899,7 +901,15 @@
     return h(
       "button",
       {
-        className: "hao-button " + (props.kind === "quiet" ? "hao-button-quiet" : props.kind === "danger" ? "hao-button-danger" : ""),
+        className:
+          "hao-button " +
+          (props.kind === "quiet"
+            ? "hao-button-quiet"
+            : props.kind === "outline"
+              ? "hao-button-outline"
+              : props.kind === "danger"
+                ? "hao-button-danger"
+                : ""),
         type: props.type || "button",
         disabled: props.disabled,
         onClick: props.onClick,
@@ -2322,14 +2332,19 @@
       { className: "hao-section-stack" },
       h(
         "div",
-        { className: "hao-section-head" },
-        h("div", null, h("h1", null, props.t("suppliers.title")), h("p", null, props.t("suppliers.subtitle"))),
+        { className: "hao-section-head hao-supplier-section-head" },
         h(
           "div",
-          { className: "hao-section-actions" },
-          h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(suppliers.length) })),
-          h(Button, { onClick: openOnboarding }, "+ " + props.t("suppliers.add")),
+          { className: "hao-section-title-block" },
+          h(
+            "div",
+            { className: "hao-section-title-line" },
+            h("h1", null, props.t("suppliers.title")),
+            h("span", { className: "hao-count hao-count-inline" }, props.number(suppliers.length)),
+          ),
+          h("p", null, props.t("suppliers.subtitle")),
         ),
+        h("div", { className: "hao-section-actions" }, h(Button, { onClick: openOnboarding }, "+ " + props.t("suppliers.add"))),
       ),
       suppliers.length
         ? h(
@@ -2367,39 +2382,40 @@
                         ? economicsBadge("suppliers.routing.", facts.economics.routingPolicy, "routing")
                         : null,
                     ),
-                    h("p", null, supplier.slug),
-                    supplier.websiteUrl
-                      ? h("a", { className: "hao-external-link hao-supplier-website", href: supplier.websiteUrl, target: "_blank", rel: "noreferrer" }, supplier.websiteUrl)
-                      : null,
+                    h("p", { className: "hao-supplier-slug" }, supplier.slug),
                   ),
                 ),
                 h(
                   "div",
                   { className: "hao-supplier-compact-stat" },
-                  h("span", null, props.t("suppliers.enabledEmployees")),
                   h("strong", null, props.number(facts.enabledIds.length) + " / " + props.number(facts.employees.length)),
+                  h("span", null, props.t("suppliers.enabledOfTotal")),
                 ),
                 h(
                   "div",
                   { className: "hao-supplier-default" },
-                  h("span", null, props.t("suppliers.defaultEmployee")),
+                  h("span", { className: "hao-supplier-mobile-label" }, props.t("suppliers.defaultEmployee")),
                   h("strong", null, facts.defaultEmployee ? facts.defaultEmployee.displayName : props.t("suppliers.defaultEmployeeNone")),
                 ),
                 h(
                   "div",
                   { className: "hao-supplier-row-status" },
-                  h(Status, { value: supplier.lifecycle, t: props.t }),
-                  facts.nativeAccess.length
-                    ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.nativeAccess.length) + " " + props.t("suppliers.nativeAccess"))
-                    : facts.channels.length
-                      ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
-                      : null,
+                  h(
+                    "div",
+                    { className: "hao-supplier-status-copy" },
+                    h(Status, { value: supplier.lifecycle, t: props.t }),
+                    facts.nativeAccess.length
+                      ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.nativeAccess.length) + " " + props.t("suppliers.nativeAccess"))
+                      : facts.channels.length
+                        ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
+                        : h("span", { className: "hao-supplier-route-health" }, "—"),
+                  ),
                 ),
                 h(
                   "div",
                   { className: "hao-supplier-row-actions" },
                   h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
-                  h(Button, { kind: "quiet", onClick: function () { openSupplierManage(supplier); } }, props.t("suppliers.manage")),
+                  h(Button, { kind: "outline", onClick: function () { openSupplierManage(supplier); } }, props.t("suppliers.manage")),
                 ),
               );
             }),

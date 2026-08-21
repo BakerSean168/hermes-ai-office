@@ -2364,3 +2364,316 @@
     gap: 4px;
   }
 }
+
+/* Supplier management visual hierarchy and table alignment. */
+.hao-button-outline {
+  border-color: color-mix(in srgb, var(--hao-accent) 72%, var(--hao-border));
+  background: transparent;
+  color: var(--hao-accent) !important;
+}
+
+.hao-button-outline:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--hao-accent) 9%, transparent);
+}
+
+.hao-supplier-section-head {
+  align-items: center;
+  padding: 4px 2px 8px;
+}
+
+.hao-section-title-block {
+  min-width: 0;
+}
+
+.hao-section-title-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.hao-count-inline {
+  min-height: 22px;
+  padding: 2px 8px;
+  font-size: 10px;
+}
+
+.hao-supplier-section-head .hao-section-actions .hao-button {
+  min-height: 40px;
+  padding-inline: 17px;
+}
+
+.hao-supplier-list {
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--hao-border);
+  border-radius: 14px;
+  background: var(--hao-panel);
+  box-shadow: 0 10px 32px color-mix(in srgb, var(--hao-shadow) 72%, transparent);
+}
+
+.hao-supplier-row {
+  grid-template-columns: minmax(340px, 2fr) 150px minmax(210px, 1fr) 150px 246px;
+  min-height: 82px;
+  gap: 24px;
+  padding: 12px 18px;
+  border: 0;
+  border-top: 1px solid var(--hao-border);
+  border-radius: 0;
+  background: var(--hao-panel);
+}
+
+.hao-supplier-row:not(.hao-supplier-row-head) {
+  height: auto !important;
+}
+
+.hao-supplier-row:not(.hao-supplier-row-head):hover {
+  border-color: var(--hao-border);
+  background: color-mix(in srgb, var(--hao-panel) 94%, var(--hao-hover-bg));
+}
+
+.hao-supplier-list .hao-supplier-row-head {
+  min-height: 42px !important;
+  padding: 0 18px !important;
+  border: 0 !important;
+  border-bottom: 1px solid var(--hao-border) !important;
+  border-radius: 0 !important;
+  background: color-mix(in srgb, var(--hao-panel-soft) 90%, transparent) !important;
+  font-size: 10px;
+  letter-spacing: 0.035em;
+}
+
+.hao-supplier-row-head > span:nth-child(4) {
+  text-align: left;
+}
+
+.hao-supplier-row-head > span:nth-child(5) {
+  text-align: right;
+}
+
+.hao-supplier-row-main {
+  gap: 14px;
+}
+
+.hao-supplier-row .hao-supplier-mark {
+  width: 42px;
+  height: 42px;
+  flex-basis: 42px;
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--hao-accent-soft) 86%, transparent);
+  font-size: 16px;
+}
+
+.hao-supplier-row-copy h2 {
+  gap: 7px;
+  font-size: 16.5px;
+  font-weight: 760;
+}
+
+.hao-supplier-slug {
+  margin-top: 4px !important;
+  color: var(--hao-faint) !important;
+  font-size: 10px !important;
+}
+
+.hao-economics-tags {
+  gap: 4px;
+  margin-top: 5px;
+}
+
+.hao-economics-badge {
+  min-height: 20px;
+  padding: 2px 7px;
+  font-size: 8.5px;
+  letter-spacing: 0.025em;
+  text-transform: none;
+}
+
+.hao-economics-origin {
+  background: color-mix(in srgb, var(--hao-accent) 8%, var(--hao-panel-soft));
+}
+
+.hao-economics-commercial {
+  background: color-mix(in srgb, var(--hao-good) 8%, var(--hao-panel-soft));
+}
+
+.hao-economics-routing {
+  background: color-mix(in srgb, var(--hao-warn) 8%, var(--hao-panel-soft));
+}
+
+.hao-badge-internal {
+  background: color-mix(in srgb, #a78bfa 10%, var(--hao-panel-soft));
+  border-color: color-mix(in srgb, #a78bfa 48%, var(--hao-border));
+  color: color-mix(in srgb, #c4b5fd 82%, var(--hao-text)) !important;
+}
+
+.hao-supplier-compact-stat,
+.hao-supplier-default {
+  gap: 3px;
+}
+
+.hao-supplier-compact-stat strong {
+  font-size: 18px;
+  font-weight: 760;
+  letter-spacing: -0.015em;
+}
+
+.hao-supplier-compact-stat span {
+  color: var(--hao-faint);
+  font-size: 9px;
+}
+
+.hao-supplier-default strong {
+  font-size: 13px;
+  font-weight: 690;
+}
+
+.hao-supplier-mobile-label {
+  display: none;
+}
+
+.hao-supplier-row-status {
+  justify-content: flex-start;
+}
+
+.hao-supplier-status-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+.hao-supplier-status-copy .hao-badge {
+  min-height: 22px;
+  padding-inline: 8px;
+  font-size: 9px;
+}
+
+.hao-supplier-route-health {
+  color: var(--hao-faint);
+  font-size: 9.5px;
+}
+
+.hao-supplier-row-actions {
+  min-width: 246px;
+  gap: 9px;
+}
+
+.hao-supplier-row-actions .hao-button {
+  min-width: 112px;
+  min-height: 38px;
+  padding-inline: 13px;
+}
+
+@media (max-width: 1280px) {
+  .hao-supplier-row {
+    grid-template-columns: minmax(280px, 2fr) 120px minmax(180px, 1fr) 130px 220px;
+    gap: 14px;
+  }
+
+  .hao-supplier-row-actions {
+    min-width: 220px;
+  }
+
+  .hao-supplier-row-actions .hao-button {
+    min-width: 102px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .hao-supplier-row {
+    grid-template-columns: minmax(260px, 1.7fr) 112px 130px 214px;
+  }
+
+  .hao-supplier-default,
+  .hao-supplier-row-head > span:nth-child(3) {
+    display: none;
+  }
+}
+
+@media (max-width: 820px) {
+  .hao-supplier-list {
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .hao-supplier-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    min-height: auto;
+    gap: 11px 14px;
+    margin-bottom: 9px;
+    padding: 14px;
+    border: 1px solid var(--hao-border);
+    border-radius: 12px;
+  }
+
+  .hao-supplier-row-main {
+    grid-column: 1 / -1;
+  }
+
+  .hao-supplier-compact-stat,
+  .hao-supplier-default,
+  .hao-supplier-row-status,
+  .hao-supplier-row-actions {
+    grid-row: auto;
+  }
+
+  .hao-supplier-compact-stat {
+    grid-column: 1;
+  }
+
+  .hao-supplier-default {
+    display: flex;
+    grid-column: 2;
+  }
+
+  .hao-supplier-mobile-label {
+    display: block;
+  }
+
+  .hao-supplier-row-status {
+    grid-column: 1;
+  }
+
+  .hao-supplier-row-actions {
+    grid-column: 2;
+    min-width: 0;
+    justify-content: flex-end;
+  }
+
+  .hao-supplier-row-actions .hao-button {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+}
+
+@media (max-width: 620px) {
+  .hao-supplier-section-head {
+    align-items: stretch;
+  }
+
+  .hao-supplier-section-head .hao-section-actions,
+  .hao-supplier-section-head .hao-section-actions .hao-button {
+    width: 100%;
+  }
+
+  .hao-supplier-row {
+    grid-template-columns: 1fr;
+  }
+
+  .hao-supplier-row-main,
+  .hao-supplier-compact-stat,
+  .hao-supplier-default,
+  .hao-supplier-row-status,
+  .hao-supplier-row-actions {
+    grid-column: 1;
+  }
+
+  .hao-supplier-row-actions {
+    justify-content: stretch;
+  }
+}
