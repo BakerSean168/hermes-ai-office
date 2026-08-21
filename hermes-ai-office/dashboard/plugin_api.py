@@ -673,6 +673,17 @@ def _safe_provider_id(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _is_official_deepseek_endpoint(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        host = str(urllib.parse.urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "api.deepseek.com"
+
+
 def _normalize_base_url(value: str) -> str:
     raw = value.strip().rstrip("/")
     parsed = urllib.parse.urlparse(raw)
@@ -1351,6 +1362,10 @@ async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
 async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
     try:
         descriptor, discovered, _configured = await asyncio.to_thread(_discover_provider_models, body)
+        if _is_official_deepseek_endpoint(descriptor.get("baseUrl")):
+            raise ValueError(
+                "DeepSeek 官方 API 仅保留给 Hermes 大脑配置，不进入 AI Office 员工采购与执行路由"
+            )
         selected = list(dict.fromkeys(model.strip() for model in body.selected_models if model.strip()))
         if not selected:
             raise ValueError("至少选择一个模型作为员工")

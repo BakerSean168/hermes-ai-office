@@ -546,6 +546,10 @@ def _save_shared_custom_provider(
 def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         raw_url = _normalize_shared_url(str(args.get("url") or ""))
+        if _is_official_deepseek_endpoint(raw_url):
+            raise ValueError(
+                "DeepSeek official API is reserved for Hermes brain configuration and cannot be added to AI Office workforce routing"
+            )
         api_key = str(args.get("api_key") or args.get("key") or "").strip()
         if not api_key:
             raise ValueError("API key is required")
@@ -769,6 +773,8 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
         for connection in hub.get("items") or []:
             if not isinstance(connection, dict):
                 continue
+            if _brain_only_provider_connection(connection):
+                continue
             auth_kind = str(connection.get("auth_kind") or connection.get("authKind") or "").upper()
             admin_state = str(
                 connection.get("admin_state") or connection.get("adminState") or "ENABLED"
@@ -851,11 +857,32 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
         return {"connections": reconciled_connections, "models": reconciled_models}
 
 
+def _is_official_deepseek_endpoint(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        host = str(urllib.parse.urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "api.deepseek.com"
+
+
+def _brain_only_provider_connection(connection: dict[str, Any]) -> bool:
+    provider_key = str(
+        connection.get("provider_key") or connection.get("providerKey") or ""
+    ).strip().lower()
+    base_url = str(connection.get("base_url") or connection.get("baseUrl") or "").strip()
+    return provider_key == "deepseek" or _is_official_deepseek_endpoint(base_url)
+
+
 def _available_execution_provider_ids(profile_name: str) -> list[str]:
     hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
     ready: list[str] = []
     for connection in hub.get("items") or []:
         if not isinstance(connection, dict):
+            continue
+        if _brain_only_provider_connection(connection):
             continue
         connection_id = str(connection.get("id") or "").strip()
         admin_state = str(

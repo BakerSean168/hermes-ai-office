@@ -147,6 +147,34 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("deepseek", ids)
         self.assertIn("opencode-go", ids)
 
+    async def test_custom_onboarding_rejects_deepseek_official_as_brain_only(self) -> None:
+        descriptor = {
+            "id": "custom-deepseek",
+            "name": "DeepSeek official",
+            "supplierSlug": "custom-deepseek",
+            "supplierName": "DeepSeek official",
+            "baseUrl": "https://api.deepseek.com/v1",
+            "keyEnv": "DEEPSEEK_API_KEY",
+            "transport": "openai_chat",
+        }
+        body = api.ProviderRegisterRequest(
+            preset_id="custom",
+            api_key="do-not-store",
+            selected_models=["deepseek-chat"],
+            default_model="deepseek-chat",
+        )
+        with mock.patch.object(
+            api, "_discover_provider_models", return_value=(descriptor, ["deepseek-chat"], False)
+        ), mock.patch.object(api, "_save_provider_secret") as save, mock.patch.object(
+            api, "_hub_upsert_connection"
+        ) as upsert:
+            with self.assertRaises(api.HTTPException) as raised:
+                await api.register_provider(body)
+        self.assertEqual(raised.exception.status_code, 422)
+        self.assertIn("Hermes 大脑", str(raised.exception.detail))
+        save.assert_not_called()
+        upsert.assert_not_called()
+
     def test_profile_discovery_ignores_ai_office_managed_codex_and_opencode_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir)
@@ -316,7 +344,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             "name": "DeepSeek API",
             "supplierSlug": "deepseek",
             "supplierName": "DeepSeek",
-            "baseUrl": "https://api.deepseek.com/v1",
+            "baseUrl": "https://relay.example/v1",
             "keyEnv": "DEEPSEEK_API_KEY",
             "transport": "openai_chat",
             "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},

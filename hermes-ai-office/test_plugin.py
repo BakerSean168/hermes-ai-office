@@ -488,6 +488,47 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertNotIn("super-secret-key", json.dumps(payload))
         self.assertNotIn("super-secret-key", json.dumps(result))
 
+    def test_deepseek_official_api_is_brain_only_and_excluded_from_ai_office(self) -> None:
+        with mock.patch.object(plugin, "_discover_shared_models") as discover, mock.patch.object(
+            plugin, "_save_shared_credential"
+        ) as save:
+            rejected = json.loads(
+                plugin._add_shared_provider_tool(
+                    {
+                        "url": "https://api.deepseek.com/v1",
+                        "api_key": "never-store-this-value",
+                        "name": "deepseek",
+                    }
+                )
+            )
+        self.assertFalse(rejected["ok"])
+        self.assertIn("brain", rejected["message"].lower())
+        discover.assert_not_called()
+        save.assert_not_called()
+
+        hub = {
+            "items": [
+                {
+                    "id": "deepseek-official",
+                    "provider_key": "deepseek",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "admin_state": "ENABLED",
+                    "routable": True,
+                },
+                {
+                    "id": "charity",
+                    "provider_key": "charity-relay",
+                    "base_url": "https://relay.example/v1",
+                    "admin_state": "ENABLED",
+                    "routable": True,
+                },
+            ]
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=hub), mock.patch.object(
+            plugin, "_provider_connection_credential_ready", return_value=True
+        ):
+            self.assertEqual(plugin._available_execution_provider_ids("coder"), ["charity"])
+
     def test_list_shared_providers_reads_central_hub_state(self) -> None:
         with mock.patch.object(
             plugin,
