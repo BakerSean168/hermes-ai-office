@@ -55,6 +55,22 @@ _LITELLM_RUNTIME_KEY_FILE = "/opt/data/secrets/litellm-runtime.key"
 _LITELLM_RUNTIME_KEY_ENV = "HERMES_LITELLM_RUNTIME_KEY"
 
 _CONTROL_PLANE_BASE = "http://127.0.0.1:8320"
+_SUPPLY_ORIGINS = {"OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"}
+_COMMERCIAL_TYPES = {"FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"}
+_ROUTING_POLICIES = {"AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"}
+
+
+def _shared_economics(args: Mapping[str, Any]) -> dict[str, str]:
+    origin = str(args.get("supply_origin") or "COMMERCIAL_RELAY").strip().upper()
+    commercial = str(args.get("commercial_type") or "METERED").strip().upper()
+    routing = str(args.get("routing_policy") or "AUTO").strip().upper()
+    if origin not in _SUPPLY_ORIGINS:
+        raise ValueError("invalid supply_origin")
+    if commercial not in _COMMERCIAL_TYPES:
+        raise ValueError("invalid commercial_type")
+    if routing not in _ROUTING_POLICIES:
+        raise ValueError("invalid routing_policy")
+    return {"supplyOrigin": origin, "commercialType": commercial, "routingPolicy": routing}
 
 _ADD_PROVIDER_SCHEMA = {
     "name": "ai_office_add_provider",
@@ -71,6 +87,9 @@ _ADD_PROVIDER_SCHEMA = {
             "key": {"type": "string", "description": "Alias for api_key, compatible with newapi_channel_conn payloads."},
             "name": {"type": "string", "description": "Shared channel/provider name. Optional; derived from hostname when omitted."},
             "website_url": {"type": "string", "description": "Official website URL. Optional; defaults to the API origin."},
+            "supply_origin": {"type": "string", "enum": ["OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"], "description": "Supply origin tag used by AI Office economics policy."},
+            "commercial_type": {"type": "string", "enum": ["FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"], "description": "Commercial plan type. FREE/SPONSORED routes are consumed before subscriptions and metered APIs."},
+            "routing_policy": {"type": "string", "enum": ["AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"], "description": "Whether this supplier may participate in automatic execution placement."},
             "models": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -411,6 +430,9 @@ def _register_shared_policy_workforce(
     credential_ref: str,
     connection_id: str,
     models: list[str],
+    supply_origin: str = "UNKNOWN",
+    commercial_type: str = "OTHER",
+    routing_policy: str = "AUTO",
 ) -> list[dict[str, Any]]:
     registrations: list[dict[str, Any]] = []
     for model in _policy_workforce_models(models):
@@ -421,11 +443,18 @@ def _register_shared_policy_workforce(
                 "name": supplier_name or display_name,
                 "websiteUrl": website_url,
                 "sourceKind": "EXTERNAL",
+                "supplyOrigin": supply_origin,
+                "routingPolicy": routing_policy,
             },
             "supplierModel": {"key": model, "name": model},
             "agreement": {
                 "externalAccountRef": f"provider-hub:{connection_id}",
                 "name": f"{display_name} shared connection",
+            },
+            "plan": {
+                "slug": "default",
+                "name": f"{display_name} access",
+                "commercialType": commercial_type,
             },
         }
         catalog_seed = json.dumps(catalog_payload, sort_keys=True, ensure_ascii=False)
@@ -550,6 +579,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             raise ValueError(
                 "DeepSeek official API is reserved for Hermes brain configuration and cannot be added to AI Office workforce routing"
             )
+        economics = _shared_economics(args)
         api_key = str(args.get("api_key") or args.get("key") or "").strip()
         if not api_key:
             raise ValueError("API key is required")
@@ -580,6 +610,8 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             "name": display_name,
             "websiteUrl": website_url,
             "sourceKind": "EXTERNAL",
+            "supplyOrigin": economics["supplyOrigin"],
+            "routingPolicy": economics["routingPolicy"],
         }
         source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
         source = _control_plane_request(
@@ -606,6 +638,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             "metadata": {
                 "addedFromProfile": profile or None,
                 "managedBy": "hermes-ai-office",
+                "economics": economics,
             },
         }
         seed = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -627,6 +660,9 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 credential_ref=credential_ref,
                 connection_id=connection_id,
                 models=models,
+                supply_origin=economics["supplyOrigin"],
+                commercial_type=economics["commercialType"],
+                routing_policy=economics["routingPolicy"],
             )
             if connection_id
             else []
@@ -644,6 +680,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 "health": connection.get("health") or payload["health"],
                 "models": models,
                 "workforce": workforce,
+                "economics": economics,
                 "shared": True,
                 "message": (
                     "Added as a shared external supplier connection. Other profiles discover it through the common registry; "
@@ -662,11 +699,52 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
 def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
+        try:
+            supply = _control_plane_request("/api/v2/projections/supply", timeout=3.0)
+        except Exception:
+            supply = {"suppliers": []}
+        supplier_economics: dict[str, dict[str, Any]] = {}
+        for supplier_row in supply.get("suppliers") or []:
+            if not isinstance(supplier_row, dict):
+                continue
+            supplier_id = str(supplier_row.get("id") or "").strip()
+            commercial_type = "OTHER"
+            for plan in supplier_row.get("plans") or []:
+                if isinstance(plan, dict) and str(plan.get("lifecycle") or "ACTIVE").upper() == "ACTIVE":
+                    candidate = str(plan.get("commercialType") or "OTHER").upper()
+                    if candidate != "OTHER":
+                        commercial_type = candidate
+                        break
+            spend_tier = (
+                "ZERO_COST"
+                if commercial_type in {"FREE", "SPONSORED"}
+                else "COMMITTED_EXPIRING"
+                if commercial_type in {"SUBSCRIPTION", "PREPAID"}
+                else "PAY_AS_YOU_GO"
+                if commercial_type == "METERED"
+                else "UNKNOWN"
+            )
+            if supplier_id:
+                supplier_economics[supplier_id] = {
+                    "supplyOrigin": str(supplier_row.get("supplyOrigin") or "UNKNOWN"),
+                    "routingPolicy": str(supplier_row.get("routingPolicy") or "AUTO"),
+                    "commercialType": commercial_type,
+                    "spendTier": spend_tier,
+                }
         items = []
         for item in hub.get("items") or []:
             if not isinstance(item, dict):
                 continue
             supplier = item.get("supplier") if isinstance(item.get("supplier"), dict) else {}
+            economics = supplier_economics.get(
+                str(supplier.get("id") or ""),
+                {
+                    "supplyOrigin": str(supplier.get("supplyOrigin") or "UNKNOWN"),
+                    "routingPolicy": str(supplier.get("routingPolicy") or "AUTO"),
+                    "commercialType": "OTHER",
+                    "spendTier": "UNKNOWN",
+                },
+            )
             profiles = sorted(
                 {
                     str(link.get("profile_id"))
@@ -698,6 +776,10 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
                     "credentialScope": item.get("credential_scope"),
                     "models": item.get("models") or [],
                     "supplier": supplier.get("name"),
+                    "supplyOrigin": economics["supplyOrigin"],
+                    "commercialType": economics["commercialType"],
+                    "routingPolicy": economics["routingPolicy"],
+                    "spendTier": economics["spendTier"],
                     "profiles": profiles,
                 }
             )
@@ -743,7 +825,28 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
                 existing.add(key)
                 employee_ids[key] = str(employee.get("id") or "").strip()
 
+        supplier_economics: dict[str, dict[str, str]] = {}
         bridge_ready_employee_ids: set[str] = set()
+        for supplier_projection in supply.get("suppliers") or []:
+            if isinstance(supplier_projection, dict):
+                sid = str(supplier_projection.get("id") or "").strip()
+                active_agreements = [
+                    agreement
+                    for agreement in (supplier_projection.get("agreements") or [])
+                    if isinstance(agreement, dict) and str(agreement.get("lifecycle") or "") == "ACTIVE"
+                ]
+                commercial_type = "OTHER"
+                for agreement in active_agreements:
+                    candidate_type = str(agreement.get("commercialType") or "OTHER").upper()
+                    if candidate_type != "OTHER":
+                        commercial_type = candidate_type
+                        break
+                if sid:
+                    supplier_economics[sid] = {
+                        "supplyOrigin": str(supplier_projection.get("supplyOrigin") or "UNKNOWN").upper(),
+                        "routingPolicy": str(supplier_projection.get("routingPolicy") or "AUTO").upper(),
+                        "commercialType": commercial_type,
+                    }
         for supplier_projection in supply.get("suppliers") or []:
             if not isinstance(supplier_projection, dict):
                 continue
@@ -826,6 +929,10 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
             ):
                 continue
             try:
+                economics = supplier_economics.get(
+                    supplier_id,
+                    {"supplyOrigin": "UNKNOWN", "commercialType": "OTHER", "routingPolicy": "AUTO"},
+                )
                 registrations = _register_shared_policy_workforce(
                     provider_key=provider_key,
                     display_name=display_name,
@@ -837,6 +944,9 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
                     credential_ref=credential_ref,
                     connection_id=connection_id,
                     models=to_reconcile,
+                    supply_origin=economics["supplyOrigin"],
+                    commercial_type=economics["commercialType"],
+                    routing_policy=economics["routingPolicy"],
                 )
             except Exception:
                 continue

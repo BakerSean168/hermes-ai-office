@@ -141,11 +141,38 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(post.call_args_list[1].args[0], "/api/v2/commands/suppliers/sup_1/retire")
         self.assertTrue(post.call_args_list[1].args[1]["force"])
 
+    async def test_supplier_economics_proxy_persists_orthogonal_tags(self) -> None:
+        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
+            result = await api.supplier_economics(
+                "sup_1",
+                api.SupplierEconomicsRequest(
+                    supply_origin="COMMUNITY_RELAY",
+                    commercial_type="SPONSORED",
+                    routing_policy="AUTO",
+                ),
+            )
+        self.assertEqual(result, {"ok": True})
+        post.assert_called_once_with(
+            "/api/v2/commands/suppliers/sup_1/economics",
+            {
+                "supplyOrigin": "COMMUNITY_RELAY",
+                "commercialType": "SPONSORED",
+                "routingPolicy": "AUTO",
+            },
+        )
+
     async def test_provider_presets_hide_expensive_deepseek_official_api(self) -> None:
         result = await api.provider_presets()
         ids = [item["id"] for item in result["items"]]
         self.assertNotIn("deepseek", ids)
         self.assertIn("opencode-go", ids)
+        profiles = {item["id"]: item for item in result["quickProfiles"]}
+        self.assertEqual(profiles["community-free"]["commercialType"], "SPONSORED")
+        self.assertEqual(profiles["event-free"]["supplyOrigin"], "EVENT_GRANT")
+        self.assertEqual(profiles["personal-hosted"]["routingPolicy"], "MANUAL_ONLY")
+        opencode = next(item for item in result["items"] if item["id"] == "opencode-go")
+        self.assertEqual(opencode["economics"]["supplyOrigin"], "OFFICIAL")
+        self.assertEqual(opencode["economics"]["commercialType"], "SUBSCRIPTION")
 
     async def test_custom_onboarding_rejects_deepseek_official_as_brain_only(self) -> None:
         descriptor = {
@@ -374,6 +401,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                 }
             if path.endswith("workforce-sources/upsert"):
                 return {"id": "sup_deepseek", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
+            if path.endswith("/economics"):
+                return {"ok": True}
             if path.endswith("/staffing-preferences"):
                 return {"metadata": {"staffingPreferences": payload}}
             if path.endswith("/runtime-access"):
@@ -404,7 +433,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([item["model"] for item in result["employees"]], ["deepseek-chat", "deepseek-reasoner"])
         self.assertEqual(result["defaultEmployeeId"], "emp_deepseek-reasoner")
-        save_secret.assert_called_once_with(descriptor, "secret-key-value")
+        save_secret.assert_called_once()
+        self.assertEqual(save_secret.call_args.args[0]["keyEnv"], "DEEPSEEK_API_KEY")
+        self.assertEqual(save_secret.call_args.args[1], "secret-key-value")
         catalog_calls = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
         self.assertEqual(len(catalog_calls), 2)
         self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_calls))
@@ -454,6 +485,8 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                 }
             if path.endswith("workforce-sources/upsert"):
                 return {"id": "sup_custom", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
+            if path.endswith("/economics"):
+                return {"ok": True}
             if path.endswith("supply-catalog/register"):
                 model = payload["supplierModel"]["key"]
                 return {
@@ -621,6 +654,13 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('api("/providers/register"', source)
         self.assertIn('selected_models: selectedModels', source)
         self.assertIn('default_model: defaultModel || selectedModels[0]', source)
+        self.assertIn('supply_origin: supplyOrigin', source)
+        self.assertIn('commercial_type: commercialType', source)
+        self.assertIn('routing_policy: routingPolicy', source)
+        self.assertIn('className: "hao-economics-quick-grid"', source)
+        self.assertIn('props.t("suppliers.quick." + profile.id)', source)
+        self.assertIn('className: "hao-economics-tags"', source)
+        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/economics"', source)
         self.assertIn('className: "hao-supplier-list"', source)
         self.assertIn('className: "hao-supplier-row hao-supplier-row-head"', source)
         self.assertIn('props.t("suppliers.internal")', source)
@@ -641,6 +681,8 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('.hao-supplier-row {', css)
         self.assertIn('.hao-button-danger {', css)
         self.assertIn('.hao-provider-manage-grid {', css)
+        self.assertIn('.hao-economics-quick-grid {', css)
+        self.assertIn('.hao-economics-tags {', css)
         self.assertRegex(css, r"\.hao-supplier-row-actions\s*\{[^}]*flex-wrap:\s*nowrap")
         self.assertRegex(css, r"\.hao-supplier-row-actions\s+\.hao-button\s*\{[^}]*white-space:\s*nowrap")
         self.assertIn('190px max-content;', css)

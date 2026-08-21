@@ -1,6 +1,8 @@
 import type { V2Repository, V2Row } from './repository.js';
 import { ProviderHubRepository } from './providerHub.js';
 import { RuntimeAccessRepository } from './runtimeAccess.js';
+import { SupplyRepository } from './supply.js';
+import { evaluateSupplyEconomics, type SupplyEconomicsEvaluation } from './supplyEconomics.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -43,6 +45,8 @@ interface Candidate {
   harnessPath: string | null;
   modelRank: number;
   rank: number;
+  serviceabilityPriority: number;
+  economics: SupplyEconomicsEvaluation;
   reasons: string[];
 }
 
@@ -416,15 +420,18 @@ export class ExecutionPolicyService {
   readonly #domain: V2Repository;
   readonly #runtimeAccess: RuntimeAccessRepository;
   readonly #providerHub: ProviderHubRepository;
+  readonly #supply: SupplyRepository;
 
   constructor(
     domain: V2Repository,
     runtimeAccess = new RuntimeAccessRepository(domain),
     providerHub = new ProviderHubRepository(domain),
+    supply = new SupplyRepository(domain),
   ) {
     this.#domain = domain;
     this.#runtimeAccess = runtimeAccess;
     this.#providerHub = providerHub;
+    this.#supply = supply;
   }
 
   resolve(input: ExecutionResolveInput): V2Row {
@@ -449,6 +456,7 @@ export class ExecutionPolicyService {
         (item) => availableConnectionIds === null || availableConnectionIds.has(String(item.id)),
       );
     const candidates: Candidate[] = [];
+    const excludedCandidates: V2Row[] = [];
 
     for (const employee of this.#domain.listEmployees()) {
       if (String(employee.recordLifecycle ?? '') !== 'ACTIVE') continue;
@@ -483,6 +491,24 @@ export class ExecutionPolicyService {
       );
 
       for (const employment of employments) {
+        const economics = evaluateSupplyEconomics({
+          supplier,
+          employment,
+          capacityPools: this.#supply.listCapacityPools(String(employment.supplyAgreementId)),
+          at,
+        });
+        if (economics.routingPolicy !== 'AUTO' || !economics.capacityEligible) {
+          excludedCandidates.push({
+            employeeId: employee.id,
+            employeeName: employee.displayName,
+            model,
+            supplierId: supplier.id,
+            supplierName: supplier.name,
+            supplyEconomics: economics,
+            reasons: economics.reasons,
+          });
+          continue;
+        }
         const accesses = this.#runtimeAccess
           .list(String(employment.id))
           .filter((item) => String(item.lifecycle ?? '') === 'ACTIVE');
@@ -493,8 +519,9 @@ export class ExecutionPolicyService {
         const connection = runtime.connection;
         const rankingClass = requested ? candidateClass : desiredClass;
         const modelRank = baseRank(rankingClass, model);
-        let rank = modelRank;
-        const reasons = [`MODEL_CLASS_${candidateClass}`, `FAMILY_${family}`];
+        let rank = 0;
+        let serviceabilityPriority = 0;
+        const reasons = [`MODEL_CLASS_${candidateClass}`, `FAMILY_${family}`, ...economics.reasons];
         if (requested && candidateClass !== desiredClass) {
           reasons.push(`EXPLICIT_MODEL_OVERRIDE_${desiredClass}_TO_${candidateClass}`);
         }
@@ -503,7 +530,10 @@ export class ExecutionPolicyService {
           reasons.push(`PROVIDER_${effective}`);
           if (effective === 'AVAILABLE') rank -= 5;
           else if (effective === 'UNKNOWN') rank += 6;
-          else if (effective.includes('DEGRADED') || effective.includes('CONGESTED')) rank += 8;
+          else if (effective.includes('DEGRADED') || effective.includes('CONGESTED')) {
+            serviceabilityPriority = 1;
+            rank += 8;
+          }
         } else {
           rank += 12;
           reasons.push('PROVIDER_CONNECTION_UNBOUND');
@@ -556,12 +586,24 @@ export class ExecutionPolicyService {
           harnessPath: runtime.path,
           modelRank,
           rank,
+          serviceabilityPriority,
+          economics,
           reasons,
         });
       }
     }
 
     candidates.sort((left, right) => {
+      const serviceability = left.serviceabilityPriority - right.serviceabilityPriority;
+      if (serviceability !== 0) return serviceability;
+      const spendPriority = left.economics.spendPriority - right.economics.spendPriority;
+      if (spendPriority !== 0) return spendPriority;
+      const expiryPriority = left.economics.expiryPriority - right.economics.expiryPriority;
+      if (expiryPriority !== 0) return expiryPriority;
+      if (left.economics.expiresAt != null && right.economics.expiresAt != null) {
+        const expiry = left.economics.expiresAt - right.economics.expiresAt;
+        if (expiry !== 0) return expiry;
+      }
       const modelPriority = left.modelRank - right.modelRank;
       if (modelPriority !== 0) return modelPriority;
       if (
@@ -579,9 +621,9 @@ export class ExecutionPolicyService {
     const selected = candidates[0] ?? null;
     return {
       status: selected ? 'SELECTED' : 'UNRESOLVED',
-      policyVersion: 'simple-placement-v1',
+      policyVersion: 'economic-placement-v2',
       decisionScope: 'PER_EXECUTION',
-      routingPrinciple: 'INTENT_SELECTS_WORK_CLASS_MODEL_FAMILY_SELECTS_HARNESS',
+      routingPrinciple: 'QUALITY_GATE_THEN_SPEND_TIER_THEN_ROUTE_FIT',
       intent,
       workClass: desiredClass,
       evaluatedAt: at,
@@ -594,6 +636,7 @@ export class ExecutionPolicyService {
             employment: selected.employment,
             model: selected.model,
             family: selected.family,
+            supplyEconomics: selected.economics,
             providerConnection: selected.connection
               ? {
                   id: selected.connection.id,
@@ -627,6 +670,15 @@ export class ExecutionPolicyService {
         officialHarnessRuntimeAvailable: candidate.officialHarnessRuntimeAvailable,
         officialHarnessUsableForSelectedRoute: candidate.harness === candidate.officialHarness,
         fallbackReason: candidate.fallbackReason,
+        supplyEconomics: candidate.economics,
+        selectionKey: {
+          serviceabilityPriority: candidate.serviceabilityPriority,
+          spendPriority: candidate.economics.spendPriority,
+          expiryPriority: candidate.economics.expiryPriority,
+          expiresAt: candidate.economics.expiresAt,
+          modelRank: candidate.modelRank,
+          routeFitRank: candidate.rank,
+        },
         transportMode:
           candidate.harness === 'CODEX'
             ? codexTransportMode(
@@ -639,6 +691,8 @@ export class ExecutionPolicyService {
         rank: candidate.rank,
         reasons: candidate.reasons,
       })),
+      totalCandidates: candidates.length,
+      excludedCandidates,
       metadata: input.metadata ?? {},
     };
   }

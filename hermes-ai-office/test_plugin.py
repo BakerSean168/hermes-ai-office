@@ -451,6 +451,15 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(payload["metadata"]["profileName"], "coder")
         self.assertEqual(captured["timeout"], 0.8)
 
+    def test_add_provider_schema_exposes_supply_economics_tags(self) -> None:
+        properties = plugin._ADD_PROVIDER_SCHEMA["parameters"]["properties"]
+        self.assertEqual(properties["supply_origin"]["enum"], [
+            "OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT",
+            "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN",
+        ])
+        self.assertIn("SUBSCRIPTION", properties["commercial_type"]["enum"])
+        self.assertIn("MANUAL_ONLY", properties["routing_policy"]["enum"])
+
     def test_add_shared_provider_stores_secret_only_in_hermes_and_sends_safe_hub_payload(self) -> None:
         captured: dict[str, object] = {}
 
@@ -473,6 +482,9 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                         "api_key": "super-secret-key",
                         "name": "worldclaw",
                         "website_url": "https://worldclawpro.ai/",
+                        "supply_origin": "COMMUNITY_RELAY",
+                        "commercial_type": "SPONSORED",
+                        "routing_policy": "AUTO",
                     }
                 )
             )
@@ -480,6 +492,8 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["providerKey"], "worldclaw")
         self.assertEqual(result["websiteUrl"], "https://worldclawpro.ai")
+        self.assertEqual(result["economics"]["supplyOrigin"], "COMMUNITY_RELAY")
+        self.assertEqual(result["economics"]["commercialType"], "SPONSORED")
         save_credential.assert_called_once_with("WORLDCLAW_API_KEY", "super-secret-key")
         payload = captured["payload"]
         self.assertIsInstance(payload, dict)
@@ -597,6 +611,40 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         with mock.patch.object(plugin, "_resolve_runtime_policy", return_value=decision), mock.patch.object(plugin, "_enqueue"):
             plugin._on_pre_tool_call(tool_name="terminal", args={"command": "opencode run test"}, tool_call_id="carry-1")
         self.assertEqual(plugin._PENDING["carry-1"]["providerHubConnectionId"], "conn-9")
+
+    def test_list_provider_exposes_supply_economics_for_routing_explanations(self) -> None:
+        hub = {
+            "items": [
+                {
+                    "id": "conn-free",
+                    "display_name": "Free Relay",
+                    "provider_key": "free-relay",
+                    "supplier": {
+                        "id": "sup-free",
+                        "name": "Free Relay",
+                        "supplyOrigin": "COMMUNITY_RELAY",
+                        "routingPolicy": "AUTO",
+                    },
+                    "profileLinks": [],
+                }
+            ]
+        }
+        supply = {
+            "suppliers": [
+                {
+                    "id": "sup-free",
+                    "supplyOrigin": "COMMUNITY_RELAY",
+                    "routingPolicy": "AUTO",
+                    "plans": [{"commercialType": "SPONSORED", "lifecycle": "ACTIVE"}],
+                }
+            ]
+        }
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=[hub, supply]):
+            item = json.loads(plugin._list_shared_providers_tool({}))["items"][0]
+        self.assertEqual(item["supplyOrigin"], "COMMUNITY_RELAY")
+        self.assertEqual(item["commercialType"], "SPONSORED")
+        self.assertEqual(item["spendTier"], "ZERO_COST")
+        self.assertEqual(item["routingPolicy"], "AUTO")
 
     def test_list_provider_includes_availability_projection_fields(self) -> None:
         fields = {"adminState", "availabilityState", "effectiveState", "routable", "retryable", "consecutiveFailures", "totalSuccesses", "totalFailures", "lastSuccessAt", "lastFailureAt", "lastErrorKind", "lastErrorStatus", "lastErrorMessage", "retryAfterAt"}

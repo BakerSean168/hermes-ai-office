@@ -346,29 +346,83 @@ export class V2Repository {
     name: string,
     websiteUrl?: string,
     sourceKind: 'EXTERNAL' | 'INTERNAL' = 'EXTERNAL',
+    supplyOrigin?:
+      | 'OFFICIAL'
+      | 'COMMERCIAL_RELAY'
+      | 'COMMUNITY_RELAY'
+      | 'EVENT_GRANT'
+      | 'PERSONAL_HOSTED'
+      | 'INTERNAL_POOL'
+      | 'UNKNOWN',
+    routingPolicy?: 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED',
   ): Row {
     const normalizedWebsite = websiteUrl?.trim().replace(/\/$/, '') || null;
     if (!['EXTERNAL', 'INTERNAL'].includes(sourceKind))
       throw new Error('SUPPLIER_SOURCE_KIND_INVALID');
+    const normalizedOrigin = supplyOrigin?.trim().toUpperCase() || null;
+    if (
+      normalizedOrigin &&
+      ![
+        'OFFICIAL',
+        'COMMERCIAL_RELAY',
+        'COMMUNITY_RELAY',
+        'EVENT_GRANT',
+        'PERSONAL_HOSTED',
+        'INTERNAL_POOL',
+        'UNKNOWN',
+      ].includes(normalizedOrigin)
+    ) {
+      throw new Error('SUPPLIER_ORIGIN_INVALID');
+    }
+    const normalizedRouting = routingPolicy?.trim().toUpperCase() || null;
+    if (
+      normalizedRouting &&
+      !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(normalizedRouting)
+    ) {
+      throw new Error('SUPPLIER_ROUTING_POLICY_INVALID');
+    }
     if (normalizedWebsite && !/^https?:\/\//i.test(normalizedWebsite))
       throw new Error('SUPPLIER_WEBSITE_URL_INVALID');
     const existing = row(this.db.prepare('SELECT * FROM v2_suppliers WHERE slug=?').get(slug));
     if (existing) {
       if (
         (normalizedWebsite && String(existing.website_url ?? '') !== normalizedWebsite) ||
-        String(existing.source_kind ?? 'EXTERNAL') !== sourceKind
+        String(existing.source_kind ?? 'EXTERNAL') !== sourceKind ||
+        (normalizedOrigin &&
+          String(existing.supply_origin ?? 'UNKNOWN') === 'UNKNOWN' &&
+          normalizedOrigin !== 'UNKNOWN')
       ) {
         const timestamp = now();
         this.db
           .prepare(
-            'UPDATE v2_suppliers SET website_url=COALESCE(?,website_url),source_kind=?,updated_at=? WHERE id=?',
+            `UPDATE v2_suppliers
+             SET website_url=COALESCE(?,website_url),source_kind=?,
+                 supply_origin=CASE
+                   WHEN supply_origin='UNKNOWN' AND ? IS NOT NULL AND ?!='UNKNOWN' THEN ?
+                   ELSE supply_origin
+                 END,
+                 updated_at=?
+             WHERE id=?`,
           )
-          .run(normalizedWebsite, sourceKind, timestamp, String(existing.id));
+          .run(
+            normalizedWebsite,
+            sourceKind,
+            normalizedOrigin,
+            normalizedOrigin,
+            normalizedOrigin,
+            timestamp,
+            String(existing.id),
+          );
         this.emit({
-          type: 'supplier.website.updated',
+          type: 'supplier.profile.updated',
           entityType: 'Supplier',
           entityId: String(existing.id),
-          payload: { websiteUrl: normalizedWebsite, sourceKind },
+          payload: {
+            websiteUrl: normalizedWebsite,
+            sourceKind,
+            supplyOrigin: normalizedOrigin,
+            routingPolicy: normalizedRouting,
+          },
         });
         return row(
           this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(String(existing.id)),
@@ -378,17 +432,39 @@ export class V2Repository {
     }
     const timestamp = now();
     const id = newId('sup', timestamp);
+    const initialOrigin =
+      normalizedOrigin ?? (sourceKind === 'INTERNAL' ? 'INTERNAL_POOL' : 'UNKNOWN');
+    const initialRouting = normalizedRouting ?? 'AUTO';
     this.db
       .prepare(
-        `INSERT INTO v2_suppliers(id,slug,name,website_url,source_kind,lifecycle,metadata_json,created_at,updated_at)
-         VALUES(?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO v2_suppliers(
+           id,slug,name,website_url,source_kind,supply_origin,routing_policy,lifecycle,metadata_json,created_at,updated_at
+         ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
       )
-      .run(id, slug, name, normalizedWebsite, sourceKind, 'ACTIVE', '{}', timestamp, timestamp);
+      .run(
+        id,
+        slug,
+        name,
+        normalizedWebsite,
+        sourceKind,
+        initialOrigin,
+        initialRouting,
+        'ACTIVE',
+        '{}',
+        timestamp,
+        timestamp,
+      );
     this.emit({
       type: 'supplier.created',
       entityType: 'Supplier',
       entityId: id,
-      payload: { slug, websiteUrl: normalizedWebsite, sourceKind },
+      payload: {
+        slug,
+        websiteUrl: normalizedWebsite,
+        sourceKind,
+        supplyOrigin: initialOrigin,
+        routingPolicy: initialRouting,
+      },
     });
     return row(this.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(id))!;
   }
@@ -1386,6 +1462,7 @@ export class V2Repository {
         .prepare(
           `SELECT e.id,e.display_name,e.record_lifecycle,e.first_seen_at,
                   s.id supplier_id,s.slug supplier_slug,s.name supplier_name,s.source_kind supplier_source_kind,
+                  s.supply_origin supplier_supply_origin,s.routing_policy supplier_routing_policy,
                   sm.id supplier_model_id,sm.supplier_model_key,sm.display_name supplier_model_name,
                   (SELECT COUNT(*) FROM v2_employments em
                     WHERE em.employee_id=e.id AND em.status='CURRENT' AND em.effective_to IS NULL) current_employments,
@@ -1409,6 +1486,8 @@ export class V2Repository {
         slug: value.supplier_slug,
         name: value.supplier_name,
         sourceKind: value.supplier_source_kind ?? 'EXTERNAL',
+        supplyOrigin: value.supplier_supply_origin ?? 'UNKNOWN',
+        routingPolicy: value.supplier_routing_policy ?? 'AUTO',
       },
       supplierModel: {
         id: value.supplier_model_id,
@@ -1427,6 +1506,7 @@ export class V2Repository {
       this.db
         .prepare(
           `SELECT e.*,s.slug supplier_slug,s.name supplier_name,s.source_kind supplier_source_kind,
+                  s.supply_origin supplier_supply_origin,s.routing_policy supplier_routing_policy,
                   sm.supplier_model_key,sm.display_name supplier_model_name
            FROM v2_employees e
            JOIN v2_suppliers s ON s.id=e.supplier_id
@@ -3499,9 +3579,12 @@ export class V2Repository {
       this.db
         .prepare(
           `SELECT em.*,a.name agreement_name,a.lifecycle agreement_lifecycle,a.external_account_ref,
+                  a.valid_to agreement_valid_to,a.plan_id,
+                  p.slug plan_slug,p.name plan_name,p.commercial_type,p.terms_json plan_terms_json,
                   e.display_name employee_name
            FROM v2_employments em
            JOIN v2_supply_agreements a ON a.id=em.supply_agreement_id
+           LEFT JOIN v2_plans p ON p.id=a.plan_id
            JOIN v2_employees e ON e.id=em.employee_id
            WHERE (? IS NULL OR em.employee_id=?)
            ORDER BY em.effective_from DESC`,
@@ -3515,6 +3598,12 @@ export class V2Repository {
       agreementName: value.agreement_name,
       agreementLifecycle: value.agreement_lifecycle,
       externalAccountRef: value.external_account_ref,
+      agreementValidTo: value.agreement_valid_to,
+      planId: value.plan_id,
+      planSlug: value.plan_slug,
+      planName: value.plan_name,
+      commercialType: value.commercial_type ?? 'OTHER',
+      planTerms: decode<JsonRecord>(value.plan_terms_json, {}),
       status: value.status,
       effectiveFrom: value.effective_from,
       effectiveTo: value.effective_to,

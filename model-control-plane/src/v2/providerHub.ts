@@ -871,6 +871,8 @@ export class ProviderHubRepository {
               id: (item.supplier as V2Row).id,
               name: (item.supplier as V2Row).name,
               slug: (item.supplier as V2Row).slug,
+              supplyOrigin: (item.supplier as V2Row).supplyOrigin ?? 'UNKNOWN',
+              routingPolicy: (item.supplier as V2Row).routingPolicy ?? 'AUTO',
             }
           : null,
       })),
@@ -888,6 +890,7 @@ export class ProviderHubRepository {
       this.#domain.db
         .prepare(
           `SELECT pc.*,s.name supplier_name,s.slug supplier_slug,s.website_url supplier_website_url,
+                  s.supply_origin supplier_supply_origin,s.routing_policy supplier_routing_policy,
              (SELECT COUNT(*) FROM v2_profile_provider_links pl WHERE pl.connection_id=pc.id AND pl.state='ACTIVE') profile_count
            FROM v2_provider_connections pc
            LEFT JOIN v2_suppliers s ON s.id=pc.supplier_id
@@ -1038,6 +1041,8 @@ export class ProviderHubRepository {
             name: value.supplier_name ?? null,
             slug: value.supplier_slug ?? null,
             websiteUrl: value.supplier_website_url ?? null,
+            supplyOrigin: value.supplier_supply_origin ?? 'UNKNOWN',
+            routingPolicy: value.supplier_routing_policy ?? 'AUTO',
           }
         : null,
     };

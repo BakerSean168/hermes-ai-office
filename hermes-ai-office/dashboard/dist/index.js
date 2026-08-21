@@ -266,7 +266,36 @@
       "suppliers.addTitle": "Add supplier",
       "suppliers.addSubtitle": "Choose a common provider or use any OpenAI-compatible endpoint.",
       "suppliers.chooseProvider": "1. Choose provider",
-      "suppliers.credentials": "2. Connection",
+      "suppliers.economics": "2. Supply economics",
+      "suppliers.economicsHint": "Choose a quick profile or edit the three independent routing tags.",
+      "suppliers.credentials": "3. Connection",
+      "suppliers.supplyOrigin": "Supply origin",
+      "suppliers.commercialType": "Billing model",
+      "suppliers.routingPolicy": "Routing policy",
+      "suppliers.quick.community-free": "Community relay · free",
+      "suppliers.quick.event-free": "Event grant · free",
+      "suppliers.quick.personal-hosted": "Personal hosted · manual",
+      "suppliers.quick.commercial-metered": "Commercial relay · metered",
+      "suppliers.quick.official-metered": "Official API · metered",
+      "suppliers.quick.official-subscription": "Official coding plan · subscription",
+      "suppliers.origin.OFFICIAL": "Official",
+      "suppliers.origin.COMMERCIAL_RELAY": "Commercial relay",
+      "suppliers.origin.COMMUNITY_RELAY": "Community relay",
+      "suppliers.origin.EVENT_GRANT": "Event grant",
+      "suppliers.origin.PERSONAL_HOSTED": "Personal hosted",
+      "suppliers.origin.INTERNAL_POOL": "Internal pool",
+      "suppliers.origin.UNKNOWN": "Unknown origin",
+      "suppliers.commercial.FREE": "Free",
+      "suppliers.commercial.SPONSORED": "Sponsored / free",
+      "suppliers.commercial.SUBSCRIPTION": "Subscription",
+      "suppliers.commercial.PREPAID": "Prepaid",
+      "suppliers.commercial.METERED": "Pay as you go",
+      "suppliers.commercial.OTHER": "Other",
+      "suppliers.routing.AUTO": "Auto routing",
+      "suppliers.routing.MANUAL_ONLY": "Manual only",
+      "suppliers.routing.BRAIN_ONLY": "Brain only",
+      "suppliers.routing.DISABLED": "Disabled",
+      "suppliers.credentials": "3. Connection",
       "suppliers.apiKey": "API Key",
       "suppliers.apiKeyExisting": "Already configured in Hermes. Leave blank to reuse it.",
       "suppliers.apiKeyRequired": "Paste the provider API key.",
@@ -275,7 +304,7 @@
       "suppliers.supplierNameHint": "Leave blank and Hermes will generate a name from the URL.",
       "suppliers.discover": "Fetch models",
       "suppliers.discovering": "Fetching models…",
-      "suppliers.selectModels": "3. Choose employees",
+      "suppliers.selectModels": "4. Choose employees",
       "suppliers.selectModelsHint": "Only checked models become enabled employees. Pick one as the default employee.",
       "suppliers.modelSearch": "Search discovered models",
       "suppliers.selectedCount": "{count} selected",
@@ -567,7 +596,36 @@
       "suppliers.addTitle": "添加供应商",
       "suppliers.addSubtitle": "选择常用供应商，或者直接填写任意 OpenAI 兼容请求地址。",
       "suppliers.chooseProvider": "1. 选择供应商",
-      "suppliers.credentials": "2. 连接信息",
+      "suppliers.economics": "2. 供给与费用策略",
+      "suppliers.economicsHint": "可一键选择常用标签组合，也可以分别调整三个独立属性。",
+      "suppliers.credentials": "3. 连接信息",
+      "suppliers.supplyOrigin": "供给来源",
+      "suppliers.commercialType": "计费方式",
+      "suppliers.routingPolicy": "路由策略",
+      "suppliers.quick.community-free": "公益中转 · 免费",
+      "suppliers.quick.event-free": "赛事活动 · 免费",
+      "suppliers.quick.personal-hosted": "个人搭建 · 手动",
+      "suppliers.quick.commercial-metered": "商业中转 · 按量",
+      "suppliers.quick.official-metered": "官方 API · 按量",
+      "suppliers.quick.official-subscription": "官方 Coding Plan · 包月",
+      "suppliers.origin.OFFICIAL": "官方",
+      "suppliers.origin.COMMERCIAL_RELAY": "商业中转",
+      "suppliers.origin.COMMUNITY_RELAY": "公益中转",
+      "suppliers.origin.EVENT_GRANT": "赛事/活动赠送",
+      "suppliers.origin.PERSONAL_HOSTED": "个人搭建",
+      "suppliers.origin.INTERNAL_POOL": "内部账号池",
+      "suppliers.origin.UNKNOWN": "来源待确认",
+      "suppliers.commercial.FREE": "免费",
+      "suppliers.commercial.SPONSORED": "赠送/免费",
+      "suppliers.commercial.SUBSCRIPTION": "包月/订阅",
+      "suppliers.commercial.PREPAID": "预付额度",
+      "suppliers.commercial.METERED": "按量付费",
+      "suppliers.commercial.OTHER": "其他",
+      "suppliers.routing.AUTO": "自动调度",
+      "suppliers.routing.MANUAL_ONLY": "仅手动",
+      "suppliers.routing.BRAIN_ONLY": "仅大脑",
+      "suppliers.routing.DISABLED": "禁用",
+      "suppliers.credentials": "3. 连接信息",
       "suppliers.apiKey": "API Key",
       "suppliers.apiKeyExisting": "Hermes 已经配置过凭证；留空即可复用。",
       "suppliers.apiKeyRequired": "粘贴该供应商的 API Key。",
@@ -576,7 +634,7 @@
       "suppliers.supplierNameHint": "不填写时，Hermes 会根据请求地址自动生成。",
       "suppliers.discover": "获取模型",
       "suppliers.discovering": "正在获取模型…",
-      "suppliers.selectModels": "3. 挑选员工",
+      "suppliers.selectModels": "4. 挑选员工",
       "suppliers.selectModelsHint": "只有勾选的模型会成为启用员工；再指定其中一名作为默认员工。",
       "suppliers.modelSearch": "搜索已发现模型",
       "suppliers.selectedCount": "已选择 {count} 个",
@@ -1813,11 +1871,21 @@
     const [manageConnections, setManageConnections] = React.useState([]);
     const [manageName, setManageName] = React.useState("");
     const [manageWebsite, setManageWebsite] = React.useState("");
+    const [manageSupplyOrigin, setManageSupplyOrigin] = React.useState("UNKNOWN");
+    const [manageCommercialType, setManageCommercialType] = React.useState("OTHER");
+    const [manageRoutingPolicy, setManageRoutingPolicy] = React.useState("AUTO");
     const [manageDrafts, setManageDrafts] = React.useState({});
     const [manageBusy, setManageBusy] = React.useState("");
     const [manageMessage, setManageMessage] = React.useState("");
     const [addOpen, setAddOpen] = React.useState(false);
     const [presets, setPresets] = React.useState([]);
+    const [economicsQuickProfiles, setEconomicsQuickProfiles] = React.useState([]);
+    const [supplyOrigins, setSupplyOrigins] = React.useState([]);
+    const [commercialTypes, setCommercialTypes] = React.useState([]);
+    const [routingPolicies, setRoutingPolicies] = React.useState([]);
+    const [supplyOrigin, setSupplyOrigin] = React.useState("COMMERCIAL_RELAY");
+    const [commercialType, setCommercialType] = React.useState("METERED");
+    const [routingPolicy, setRoutingPolicy] = React.useState("AUTO");
     const [presetId, setPresetId] = React.useState("opencode-go");
     const [apiKey, setApiKey] = React.useState("");
     const [baseUrl, setBaseUrl] = React.useState("");
@@ -1854,6 +1922,9 @@
       setBaseUrl("");
       setSupplierName("");
       setWebsiteUrl("");
+      setSupplyOrigin("COMMERCIAL_RELAY");
+      setCommercialType("METERED");
+      setRoutingPolicy("AUTO");
       setModels([]);
       setSelectedModels([]);
       setDefaultModel("");
@@ -1861,6 +1932,26 @@
       setFormMessage("");
       setDiscovering(false);
       setSaving(false);
+    }
+
+    function applyEconomics(economics) {
+      const value = asObject(economics);
+      if (value.supplyOrigin) setSupplyOrigin(String(value.supplyOrigin));
+      if (value.commercialType) setCommercialType(String(value.commercialType));
+      if (value.routingPolicy) setRoutingPolicy(String(value.routingPolicy));
+    }
+
+    function supplierCommercialType(supplier) {
+      const plans = asArray(supplier.plans);
+      const agreements = asArray(supplier.agreements);
+      const explicit = plans.find(function (plan) { return plan && plan.commercialType && plan.commercialType !== "OTHER"; });
+      if (explicit) return String(explicit.commercialType);
+      const agreement = agreements.find(function (item) { return item && item.commercialType && item.commercialType !== "OTHER"; });
+      return agreement ? String(agreement.commercialType) : "OTHER";
+    }
+
+    function economicsBadge(key, value, kind) {
+      return h("span", { className: "hao-badge hao-economics-badge hao-economics-" + kind }, props.t(key + value));
     }
 
     async function openSupplierDetail(supplier) {
@@ -1898,6 +1989,9 @@
       setManageSupplier(supplier);
       setManageName(String(supplier.name || ""));
       setManageWebsite(String(supplier.websiteUrl || ""));
+      setManageSupplyOrigin(String(supplier.supplyOrigin || "UNKNOWN"));
+      setManageCommercialType(supplierCommercialType(supplier));
+      setManageRoutingPolicy(String(supplier.routingPolicy || "AUTO"));
       setManageMessage("");
       setManageBusy("loading");
       try {
@@ -1912,6 +2006,9 @@
     function closeSupplierManage() {
       setManageSupplier(null);
       setManageConnections([]);
+      setManageSupplyOrigin("UNKNOWN");
+      setManageCommercialType("OTHER");
+      setManageRoutingPolicy("AUTO");
       setManageDrafts({});
       setManageMessage("");
       setManageBusy("");
@@ -1934,6 +2031,15 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: manageName.trim(), website_url: manageWebsite.trim() }),
+        });
+        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/economics", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            supply_origin: manageSupplyOrigin,
+            commercial_type: manageCommercialType,
+            routing_policy: manageRoutingPolicy,
+          }),
         });
         setManageMessage(props.t("suppliers.savedProfile"));
         await props.onRefresh();
@@ -2045,11 +2151,18 @@
         const result = await api("/providers/presets");
         const items = asArray(result.items);
         setPresets(items);
+        setEconomicsQuickProfiles(asArray(result.quickProfiles));
+        setSupplyOrigins(asArray(result.supplyOrigins));
+        setCommercialTypes(asArray(result.commercialTypes));
+        setRoutingPolicies(asArray(result.routingPolicies));
         const preferred =
           items.find(function (item) {
             return item.id === "opencode-go";
           }) || items[0];
-        if (preferred) setPresetId(preferred.id);
+        if (preferred) {
+          setPresetId(preferred.id);
+          applyEconomics(preferred.economics);
+        }
       } catch (cause) {
         setFormMessage(String(cause));
       }
@@ -2057,6 +2170,8 @@
 
     function choosePreset(id) {
       setPresetId(id);
+      const preset = presets.find(function (item) { return item.id === id; });
+      if (preset) applyEconomics(preset.economics);
       setModels([]);
       setSelectedModels([]);
       setDefaultModel("");
@@ -2124,6 +2239,9 @@
             base_url: baseUrl,
             supplier_name: supplierName,
             website_url: websiteUrl,
+            supply_origin: supplyOrigin,
+            commercial_type: commercialType,
+            routing_policy: routingPolicy,
             selected_models: selectedModels,
             default_model: defaultModel || selectedModels[0],
           }),
@@ -2174,6 +2292,11 @@
       const healthyChannels = channels.filter(function (channel) {
         return channel.health === "HEALTHY";
       }).length;
+      const economics = {
+        supplyOrigin: String(supplier.supplyOrigin || "UNKNOWN"),
+        commercialType: supplierCommercialType(supplier),
+        routingPolicy: String(supplier.routingPolicy || "AUTO"),
+      };
       return {
         employees: employees,
         agreements: agreements,
@@ -2188,6 +2311,7 @@
         defaultEmployeeId: defaultEmployeeId,
         observedRequests: observedRequests,
         healthyChannels: healthyChannels,
+        economics: economics,
       };
     }
 
@@ -2234,6 +2358,15 @@
                     "div",
                     { className: "hao-supplier-row-copy" },
                     h("h2", null, supplier.name, internal ? h("span", { className: "hao-badge hao-badge-internal" }, props.t("suppliers.internal")) : null),
+                    h(
+                      "div",
+                      { className: "hao-economics-tags" },
+                      economicsBadge("suppliers.origin.", facts.economics.supplyOrigin, "origin"),
+                      economicsBadge("suppliers.commercial.", facts.economics.commercialType, "commercial"),
+                      facts.economics.routingPolicy !== "AUTO"
+                        ? economicsBadge("suppliers.routing.", facts.economics.routingPolicy, "routing")
+                        : null,
+                    ),
                     h("p", null, supplier.slug),
                     supplier.websiteUrl
                       ? h("a", { className: "hao-external-link hao-supplier-website", href: supplier.websiteUrl, target: "_blank", rel: "noreferrer" }, supplier.websiteUrl)
@@ -2469,6 +2602,9 @@
                   { className: "hao-provider-manage-grid" },
                   h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { value: manageName, onChange: function (event) { setManageName(event.target.value); } })),
                   h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { value: manageWebsite, onChange: function (event) { setManageWebsite(event.target.value); }, placeholder: "https://…" })),
+                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplyOrigin")), h("select", { value: manageSupplyOrigin, onChange: function (event) { setManageSupplyOrigin(event.target.value); } }, (supplyOrigins.length ? supplyOrigins : ["OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.origin." + value)); }))),
+                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.commercialType")), h("select", { value: manageCommercialType, onChange: function (event) { setManageCommercialType(event.target.value); } }, (commercialTypes.length ? commercialTypes : ["FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.commercial." + value)); }))),
+                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.routingPolicy")), h("select", { value: manageRoutingPolicy, onChange: function (event) { setManageRoutingPolicy(event.target.value); } }, (routingPolicies.length ? routingPolicies : ["AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.routing." + value)); }))),
                 ),
                 h("div", { className: "hao-provider-manage-actions" }, h(Button, { disabled: Boolean(manageBusy) || !manageName.trim(), onClick: saveManagedSupplier }, manageBusy === "supplier" ? props.t("suppliers.controlBusy") : props.t("suppliers.saveProfile"))),
               ),
@@ -2556,6 +2692,36 @@
                   preset.configured ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.configured")) : null,
                 );
               }),
+            ),
+          ),
+          h(
+            "section",
+            { className: "hao-onboarding-step" },
+            h("div", { className: "hao-onboarding-step-head" }, h("div", null, h("h3", null, props.t("suppliers.economics")), h("p", null, props.t("suppliers.economicsHint")))),
+            h(
+              "div",
+              { className: "hao-economics-quick-grid" },
+              economicsQuickProfiles.map(function (profile) {
+                const selected = supplyOrigin === profile.supplyOrigin && commercialType === profile.commercialType && routingPolicy === profile.routingPolicy;
+                return h(
+                  "button",
+                  {
+                    className: "hao-economics-quick",
+                    type: "button",
+                    key: profile.id,
+                    "aria-pressed": selected,
+                    onClick: function () { applyEconomics(profile); },
+                  },
+                  props.t("suppliers.quick." + profile.id),
+                );
+              }),
+            ),
+            h(
+              "div",
+              { className: "hao-economics-fields" },
+              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplyOrigin")), h("select", { value: supplyOrigin, onChange: function (event) { setSupplyOrigin(event.target.value); } }, supplyOrigins.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.origin." + value)); }))),
+              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.commercialType")), h("select", { value: commercialType, onChange: function (event) { setCommercialType(event.target.value); } }, commercialTypes.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.commercial." + value)); }))),
+              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.routingPolicy")), h("select", { value: routingPolicy, onChange: function (event) { setRoutingPolicy(event.target.value); } }, routingPolicies.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.routing." + value)); }))),
             ),
           ),
           h(

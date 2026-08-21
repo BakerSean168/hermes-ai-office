@@ -35,15 +35,41 @@ function addCandidate(
     providerRef?: string;
     profileRef?: string;
     runtimeConfig?: Record<string, unknown>;
+    supplyOrigin?:
+      | 'OFFICIAL'
+      | 'COMMERCIAL_RELAY'
+      | 'COMMUNITY_RELAY'
+      | 'EVENT_GRANT'
+      | 'PERSONAL_HOSTED'
+      | 'INTERNAL_POOL'
+      | 'UNKNOWN';
+    routingPolicy?: 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED';
+    commercialType?: 'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER';
+    planTerms?: Record<string, unknown>;
+    capacityRemaining?: number;
+    capacityResetAt?: number;
   },
 ) {
   const catalog = state.supply.registerCatalogEntry({
-    supplier: { slug: input.supplierSlug, name: input.supplierName },
+    supplier: {
+      slug: input.supplierSlug,
+      name: input.supplierName,
+      supplyOrigin: input.supplyOrigin,
+      routingPolicy: input.routingPolicy,
+    },
     supplierModel: { key: input.model, name: input.model },
     agreement: {
       externalAccountRef: `${input.providerKey}:${input.model}`,
       name: `${input.providerName ?? input.providerKey} access`,
     },
+    plan: input.commercialType
+      ? {
+          slug: `${input.providerKey}-plan`,
+          name: `${input.providerName ?? input.providerKey} plan`,
+          commercialType: input.commercialType,
+          terms: input.planTerms,
+        }
+      : undefined,
   });
   const supplier = catalog.supplier as Record<string, unknown>;
   const employee = catalog.employee as Record<string, unknown>;
@@ -70,6 +96,18 @@ function addCandidate(
       baseUrl: input.baseUrl,
       credentialRef: `${input.providerKey.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
       config: { providerHubConnectionId: connection.id, ...(input.runtimeConfig ?? {}) },
+    });
+  }
+  if (input.capacityRemaining !== undefined) {
+    state.supply.upsertCapacityPool({
+      supplyAgreementId: String(employment.supplyAgreementId),
+      name: `${input.providerKey} quota`,
+      dimension: 'REQUESTS',
+      limit: 100,
+      remaining: input.capacityRemaining,
+      unit: 'requests',
+      resetAt: input.capacityResetAt,
+      source: 'TEST',
     });
   }
   return { catalog, supplier, employee, employment, connection };
@@ -141,7 +179,7 @@ test('implementation does not hard-code DeepSeek over a reusable healthy Luna ro
   const selected = decision.selected as Record<string, unknown>;
   assert.equal(selected.model, 'gpt-5.6-luna');
   assert.equal(decision.decisionScope, 'PER_EXECUTION');
-  assert.equal(decision.routingPrinciple, 'INTENT_SELECTS_WORK_CLASS_MODEL_FAMILY_SELECTS_HARNESS');
+  assert.equal(decision.routingPrinciple, 'QUALITY_GATE_THEN_SPEND_TIER_THEN_ROUTE_FIT');
   assert.match(String(selected.guidance), /per-execution placement/i);
   assert.match(String(selected.guidance), /not a fixed model or harness/i);
 });
@@ -549,4 +587,184 @@ test('GLM advertises ZCode as official harness but falls back to OpenCode for he
   assert.equal(runtime.preferredHarness, 'ZCODE');
   assert.equal(runtime.selectedHarness, 'OPENCODE');
   assert.equal(runtime.officialHarnessAvailable, false);
+});
+
+test('same eligible model prefers zero-cost supply before subscription and metered routes', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'free-relay',
+    supplierName: 'Free Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'free-relay',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    providerRef: 'free-relay',
+    supplyOrigin: 'COMMUNITY_RELAY',
+    commercialType: 'SPONSORED',
+  });
+  addCandidate(state, {
+    supplierSlug: 'subscription',
+    supplierName: 'Subscription',
+    model: 'gpt-5.6-sol',
+    providerKey: 'subscription',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    providerRef: 'subscription',
+    supplyOrigin: 'OFFICIAL',
+    commercialType: 'SUBSCRIPTION',
+  });
+  addCandidate(state, {
+    supplierSlug: 'metered',
+    supplierName: 'Metered Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'metered',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    providerRef: 'metered',
+    supplyOrigin: 'COMMERCIAL_RELAY',
+    commercialType: 'METERED',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    availableRuntimes: [{ kind: 'CODEX', path: '/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const provider = selected.providerConnection as Record<string, unknown>;
+  const economics = selected.supplyEconomics as Record<string, unknown>;
+  assert.equal(provider.providerKey, 'free-relay');
+  assert.equal(economics.spendTier, 'ZERO_COST');
+  assert.ok((selected.reasons as string[]).includes('SPEND_TIER_ZERO_COST'));
+});
+
+test('exhausted free capacity falls through to committed subscription before metered spend', () => {
+  const state = make();
+  const now = Date.UTC(2026, 7, 21, 6, 0, 0);
+  addCandidate(state, {
+    supplierSlug: 'free-relay',
+    supplierName: 'Free Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'free-relay',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'COMMUNITY_RELAY',
+    commercialType: 'SPONSORED',
+    capacityRemaining: 0,
+    capacityResetAt: now + 60 * 60 * 1000,
+  });
+  addCandidate(state, {
+    supplierSlug: 'subscription',
+    supplierName: 'Subscription',
+    model: 'gpt-5.6-sol',
+    providerKey: 'subscription',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'OFFICIAL',
+    commercialType: 'SUBSCRIPTION',
+  });
+  addCandidate(state, {
+    supplierSlug: 'metered',
+    supplierName: 'Metered',
+    model: 'gpt-5.6-sol',
+    providerKey: 'metered',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'COMMERCIAL_RELAY',
+    commercialType: 'METERED',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    at: now,
+    availableRuntimes: [{ kind: 'CODEX', path: '/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const provider = selected.providerConnection as Record<string, unknown>;
+  assert.equal(provider.providerKey, 'subscription');
+  assert.equal(
+    (selected.supplyEconomics as Record<string, unknown>).spendTier,
+    'COMMITTED_EXPIRING',
+  );
+  const excluded = decision.excludedCandidates as Array<Record<string, unknown>>;
+  const free = excluded.find((item) => item.model === 'gpt-5.6-sol');
+  assert.ok(free);
+  assert.equal((free?.supplyEconomics as Record<string, unknown>).capacityState, 'EXHAUSTED');
+});
+
+test('expiring event grant is consumed before non-expiring community free capacity', () => {
+  const state = make();
+  const now = Date.UTC(2026, 7, 21, 6, 0, 0);
+  addCandidate(state, {
+    supplierSlug: 'community',
+    supplierName: 'Community Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'community',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'COMMUNITY_RELAY',
+    commercialType: 'SPONSORED',
+  });
+  addCandidate(state, {
+    supplierSlug: 'event-grant',
+    supplierName: 'Event Grant',
+    model: 'gpt-5.6-sol',
+    providerKey: 'event-grant',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'EVENT_GRANT',
+    commercialType: 'SPONSORED',
+    capacityRemaining: 50,
+    capacityResetAt: now + 24 * 60 * 60 * 1000,
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    at: now,
+    availableRuntimes: [{ kind: 'CODEX', path: '/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal((selected.providerConnection as Record<string, unknown>).providerKey, 'event-grant');
+  assert.equal((selected.supplyEconomics as Record<string, unknown>).origin, 'EVENT_GRANT');
+  assert.ok((selected.reasons as string[]).includes('EXPIRING_CAPACITY_FIRST'));
+});
+
+test('manual-only free supply is excluded from automatic placement', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'personal',
+    supplierName: 'Personal Proxy',
+    model: 'gpt-5.6-sol',
+    providerKey: 'personal',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'PERSONAL_HOSTED',
+    routingPolicy: 'MANUAL_ONLY',
+    commercialType: 'FREE',
+  });
+  addCandidate(state, {
+    supplierSlug: 'subscription',
+    supplierName: 'Subscription',
+    model: 'gpt-5.6-sol',
+    providerKey: 'subscription',
+    protocol: 'openai-responses',
+    runtimeKind: 'CODEX',
+    supplyOrigin: 'OFFICIAL',
+    commercialType: 'SUBSCRIPTION',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    availableRuntimes: [{ kind: 'CODEX', path: '/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  assert.equal(
+    (selected.providerConnection as Record<string, unknown>).providerKey,
+    'subscription',
+  );
+  const excluded = decision.excludedCandidates as Array<Record<string, unknown>>;
+  assert.ok(
+    excluded.some(
+      (item) => (item.supplyEconomics as Record<string, unknown>).routingPolicy === 'MANUAL_ONLY',
+    ),
+  );
 });

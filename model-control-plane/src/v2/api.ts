@@ -1771,15 +1771,41 @@ export function registerV2Routes(
         }
         const body = (request.body ?? {}) as Record<string, unknown>;
         const sourceKind = String(body.sourceKind ?? 'EXTERNAL').toUpperCase();
+        const supplyOrigin = String(body.supplyOrigin ?? 'UNKNOWN').toUpperCase();
+        const routingPolicy = String(body.routingPolicy ?? 'AUTO').toUpperCase();
         if (!body.slug || !body.name || !['EXTERNAL', 'INTERNAL'].includes(sourceKind)) {
           reply.code(400);
           return { error: { code: 'WORKFORCE_SOURCE_IDENTITY_REQUIRED' } };
+        }
+        if (
+          ![
+            'OFFICIAL',
+            'COMMERCIAL_RELAY',
+            'COMMUNITY_RELAY',
+            'EVENT_GRANT',
+            'PERSONAL_HOSTED',
+            'INTERNAL_POOL',
+            'UNKNOWN',
+          ].includes(supplyOrigin) ||
+          !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy)
+        ) {
+          reply.code(400);
+          return { error: { code: 'WORKFORCE_SOURCE_ECONOMICS_INVALID' } };
         }
         return services.supply.upsertSource({
           slug: String(body.slug),
           name: String(body.name),
           websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
           sourceKind: sourceKind as 'EXTERNAL' | 'INTERNAL',
+          supplyOrigin: supplyOrigin as
+            | 'OFFICIAL'
+            | 'COMMERCIAL_RELAY'
+            | 'COMMUNITY_RELAY'
+            | 'EVENT_GRANT'
+            | 'PERSONAL_HOSTED'
+            | 'INTERNAL_POOL'
+            | 'UNKNOWN',
+          routingPolicy: routingPolicy as 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED',
         });
       },
     }),
@@ -1806,9 +1832,91 @@ export function registerV2Routes(
             return services.supply.updateSupplierProfile(request.params.supplierId, {
               name: String(body.name),
               websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
+              supplyOrigin:
+                body.supplyOrigin == null
+                  ? undefined
+                  : (String(body.supplyOrigin).toUpperCase() as
+                      | 'OFFICIAL'
+                      | 'COMMERCIAL_RELAY'
+                      | 'COMMUNITY_RELAY'
+                      | 'EVENT_GRANT'
+                      | 'PERSONAL_HOSTED'
+                      | 'INTERNAL_POOL'
+                      | 'UNKNOWN'),
+              routingPolicy:
+                body.routingPolicy == null
+                  ? undefined
+                  : (String(body.routingPolicy).toUpperCase() as
+                      'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED'),
             });
           } catch (error) {
             const code = error instanceof Error ? error.message : 'SUPPLIER_PROFILE_UPDATE_FAILED';
+            reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { supplierId: string } }>(
+    '/api/v2/commands/suppliers/:supplierId/economics',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supplier.economics.update',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          const supplyOrigin = String(body.supplyOrigin ?? '').toUpperCase();
+          const routingPolicy = String(body.routingPolicy ?? '').toUpperCase();
+          const commercialType = String(body.commercialType ?? '').toUpperCase();
+          if (
+            ![
+              'OFFICIAL',
+              'COMMERCIAL_RELAY',
+              'COMMUNITY_RELAY',
+              'EVENT_GRANT',
+              'PERSONAL_HOSTED',
+              'INTERNAL_POOL',
+              'UNKNOWN',
+            ].includes(supplyOrigin) ||
+            !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy) ||
+            !['FREE', 'SUBSCRIPTION', 'PREPAID', 'METERED', 'SPONSORED', 'OTHER'].includes(
+              commercialType,
+            )
+          ) {
+            reply.code(400);
+            return { error: { code: 'SUPPLIER_ECONOMICS_INVALID' } };
+          }
+          try {
+            return services.supply.updateSupplierEconomics(request.params.supplierId, {
+              supplyOrigin: supplyOrigin as
+                | 'OFFICIAL'
+                | 'COMMERCIAL_RELAY'
+                | 'COMMUNITY_RELAY'
+                | 'EVENT_GRANT'
+                | 'PERSONAL_HOSTED'
+                | 'INTERNAL_POOL'
+                | 'UNKNOWN',
+              routingPolicy: routingPolicy as 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED',
+              commercialType: commercialType as
+                'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER',
+              planSlug: body.planSlug == null ? undefined : String(body.planSlug),
+              planName: body.planName == null ? undefined : String(body.planName),
+              planTerms:
+                body.planTerms &&
+                typeof body.planTerms === 'object' &&
+                !Array.isArray(body.planTerms)
+                  ? (body.planTerms as Record<string, unknown>)
+                  : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'SUPPLIER_ECONOMICS_UPDATE_FAILED';
             reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
             return { error: { code } };
           }
@@ -1956,6 +2064,22 @@ export function registerV2Routes(
                 supplier.sourceKind == null
                   ? undefined
                   : (String(supplier.sourceKind).toUpperCase() as 'EXTERNAL' | 'INTERNAL'),
+              supplyOrigin:
+                supplier.supplyOrigin == null
+                  ? undefined
+                  : (String(supplier.supplyOrigin).toUpperCase() as
+                      | 'OFFICIAL'
+                      | 'COMMERCIAL_RELAY'
+                      | 'COMMUNITY_RELAY'
+                      | 'EVENT_GRANT'
+                      | 'PERSONAL_HOSTED'
+                      | 'INTERNAL_POOL'
+                      | 'UNKNOWN'),
+              routingPolicy:
+                supplier.routingPolicy == null
+                  ? undefined
+                  : (String(supplier.routingPolicy).toUpperCase() as
+                      'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED'),
             },
             supplierModel: { key: String(supplierModel.key), name: String(supplierModel.name) },
             agreement: {
@@ -1970,6 +2094,10 @@ export function registerV2Routes(
                     ? (String(plan.commercialType) as
                         'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER')
                     : undefined,
+                  terms:
+                    plan.terms && typeof plan.terms === 'object' && !Array.isArray(plan.terms)
+                      ? (plan.terms as Record<string, unknown>)
+                      : undefined,
                 }
               : undefined,
             runtimeSelectors:

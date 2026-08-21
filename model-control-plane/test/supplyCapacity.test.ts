@@ -176,3 +176,35 @@ test('unknown remaining capacity is visible but does not fabricate exhaustion', 
   assert.equal(state.pools[0]?.remaining, null);
   assert.deepEqual(state.reasons, []);
 });
+
+test('automatic discovery fills unknown economics once but never overwrites operator economics', () => {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const repository = new V2Repository(db);
+  const supply = new SupplyRepository(repository);
+  const supplier = supply.upsertSource({
+    slug: 'relay',
+    name: 'Relay',
+    sourceKind: 'EXTERNAL',
+  });
+  supply.updateSupplierEconomics(String(supplier.id), {
+    supplyOrigin: 'PERSONAL_HOSTED',
+    routingPolicy: 'MANUAL_ONLY',
+    commercialType: 'OTHER',
+  });
+
+  supply.upsertSource({
+    slug: 'relay',
+    name: 'Relay',
+    sourceKind: 'EXTERNAL',
+    supplyOrigin: 'COMMUNITY_RELAY',
+    routingPolicy: 'AUTO',
+  });
+  const afterDiscovery = supply.projection().suppliers[0] as Record<string, unknown>;
+  assert.equal(afterDiscovery.supplyOrigin, 'PERSONAL_HOSTED');
+  assert.equal(afterDiscovery.routingPolicy, 'MANUAL_ONLY');
+  assert.equal(
+    (afterDiscovery.plans as Array<Record<string, unknown>>)[0]?.commercialType,
+    'OTHER',
+  );
+});

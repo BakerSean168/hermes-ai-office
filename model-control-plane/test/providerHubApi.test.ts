@@ -119,7 +119,13 @@ test('provider hub summary stays compact and detail is fetched by connection id'
     authKind: 'API_KEY',
     modelCount: 2,
     profileCount: 1,
-    supplier: { id: String(supplier.id), name: 'Worldclaw', slug: 'worldclaw' },
+    supplier: {
+      id: String(supplier.id),
+      name: 'Worldclaw',
+      slug: 'worldclaw',
+      supplyOrigin: 'UNKNOWN',
+      routingPolicy: 'AUTO',
+    },
   });
   assert.equal(JSON.stringify(summary.json()).includes('WORLDCLAW_API_KEY'), false);
   assert.equal(JSON.stringify(summary.json()).includes('worldclawpro.ai'), false);

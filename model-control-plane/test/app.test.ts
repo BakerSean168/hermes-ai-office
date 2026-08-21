@@ -394,6 +394,59 @@ test('operator force retirement closes active relationships and retires supplier
   }
 });
 
+test('supplier economics command persists orthogonal tags and assigns commercial plan to active agreements', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+  try {
+    const seeded = runtime.v2.bootstrapReference({
+      supplierSlug: 'community-free',
+      supplierName: 'Community Free',
+      supplierModelKey: 'gpt-5.6-sol',
+      supplierModelName: 'GPT-5.6 Sol',
+      agreementRef: 'community-free-current',
+      agreementName: 'Community Free / Current',
+      gatewaySlug: 'litellm-reference',
+      gatewayKind: 'LITELLM',
+      gatewayName: 'LiteLLM Reference Gateway',
+      workScopeSlug: 'development',
+      workScopeName: 'Development',
+      positionSlug: 'review',
+      positionName: 'Reviewer',
+      positionKind: 'REVIEWER',
+      runtimeKind: 'CODEX',
+      protocol: 'openai-responses',
+    });
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/economics`,
+      headers: { 'idempotency-key': 'community-free-economics' },
+      payload: {
+        supplyOrigin: 'COMMUNITY_RELAY',
+        routingPolicy: 'AUTO',
+        commercialType: 'SPONSORED',
+        planSlug: 'free',
+        planName: 'Community sponsored access',
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    const supply = await runtime.app.inject({ method: 'GET', url: '/api/v2/projections/supply' });
+    const supplier = supply
+      .json()
+      .suppliers.find((item: Record<string, unknown>) => item.id === seeded.supplierId);
+    assert.equal(supplier.supplyOrigin, 'COMMUNITY_RELAY');
+    assert.equal(supplier.routingPolicy, 'AUTO');
+    assert.equal(supplier.plans[0].commercialType, 'SPONSORED');
+    assert.equal(supplier.agreements[0].commercialType, 'SPONSORED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('explicit supply catalog registration classifies gateway evidence without creating an Appointment', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
