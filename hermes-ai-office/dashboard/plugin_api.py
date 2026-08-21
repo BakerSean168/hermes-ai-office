@@ -424,7 +424,7 @@ def _register_discovered_employee(
     result = _post_json(
         "/api/v2/commands/supply-catalog/register",
         payload,
-        idempotency_key="provider-catalog-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
+        idempotency_key="provider-catalog-v2-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
     )
     employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
     supplier_row = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
@@ -1557,7 +1557,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                 _post_json,
                 "/api/v2/commands/supply-catalog/register",
                 payload,
-                idempotency_key=f"office-onboard-{digest}",
+                idempotency_key=f"office-onboard-v2-{digest}",
             )
             supplier = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
             employee = result.get("employee") if isinstance(result.get("employee"), Mapping) else {}

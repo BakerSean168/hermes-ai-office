@@ -462,7 +462,7 @@ def _register_shared_policy_workforce(
             "/api/v2/commands/supply-catalog/register",
             method="POST",
             payload=catalog_payload,
-            idempotency_key="provider-tool-workforce-v1-"
+            idempotency_key="provider-tool-workforce-v2-"
             + hashlib.blake2b(catalog_seed.encode("utf-8"), digest_size=10).hexdigest(),
         )
         employee = catalog.get("employee") if isinstance(catalog.get("employee"), dict) else {}
