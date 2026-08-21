@@ -34,6 +34,7 @@ function addCandidate(
     runtimeKind?: 'OPENCODE' | 'CODEX' | 'CLAUDE_CODE';
     providerRef?: string;
     profileRef?: string;
+    runtimeConfig?: Record<string, unknown>;
   },
 ) {
   const catalog = state.supply.registerCatalogEntry({
@@ -68,7 +69,7 @@ function addCandidate(
       profileRef: input.profileRef,
       baseUrl: input.baseUrl,
       credentialRef: `${input.providerKey.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
-      config: { providerHubConnectionId: connection.id },
+      config: { providerHubConnectionId: connection.id, ...(input.runtimeConfig ?? {}) },
     });
   }
   return { catalog, supplier, employee, employment, connection };
@@ -268,7 +269,7 @@ test('review selects a premium model and prefers the model vendor official harne
   assert.match(String(selected.guidance), /never place API keys/i);
 });
 
-test('GPT on a chat-completions-only relay does not force incompatible Codex', () => {
+test('GPT on a chat-completions-only relay without an explicit bridge does not force Codex', () => {
   const state = make();
   addCandidate(state, {
     supplierSlug: 'chat-relay',
@@ -302,7 +303,104 @@ test('GPT on a chat-completions-only relay does not force incompatible Codex', (
   );
 });
 
-test('same GPT model prefers an UNKNOWN responses route with Codex over an AVAILABLE chat fallback', () => {
+test('GPT on an explicitly bridged chat relay uses Codex without changing Codex wire protocol', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'chat-relay',
+    supplierName: 'Chat Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'chat-relay',
+    protocol: 'openai-chat-completions',
+    availabilityState: 'AVAILABLE',
+    runtimeKind: 'CODEX',
+    providerRef: 'chat-relay-bridge',
+    profileRef: 'chat-relay-sol',
+    runtimeConfig: {
+      transportMode: 'BRIDGED_CHAT',
+      bridgeKind: 'CC_SWITCH_CODEX_CHAT',
+      wireApi: 'responses',
+    },
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    availableRuntimes: [
+      { kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' },
+      { kind: 'OPENCODE', path: '/opt/data/runtime/npm/bin/opencode' },
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(runtime.preferredHarness, 'CODEX');
+  assert.equal(runtime.selectedHarness, 'CODEX');
+  assert.equal(runtime.transportMode, 'BRIDGED_CHAT');
+  assert.equal(runtime.bridgeKind, 'CC_SWITCH_CODEX_CHAT');
+  assert.equal(runtime.officialHarnessUsableForSelectedRoute, true);
+  assert.equal(runtime.fallbackReason, null);
+  assert.ok((selected.reasons as string[]).includes('OFFICIAL_HARNESS_VIA_PROTOCOL_BRIDGE'));
+});
+
+test('explicit GPT model request can cross the default work class and still use a bridged Codex route', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: '4sapi',
+    supplierName: '4SAPI',
+    model: 'gpt-5.5',
+    providerKey: '4sapi',
+    protocol: 'openai-chat-completions',
+    availabilityState: 'AVAILABLE',
+    runtimeKind: 'CODEX',
+    providerRef: '4sapi-bridge',
+    profileRef: '4sapi-gpt-5-5',
+    runtimeConfig: {
+      transportMode: 'BRIDGED_CHAT',
+      bridgeKind: 'CC_SWITCH_CODEX_CHAT',
+      wireApi: 'responses',
+    },
+  });
+  const decision = state.policy.resolve({
+    intent: 'IMPLEMENT',
+    requestedModel: 'gpt-5.5',
+    availableRuntimes: [{ kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' }],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(selected.model, 'gpt-5.5');
+  assert.equal(runtime.selectedHarness, 'CODEX');
+  assert.equal(runtime.transportMode, 'BRIDGED_CHAT');
+  assert.ok(
+    (selected.reasons as string[]).includes('EXPLICIT_MODEL_OVERRIDE_IMPLEMENTATION_TO_PREMIUM'),
+  );
+});
+
+test('non-agent GPT image model is never eligible as a coding execution model', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: '4sapi',
+    supplierName: '4SAPI',
+    model: 'gpt-image-2',
+    providerKey: '4sapi',
+    protocol: 'openai-chat-completions',
+    availabilityState: 'AVAILABLE',
+    runtimeKind: 'CODEX',
+    providerRef: '4sapi-bridge',
+    profileRef: '4sapi-image',
+    runtimeConfig: {
+      transportMode: 'BRIDGED_CHAT',
+      bridgeKind: 'CC_SWITCH_CODEX_CHAT',
+      wireApi: 'responses',
+    },
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-image-2',
+    availableRuntimes: [{ kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' }],
+  });
+  assert.equal(decision.status, 'UNRESOLVED');
+  assert.equal(decision.selected, null);
+});
+
+test('same GPT model prefers an UNKNOWN responses route with Codex over an AVAILABLE unbridged chat fallback', () => {
   const state = make();
   addCandidate(state, {
     supplierSlug: 'chat-relay',

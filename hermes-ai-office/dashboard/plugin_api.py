@@ -20,8 +20,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-import yaml
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -31,6 +29,14 @@ try:
 except Exception:  # pragma: no cover - only used by isolated import tests
     config_mod = None  # type: ignore[assignment]
     get_hermes_home = None  # type: ignore[assignment]
+
+
+def _safe_yaml_load(text: str) -> Any:
+    yaml_mod = getattr(config_mod, "yaml", None) if config_mod is not None else None
+    if yaml_mod is None:
+        return {}
+    return yaml_mod.safe_load(text)
+
 
 router = APIRouter()
 
@@ -524,7 +530,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 profile_config_path = profile_dir / "config.yaml"
                 if profile_config_path.exists():
                     try:
-                        profile_config = yaml.safe_load(profile_config_path.read_text(encoding="utf-8")) or {}
+                        profile_config = _safe_yaml_load(profile_config_path.read_text(encoding="utf-8")) or {}
                         model_config = profile_config.get("model") if isinstance(profile_config, Mapping) else None
                         if isinstance(model_config, Mapping):
                             selected_provider = str(model_config.get("provider") or "").strip()
@@ -929,7 +935,7 @@ def _hermes_model_defaults() -> Dict[str, Dict[str, str]]:
         return defaults
     for config_path in profiles_root.glob("*/config.yaml"):
         try:
-            value = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            value = _safe_yaml_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
         model = _model_config(value.get("model") if isinstance(value, Mapping) else None)

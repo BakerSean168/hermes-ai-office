@@ -68,12 +68,18 @@ function workClass(intent: ExecutionIntent): WorkClass {
   return PREMIUM_INTENTS.has(intent) ? 'PREMIUM' : 'IMPLEMENTATION';
 }
 
+const GPT_NON_AGENT_MARKERS = ['image', 'audio', 'realtime', 'tts', 'transcribe'];
+
+function isGptExecutionModel(model: string): boolean {
+  return (
+    model.startsWith('gpt-') && !GPT_NON_AGENT_MARKERS.some((marker) => model.includes(marker))
+  );
+}
+
 function modelClass(model: string): WorkClass | null {
   if (model.startsWith('claude-opus-') || model.startsWith('claude-sonnet-')) return 'PREMIUM';
-  if (model === 'gpt-5.6' || model.startsWith('gpt-5.6-sol') || model.startsWith('gpt-5.6-terra')) {
-    return 'PREMIUM';
-  }
   if (model.startsWith('gpt-5.6-luna')) return 'IMPLEMENTATION';
+  if (isGptExecutionModel(model)) return 'PREMIUM';
   if (model.startsWith('deepseek-v4-flash')) return 'IMPLEMENTATION';
   if (model.startsWith('glm-5.2')) return 'IMPLEMENTATION';
   return null;
@@ -202,6 +208,27 @@ function connectionForAccess(
   return routable[0] ?? connections.find((item) => supportsModel(item, model)) ?? null;
 }
 
+function accessConfig(access: V2Row | null): JsonRecord {
+  return access?.config && typeof access.config === 'object' ? (access.config as JsonRecord) : {};
+}
+
+function codexTransportMode(access: V2Row | null, protocol: string): string {
+  const configured = String(accessConfig(access).transportMode ?? '')
+    .trim()
+    .toUpperCase();
+  if (configured === 'BRIDGED_CHAT') {
+    return protocol.includes('chat') ? 'BRIDGED_CHAT' : 'UNSUPPORTED';
+  }
+  if (
+    protocol.includes('responses') ||
+    protocol.includes('codex') ||
+    protocol.includes('chatgpt')
+  ) {
+    return 'NATIVE_RESPONSES';
+  }
+  return 'UNSUPPORTED';
+}
+
 function harnessCompatible(
   family: ModelFamily,
   harness: ExecutionHarness,
@@ -224,9 +251,17 @@ function harnessCompatible(
     );
   }
   if (harness === 'CODEX') {
-    const codexProtocol =
-      protocol.includes('responses') || protocol.includes('codex') || protocol.includes('chatgpt');
-    return family === 'OPENAI' && codexProtocol && (Boolean(access) || hasManagedConnection);
+    const transportMode = codexTransportMode(access, protocol);
+    const bridgeExplicitlyRegistered =
+      transportMode !== 'BRIDGED_CHAT' ||
+      (Boolean(access) &&
+        String(accessConfig(access).bridgeKind ?? '').toUpperCase() === 'CC_SWITCH_CODEX_CHAT');
+    return (
+      family === 'OPENAI' &&
+      transportMode !== 'UNSUPPORTED' &&
+      bridgeExplicitlyRegistered &&
+      (Boolean(access) || hasManagedConnection)
+    );
   }
   if (harness === 'DSH') {
     return (
@@ -299,6 +334,10 @@ function routeRuntime(
 function runtimeInstruction(candidate: Candidate): JsonRecord {
   const connection = candidate.connection;
   const access = candidate.access;
+  const config = accessConfig(access);
+  const protocol = String(connection?.protocol ?? access?.protocol ?? '').toLowerCase();
+  const transportMode =
+    candidate.harness === 'CODEX' ? codexTransportMode(access, protocol) : 'NATIVE';
   const providerRef = String(
     access?.providerRef ?? access?.provider_ref ?? connection?.provider_key ?? '',
   ).trim();
@@ -337,6 +376,8 @@ function runtimeInstruction(candidate: Candidate): JsonRecord {
     profileRef: profileRef || null,
     providerRef: providerRef || null,
     accessProfileId: access?.id ?? null,
+    transportMode,
+    bridgeKind: transportMode === 'BRIDGED_CHAT' ? String(config.bridgeKind ?? '') || null : null,
   };
 }
 
@@ -417,8 +458,10 @@ export class ExecutionPolicyService {
           ? (employee.supplierModel as V2Row)
           : {};
       const model = normalizedModel(supplierModel.key);
-      if (!model || modelClass(model) !== desiredClass) continue;
+      const candidateClass = modelClass(model);
+      if (!model || !candidateClass) continue;
       if (requested && model !== requested) continue;
+      if (!requested && candidateClass !== desiredClass) continue;
       const family = modelFamily(model);
       if (family === 'OTHER') continue;
       const employments = this.#domain
@@ -448,9 +491,13 @@ export class ExecutionPolicyService {
         if (availableConnectionIds !== null && !runtime.connection) continue;
         const selectedAccess = runtime.access;
         const connection = runtime.connection;
-        const modelRank = baseRank(desiredClass, model);
+        const rankingClass = requested ? candidateClass : desiredClass;
+        const modelRank = baseRank(rankingClass, model);
         let rank = modelRank;
-        const reasons = [`MODEL_CLASS_${desiredClass}`, `FAMILY_${family}`];
+        const reasons = [`MODEL_CLASS_${candidateClass}`, `FAMILY_${family}`];
+        if (requested && candidateClass !== desiredClass) {
+          reasons.push(`EXPLICIT_MODEL_OVERRIDE_${desiredClass}_TO_${candidateClass}`);
+        }
         if (connection) {
           const effective = connectionEffectiveState(connection);
           reasons.push(`PROVIDER_${effective}`);
@@ -463,7 +510,15 @@ export class ExecutionPolicyService {
         }
         if (runtime.selected === runtime.official) {
           rank -= 5;
-          reasons.push('OFFICIAL_HARNESS_AVAILABLE');
+          const protocol = String(
+            connection?.protocol ?? selectedAccess?.protocol ?? '',
+          ).toLowerCase();
+          reasons.push(
+            runtime.selected === 'CODEX' &&
+              codexTransportMode(selectedAccess, protocol) === 'BRIDGED_CHAT'
+              ? 'OFFICIAL_HARNESS_VIA_PROTOCOL_BRIDGE'
+              : 'OFFICIAL_HARNESS_AVAILABLE',
+          );
         } else {
           rank += 5;
           reasons.push(`OFFICIAL_HARNESS_UNAVAILABLE_OR_INCOMPATIBLE_USING_${runtime.selected}`);
@@ -572,6 +627,15 @@ export class ExecutionPolicyService {
         officialHarnessRuntimeAvailable: candidate.officialHarnessRuntimeAvailable,
         officialHarnessUsableForSelectedRoute: candidate.harness === candidate.officialHarness,
         fallbackReason: candidate.fallbackReason,
+        transportMode:
+          candidate.harness === 'CODEX'
+            ? codexTransportMode(
+                candidate.access,
+                String(
+                  candidate.connection?.protocol ?? candidate.access?.protocol ?? '',
+                ).toLowerCase(),
+              )
+            : 'NATIVE',
         rank: candidate.rank,
         reasons: candidate.reasons,
       })),

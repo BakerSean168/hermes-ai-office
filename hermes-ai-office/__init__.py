@@ -356,15 +356,20 @@ def _discover_shared_models(api_key: str, base_url: str) -> tuple[str, list[str]
 
 
 _POLICY_WORKFORCE_MODELS = {
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
     "deepseek-v4-flash",
     "glm-5.2",
     "claude-opus-5",
     "claude-opus-4-8",
     "claude-sonnet-5",
 }
+_GPT_NON_AGENT_MARKERS = ("image", "audio", "realtime", "tts", "transcribe")
+
+
+def _is_gpt_execution_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith("gpt-") and not any(
+        marker in normalized for marker in _GPT_NON_AGENT_MARKERS
+    )
 
 
 def _policy_workforce_models(models: list[str]) -> list[str]:
@@ -372,7 +377,8 @@ def _policy_workforce_models(models: list[str]) -> list[str]:
     seen: set[str] = set()
     for model in models:
         normalized = str(model or "").strip().lower()
-        if normalized not in _POLICY_WORKFORCE_MODELS or normalized in seen:
+        supported = normalized in _POLICY_WORKFORCE_MODELS or _is_gpt_execution_model(normalized)
+        if not supported or normalized in seen:
             continue
         selected.append(str(model).strip())
         seen.add(normalized)
@@ -382,6 +388,15 @@ def _policy_workforce_models(models: list[str]) -> list[str]:
 def _codex_protocol_compatible(protocol: str) -> bool:
     normalized = str(protocol or "").strip().lower()
     return any(token in normalized for token in ("responses", "codex", "chatgpt"))
+
+
+def _codex_transport_mode(protocol: str) -> str:
+    normalized = str(protocol or "").strip().lower()
+    if _codex_protocol_compatible(normalized):
+        return "NATIVE_RESPONSES"
+    if "chat" in normalized:
+        return "BRIDGED_CHAT"
+    return ""
 
 
 def _register_shared_policy_workforce(
@@ -452,7 +467,8 @@ def _register_shared_policy_workforce(
         )
         accesses: list[dict[str, Any]] = [opencode]
 
-        if normalized.startswith("gpt-5.6") and _codex_protocol_compatible(protocol):
+        codex_transport = _codex_transport_mode(protocol)
+        if _is_gpt_execution_model(normalized) and codex_transport:
             digest = hashlib.blake2b(
                 f"{provider_key}|{base_url}".encode("utf-8"), digest_size=4
             ).hexdigest()
@@ -471,6 +487,9 @@ def _register_shared_policy_workforce(
                 "protocol": protocol,
                 "config": {
                     "wireApi": "responses",
+                    "transportMode": codex_transport,
+                    "bridgeKind": "CC_SWITCH_CODEX_CHAT" if codex_transport == "BRIDGED_CHAT" else None,
+                    "upstreamProtocol": protocol if codex_transport == "BRIDGED_CHAT" else None,
                     "providerHubConnectionId": connection_id,
                 },
                 "priority": 120,
@@ -481,7 +500,7 @@ def _register_shared_policy_workforce(
                     f"/api/v2/commands/employments/{urllib.parse.quote(employment_id, safe='')}/runtime-access",
                     method="POST",
                     payload=codex_access,
-                    idempotency_key="provider-tool-codex-v1-"
+                    idempotency_key="provider-tool-codex-v2-"
                     + hashlib.blake2b(codex_seed.encode("utf-8"), digest_size=10).hexdigest(),
                 )
             )
@@ -700,7 +719,9 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
             return {"connections": 0, "models": 0}
         hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
         workforce = _control_plane_request("/api/v2/projections/workforce", timeout=3.0)
+        supply = _control_plane_request("/api/v2/projections/supply", timeout=3.0)
         existing: set[tuple[str, str]] = set()
+        employee_ids: dict[tuple[str, str], str] = {}
         for employee in workforce.get("employees") or []:
             if not isinstance(employee, dict):
                 continue
@@ -714,7 +735,34 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
             model = str(supplier_model.get("key") or "").strip().lower()
             current = int(employee.get("currentEmploymentCount") or 0)
             if supplier_id and model and current > 0:
-                existing.add((supplier_id, model))
+                key = (supplier_id, model)
+                existing.add(key)
+                employee_ids[key] = str(employee.get("id") or "").strip()
+
+        bridge_ready_employee_ids: set[str] = set()
+        for supplier_projection in supply.get("suppliers") or []:
+            if not isinstance(supplier_projection, dict):
+                continue
+            for agreement in supplier_projection.get("agreements") or []:
+                if not isinstance(agreement, dict):
+                    continue
+                for employment in agreement.get("employments") or []:
+                    if not isinstance(employment, dict):
+                        continue
+                    employee_id = str(employment.get("employeeId") or "").strip()
+                    for access in employment.get("runtimeAccess") or []:
+                        if not isinstance(access, dict):
+                            continue
+                        config = access.get("config") if isinstance(access.get("config"), dict) else {}
+                        if (
+                            str(access.get("runtimeKind") or "").upper() == "CODEX"
+                            and str(access.get("lifecycle") or "ACTIVE").upper() == "ACTIVE"
+                            and str(config.get("wireApi") or "").lower() == "responses"
+                            and str(config.get("transportMode") or "").upper() == "BRIDGED_CHAT"
+                            and str(config.get("bridgeKind") or "").upper() == "CC_SWITCH_CODEX_CHAT"
+                            and employee_id
+                        ):
+                            bridge_ready_employee_ids.add(employee_id)
 
         reconciled_connections = 0
         reconciled_models = 0
@@ -749,13 +797,22 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
             models = _policy_workforce_models(
                 [str(item) for item in (connection.get("models") or []) if str(item).strip()]
             )
-            missing = [
-                model
-                for model in models
-                if not supplier_id or (supplier_id, model.lower()) not in existing
-            ]
+            protocol = str(connection.get("protocol") or "openai-chat-completions")
+            transport_mode = _codex_transport_mode(protocol)
+            to_reconcile: list[str] = []
+            for model in models:
+                key = (supplier_id, model.lower())
+                is_missing = not supplier_id or key not in existing
+                employee_id = employee_ids.get(key, "")
+                needs_bridge_upgrade = (
+                    _is_gpt_execution_model(model)
+                    and transport_mode == "BRIDGED_CHAT"
+                    and employee_id not in bridge_ready_employee_ids
+                )
+                if is_missing or needs_bridge_upgrade:
+                    to_reconcile.append(model)
             if (
-                not missing
+                not to_reconcile
                 or not provider_key
                 or not connection_id
                 or not base_url
@@ -770,10 +827,10 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
                     supplier_slug=supplier_slug or provider_key,
                     supplier_name=supplier_name or display_name,
                     base_url=base_url,
-                    protocol=str(connection.get("protocol") or "openai-chat-completions"),
+                    protocol=protocol,
                     credential_ref=credential_ref,
                     connection_id=connection_id,
-                    models=missing,
+                    models=to_reconcile,
                 )
             except Exception:
                 continue
@@ -783,7 +840,13 @@ def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
                 for registration in registrations:
                     model = str(registration.get("model") or "").lower()
                     if supplier_id and model:
-                        existing.add((supplier_id, model))
+                        key = (supplier_id, model)
+                        existing.add(key)
+                        employee_id = str(registration.get("employeeId") or "").strip()
+                        if employee_id:
+                            employee_ids[key] = employee_id
+                            if transport_mode == "BRIDGED_CHAT" and _is_gpt_execution_model(model):
+                                bridge_ready_employee_ids.add(employee_id)
         _PLACEMENT_RECONCILE_LAST = time.monotonic()
         return {"connections": reconciled_connections, "models": reconciled_models}
 
@@ -887,7 +950,11 @@ def _execution_project_path(args: dict[str, Any] | None = None) -> str:
     return ""
 
 
-def _prepare_agent_harness_environment(project_path: str, host: str) -> dict[str, Any]:
+def _prepare_agent_harness_environment(
+    project_path: str,
+    host: str,
+    route_config: str = "",
+) -> dict[str, Any]:
     harnessctl = _agent_harnessctl_path()
     if not harnessctl:
         raise RuntimeError("Agent Harness controller is not available")
@@ -898,8 +965,12 @@ def _prepare_agent_harness_environment(project_path: str, host: str) -> dict[str
     _adopt_active_runtime_owner(profile_home)
     env = os.environ.copy()
     env["HOME"] = str(profile_home)
+    command = [harnessctl, "prepare", project_path, "--host", host]
+    if route_config:
+        command.extend(["--route-config", route_config])
+    command.append("--json")
     process = subprocess.run(
-        [harnessctl, "prepare", project_path, "--host", host, "--json"],
+        command,
         env=env,
         cwd=project_path,
         stdin=subprocess.DEVNULL,
@@ -1044,8 +1115,57 @@ def _prepare_codex_execution(
             }
         )
         return
+    transport_mode = str(runtime.get("transportMode") or _codex_transport_mode(protocol)).strip().upper()
+    if transport_mode == "BRIDGED_CHAT":
+        bridge_kind = str(runtime.get("bridgeKind") or "").strip().upper()
+        if "chat" not in protocol.lower() or bridge_kind != "CC_SWITCH_CODEX_CHAT":
+            raise RuntimeError("Codex bridged route is missing a valid Chat Completions bridge contract")
+        if not provider_ref or not profile_ref or not model or not base_url or not credential_ref:
+            raise RuntimeError("Codex bridged route is missing provider, profile, model, baseUrl, or credentialRef")
+        secret_file = _runtime_secret_file(credential_ref)
+        if not secret_file:
+            raise RuntimeError("Codex bridged provider credential is not available")
+        route_seed = f"{provider_ref}|{profile_ref}|{model}|{base_url}|{credential_ref}"
+        route_digest = hashlib.blake2b(route_seed.encode("utf-8"), digest_size=8).hexdigest()
+        route_path = (
+            _active_runtime_hermes_home()
+            / "runtime"
+            / "agent-harness"
+            / "routes"
+            / f"codex-{_safe_runtime_name(provider_ref)}-{route_digest}.json"
+        )
+        _write_json_atomic(
+            route_path,
+            {
+                "version": 1,
+                "transportMode": "BRIDGED_CHAT",
+                "bridgeKind": "CC_SWITCH_CODEX_CHAT",
+                "providerRef": provider_ref,
+                "profileRef": profile_ref,
+                "model": model,
+                "upstreamModel": model,
+                "upstreamBaseUrl": base_url,
+                "upstreamProtocol": protocol,
+                "credentialRef": credential_ref,
+                "providerHubConnectionId": str(connection.get("id") or ""),
+            },
+        )
+        runtime.update(
+            {
+                "profileAction": "REUSE_EXISTING" if runtime.get("accessProfileId") else "CREATE_MANAGED",
+                "profileReady": True,
+                "profileRef": profile_ref,
+                "providerRef": provider_ref,
+                "bridgeRouteConfig": str(route_path),
+                "commandTemplate": (
+                    f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+                    f"{shlex.quote(executable)} --profile {shlex.quote(profile_ref)} exec <task>"
+                ),
+            }
+        )
+        return
     if not _codex_protocol_compatible(protocol):
-        raise RuntimeError(f"Codex does not support selected provider protocol: {protocol or 'unknown'}")
+        raise RuntimeError(f"Codex does not support selected provider protocol natively: {protocol or 'unknown'}")
     if not provider_ref:
         provider_ref = (
             "hao-"
@@ -1071,7 +1191,7 @@ def _prepare_codex_execution(
             "baseUrl": base_url or None,
             "credentialRef": credential_ref or None,
             "protocol": protocol,
-            "config": {"wireApi": "responses"},
+            "config": {"wireApi": "responses", "transportMode": "NATIVE_RESPONSES"},
         },
     }
     if not _ensure_codex_native_access(synthetic):
@@ -1194,9 +1314,14 @@ def _apply_agent_harness_launch(
     controller = str(environment["controller"])
     profile_home = str(environment["profileHome"])
     project_root = str(environment["projectRoot"])
+    route_option = ""
+    if selected_harness == "CODEX":
+        route_config = str(runtime.get("bridgeRouteConfig") or "").strip()
+        if route_config:
+            route_option = f"--route-config {shlex.quote(route_config)} "
     base = (
         f"HOME={shlex.quote(profile_home)} {shlex.quote(controller)} exec "
-        f"--project {shlex.quote(project_root)} {host} -- "
+        f"--project {shlex.quote(project_root)} {route_option}{host} -- "
     )
     prefix = ""
     args = ""
@@ -1285,7 +1410,12 @@ def _prepare_execution_result(result: dict[str, Any], project_path: str = "") ->
             "DSH": "dsh",
             "OPENCODE": "opencode",
         }[harness]
-        environment = _prepare_agent_harness_environment(project_path, host)
+        route_config = str(runtime.get("bridgeRouteConfig") or "").strip()
+        environment = _prepare_agent_harness_environment(
+            project_path,
+            host,
+            route_config=route_config,
+        )
         admission = environment.get("admission") if isinstance(environment.get("admission"), dict) else {}
         if str(admission.get("status") or "") != "READY":
             runtime.update(

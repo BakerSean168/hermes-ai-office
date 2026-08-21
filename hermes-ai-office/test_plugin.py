@@ -820,11 +820,123 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIsNone(result)
         request.assert_not_called()
 
-    def test_policy_workforce_model_filter_keeps_only_small_fixed_roster(self) -> None:
+    def test_chat_gpt_workforce_registers_explicit_bridged_codex_access(self) -> None:
+        accesses: list[dict[str, object]] = []
+
+        def control(path: str, **kwargs: object) -> dict[str, object]:
+            payload = kwargs.get("payload")
+            if path == "/api/v2/commands/supply-catalog/register":
+                return {
+                    "employee": {"id": "emp-4sapi"},
+                    "employment": {"id": "empl-4sapi"},
+                }
+            if path.endswith("/runtime-access"):
+                self.assertIsInstance(payload, dict)
+                accesses.append(dict(payload))
+                return {"id": f"access-{len(accesses)}"}
+            raise AssertionError(path)
+
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=control):
+            registrations = plugin._register_shared_policy_workforce(
+                provider_key="forapi-4sapi-org-gpt-5-6",
+                display_name="4SAPI",
+                website_url="https://4sapi.org",
+                base_url="https://4sapi.org/v1",
+                protocol="openai-chat-completions",
+                credential_ref="FORAPI_4SAPI_API_KEY",
+                connection_id="pconn-4sapi",
+                models=["gpt-5.6-sol"],
+            )
+        self.assertEqual(len(registrations), 1)
+        self.assertEqual([item["runtimeKind"] for item in accesses], ["OPENCODE", "CODEX"])
+        codex = accesses[1]
+        self.assertEqual(codex["protocol"], "openai-chat-completions")
+        self.assertEqual(codex["config"]["wireApi"], "responses")
+        self.assertEqual(codex["config"]["transportMode"], "BRIDGED_CHAT")
+        self.assertEqual(codex["config"]["bridgeKind"], "CC_SWITCH_CODEX_CHAT")
+
+    def test_reconcile_upgrades_stale_chat_codex_access_to_bridged_transport(self) -> None:
+        hub = {
+            "items": [
+                {
+                    "id": "pconn-4sapi",
+                    "provider_key": "forapi-4sapi-org-gpt-5-6",
+                    "display_name": "4SAPI",
+                    "base_url": "https://4sapi.org/v1",
+                    "website_url": "https://4sapi.org",
+                    "credential_ref": "FORAPI_4SAPI_API_KEY",
+                    "auth_kind": "API_KEY",
+                    "admin_state": "ENABLED",
+                    "protocol": "openai-chat-completions",
+                    "models": ["gpt-5.6-sol"],
+                    "supplier": {"id": "sup-4sapi", "slug": "forapi-4sapi-org-gpt-5-6", "name": "4SAPI"},
+                }
+            ]
+        }
+        workforce = {
+            "employees": [
+                {
+                    "id": "emp-4sapi",
+                    "currentEmploymentCount": 1,
+                    "supplier": {"id": "sup-4sapi"},
+                    "supplierModel": {"key": "gpt-5.6-sol"},
+                }
+            ]
+        }
+        supply = {
+            "suppliers": [
+                {
+                    "agreements": [
+                        {
+                            "employments": [
+                                {
+                                    "employeeId": "emp-4sapi",
+                                    "runtimeAccess": [
+                                        {
+                                            "runtimeKind": "CODEX",
+                                            "lifecycle": "ACTIVE",
+                                            "config": {"wireApi": "chat"},
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        def control(path: str, **_kwargs: object) -> dict[str, object]:
+            if path.endswith("provider-hub"):
+                return hub
+            if path.endswith("workforce"):
+                return workforce
+            if path.endswith("supply"):
+                return supply
+            raise AssertionError(path)
+
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=control), mock.patch.object(
+            plugin, "_provider_connection_credential_ready", return_value=True
+        ), mock.patch.object(
+            plugin,
+            "_register_shared_policy_workforce",
+            return_value=[{"model": "gpt-5.6-sol", "employeeId": "emp-4sapi"}],
+        ) as register:
+            result = plugin._reconcile_policy_workforce_from_hub(force=True)
+        self.assertEqual(result, {"connections": 1, "models": 1})
+        self.assertEqual(register.call_args.kwargs["models"], ["gpt-5.6-sol"])
+        self.assertEqual(register.call_args.kwargs["protocol"], "openai-chat-completions")
+
+    def test_policy_workforce_keeps_all_gpt_execution_models_but_excludes_non_agent_gpt(self) -> None:
         models = [
+            "gpt-4.1",
+            "gpt-5.4-mini",
+            "gpt-5.5",
             "gpt-5.6-luna",
             "gpt-5.6-luna-fast",
             "gpt-5.6-sol",
+            "gpt-image-2",
+            "gpt-audio-1",
             "deepseek-v4-flash",
             "deepseek-v4-pro",
             "glm-5.2",
@@ -834,7 +946,17 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ]
         self.assertEqual(
             plugin._policy_workforce_models(models),
-            ["gpt-5.6-luna", "gpt-5.6-sol", "deepseek-v4-flash", "glm-5.2", "claude-opus-5"],
+            [
+                "gpt-4.1",
+                "gpt-5.4-mini",
+                "gpt-5.5",
+                "gpt-5.6-luna",
+                "gpt-5.6-luna-fast",
+                "gpt-5.6-sol",
+                "deepseek-v4-flash",
+                "glm-5.2",
+                "claude-opus-5",
+            ],
         )
 
     def test_execution_runtime_inventory_uses_persistent_runtime_paths(self) -> None:
@@ -932,7 +1054,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ), mock.patch.dict(os.environ, {}, clear=True):
             self.assertEqual(plugin._credential_value("SHARED_API_KEY"), "global-secret")
 
-    def test_prepare_codex_rejects_chat_completions_only_provider(self) -> None:
+    def test_prepare_codex_rejects_chat_provider_without_explicit_bridge_contract(self) -> None:
         selected = {"model": "gpt-5.6-luna"}
         runtime = {
             "selectedHarness": "CODEX",
@@ -949,9 +1071,46 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             "protocol": "openai-chat-completions",
         }
         with mock.patch.object(plugin, "_ensure_codex_native_access") as ensure:
-            with self.assertRaisesRegex(RuntimeError, "does not support selected provider protocol"):
+            with self.assertRaisesRegex(RuntimeError, "missing a valid Chat Completions bridge contract"):
                 plugin._prepare_codex_execution(selected, runtime, connection)
         ensure.assert_not_called()
+
+    def test_prepare_codex_bridged_chat_writes_secret_free_route_descriptor(self) -> None:
+        selected = {"model": "gpt-5.6-sol"}
+        runtime = {
+            "selectedHarness": "CODEX",
+            "preferredHarness": "CODEX",
+            "providerRef": "hao-forapi-4sapi",
+            "profileRef": "hao-forapi-sol",
+            "accessProfileId": "raccess-bridge",
+            "transportMode": "BRIDGED_CHAT",
+            "bridgeKind": "CC_SWITCH_CODEX_CHAT",
+            "executable": "/opt/data/runtime/npm/bin/codex",
+        }
+        connection = {
+            "id": "pconn-4sapi",
+            "providerKey": "forapi-4sapi-org-gpt-5-6",
+            "authKind": "API_KEY",
+            "baseUrl": "https://4sapi.org/v1",
+            "credentialRef": "FORAPI_4SAPI_API_KEY",
+            "protocol": "openai-chat-completions",
+        }
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tempdir}, clear=False
+        ), mock.patch.object(
+            plugin, "_runtime_secret_file", return_value=f"{tempdir}/credential.key"
+        ), mock.patch.object(plugin, "_ensure_codex_native_access") as ensure:
+            plugin._prepare_codex_execution(selected, runtime, connection)
+            route_path = Path(runtime["bridgeRouteConfig"])
+            self.assertTrue(route_path.exists())
+            route = json.loads(route_path.read_text(encoding="utf-8"))
+        ensure.assert_not_called()
+        self.assertEqual(route["transportMode"], "BRIDGED_CHAT")
+        self.assertEqual(route["bridgeKind"], "CC_SWITCH_CODEX_CHAT")
+        self.assertEqual(route["upstreamBaseUrl"], "https://4sapi.org/v1")
+        self.assertEqual(route["credentialRef"], "FORAPI_4SAPI_API_KEY")
+        self.assertNotIn("secret", json.dumps(route).lower())
+        self.assertTrue(runtime["profileReady"])
 
     def test_prepare_codex_oauth_reuses_existing_profile_without_secret_materialization(self) -> None:
         selected = {"model": "gpt-5.6-sol"}
@@ -1066,6 +1225,72 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIn("--patch", runtime["commandTemplate"])
         self.assertIn("$(cat", runtime["commandTemplate"])
         self.assertIn("replace only <task>", selected["guidance"])
+
+    def test_prepare_execution_result_routes_bridged_codex_through_agent_harness_route_descriptor(self) -> None:
+        result = {
+            "status": "SELECTED",
+            "selected": {
+                "model": "gpt-5.6-sol",
+                "providerConnection": {
+                    "id": "pconn-4sapi",
+                    "providerKey": "forapi-4sapi-org-gpt-5-6",
+                    "authKind": "API_KEY",
+                    "baseUrl": "https://4sapi.org/v1",
+                    "credentialRef": "FORAPI_4SAPI_API_KEY",
+                    "protocol": "openai-chat-completions",
+                },
+                "runtime": {
+                    "selectedHarness": "CODEX",
+                    "preferredHarness": "CODEX",
+                    "accessProfileId": "raccess-bridge",
+                    "profileRef": "hao-forapi-sol",
+                    "providerRef": "hao-forapi-4sapi",
+                    "transportMode": "BRIDGED_CHAT",
+                    "bridgeKind": "CC_SWITCH_CODEX_CHAT",
+                },
+                "guidance": "Use Codex.",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tempdir, mock.patch.dict(
+            os.environ, {"HERMES_HOME": tempdir}, clear=False
+        ), mock.patch.object(
+            plugin, "_runtime_secret_file", return_value=f"{tempdir}/4sapi.key"
+        ), mock.patch.object(
+            plugin,
+            "_prepare_agent_harness_environment",
+            return_value={
+                "controller": "/home/ubuntu/projects/agent-harness/bin/harnessctl",
+                "profileHome": f"{tempdir}/profiles/coder/home",
+                "projectRoot": "/home/ubuntu/projects/memoflow",
+                "capabilityHash": "cap-hash",
+                "environmentId": "memoflow-cap-hash",
+                "environmentRoot": f"{tempdir}/capability-env",
+                "admission": {
+                    "host": "codex",
+                    "status": "READY",
+                    "runtimeState": "READY",
+                    "transportMode": "BRIDGED_CHAT",
+                    "blockers": [],
+                },
+            },
+        ) as prepare:
+            prepared = plugin._prepare_execution_result(
+                result, project_path="/home/ubuntu/projects/memoflow"
+            )
+            runtime = prepared["selected"]["runtime"]
+            route = runtime["bridgeRouteConfig"]
+            descriptor = json.loads(Path(route).read_text(encoding="utf-8"))
+            prepare.assert_called_once_with(
+                "/home/ubuntu/projects/memoflow",
+                "codex",
+                route_config=route,
+            )
+            self.assertEqual(runtime["capabilityPlaneStatus"], "READY")
+            self.assertIn(f"--route-config {route} codex --", runtime["commandTemplate"])
+            self.assertIn("$(cat", runtime["commandTemplate"])
+            self.assertEqual(descriptor["transportMode"], "BRIDGED_CHAT")
+            self.assertEqual(descriptor["credentialRef"], "FORAPI_4SAPI_API_KEY")
+            self.assertNotIn("credential-secret-value", json.dumps(descriptor))
 
     def test_prepare_execution_result_blocks_on_capability_admission_failure(self) -> None:
         result = {
