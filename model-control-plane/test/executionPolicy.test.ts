@@ -30,6 +30,7 @@ function addCandidate(
     providerName?: string;
     baseUrl?: string;
     protocol?: string;
+    availabilityState?: string;
     runtimeKind?: 'OPENCODE' | 'CODEX' | 'CLAUDE_CODE';
     providerRef?: string;
     profileRef?: string;
@@ -54,7 +55,7 @@ function addCandidate(
     credentialRef: `${input.providerKey.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
     protocol: input.protocol ?? 'openai-chat-completions',
     sourceKind: 'TEST',
-    availabilityState: 'AVAILABLE',
+    availabilityState: input.availabilityState ?? 'AVAILABLE',
     models: [input.model],
   });
   if (input.runtimeKind) {
@@ -292,6 +293,54 @@ test('GPT on a chat-completions-only relay does not force incompatible Codex', (
   assert.equal(runtime.preferredHarness, 'CODEX');
   assert.equal(runtime.selectedHarness, 'OPENCODE');
   assert.equal(runtime.officialHarnessAvailable, false);
+  assert.equal(runtime.officialHarnessRuntimeAvailable, true);
+  assert.equal(runtime.officialHarnessUsableForSelectedRoute, false);
+  assert.equal(runtime.fallbackReason, 'OFFICIAL_ROUTE_INCOMPATIBLE_OR_UNROUTABLE');
+  assert.match(
+    String(selected.guidance),
+    /does not mean the CODEX runtime is globally unavailable/i,
+  );
+});
+
+test('same GPT model prefers an UNKNOWN responses route with Codex over an AVAILABLE chat fallback', () => {
+  const state = make();
+  addCandidate(state, {
+    supplierSlug: 'chat-relay',
+    supplierName: 'Chat Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'chat-relay',
+    protocol: 'openai-chat-completions',
+    availabilityState: 'AVAILABLE',
+    runtimeKind: 'OPENCODE',
+    providerRef: 'chat-relay',
+  });
+  addCandidate(state, {
+    supplierSlug: 'responses-relay',
+    supplierName: 'Responses Relay',
+    model: 'gpt-5.6-sol',
+    providerKey: 'responses-relay',
+    protocol: 'openai-responses',
+    availabilityState: 'UNKNOWN',
+    runtimeKind: 'CODEX',
+    providerRef: 'responses-relay',
+    profileRef: 'responses-relay-sol',
+  });
+  const decision = state.policy.resolve({
+    intent: 'REVIEW',
+    requestedModel: 'gpt-5.6-sol',
+    availableRuntimes: [
+      { kind: 'CODEX', path: '/opt/data/runtime/npm/bin/codex' },
+      { kind: 'OPENCODE', path: '/opt/data/runtime/npm/bin/opencode' },
+    ],
+  });
+  const selected = decision.selected as Record<string, unknown>;
+  const connection = selected.providerConnection as Record<string, unknown>;
+  const runtime = selected.runtime as Record<string, unknown>;
+  assert.equal(connection.providerKey, 'responses-relay');
+  assert.equal(runtime.selectedHarness, 'CODEX');
+  assert.equal(runtime.officialHarnessRuntimeAvailable, true);
+  assert.equal(runtime.officialHarnessUsableForSelectedRoute, true);
+  assert.equal(runtime.fallbackReason, null);
 });
 
 test('review can select Claude and uses Claude Code when the provider is compatible', () => {

@@ -809,6 +809,9 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIn("REVIEW=CODEX", result["context"])
         self.assertIn("per-execution", result["context"])
         self.assertIn("permanent Job Type mapping", result["context"])
+        self.assertIn("officialHarnessRuntimeAvailable", result["context"])
+        self.assertIn("officialHarnessUsableForSelectedRoute", result["context"])
+        self.assertIn("Never bypass PROJECT_REQUIRED or BLOCKED", result["context"])
         request.assert_not_called()
 
     def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:
@@ -1047,6 +1050,7 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 "capabilityHash": "cap-hash",
                 "environmentId": "memoflow-cap-hash",
                 "environmentRoot": f"{tempdir}/capability-env",
+                "admission": {"host": "dsh", "status": "READY", "runtimeState": "READY", "blockers": []},
             },
         ):
             prepared = plugin._prepare_execution_result(
@@ -1062,6 +1066,56 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertIn("--patch", runtime["commandTemplate"])
         self.assertIn("$(cat", runtime["commandTemplate"])
         self.assertIn("replace only <task>", selected["guidance"])
+
+    def test_prepare_execution_result_blocks_on_capability_admission_failure(self) -> None:
+        result = {
+            "status": "SELECTED",
+            "selected": {
+                "model": "gpt-5.6-sol",
+                "providerConnection": {
+                    "id": "pconn-team",
+                    "providerKey": "team",
+                    "authKind": "OAUTH",
+                    "credentialRef": "codex-auth:team",
+                },
+                "runtime": {
+                    "selectedHarness": "CODEX",
+                    "preferredHarness": "CODEX",
+                    "accessProfileId": "access-team",
+                    "profileRef": "team",
+                    "providerRef": "openai",
+                },
+                "guidance": "Use Codex.",
+            },
+        }
+        with mock.patch.object(plugin, "_codex_profile_exists", return_value=True), mock.patch.object(
+            plugin,
+            "_prepare_agent_harness_environment",
+            return_value={
+                "controller": "/home/ubuntu/projects/agent-harness/bin/harnessctl",
+                "profileHome": "/opt/data/profiles/memoflow/home",
+                "projectRoot": "/home/ubuntu/projects/memoflow",
+                "capabilityHash": "cap-hash",
+                "environmentId": "memoflow-cap-hash",
+                "environmentRoot": "/tmp/capability-env",
+                "admission": {
+                    "host": "codex",
+                    "status": "BLOCKED",
+                    "runtimeState": "READY",
+                    "blockers": [{"kind": "mcp", "name": "codegraph", "state": "MISSING"}],
+                },
+            },
+        ):
+            prepared = plugin._prepare_execution_result(
+                result, project_path="/home/ubuntu/projects/memoflow"
+            )
+        runtime = prepared["selected"]["runtime"]
+        self.assertFalse(runtime["profileReady"])
+        self.assertEqual(runtime["capabilityPlaneStatus"], "BLOCKED")
+        self.assertEqual(runtime["launchContract"], "BLOCKED_CAPABILITY_ADMISSION")
+        self.assertEqual(runtime["capabilityBlockers"][0]["name"], "codegraph")
+        self.assertNotIn("commandTemplate", runtime)
+        self.assertIn("do not bypass", prepared["selected"]["guidance"])
 
     def test_prepare_execution_result_blocks_degraded_launch_without_project(self) -> None:
         result = {
@@ -1103,7 +1157,13 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                         "capabilityHash": "abc123",
                         "environmentId": "memoflow-abc123",
                         "root": "/tmp/env-root",
-                    }
+                    },
+                    "admission": {
+                        "host": "codex",
+                        "status": "READY",
+                        "runtimeState": "READY",
+                        "blockers": [],
+                    },
                 }
             ),
             stderr="",
@@ -1113,14 +1173,15 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ), mock.patch.object(
             plugin, "_agent_harnessctl_path", return_value="/bin/harnessctl"
         ), mock.patch.object(plugin.subprocess, "run", return_value=completed) as run:
-            value = plugin._prepare_agent_harness_environment("/home/ubuntu/projects/memoflow")
+            value = plugin._prepare_agent_harness_environment("/home/ubuntu/projects/memoflow", "codex")
         self.assertEqual(value["capabilityHash"], "abc123")
         self.assertTrue(value["profileHome"].endswith("/profiles/coder/home"))
         self.assertEqual(
             run.call_args.args[0],
-            ["/bin/harnessctl", "prepare", "/home/ubuntu/projects/memoflow", "--json"],
+            ["/bin/harnessctl", "prepare", "/home/ubuntu/projects/memoflow", "--host", "codex", "--json"],
         )
         self.assertEqual(run.call_args.kwargs["env"]["HOME"], value["profileHome"])
+        self.assertEqual(value["admission"]["status"], "READY")
 
 
 if __name__ == "__main__":

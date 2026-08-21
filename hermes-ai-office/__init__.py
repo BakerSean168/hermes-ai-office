@@ -887,7 +887,7 @@ def _execution_project_path(args: dict[str, Any] | None = None) -> str:
     return ""
 
 
-def _prepare_agent_harness_environment(project_path: str) -> dict[str, Any]:
+def _prepare_agent_harness_environment(project_path: str, host: str) -> dict[str, Any]:
     harnessctl = _agent_harnessctl_path()
     if not harnessctl:
         raise RuntimeError("Agent Harness controller is not available")
@@ -899,7 +899,7 @@ def _prepare_agent_harness_environment(project_path: str) -> dict[str, Any]:
     env = os.environ.copy()
     env["HOME"] = str(profile_home)
     process = subprocess.run(
-        [harnessctl, "prepare", project_path, "--json"],
+        [harnessctl, "prepare", project_path, "--host", host, "--json"],
         env=env,
         cwd=project_path,
         stdin=subprocess.DEVNULL,
@@ -917,8 +917,11 @@ def _prepare_agent_harness_environment(project_path: str) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Agent Harness returned invalid JSON") from exc
     environment = payload.get("environment") if isinstance(payload, dict) else None
+    admission = payload.get("admission") if isinstance(payload, dict) else None
     if not isinstance(environment, dict):
         raise RuntimeError("Agent Harness prepare did not return an environment")
+    if not isinstance(admission, dict):
+        raise RuntimeError("Agent Harness prepare did not return an admission decision")
     return {
         "controller": harnessctl,
         "profileHome": str(profile_home),
@@ -926,6 +929,7 @@ def _prepare_agent_harness_environment(project_path: str) -> dict[str, Any]:
         "capabilityHash": str(environment.get("capabilityHash") or ""),
         "environmentId": str(environment.get("environmentId") or ""),
         "environmentRoot": str(environment.get("root") or ""),
+        "admission": admission,
     }
 
 
@@ -1275,7 +1279,34 @@ def _prepare_execution_result(result: dict[str, Any], project_path: str = "") ->
                 + " A repository path is required before launch so Agent Harness can materialize project MCP, Skills, and Instructions. Resolve this execution again with project_path."
             ).strip()
             return result
-        environment = _prepare_agent_harness_environment(project_path)
+        host = {
+            "CODEX": "codex",
+            "CLAUDE_CODE": "claude",
+            "DSH": "dsh",
+            "OPENCODE": "opencode",
+        }[harness]
+        environment = _prepare_agent_harness_environment(project_path, host)
+        admission = environment.get("admission") if isinstance(environment.get("admission"), dict) else {}
+        if str(admission.get("status") or "") != "READY":
+            runtime.update(
+                {
+                    "capabilityPlane": "AGENT_HARNESS_V1",
+                    "capabilityPlaneStatus": "BLOCKED",
+                    "capabilityHash": environment.get("capabilityHash"),
+                    "capabilityEnvironmentId": environment.get("environmentId"),
+                    "capabilityEnvironmentRoot": environment.get("environmentRoot"),
+                    "capabilityBlockers": admission.get("blockers") or [],
+                    "profileReady": False,
+                    "projectRoot": environment.get("projectRoot"),
+                    "launchContract": "BLOCKED_CAPABILITY_ADMISSION",
+                }
+            )
+            runtime.pop("commandTemplate", None)
+            selected["guidance"] = (
+                str(selected.get("guidance") or "").strip()
+                + " Agent Harness materialized the project environment but blocked launch because required capabilities are not ready. Inspect capabilityBlockers; do not bypass the admission decision with a direct Harness launch."
+            ).strip()
+            return result
         _apply_agent_harness_launch(selected, runtime, connection, environment)
     selected["guidance"] = (
         str(selected.get("guidance") or "").strip()
@@ -2567,8 +2598,9 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
             "Intent selects the work class only; never infer a fixed mapping such as IMPLEMENT=DSH or REVIEW=CODEX. "
             "The returned model family determines the preferred harness, while current runtime/provider compatibility determines the selected harness. "
             "Treat every selection as per-execution and do not store a selected model or harness as a permanent Job Type mapping or memory rule. "
-            "Follow the returned Employee, provider connection, preferred official harness, selected harness, capabilityPlaneStatus, profileAction, commandTemplate, and guidance. Never bypass a PROJECT_REQUIRED capabilityPlaneStatus with a direct Harness launch. "
-            "If the official harness is unavailable, use only the fallback returned by AI Office."
+            "Follow the returned Employee, provider connection, preferred official harness, selected harness, capabilityPlaneStatus, profileAction, commandTemplate, and guidance. Never bypass PROJECT_REQUIRED or BLOCKED capabilityPlaneStatus with a direct Harness launch. "
+            "Interpret officialHarnessAvailable as legacy per-route usability, not as proof that the runtime binary or auth is missing. Use officialHarnessRuntimeAvailable to judge whether the official runtime is installed and officialHarnessUsableForSelectedRoute to judge whether the selected provider route can use it. "
+            "If the official harness is not usable for the selected route, use only the fallback returned by AI Office."
         )
 
     if not provider_authority:

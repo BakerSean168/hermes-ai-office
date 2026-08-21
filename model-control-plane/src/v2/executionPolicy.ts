@@ -36,8 +36,12 @@ interface Candidate {
   model: string;
   family: ModelFamily;
   officialHarness: ExecutionHarness;
+  officialHarnessRuntimeAvailable: boolean;
+  fallbackReason: string | null;
+  officialRoutePreferred: boolean;
   harness: ExecutionHarness;
   harnessPath: string | null;
+  modelRank: number;
   rank: number;
   reasons: string[];
 }
@@ -111,6 +115,22 @@ function connectionRoutable(connection: V2Row | null): boolean {
   return (
     connection.routable !== false &&
     String(connection.adminState ?? connection.admin_state ?? 'ENABLED') !== 'DISABLED'
+  );
+}
+
+function connectionEffectiveState(connection: V2Row | null): string {
+  return String(
+    connection?.effectiveState ?? connection?.availabilityState ?? connection?.health ?? 'UNKNOWN',
+  ).toUpperCase();
+}
+
+function connectionSeverelyDegraded(connection: V2Row | null): boolean {
+  const state = connectionEffectiveState(connection);
+  return (
+    state === 'DISABLED' ||
+    state.includes('UNAVAILABLE') ||
+    state.includes('DEGRADED') ||
+    state.includes('CONGESTED')
   );
 }
 
@@ -239,6 +259,8 @@ function routeRuntime(
   model: string,
 ): {
   official: ExecutionHarness;
+  officialRuntimeAvailable: boolean;
+  fallbackReason: string | null;
   selected: ExecutionHarness;
   path: string | null;
   access: V2Row | null;
@@ -246,6 +268,8 @@ function routeRuntime(
 } | null {
   const order = harnessOrder(family);
   const official = order[0]!;
+  const officialRuntimeAvailable =
+    inventory.length === 0 || inventory.some((item) => item.kind === official);
   for (const kind of order) {
     const available =
       inventory.length === 0 ? undefined : inventory.find((item) => item.kind === kind);
@@ -256,6 +280,13 @@ function routeRuntime(
     if (!harnessCompatible(family, kind, access, connection)) continue;
     return {
       official,
+      officialRuntimeAvailable,
+      fallbackReason:
+        kind === official
+          ? null
+          : officialRuntimeAvailable
+            ? 'OFFICIAL_ROUTE_INCOMPATIBLE_OR_UNROUTABLE'
+            : 'OFFICIAL_RUNTIME_UNAVAILABLE',
       selected: kind,
       path: available?.path?.trim() || null,
       access,
@@ -296,6 +327,9 @@ function runtimeInstruction(candidate: Candidate): JsonRecord {
     preferredHarness: candidate.officialHarness,
     selectedHarness: candidate.harness,
     officialHarnessAvailable: candidate.harness === candidate.officialHarness,
+    officialHarnessRuntimeAvailable: candidate.officialHarnessRuntimeAvailable,
+    officialHarnessUsableForSelectedRoute: candidate.harness === candidate.officialHarness,
+    fallbackReason: candidate.fallbackReason,
     executable: candidate.harnessPath,
     launchMode,
     commandTemplate,
@@ -323,7 +357,9 @@ function guidance(candidate: Candidate, intent: ExecutionIntent): string {
   const fallback =
     candidate.harness === candidate.officialHarness
       ? ''
-      : ` The preferred official harness is ${candidate.officialHarness}, but it is not available in this runtime, so use ${candidate.harness}.`;
+      : candidate.officialHarnessRuntimeAvailable
+        ? ` The preferred official harness ${candidate.officialHarness} is installed, but it is not usable for the selected provider route; use ${candidate.harness} for this execution. This does not mean the ${candidate.officialHarness} runtime is globally unavailable.`
+        : ` The preferred official harness runtime ${candidate.officialHarness} is not installed in this execution environment, so use ${candidate.harness}.`;
   return [
     `For ${intent}, use ${candidate.model} from ${familyLabel} through AI Office connection ${connectionId}.`,
     'This is a per-execution placement: intent determines the work class, not a fixed model or harness.',
@@ -412,10 +448,11 @@ export class ExecutionPolicyService {
         if (availableConnectionIds !== null && !runtime.connection) continue;
         const selectedAccess = runtime.access;
         const connection = runtime.connection;
-        let rank = baseRank(desiredClass, model);
+        const modelRank = baseRank(desiredClass, model);
+        let rank = modelRank;
         const reasons = [`MODEL_CLASS_${desiredClass}`, `FAMILY_${family}`];
         if (connection) {
-          const effective = String(connection.effectiveState ?? connection.health ?? 'UNKNOWN');
+          const effective = connectionEffectiveState(connection);
           reasons.push(`PROVIDER_${effective}`);
           if (effective === 'AVAILABLE') rank -= 5;
           else if (effective === 'UNKNOWN') rank += 6;
@@ -456,20 +493,34 @@ export class ExecutionPolicyService {
           model,
           family,
           officialHarness: runtime.official,
+          officialHarnessRuntimeAvailable: runtime.officialRuntimeAvailable,
+          fallbackReason: runtime.fallbackReason,
+          officialRoutePreferred:
+            runtime.selected === runtime.official && !connectionSeverelyDegraded(connection),
           harness: runtime.selected,
           harnessPath: runtime.path,
+          modelRank,
           rank,
           reasons,
         });
       }
     }
 
-    candidates.sort(
-      (left, right) =>
+    candidates.sort((left, right) => {
+      const modelPriority = left.modelRank - right.modelRank;
+      if (modelPriority !== 0) return modelPriority;
+      if (
+        left.model === right.model &&
+        left.officialRoutePreferred !== right.officialRoutePreferred
+      ) {
+        return left.officialRoutePreferred ? -1 : 1;
+      }
+      return (
         left.rank - right.rank ||
         left.model.localeCompare(right.model) ||
-        String(left.employee.id).localeCompare(String(right.employee.id)),
-    );
+        String(left.employee.id).localeCompare(String(right.employee.id))
+      );
+    });
     const selected = candidates[0] ?? null;
     return {
       status: selected ? 'SELECTED' : 'UNRESOLVED',
@@ -517,6 +568,10 @@ export class ExecutionPolicyService {
         family: candidate.family,
         providerConnectionId: candidate.connection?.id ?? null,
         harness: candidate.harness,
+        preferredHarness: candidate.officialHarness,
+        officialHarnessRuntimeAvailable: candidate.officialHarnessRuntimeAvailable,
+        officialHarnessUsableForSelectedRoute: candidate.harness === candidate.officialHarness,
+        fallbackReason: candidate.fallbackReason,
         rank: candidate.rank,
         reasons: candidate.reasons,
       })),
