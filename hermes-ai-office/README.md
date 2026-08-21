@@ -181,3 +181,9 @@ sudo /usr/local/sbin/hermes-ai-office-deploy --plan
 sudo /usr/local/sbin/hermes-ai-office-deploy --guard-only
 systemctl status hermes-ai-office-deploy-reconcile.timer
 ```
+
+To keep AI Office disabled for one multiplex profile across later deployments,
+create `${HERMES_HOME}/profiles/<profile>/.ai-office-disabled`. The sync helper
+will disable the plugin for that profile and remove only its profile-local
+symlink while leaving the shared plugin installed for other profiles. Remove
+the marker when that profile should opt back in.

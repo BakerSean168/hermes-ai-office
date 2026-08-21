@@ -24,6 +24,23 @@ for profile_dir in "${profiles_root}"/*; do
   [[ -d "${profile_dir}" && -f "${profile_dir}/config.yaml" ]] || continue
   mkdir -p "${profile_dir}/plugins"
   target="${profile_dir}/plugins/${plugin_name}"
+  opt_out_marker="${profile_dir}/.ai-office-disabled"
+
+  if [[ -e "${opt_out_marker}" ]]; then
+    # Profile-local opt-out is durable across later AI Office deployments.
+    # Disable first while the shared plugin source is still reachable, then
+    # remove only the profile symlink. Never remove the shared plugin source.
+    HERMES_HOME="${profile_dir}" "${hermes_bin}" plugins disable "${plugin_name}" >/dev/null 2>&1 || true
+    if [[ -L "${target}" ]]; then
+      rm -f "${target}"
+    elif [[ -e "${target}" ]]; then
+      echo "Refusing to remove non-symlink opt-out plugin path: ${target}" >&2
+      exit 3
+    fi
+    echo "disabled ${plugin_name} for $(basename "${profile_dir}") (profile opt-out)"
+    continue
+  fi
+
   if [[ -e "${target}" && ! -L "${target}" ]]; then
     echo "Refusing to replace profile-local plugin directory: ${target}" >&2
     exit 3
