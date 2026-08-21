@@ -215,6 +215,73 @@ export function registerV2Routes(
   );
 
   app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/profile',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.profile.update',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.providerHub.updateConnection(request.params.connectionId, {
+              displayName: body.displayName == null ? undefined : String(body.displayName),
+              baseUrl: body.baseUrl == null ? undefined : String(body.baseUrl),
+              websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
+              protocol: body.protocol == null ? undefined : String(body.protocol),
+              models: Array.isArray(body.models) ? body.models.map(String) : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_UPDATE_FAILED';
+            reply.code(
+              code.endsWith('_NOT_FOUND')
+                ? 404
+                : code.endsWith('_REQUIRED') || code.endsWith('_INVALID')
+                  ? 400
+                  : code.endsWith('_CONFLICT')
+                    ? 409
+                    : 422,
+            );
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/retire',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.retire',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.providerHub.retireConnection(
+              request.params.connectionId,
+              body.reason ? String(body.reason) : 'OPERATOR_RETIRED',
+            );
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_RETIRE_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
     '/api/v2/commands/provider-connections/:connectionId/profile-links',
     async (request, reply) =>
       runCommand({
@@ -1756,13 +1823,33 @@ export function registerV2Routes(
         request,
         reply,
         commandType: 'supplier.retire',
-        operation: () => {
+        operation: async () => {
           if (!services.supply) {
             reply.code(503);
             return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
           }
           const body = (request.body ?? {}) as Record<string, unknown>;
           try {
+            const force = body.force === true;
+            if (force) {
+              if (!services.lifecycleService) {
+                reply.code(503);
+                return { error: { code: 'LIFECYCLE_SERVICE_UNAVAILABLE' } };
+              }
+              const relationships = services.supply.openRelationshipsForSupplier(
+                request.params.supplierId,
+              );
+              for (const appointmentId of relationships.appointmentIds) {
+                await services.lifecycleService.endAppointment(appointmentId, {
+                  reason: body.reason ? String(body.reason) : 'SUPPLIER_RETIRED',
+                });
+              }
+              for (const employmentId of relationships.employmentIds) {
+                await services.lifecycleService.endEmployment(employmentId, {
+                  reason: body.reason ? String(body.reason) : 'SUPPLIER_RETIRED',
+                });
+              }
+            }
             return services.supply.retireSupplier(
               request.params.supplierId,
               body.reason ? String(body.reason) : 'OPERATOR_RETIRED',

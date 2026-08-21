@@ -131,6 +131,41 @@ export class SupplyRepository {
     });
   }
 
+  openRelationshipsForSupplier(supplierId: string): {
+    employmentIds: string[];
+    appointmentIds: string[];
+  } {
+    const supplier = row(
+      this.#domain.db.prepare('SELECT id FROM v2_suppliers WHERE id=?').get(supplierId),
+    );
+    if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
+    const employmentIds = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT em.id FROM v2_employments em
+           JOIN v2_employees e ON e.id=em.employee_id
+           WHERE e.supplier_id=?
+             AND em.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+             AND em.effective_to IS NULL
+           ORDER BY em.id`,
+        )
+        .all(supplierId),
+    ).map((item) => String(item.id));
+    const appointmentIds = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT a.id FROM v2_appointments a
+           JOIN v2_employees e ON e.id=a.employee_id
+           WHERE e.supplier_id=?
+             AND a.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+             AND a.effective_to IS NULL
+           ORDER BY a.id`,
+        )
+        .all(supplierId),
+    ).map((item) => String(item.id));
+    return { employmentIds, appointmentIds };
+  }
+
   retireSupplier(supplierId: string, reason = 'OPERATOR_RETIRED'): V2Row {
     const supplier = row(
       this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId),
@@ -243,6 +278,22 @@ export class SupplyRepository {
                   WHERE supplier_id=? AND lifecycle!='RETIRED'`,
         )
         .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_profile_provider_links
+           SET state='INACTIVE',updated_at=?
+           WHERE connection_id IN (
+             SELECT id FROM v2_provider_connections WHERE supplier_id=?
+           ) AND state='ACTIVE'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_provider_connections
+           SET lifecycle='RETIRED',admin_state='DISABLED',health='UNAVAILABLE',operator_note=?,operator_updated_at=?,updated_at=?
+           WHERE supplier_id=? AND lifecycle!='RETIRED'`,
+        )
+        .run(reason, timestamp, timestamp, supplierId);
       this.#domain.db
         .prepare("UPDATE v2_suppliers SET lifecycle='RETIRED',updated_at=? WHERE id=?")
         .run(timestamp, supplierId);

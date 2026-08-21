@@ -69,6 +69,27 @@ class ProviderControlRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=500)
 
 
+class ProviderProfileRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=240)
+    base_url: str = Field(default="", max_length=1000)
+    website_url: str = Field(default="", max_length=1000)
+    protocol: str = Field(default="", max_length=120)
+
+
+class ProviderRetireRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class SupplierProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    website_url: str = Field(default="", max_length=1000)
+
+
+class SupplierRetireRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+    force: bool = True
+
+
 _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
     "opencode-go": {
         "id": "opencode-go",
@@ -81,19 +102,6 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "openai_chat",
         "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"},
         "opencodePrefix": "opencode-go",
-        "featured": True,
-    },
-    "deepseek": {
-        "id": "deepseek",
-        "name": "DeepSeek API",
-        "supplierSlug": "deepseek",
-        "supplierName": "DeepSeek",
-        "baseUrl": "https://api.deepseek.com/v1",
-        "websiteUrl": "https://www.deepseek.com",
-        "keyEnv": "DEEPSEEK_API_KEY",
-        "transport": "openai_chat",
-        "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
-        "opencodePrefix": "deepseek",
         "featured": True,
     },
     "openrouter": {
@@ -396,13 +404,23 @@ def _codex_provider_catalog(profile_home: Path) -> tuple[Dict[str, Dict[str, Any
             pass
     for path in sorted(codex.glob("*.config.toml")):
         try:
-            value = tomllib.loads(path.read_text(encoding="utf-8"))
+            raw_text = path.read_text(encoding="utf-8")
+            value = tomllib.loads(raw_text)
         except Exception:
             continue
         model = str(value.get("model") or "").strip()
         provider = str(value.get("model_provider") or "").strip()
         if model and provider:
-            configs.append({"path": path.name, "model": model, "provider": provider})
+            configs.append(
+                {
+                    "path": path.name,
+                    "model": model,
+                    "provider": provider,
+                    "managedByAiOffice": raw_text.lstrip().startswith(
+                        "# HERMES AI OFFICE MANAGED PROFILE"
+                    ),
+                }
+            )
     return providers, configs
 
 
@@ -432,6 +450,8 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
         for config in configs:
             provider_ref = str(config["provider"])
             model = str(config["model"])
+            if bool(config.get("managedByAiOffice")):
+                continue
             if provider_ref == "openai" and auth.get("auth_mode") == "chatgpt":
                 token_map = auth.get("tokens") if isinstance(auth.get("tokens"), Mapping) else {}
                 ready = bool(token_map)
@@ -455,6 +475,9 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 discovered.append(connection)
                 continue
             provider = providers.get(provider_ref) or {}
+            provider_name = str(provider.get("name") or "").strip()
+            if provider_name.startswith("Hermes AI Office ·") or provider_ref == "hermes-office":
+                continue
             base_url = str(provider.get("base_url") or "").strip().rstrip("/")
             credential_ref = str(provider.get("env_key") or "").strip()
             wire_api = str(provider.get("wire_api") or "responses").strip()
@@ -499,6 +522,11 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 opts = raw.get("options") if isinstance(raw.get("options"), Mapping) else {}
                 base_url = str(opts.get("baseURL") or opts.get("baseUrl") or "").strip().rstrip("/")
                 key_expr = str(opts.get("apiKey") or opts.get("api_key") or "").strip()
+                if (
+                    key_expr.startswith("{file:")
+                    and "/secrets/hermes-ai-office/" in key_expr
+                ):
+                    continue
                 credential_ref = ""
                 if key_expr.startswith("{env:") and key_expr.endswith("}"):
                     credential_ref = key_expr[5:-1].strip()
@@ -1185,6 +1213,83 @@ async def provider_hub_control(
             _post_json,
             f"/api/v2/commands/provider-connections/{safe_id}/control",
             payload,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/providers/hub/{connection_id}/profile")
+async def provider_hub_profile(
+    connection_id: str, request: ProviderProfileRequest
+) -> Dict[str, Any]:
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    payload: Dict[str, Any] = {
+        "displayName": request.display_name,
+        "baseUrl": request.base_url,
+        "websiteUrl": request.website_url,
+        "protocol": request.protocol,
+    }
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/provider-connections/{safe_id}/profile",
+            payload,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/providers/hub/{connection_id}/retire")
+async def provider_hub_retire(
+    connection_id: str, request: ProviderRetireRequest
+) -> Dict[str, Any]:
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/provider-connections/{safe_id}/retire",
+            {"reason": request.reason or "AI Office dashboard operator"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/suppliers/{supplier_id}/profile")
+async def supplier_profile(
+    supplier_id: str, request: SupplierProfileRequest
+) -> Dict[str, Any]:
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{safe_id}/profile",
+            {"name": request.name, "websiteUrl": request.website_url},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/suppliers/{supplier_id}/retire")
+async def supplier_retire(
+    supplier_id: str, request: SupplierRetireRequest
+) -> Dict[str, Any]:
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{safe_id}/retire",
+            {
+                "reason": request.reason or "AI Office dashboard operator",
+                "force": request.force,
+            },
         )
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

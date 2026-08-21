@@ -63,6 +63,14 @@ export interface ProviderControlInput {
   reason?: string;
 }
 
+export interface ProviderConnectionUpdateInput {
+  displayName?: string;
+  baseUrl?: string;
+  websiteUrl?: string;
+  protocol?: string;
+  models?: string[];
+}
+
 function row(value: unknown): V2Row | null {
   return value && typeof value === 'object' ? (value as V2Row) : null;
 }
@@ -583,6 +591,143 @@ export class ProviderHubRepository {
         },
       });
 
+      return this.connectionDetail(connectionId)!;
+    });
+  }
+
+  updateConnection(connectionId: string, input: ProviderConnectionUpdateInput): V2Row {
+    const connection = row(
+      this.#domain.db
+        .prepare("SELECT * FROM v2_provider_connections WHERE id=? AND lifecycle='ACTIVE'")
+        .get(connectionId),
+    );
+    if (!connection) throw new Error('PROVIDER_CONNECTION_NOT_FOUND');
+
+    const displayName =
+      input.displayName === undefined
+        ? String(connection.display_name)
+        : clean(input.displayName, 240);
+    if (!displayName) throw new Error('PROVIDER_CONNECTION_DISPLAY_NAME_REQUIRED');
+    const baseUrl =
+      input.baseUrl === undefined
+        ? connection.base_url
+          ? String(connection.base_url)
+          : null
+        : (clean(input.baseUrl, 1000)?.replace(/\/$/, '') ?? null);
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl))
+      throw new Error('PROVIDER_CONNECTION_BASE_URL_INVALID');
+    const websiteUrl =
+      input.websiteUrl === undefined
+        ? connection.website_url
+          ? String(connection.website_url)
+          : null
+        : (clean(input.websiteUrl, 1000)?.replace(/\/$/, '') ?? null);
+    if (websiteUrl && !/^https?:\/\//i.test(websiteUrl))
+      throw new Error('PROVIDER_CONNECTION_WEBSITE_URL_INVALID');
+    const protocol =
+      input.protocol === undefined
+        ? connection.protocol
+          ? String(connection.protocol)
+          : null
+        : clean(input.protocol, 120);
+    const models =
+      input.models === undefined
+        ? parseJson<string[]>(connection.models_json, [])
+        : [...new Set(input.models.map((model) => String(model).trim()).filter(Boolean))].slice(
+            0,
+            800,
+          );
+
+    const conflict = row(
+      this.#domain.db
+        .prepare(
+          `SELECT id FROM v2_provider_connections
+           WHERE id!=? AND lifecycle='ACTIVE' AND provider_key=?
+             AND COALESCE(base_url,'')=COALESCE(?, '')
+             AND COALESCE(credential_ref,'')=COALESCE(?, '')
+             AND credential_scope=?`,
+        )
+        .get(
+          connectionId,
+          String(connection.provider_key),
+          baseUrl,
+          connection.credential_ref ? String(connection.credential_ref) : null,
+          String(connection.credential_scope),
+        ),
+    );
+    if (conflict) throw new Error('PROVIDER_CONNECTION_IDENTITY_CONFLICT');
+
+    const timestamp = Date.now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_provider_connections
+           SET display_name=?,base_url=?,website_url=?,protocol=?,models_json=?,updated_at=?
+           WHERE id=?`,
+        )
+        .run(
+          displayName,
+          baseUrl,
+          websiteUrl,
+          protocol,
+          JSON.stringify(models),
+          timestamp,
+          connectionId,
+        );
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_runtime_access_profiles
+           SET base_url=?,protocol=?,updated_at=?
+           WHERE lifecycle='ACTIVE'
+             AND json_extract(config_json,'$.providerHubConnectionId')=?`,
+        )
+        .run(baseUrl, protocol, timestamp, connectionId);
+      this.#domain.emit({
+        type: 'provider_connection.profile_updated',
+        entityType: 'ProviderConnection',
+        entityId: connectionId,
+        payload: { displayName, baseUrl, websiteUrl, protocol, modelCount: models.length },
+      });
+      return this.connectionDetail(connectionId)!;
+    });
+  }
+
+  retireConnection(connectionId: string, reason = 'OPERATOR_RETIRED'): V2Row {
+    const connection = row(
+      this.#domain.db.prepare('SELECT * FROM v2_provider_connections WHERE id=?').get(connectionId),
+    );
+    if (!connection) throw new Error('PROVIDER_CONNECTION_NOT_FOUND');
+    const alreadyRetired = connection.lifecycle === 'RETIRED';
+    const timestamp = Date.now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare(
+          "UPDATE v2_profile_provider_links SET state='INACTIVE',updated_at=? WHERE connection_id=? AND state='ACTIVE'",
+        )
+        .run(timestamp, connectionId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_runtime_access_profiles
+           SET lifecycle='RETIRED',updated_at=?
+           WHERE lifecycle='ACTIVE'
+             AND json_extract(config_json,'$.providerHubConnectionId')=?`,
+        )
+        .run(timestamp, connectionId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_provider_connections
+           SET lifecycle='RETIRED',admin_state='DISABLED',health='UNAVAILABLE',operator_note=?,operator_updated_at=?,updated_at=?
+           WHERE id=?`,
+        )
+        .run(clean(reason, 500), timestamp, timestamp, connectionId);
+      if (!alreadyRetired) {
+        this.#domain.emit({
+          type: 'provider_connection.retired',
+          entityType: 'ProviderConnection',
+          entityId: connectionId,
+          payload: { reason },
+        });
+      }
       return this.connectionDetail(connectionId)!;
     });
   }

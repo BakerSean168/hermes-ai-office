@@ -260,6 +260,65 @@ test('provider connection attempts API validates inputs, redacts secrets, and up
   assert.equal(updated.recentAttempts.length, 1);
 });
 
+test('provider connection profile and retire APIs support operator management', async (t) => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    initialSync: false,
+  });
+  t.after(async () => runtime.app.close());
+
+  const upsert = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v2/commands/provider-connections/upsert',
+    headers: { 'idempotency-key': 'hub-api-manage-conn' },
+    payload: {
+      providerKey: 'relay',
+      displayName: 'Relay old',
+      baseUrl: 'https://relay.example/v1',
+      websiteUrl: 'https://relay.example',
+      protocol: 'openai-chat-completions',
+      credentialRef: 'RELAY_API_KEY',
+      credentialScope: 'GLOBAL',
+      sourceKind: 'TEST',
+      models: ['gpt-5.5'],
+    },
+  });
+  assert.equal(upsert.statusCode, 200);
+  const id = String(upsert.json().id);
+
+  const updated = await runtime.app.inject({
+    method: 'POST',
+    url: `/api/v2/commands/provider-connections/${id}/profile`,
+    headers: { 'idempotency-key': 'hub-api-manage-update' },
+    payload: {
+      displayName: 'Relay managed',
+      baseUrl: 'https://relay.example/api/v1',
+      protocol: 'openai-responses',
+      models: ['gpt-5.5', 'gpt-5.6-sol'],
+    },
+  });
+  assert.equal(updated.statusCode, 200);
+  assert.equal(updated.json().display_name, 'Relay managed');
+  assert.equal(updated.json().protocol, 'openai-responses');
+
+  const retired = await runtime.app.inject({
+    method: 'POST',
+    url: `/api/v2/commands/provider-connections/${id}/retire`,
+    headers: { 'idempotency-key': 'hub-api-manage-retire' },
+    payload: { reason: 'Operator removed' },
+  });
+  assert.equal(retired.statusCode, 200);
+  assert.equal(retired.json().lifecycle, 'RETIRED');
+
+  const projection = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v2/projections/provider-hub',
+  });
+  assert.equal(projection.statusCode, 200);
+  assert.equal(projection.json().summary.connections, 0);
+});
+
 test('provider connection control API enables and disables routing', async (t) => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',

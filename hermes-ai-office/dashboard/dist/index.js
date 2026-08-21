@@ -208,6 +208,21 @@
       "suppliers.subtitle": "All workforce suppliers in one place. Internal account pools are marked as internal suppliers; technical connections stay in details.",
       "suppliers.add": "Add supplier",
       "suppliers.details": "View details",
+      "suppliers.manage": "Manage",
+      "suppliers.manageTitle": "Manage supplier",
+      "suppliers.manageSubtitle": "Edit supplier metadata or retire it from the active AI Office workforce.",
+      "suppliers.saveProfile": "Save changes",
+      "suppliers.deleteSupplier": "Delete supplier",
+      "suppliers.deleteSupplierConfirm": "Delete this supplier from the active AI Office workforce? Historical execution records will be preserved.",
+      "suppliers.editConnection": "Edit connection",
+      "suppliers.saveConnection": "Save connection",
+      "suppliers.deleteConnection": "Delete connection",
+      "suppliers.deleteConnectionConfirm": "Delete this provider connection from active routing? Historical records will be preserved.",
+      "suppliers.connectionName": "Connection name",
+      "suppliers.protocol": "Protocol",
+      "suppliers.savedProfile": "Supplier updated.",
+      "suppliers.savedConnection": "Connection updated.",
+      "suppliers.deleted": "Removed from active AI Office.",
       "suppliers.website": "Website",
       "suppliers.close": "Close",
       "suppliers.employees": "Employees",
@@ -494,6 +509,21 @@
       "suppliers.subtitle": "统一管理所有员工来源；My CPA、Grok2API 等账号池作为内部供应商展示，技术连接仍收进详情。",
       "suppliers.add": "添加供应商",
       "suppliers.details": "查看详情",
+      "suppliers.manage": "管理",
+      "suppliers.manageTitle": "管理供应商",
+      "suppliers.manageSubtitle": "编辑供应商与连接信息，或将其从当前 AI Office 员工体系中退休。",
+      "suppliers.saveProfile": "保存修改",
+      "suppliers.deleteSupplier": "删除供应商",
+      "suppliers.deleteSupplierConfirm": "确定从当前 AI Office 中删除这个供应商吗？历史执行记录会保留。",
+      "suppliers.editConnection": "编辑连接",
+      "suppliers.saveConnection": "保存连接",
+      "suppliers.deleteConnection": "删除连接",
+      "suppliers.deleteConnectionConfirm": "确定删除这个 Provider 连接并停止当前路由吗？历史记录会保留。",
+      "suppliers.connectionName": "连接名称",
+      "suppliers.protocol": "协议",
+      "suppliers.savedProfile": "供应商已更新。",
+      "suppliers.savedConnection": "连接已更新。",
+      "suppliers.deleted": "已从当前 AI Office 中移除。",
       "suppliers.website": "官网",
       "suppliers.close": "关闭",
       "suppliers.employees": "员工",
@@ -811,7 +841,7 @@
     return h(
       "button",
       {
-        className: "hao-button " + (props.kind === "quiet" ? "hao-button-quiet" : ""),
+        className: "hao-button " + (props.kind === "quiet" ? "hao-button-quiet" : props.kind === "danger" ? "hao-button-danger" : ""),
         type: props.type || "button",
         disabled: props.disabled,
         onClick: props.onClick,
@@ -1779,6 +1809,13 @@
     const [detailConnectionsLoading, setDetailConnectionsLoading] = React.useState(false);
     const [detailConnectionsError, setDetailConnectionsError] = React.useState("");
     const [connectionActionId, setConnectionActionId] = React.useState("");
+    const [manageSupplier, setManageSupplier] = React.useState(null);
+    const [manageConnections, setManageConnections] = React.useState([]);
+    const [manageName, setManageName] = React.useState("");
+    const [manageWebsite, setManageWebsite] = React.useState("");
+    const [manageDrafts, setManageDrafts] = React.useState({});
+    const [manageBusy, setManageBusy] = React.useState("");
+    const [manageMessage, setManageMessage] = React.useState("");
     const [addOpen, setAddOpen] = React.useState(false);
     const [presets, setPresets] = React.useState([]);
     const [presetId, setPresetId] = React.useState("opencode-go");
@@ -1838,6 +1875,137 @@
         setDetailConnectionsError(String(cause));
       } finally {
         setDetailConnectionsLoading(false);
+      }
+    }
+
+    async function loadManageConnections(supplier) {
+      const result = await api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections");
+      const items = asArray(result.items);
+      setManageConnections(items);
+      const drafts = {};
+      items.forEach(function (connection) {
+        drafts[String(connection.id)] = {
+          display_name: String(connection.display_name || connection.provider_key || ""),
+          base_url: String(connection.base_url || ""),
+          website_url: String(connection.website_url || ""),
+          protocol: String(connection.protocol || ""),
+        };
+      });
+      setManageDrafts(drafts);
+    }
+
+    async function openSupplierManage(supplier) {
+      setManageSupplier(supplier);
+      setManageName(String(supplier.name || ""));
+      setManageWebsite(String(supplier.websiteUrl || ""));
+      setManageMessage("");
+      setManageBusy("loading");
+      try {
+        await loadManageConnections(supplier);
+      } catch (cause) {
+        setManageMessage(String(cause));
+      } finally {
+        setManageBusy("");
+      }
+    }
+
+    function closeSupplierManage() {
+      setManageSupplier(null);
+      setManageConnections([]);
+      setManageDrafts({});
+      setManageMessage("");
+      setManageBusy("");
+    }
+
+    function updateManageDraft(connectionId, key, value) {
+      setManageDrafts(function (current) {
+        const next = Object.assign({}, current);
+        next[connectionId] = Object.assign({}, next[connectionId] || {}, { [key]: value });
+        return next;
+      });
+    }
+
+    async function saveManagedSupplier() {
+      if (!manageSupplier || !manageName.trim()) return;
+      setManageBusy("supplier");
+      setManageMessage("");
+      try {
+        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: manageName.trim(), website_url: manageWebsite.trim() }),
+        });
+        setManageMessage(props.t("suppliers.savedProfile"));
+        await props.onRefresh();
+      } catch (cause) {
+        setManageMessage(String(cause));
+      } finally {
+        setManageBusy("");
+      }
+    }
+
+    async function deleteManagedSupplier() {
+      if (!manageSupplier || !window.confirm(props.t("suppliers.deleteSupplierConfirm"))) return;
+      setManageBusy("supplier-delete");
+      setManageMessage("");
+      try {
+        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/retire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "AI Office dashboard operator", force: true }),
+        });
+        closeSupplierManage();
+        await props.onRefresh();
+      } catch (cause) {
+        setManageMessage(String(cause));
+        setManageBusy("");
+      }
+    }
+
+    async function saveManagedConnection(connection) {
+      const id = String(connection.id);
+      const draft = asObject(manageDrafts[id]);
+      setManageBusy("connection:" + id);
+      setManageMessage("");
+      try {
+        await api("/providers/hub/" + encodeURIComponent(id) + "/profile", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            display_name: String(draft.display_name || "").trim(),
+            base_url: String(draft.base_url || "").trim(),
+            website_url: String(draft.website_url || "").trim(),
+            protocol: String(draft.protocol || "").trim(),
+          }),
+        });
+        setManageMessage(props.t("suppliers.savedConnection"));
+        if (manageSupplier) await loadManageConnections(manageSupplier);
+        await props.onRefresh();
+      } catch (cause) {
+        setManageMessage(String(cause));
+      } finally {
+        setManageBusy("");
+      }
+    }
+
+    async function deleteManagedConnection(connection) {
+      const id = String(connection.id);
+      if (!window.confirm(props.t("suppliers.deleteConnectionConfirm"))) return;
+      setManageBusy("connection-delete:" + id);
+      setManageMessage("");
+      try {
+        await api("/providers/hub/" + encodeURIComponent(id) + "/retire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "AI Office dashboard operator" }),
+        });
+        setManageMessage(props.t("suppliers.deleted"));
+        if (manageSupplier) await loadManageConnections(manageSupplier);
+        await props.onRefresh();
+      } catch (cause) {
+        setManageMessage(String(cause));
+      } finally {
+        setManageBusy("");
       }
     }
 
@@ -2094,7 +2262,12 @@
                       ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
                       : null,
                 ),
-                h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
+                h(
+                  "div",
+                  { className: "hao-supplier-row-actions" },
+                  h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
+                  h(Button, { kind: "quiet", onClick: function () { openSupplierManage(supplier); } }, props.t("suppliers.manage")),
+                ),
               );
             }),
           )
@@ -2259,6 +2432,82 @@
                 { className: "hao-detail-metrics" },
                 h("div", null, h("span", null, props.t("suppliers.channels")), h("strong", null, props.number(detailFacts.healthyChannels) + "/" + props.number(detailFacts.channels.length))),
                 h("div", null, h("span", null, props.t("suppliers.observed")), h("strong", null, props.number(detailFacts.observedRequests))),
+              ),
+            )
+          : null,
+      ),
+      h(
+        Modal,
+        {
+          open: Boolean(manageSupplier),
+          onClose: closeSupplierManage,
+          labelledBy: "hao-supplier-manage-title",
+          title: manageSupplier ? props.t("suppliers.manageTitle") + " · " + manageSupplier.name : props.t("suppliers.manageTitle"),
+          subtitle: props.t("suppliers.manageSubtitle"),
+          closeLabel: props.t("suppliers.close"),
+          wide: true,
+          footer: manageSupplier
+            ? h(
+                "div",
+                { className: "hao-manage-footer" },
+                h(Button, { kind: "danger", disabled: Boolean(manageBusy), onClick: deleteManagedSupplier }, props.t("suppliers.deleteSupplier")),
+                h(Button, { kind: "quiet", onClick: closeSupplierManage }, props.t("suppliers.close")),
+              )
+            : null,
+        },
+        manageSupplier
+          ? h(
+              "div",
+              { className: "hao-provider-manage" },
+              manageMessage ? h(Notice, { icon: "i" }, manageMessage) : null,
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.supplier")),
+                h(
+                  "div",
+                  { className: "hao-provider-manage-grid" },
+                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { value: manageName, onChange: function (event) { setManageName(event.target.value); } })),
+                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { value: manageWebsite, onChange: function (event) { setManageWebsite(event.target.value); }, placeholder: "https://…" })),
+                ),
+                h("div", { className: "hao-provider-manage-actions" }, h(Button, { disabled: Boolean(manageBusy) || !manageName.trim(), onClick: saveManagedSupplier }, manageBusy === "supplier" ? props.t("suppliers.controlBusy") : props.t("suppliers.saveProfile"))),
+              ),
+              h(
+                "section",
+                { className: "hao-detail-section" },
+                h("h3", null, props.t("suppliers.connections")),
+                manageBusy === "loading"
+                  ? h("span", { className: "hao-muted" }, props.t("suppliers.connectionsLoading"))
+                  : manageConnections.length
+                    ? h(
+                        "div",
+                        { className: "hao-provider-manage-connections" },
+                        manageConnections.map(function (connection) {
+                          const id = String(connection.id);
+                          const draft = asObject(manageDrafts[id]);
+                          const busy = manageBusy === "connection:" + id || manageBusy === "connection-delete:" + id;
+                          return h(
+                            "div",
+                            { className: "hao-provider-manage-connection", key: id },
+                            h("div", { className: "hao-provider-manage-connection-head" }, h("strong", null, connection.provider_key || id), h(Status, { value: connection.effectiveState || connection.health, t: props.t })),
+                            h(
+                              "div",
+                              { className: "hao-provider-manage-grid" },
+                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.connectionName")), h("input", { value: String(draft.display_name || ""), onChange: function (event) { updateManageDraft(id, "display_name", event.target.value); } })),
+                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { value: String(draft.base_url || ""), onChange: function (event) { updateManageDraft(id, "base_url", event.target.value); } })),
+                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { value: String(draft.website_url || ""), onChange: function (event) { updateManageDraft(id, "website_url", event.target.value); } })),
+                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.protocol")), h("input", { value: String(draft.protocol || ""), onChange: function (event) { updateManageDraft(id, "protocol", event.target.value); } })),
+                            ),
+                            h(
+                              "div",
+                              { className: "hao-provider-manage-actions" },
+                              h(Button, { disabled: busy || !String(draft.display_name || "").trim(), onClick: function () { saveManagedConnection(connection); } }, busy && manageBusy === "connection:" + id ? props.t("suppliers.controlBusy") : props.t("suppliers.saveConnection")),
+                              h(Button, { kind: "danger", disabled: busy, onClick: function () { deleteManagedConnection(connection); } }, props.t("suppliers.deleteConnection")),
+                            ),
+                          );
+                        }),
+                      )
+                    : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noConnections")),
               ),
             )
           : null,

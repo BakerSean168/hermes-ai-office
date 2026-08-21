@@ -322,6 +322,78 @@ test('supplier retirement preserves history and removes the supplier from curren
   }
 });
 
+test('operator force retirement closes active relationships and retires supplier provider connections', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    const seeded = runtime.v2.bootstrapReference({
+      supplierSlug: 'operator-removable',
+      supplierName: 'Operator Removable',
+      supplierModelKey: 'model-a',
+      supplierModelName: 'Model A',
+      agreementRef: 'operator-removable-primary',
+      agreementName: 'Operator Removable / Primary',
+      gatewaySlug: 'litellm-reference',
+      gatewayKind: 'LITELLM',
+      gatewayName: 'LiteLLM Reference Gateway',
+      workScopeSlug: 'development',
+      workScopeName: 'Development',
+      positionSlug: 'coding-review',
+      positionName: 'Coding Reviewer',
+      positionKind: 'REVIEWER',
+      runtimeKind: 'CODEX',
+      protocol: 'openai-responses',
+    });
+    const connection = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/provider-connections/upsert',
+      headers: { 'idempotency-key': 'operator-removable-provider' },
+      payload: {
+        providerKey: 'operator-removable',
+        displayName: 'Operator Removable',
+        supplierId: seeded.supplierId,
+        baseUrl: 'https://relay.example/v1',
+        protocol: 'openai-responses',
+        credentialRef: 'REMOVABLE_API_KEY',
+        credentialScope: 'GLOBAL',
+        sourceKind: 'TEST',
+        models: ['model-a'],
+      },
+    });
+    assert.equal(connection.statusCode, 200);
+
+    const retired = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/retire`,
+      headers: { 'idempotency-key': 'operator-removable-force-retire' },
+      payload: { reason: 'OPERATOR_REMOVED', force: true },
+    });
+    assert.equal(retired.statusCode, 200);
+    assert.equal(retired.json().lifecycle, 'RETIRED');
+    assert.equal(runtime.v2.getAppointment(seeded.appointmentId)?.status, 'ENDED');
+    assert.equal(runtime.v2.getEmployment(seeded.employmentId)?.status, 'ENDED');
+
+    const supplyProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    assert.equal(supplyProjection.json().summary.suppliers, 0);
+    const providerProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/provider-hub',
+    });
+    assert.equal(providerProjection.json().summary.connections, 0);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('explicit supply catalog registration classifies gateway evidence without creating an Appointment', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',

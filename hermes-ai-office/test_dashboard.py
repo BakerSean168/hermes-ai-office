@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -106,6 +107,95 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                 "bad/id", api.ProviderControlRequest(enabled=True)
             )
         self.assertEqual(raised.exception.status_code, 400)
+
+    async def test_provider_management_proxies_profile_and_retire_commands(self) -> None:
+        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
+            updated = await api.provider_hub_profile(
+                "pconn_1",
+                api.ProviderProfileRequest(
+                    display_name="Relay",
+                    base_url="https://relay.example/v1",
+                    website_url="https://relay.example",
+                    protocol="openai-responses",
+                ),
+            )
+            retired = await api.provider_hub_retire(
+                "pconn_1", api.ProviderRetireRequest(reason="cleanup")
+            )
+        self.assertEqual(updated, {"ok": True})
+        self.assertEqual(retired, {"ok": True})
+        self.assertEqual(post.call_args_list[0].args[0], "/api/v2/commands/provider-connections/pconn_1/profile")
+        self.assertEqual(post.call_args_list[1].args[0], "/api/v2/commands/provider-connections/pconn_1/retire")
+
+    async def test_supplier_management_proxies_profile_and_force_retire(self) -> None:
+        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
+            updated = await api.supplier_profile(
+                "sup_1", api.SupplierProfileRequest(name="Relay", website_url="https://relay.example")
+            )
+            retired = await api.supplier_retire(
+                "sup_1", api.SupplierRetireRequest(reason="cleanup", force=True)
+            )
+        self.assertEqual(updated, {"ok": True})
+        self.assertEqual(retired, {"ok": True})
+        self.assertEqual(post.call_args_list[0].args[0], "/api/v2/commands/suppliers/sup_1/profile")
+        self.assertEqual(post.call_args_list[1].args[0], "/api/v2/commands/suppliers/sup_1/retire")
+        self.assertTrue(post.call_args_list[1].args[1]["force"])
+
+    async def test_provider_presets_hide_expensive_deepseek_official_api(self) -> None:
+        result = await api.provider_presets()
+        ids = [item["id"] for item in result["items"]]
+        self.assertNotIn("deepseek", ids)
+        self.assertIn("opencode-go", ids)
+
+    def test_profile_discovery_ignores_ai_office_managed_codex_and_opencode_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir)
+            home = root / "profiles" / "memoflow" / "home"
+            codex = home / ".codex"
+            codex.mkdir(parents=True)
+            (codex / "config.toml").write_text(
+                '[model_providers."hao-relay-1234"]\n'
+                'name = "Hermes AI Office · hao-relay-1234"\n'
+                'base_url = "https://relay.example/v1"\n'
+                'env_key = "RELAY_API_KEY"\n'
+                'wire_api = "responses"\n',
+                encoding="utf-8",
+            )
+            (codex / "hao-relay.config.toml").write_text(
+                '# HERMES AI OFFICE MANAGED PROFILE\n'
+                'model_provider = "hao-relay-1234"\n'
+                'model = "gpt-5.5"\n',
+                encoding="utf-8",
+            )
+            opencode = home / ".config" / "opencode"
+            opencode.mkdir(parents=True)
+            (opencode / "opencode.json").write_text(
+                json.dumps(
+                    {
+                        "provider": {
+                            "relay": {
+                                "npm": "@ai-sdk/openai-compatible",
+                                "options": {
+                                    "baseURL": "https://relay.example/v1",
+                                    "apiKey": "{file:/opt/data/profiles/memoflow/secrets/hermes-ai-office/credential-deadbeef.key}",
+                                },
+                                "models": {"gpt-5.5": {}},
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(api, "get_hermes_home", return_value=str(root)), mock.patch.object(
+                api, "_hub_upsert_connection"
+            ) as upsert, mock.patch.object(api, "_hub_link") as link, mock.patch.object(
+                api, "_register_discovered_employee"
+            ) as employee:
+                discovered = api._discover_profile_native_connections()
+        self.assertEqual(discovered, [])
+        upsert.assert_not_called()
+        link.assert_not_called()
+        employee.assert_not_called()
 
     def test_profile_default_prevents_false_unfilled_state_without_guessing_employee(self) -> None:
         organization = {
@@ -491,6 +581,13 @@ class DashboardBundleContractTest(unittest.TestCase):
         css = (DASHBOARD / "dist" / "style.css").read_text()
         self.assertIn('"suppliers.add": "添加供应商"', source)
         self.assertIn('"suppliers.details": "查看详情"', source)
+        self.assertIn('"suppliers.manage": "管理"', source)
+        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/profile"', source)
+        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/retire"', source)
+        self.assertIn('api("/providers/hub/" + encodeURIComponent(id) + "/profile"', source)
+        self.assertIn('api("/providers/hub/" + encodeURIComponent(id) + "/retire"', source)
+        self.assertIn('className: "hao-provider-manage"', source)
+        self.assertIn('className: "hao-supplier-row-actions"', source)
         self.assertIn('api("/providers/presets")', source)
         self.assertIn('api("/providers/discover"', source)
         self.assertIn('api("/providers/register"', source)
@@ -514,6 +611,8 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertNotIn('props.t("suppliers.cpaDeepseek")', source)
         self.assertNotIn('props.t("suppliers.unclassified")', source)
         self.assertIn('.hao-supplier-row {', css)
+        self.assertIn('.hao-button-danger {', css)
+        self.assertIn('.hao-provider-manage-grid {', css)
         self.assertIn('.hao-modal-backdrop {', css)
         self.assertIn('.hao-model-picker {', css)
 

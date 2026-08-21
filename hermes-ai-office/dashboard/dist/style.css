@@ -220,6 +220,65 @@
   color: var(--hao-text);
 }
 
+.hao-button-danger {
+  border-color: color-mix(in srgb, #ef4444 58%, var(--hao-border));
+  background: color-mix(in srgb, #ef4444 88%, #7f1d1d);
+  color: #ffffff;
+}
+
+.hao-supplier-row-actions,
+.hao-provider-manage-actions,
+.hao-manage-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.hao-provider-manage {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hao-provider-manage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.hao-provider-manage-actions {
+  margin-top: 12px;
+}
+
+.hao-provider-manage-connections {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.hao-provider-manage-connection {
+  padding: 14px;
+  border: 1px solid var(--hao-border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--hao-panel) 94%, transparent);
+}
+
+.hao-provider-manage-connection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+@media (max-width: 700px) {
+  .hao-provider-manage-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .hao-tabs {
   display: flex;
   gap: 4px;
@@ -1764,7 +1823,7 @@
     grid-column: 1;
   }
 
-  .hao-supplier-row > .hao-button {
+  .hao-supplier-row-actions {
     grid-column: 2;
     grid-row: 1 / span 3;
   }
