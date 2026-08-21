@@ -226,7 +226,20 @@
   color: #ffffff;
 }
 
-.hao-supplier-row-actions,
+.hao-supplier-row-actions {
+  display: flex;
+  min-width: max-content;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.hao-supplier-row-actions .hao-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .hao-provider-manage-actions,
 .hao-manage-footer {
   display: flex;
@@ -1129,7 +1142,7 @@
 
 .hao-supplier-row {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) 120px minmax(210px, 1.15fr) 190px 104px;
+  grid-template-columns: minmax(260px, 2fr) 120px minmax(210px, 1.15fr) 190px max-content;
   min-height: 74px;
   align-items: center;
   gap: 18px;

@@ -1,5 +1,5 @@
 name: hermes-ai-office
-version: "0.14.2"
+version: "0.14.3"
 description: Native Hermes AI company dashboard, provider hub, and intent-driven workforce placement for coding harnesses.
 provides_tools:
   - ai_office_add_provider

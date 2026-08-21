@@ -641,6 +641,9 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('.hao-supplier-row {', css)
         self.assertIn('.hao-button-danger {', css)
         self.assertIn('.hao-provider-manage-grid {', css)
+        self.assertRegex(css, r"\.hao-supplier-row-actions\s*\{[^}]*flex-wrap:\s*nowrap")
+        self.assertRegex(css, r"\.hao-supplier-row-actions\s+\.hao-button\s*\{[^}]*white-space:\s*nowrap")
+        self.assertIn('190px max-content;', css)
         self.assertIn('.hao-modal-backdrop {', css)
         self.assertIn('.hao-model-picker {', css)
 
