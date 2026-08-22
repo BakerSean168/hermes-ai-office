@@ -74,7 +74,26 @@
       "tabs.overview": "Overview",
       "tabs.organization": "Organization",
       "tabs.workforce": "Workforce",
-      "tabs.suppliers": "Suppliers",
+      "tabs.suppliers": "Models & Providers",
+      "registry.title": "Models & Providers",
+      "registry.subtitle": "LiteLLM is the single runtime authority for provider credentials, model deployments, routing, health, and spend.",
+      "registry.openAdmin": "Open LiteLLM Admin",
+      "registry.adminHint": "Create, edit, pause, test, and delete providers/models in LiteLLM Admin. AI Office is read-only here.",
+      "registry.credentials": "Credentials",
+      "registry.deployments": "Deployments",
+      "registry.active": "Active",
+      "registry.paused": "Paused",
+      "registry.aliases": "Model aliases",
+      "registry.group": "Model group",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "Physical model",
+      "registry.commercial": "Commercial",
+      "registry.protocol": "Protocol",
+      "registry.order": "Order",
+      "registry.credential": "Credential",
+      "registry.loading": "Loading LiteLLM registry…",
+      "registry.loadError": "LiteLLM registry could not refresh",
+      "registry.noDeployments": "No LiteLLM deployments found.",
       "tabs.operations": "Operations",
       "tabs.policy": "Runtime policy",
       "tabs.incidents": "Incidents",
@@ -98,7 +117,7 @@
       "development.routing": "V3 routing policy",
       "development.routingSubtitle": "Phase policy chooses logical model class, backend candidates, transport, and workspace isolation",
       "development.runtime": "Runtime & providers",
-      "development.runtimeSubtitle": "Execution-plane source health and Provider Hub availability",
+      "development.runtimeSubtitle": "Execution-plane source health and LiteLLM registry availability",
       "development.usage": "Usage & trace summary",
       "development.usageSubtitle": "Observed usage across active work and recent detailed history",
       "development.noActive": "No V3 execution is active right now.",
@@ -116,7 +135,7 @@
       "development.workspace": "Workspace",
       "development.session": "Session",
       "development.logicalModels": "Logical models",
-      "development.providers": "Provider Hub",
+      "development.providers": "LiteLLM Registry",
       "development.health": "Source health",
       "development.concurrency": "Writer concurrency",
       "development.globalWriters": "Global writers",
@@ -481,7 +500,26 @@
       "tabs.overview": "总览",
       "tabs.organization": "组织架构",
       "tabs.workforce": "员工",
-      "tabs.suppliers": "供应商",
+      "tabs.suppliers": "模型与供应商",
+      "registry.title": "模型与供应商",
+      "registry.subtitle": "LiteLLM 是 Provider Credential、模型 Deployment、路由、健康度与用量的唯一运行时权威。",
+      "registry.openAdmin": "打开 LiteLLM Admin",
+      "registry.adminHint": "新增、编辑、暂停、测试和删除 Provider/模型都在 LiteLLM Admin 中完成；AI Office 此处只读展示。",
+      "registry.credentials": "Credential",
+      "registry.deployments": "Deployment",
+      "registry.active": "启用",
+      "registry.paused": "暂停",
+      "registry.aliases": "模型 Alias",
+      "registry.group": "模型组",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "物理模型",
+      "registry.commercial": "商业类型",
+      "registry.protocol": "协议",
+      "registry.order": "优先级",
+      "registry.credential": "Credential",
+      "registry.loading": "正在加载 LiteLLM Registry…",
+      "registry.loadError": "LiteLLM Registry 刷新失败",
+      "registry.noDeployments": "暂无 LiteLLM Deployment。",
       "tabs.operations": "运营",
       "tabs.policy": "运行时策略",
       "tabs.incidents": "事件",
@@ -513,7 +551,7 @@
       "development.routing": "V3 路由策略",
       "development.routingSubtitle": "按阶段选择逻辑模型类、Backend 候选、传输方式与工作区隔离策略",
       "development.runtime": "运行时与 Provider",
-      "development.runtimeSubtitle": "执行平面健康状态与 Provider Hub 可用性",
+      "development.runtimeSubtitle": "执行平面健康状态与 LiteLLM Registry 可用性",
       "development.usage": "用量与 Trace",
       "development.usageSubtitle": "正在执行与最近详细历史中的可观测用量汇总",
       "development.noActive": "当前没有正在运行的 V3 执行。",
@@ -531,7 +569,7 @@
       "development.workspace": "工作区",
       "development.session": "会话",
       "development.logicalModels": "逻辑模型",
-      "development.providers": "Provider Hub",
+      "development.providers": "LiteLLM Registry",
       "development.health": "源健康度",
       "development.concurrency": "写入并发",
       "development.globalWriters": "全局 writer",
@@ -890,7 +928,26 @@
     "tabs.overview": "總覽",
     "tabs.organization": "組織架構",
     "tabs.workforce": "員工",
-    "tabs.suppliers": "供應商",
+    "tabs.suppliers": "模型與供應商",
+      "registry.title": "模型與供應商",
+      "registry.subtitle": "LiteLLM 是 Provider Credential、模型 Deployment、路由、健康度與用量的唯一運行時權威。",
+      "registry.openAdmin": "開啟 LiteLLM Admin",
+      "registry.adminHint": "新增、編輯、暫停、測試和刪除 Provider/模型都在 LiteLLM Admin 中完成；AI Office 此處只讀展示。",
+      "registry.credentials": "Credential",
+      "registry.deployments": "Deployment",
+      "registry.active": "啟用",
+      "registry.paused": "暫停",
+      "registry.aliases": "模型 Alias",
+      "registry.group": "模型組",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "物理模型",
+      "registry.commercial": "商業類型",
+      "registry.protocol": "協議",
+      "registry.order": "優先級",
+      "registry.credential": "Credential",
+      "registry.loading": "正在載入 LiteLLM Registry…",
+      "registry.loadError": "LiteLLM Registry 更新失敗",
+      "registry.noDeployments": "暫無 LiteLLM Deployment。",
     "tabs.operations": "營運",
     "tabs.policy": "執行階段策略",
     "tabs.incidents": "事件",
@@ -2047,935 +2104,104 @@
   }
 
   function Suppliers(props) {
-    const supply = asObject(props.data.supply);
-    const workforce = asObject(props.data.workforce);
-    const error = sourceError(supply);
-    const [detailSupplier, setDetailSupplier] = React.useState(null);
-    const [detailConnections, setDetailConnections] = React.useState([]);
-    const [detailConnectionsLoading, setDetailConnectionsLoading] = React.useState(false);
-    const [detailConnectionsError, setDetailConnectionsError] = React.useState("");
-    const [connectionActionId, setConnectionActionId] = React.useState("");
-    const [manageSupplier, setManageSupplier] = React.useState(null);
-    const [manageConnections, setManageConnections] = React.useState([]);
-    const [manageName, setManageName] = React.useState("");
-    const [manageWebsite, setManageWebsite] = React.useState("");
-    const [manageSupplyOrigin, setManageSupplyOrigin] = React.useState("UNKNOWN");
-    const [manageCommercialType, setManageCommercialType] = React.useState("OTHER");
-    const [manageRoutingPolicy, setManageRoutingPolicy] = React.useState("AUTO");
-    const [manageDrafts, setManageDrafts] = React.useState({});
-    const [manageBusy, setManageBusy] = React.useState("");
-    const [manageMessage, setManageMessage] = React.useState("");
-    const [addOpen, setAddOpen] = React.useState(false);
-    const [presets, setPresets] = React.useState([]);
-    const [economicsQuickProfiles, setEconomicsQuickProfiles] = React.useState([]);
-    const [supplyOrigins, setSupplyOrigins] = React.useState([]);
-    const [commercialTypes, setCommercialTypes] = React.useState([]);
-    const [routingPolicies, setRoutingPolicies] = React.useState([]);
-    const [supplyOrigin, setSupplyOrigin] = React.useState("COMMERCIAL_RELAY");
-    const [commercialType, setCommercialType] = React.useState("METERED");
-    const [routingPolicy, setRoutingPolicy] = React.useState("AUTO");
-    const [presetId, setPresetId] = React.useState("opencode-go");
-    const [apiKey, setApiKey] = React.useState("");
-    const [baseUrl, setBaseUrl] = React.useState("");
-    const [supplierName, setSupplierName] = React.useState("");
-    const [websiteUrl, setWebsiteUrl] = React.useState("");
-    const [models, setModels] = React.useState([]);
-    const [selectedModels, setSelectedModels] = React.useState([]);
-    const [defaultModel, setDefaultModel] = React.useState("");
-    const [modelQuery, setModelQuery] = React.useState("");
-    const [discovering, setDiscovering] = React.useState(false);
-    const [saving, setSaving] = React.useState(false);
-    const [formMessage, setFormMessage] = React.useState("");
+    const [registry, setRegistry] = React.useState(null);
+    const [error, setError] = React.useState("");
+    const [loading, setLoading] = React.useState(true);
+    const [query, setQuery] = React.useState("");
 
-    if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
-
-    const workforceById = new Map(
-      asArray(workforce.employees).map(function (employee) {
-        return [employee.id, employee];
-      }),
-    );
-    const suppliers = asArray(supply.suppliers);
-    const currentPreset =
-      presets.find(function (preset) {
-        return preset.id === presetId;
-      }) || null;
-    const visibleModels = models.filter(function (model) {
-      const needle = modelQuery.trim().toLowerCase();
-      return !needle || String(model.name || model.id).toLowerCase().includes(needle);
-    });
-
-    function resetOnboarding() {
-      setPresetId("opencode-go");
-      setApiKey("");
-      setBaseUrl("");
-      setSupplierName("");
-      setWebsiteUrl("");
-      setSupplyOrigin("COMMERCIAL_RELAY");
-      setCommercialType("METERED");
-      setRoutingPolicy("AUTO");
-      setModels([]);
-      setSelectedModels([]);
-      setDefaultModel("");
-      setModelQuery("");
-      setFormMessage("");
-      setDiscovering(false);
-      setSaving(false);
-    }
-
-    function applyEconomics(economics) {
-      const value = asObject(economics);
-      if (value.supplyOrigin) setSupplyOrigin(String(value.supplyOrigin));
-      if (value.commercialType) setCommercialType(String(value.commercialType));
-      if (value.routingPolicy) setRoutingPolicy(String(value.routingPolicy));
-    }
-
-    function supplierCommercialType(supplier) {
-      const plans = asArray(supplier.plans);
-      const agreements = asArray(supplier.agreements);
-      const explicit = plans.find(function (plan) { return plan && plan.commercialType && plan.commercialType !== "OTHER"; });
-      if (explicit) return String(explicit.commercialType);
-      const agreement = agreements.find(function (item) { return item && item.commercialType && item.commercialType !== "OTHER"; });
-      return agreement ? String(agreement.commercialType) : "OTHER";
-    }
-
-    function economicsBadge(key, value, kind) {
-      return h("span", { className: "hao-badge hao-economics-badge hao-economics-" + kind }, props.t(key + value));
-    }
-
-    async function openSupplierDetail(supplier) {
-      setDetailSupplier(supplier);
-      setDetailConnections([]);
-      setDetailConnectionsError("");
-      setDetailConnectionsLoading(true);
+    const load = React.useCallback(async function () {
+      setLoading(true);
       try {
-        const result = await api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections");
-        setDetailConnections(asArray(result.items));
+        const value = await api("/model-registry");
+        setRegistry(value);
+        setError("");
       } catch (cause) {
-        setDetailConnectionsError(String(cause));
+        setError(String(cause));
       } finally {
-        setDetailConnectionsLoading(false);
+        setLoading(false);
       }
-    }
+    }, []);
 
-    async function loadManageConnections(supplier) {
-      const result = await api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections");
-      const items = asArray(result.items);
-      setManageConnections(items);
-      const drafts = {};
-      items.forEach(function (connection) {
-        drafts[String(connection.id)] = {
-          display_name: String(connection.display_name || connection.provider_key || ""),
-          base_url: String(connection.base_url || ""),
-          website_url: String(connection.website_url || ""),
-          protocol: String(connection.protocol || ""),
-        };
-      });
-      setManageDrafts(drafts);
-    }
+    React.useEffect(function () {
+      load();
+    }, [load]);
 
-    async function openSupplierManage(supplier) {
-      setManageSupplier(supplier);
-      setManageName(String(supplier.name || ""));
-      setManageWebsite(String(supplier.websiteUrl || ""));
-      setManageSupplyOrigin(String(supplier.supplyOrigin || "UNKNOWN"));
-      setManageCommercialType(supplierCommercialType(supplier));
-      setManageRoutingPolicy(String(supplier.routingPolicy || "AUTO"));
-      setManageMessage("");
-      setManageBusy("loading");
-      try {
-        await loadManageConnections(supplier);
-      } catch (cause) {
-        setManageMessage(String(cause));
-      } finally {
-        setManageBusy("");
-      }
-    }
-
-    function closeSupplierManage() {
-      setManageSupplier(null);
-      setManageConnections([]);
-      setManageSupplyOrigin("UNKNOWN");
-      setManageCommercialType("OTHER");
-      setManageRoutingPolicy("AUTO");
-      setManageDrafts({});
-      setManageMessage("");
-      setManageBusy("");
-    }
-
-    function updateManageDraft(connectionId, key, value) {
-      setManageDrafts(function (current) {
-        const next = Object.assign({}, current);
-        next[connectionId] = Object.assign({}, next[connectionId] || {}, { [key]: value });
-        return next;
-      });
-    }
-
-    async function saveManagedSupplier() {
-      if (!manageSupplier || !manageName.trim()) return;
-      setManageBusy("supplier");
-      setManageMessage("");
-      try {
-        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/profile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ name: manageName.trim(), website_url: manageWebsite.trim() }),
-        });
-        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/economics", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            supply_origin: manageSupplyOrigin,
-            commercial_type: manageCommercialType,
-            routing_policy: manageRoutingPolicy,
-          }),
-        });
-        setManageMessage(props.t("suppliers.savedProfile"));
-        await props.onRefresh();
-      } catch (cause) {
-        setManageMessage(String(cause));
-      } finally {
-        setManageBusy("");
-      }
-    }
-
-    async function deleteManagedSupplier() {
-      if (!manageSupplier || !window.confirm(props.t("suppliers.deleteSupplierConfirm"))) return;
-      setManageBusy("supplier-delete");
-      setManageMessage("");
-      try {
-        await api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/retire", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: "AI Office dashboard operator", force: true }),
-        });
-        closeSupplierManage();
-        await props.onRefresh();
-      } catch (cause) {
-        setManageMessage(String(cause));
-        setManageBusy("");
-      }
-    }
-
-    async function saveManagedConnection(connection) {
-      const id = String(connection.id);
-      const draft = asObject(manageDrafts[id]);
-      setManageBusy("connection:" + id);
-      setManageMessage("");
-      try {
-        await api("/providers/hub/" + encodeURIComponent(id) + "/profile", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            display_name: String(draft.display_name || "").trim(),
-            base_url: String(draft.base_url || "").trim(),
-            website_url: String(draft.website_url || "").trim(),
-            protocol: String(draft.protocol || "").trim(),
-          }),
-        });
-        setManageMessage(props.t("suppliers.savedConnection"));
-        if (manageSupplier) await loadManageConnections(manageSupplier);
-        await props.onRefresh();
-      } catch (cause) {
-        setManageMessage(String(cause));
-      } finally {
-        setManageBusy("");
-      }
-    }
-
-    async function deleteManagedConnection(connection) {
-      const id = String(connection.id);
-      if (!window.confirm(props.t("suppliers.deleteConnectionConfirm"))) return;
-      setManageBusy("connection-delete:" + id);
-      setManageMessage("");
-      try {
-        await api("/providers/hub/" + encodeURIComponent(id) + "/retire", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ reason: "AI Office dashboard operator" }),
-        });
-        setManageMessage(props.t("suppliers.deleted"));
-        if (manageSupplier) await loadManageConnections(manageSupplier);
-        await props.onRefresh();
-      } catch (cause) {
-        setManageMessage(String(cause));
-      } finally {
-        setManageBusy("");
-      }
-    }
-
-    async function controlConnection(connection, enabled) {
-      setConnectionActionId(String(connection.id));
-      try {
-        await api("/providers/hub/" + encodeURIComponent(String(connection.id)) + "/control", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled: Boolean(enabled), reason: "AI Office dashboard operator" }),
-        });
-        if (detailSupplier) await openSupplierDetail(detailSupplier);
-      } catch (cause) {
-        setDetailConnectionsError(String(cause));
-      } finally {
-        setConnectionActionId("");
-      }
-    }
-
-    function connectionTime(value) {
-      if (!value) return props.t("common.notRecorded");
-      const numeric = Number(value);
-      return props.relativeTime(Number.isFinite(numeric) && numeric ? numeric : Date.parse(String(value)));
-    }
-
-    function closeSupplierDetail() {
-      setDetailSupplier(null);
-      setDetailConnections([]);
-      setDetailConnectionsError("");
-      setDetailConnectionsLoading(false);
-    }
-
-    async function openOnboarding() {
-      resetOnboarding();
-      setAddOpen(true);
-      try {
-        const result = await api("/providers/presets");
-        const items = asArray(result.items);
-        setPresets(items);
-        setEconomicsQuickProfiles(asArray(result.quickProfiles));
-        setSupplyOrigins(asArray(result.supplyOrigins));
-        setCommercialTypes(asArray(result.commercialTypes));
-        setRoutingPolicies(asArray(result.routingPolicies));
-        const preferred =
-          items.find(function (item) {
-            return item.id === "opencode-go";
-          }) || items[0];
-        if (preferred) {
-          setPresetId(preferred.id);
-          applyEconomics(preferred.economics);
-        }
-      } catch (cause) {
-        setFormMessage(String(cause));
-      }
-    }
-
-    function choosePreset(id) {
-      setPresetId(id);
-      const preset = presets.find(function (item) { return item.id === id; });
-      if (preset) applyEconomics(preset.economics);
-      setModels([]);
-      setSelectedModels([]);
-      setDefaultModel("");
-      setModelQuery("");
-      setFormMessage("");
-      if (id !== "custom") {
-        setBaseUrl("");
-        setSupplierName("");
-        setWebsiteUrl("");
-      }
-    }
-
-    async function discoverModels() {
-      setDiscovering(true);
-      setFormMessage("");
-      try {
-        const result = await api("/providers/discover", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preset_id: presetId,
-            api_key: apiKey,
-            base_url: baseUrl,
-            supplier_name: supplierName,
-            website_url: websiteUrl,
-          }),
-        });
-        setModels(asArray(result.models));
-        setSelectedModels([]);
-        setDefaultModel("");
-      } catch (cause) {
-        setModels([]);
-        setFormMessage(String(cause));
-      } finally {
-        setDiscovering(false);
-      }
-    }
-
-    function toggleModel(modelId) {
-      setSelectedModels(function (current) {
-        if (current.includes(modelId)) {
-          const next = current.filter(function (value) {
-            return value !== modelId;
-          });
-          if (defaultModel === modelId) setDefaultModel(next[0] || "");
-          return next;
-        }
-        const next = current.concat([modelId]);
-        if (!defaultModel) setDefaultModel(modelId);
-        return next;
-      });
-    }
-
-    async function saveSupplier() {
-      if (!selectedModels.length) return;
-      setSaving(true);
-      setFormMessage("");
-      try {
-        await api("/providers/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preset_id: presetId,
-            api_key: apiKey,
-            base_url: baseUrl,
-            supplier_name: supplierName,
-            website_url: websiteUrl,
-            supply_origin: supplyOrigin,
-            commercial_type: commercialType,
-            routing_policy: routingPolicy,
-            selected_models: selectedModels,
-            default_model: defaultModel || selectedModels[0],
-          }),
-        });
-        setFormMessage(props.t("suppliers.saved"));
-        await props.onRefresh();
-        setAddOpen(false);
-        resetOnboarding();
-      } catch (cause) {
-        setFormMessage(String(cause));
-      } finally {
-        setSaving(false);
-      }
-    }
-
-    function supplierFacts(supplier) {
-      const employees = asArray(supplier.employees);
-      const agreements = asArray(supplier.agreements);
-      const channels = agreements.flatMap(function (agreement) {
-        return asArray(agreement.channels);
-      });
-      const employments = agreements.flatMap(function (agreement) {
-        return asArray(agreement.employments);
-      });
-      const runtimeAccess = employments.flatMap(function (employment) {
-        return asArray(employment.runtimeAccess).map(function (access) {
-          return Object.assign({ employeeName: employment.employeeName, employmentId: employment.id }, access);
-        });
-      });
-      const nativeAccess = runtimeAccess.filter(function (access) {
-        return access.adapterKind === "NATIVE_CONFIG" && access.lifecycle === "ACTIVE";
-      });
-      const gatewayAccess = runtimeAccess.filter(function (access) {
-        return access.adapterKind === "GATEWAY" && access.lifecycle === "ACTIVE";
-      });
-      const metadata = asObject(supplier.metadata);
-      const preferences = asObject(metadata.staffingPreferences);
-      const explicitlySelected = Array.isArray(preferences.enabledEmployeeIds);
-      const enabledIds = explicitlySelected ? asArray(preferences.enabledEmployeeIds).map(String) : employees.map(function (employee) { return String(employee.id); });
-      const defaultEmployeeId = String(preferences.defaultEmployeeId || "");
-      const defaultEmployee = employees.find(function (employee) {
-        return String(employee.id) === defaultEmployeeId;
-      });
-      const observedRequests = employees.reduce(function (sum, employee) {
-        const workforceEmployee = workforceById.get(employee.id);
-        return sum + Number(asObject(asObject(workforceEmployee && workforceEmployee.career).observedUsage).requests || 0);
-      }, 0);
-      const healthyChannels = channels.filter(function (channel) {
-        return channel.health === "HEALTHY";
-      }).length;
-      const economics = {
-        supplyOrigin: String(supplier.supplyOrigin || "UNKNOWN"),
-        commercialType: supplierCommercialType(supplier),
-        routingPolicy: String(supplier.routingPolicy || "AUTO"),
-      };
-      return {
-        employees: employees,
-        agreements: agreements,
-        channels: channels,
-        employments: employments,
-        runtimeAccess: runtimeAccess,
-        nativeAccess: nativeAccess,
-        gatewayAccess: gatewayAccess,
-        enabledIds: enabledIds,
-        explicitlySelected: explicitlySelected,
-        defaultEmployee: defaultEmployee,
-        defaultEmployeeId: defaultEmployeeId,
-        observedRequests: observedRequests,
-        healthyChannels: healthyChannels,
-        economics: economics,
-      };
-    }
-
-    const detailFacts = detailSupplier ? supplierFacts(detailSupplier) : null;
+    const value = asObject(registry);
+    const credentials = asObject(value.credentials);
+    const deploymentSummary = asObject(value.deployments);
+    const aliases = asObject(value.aliases);
+    const deployments = asArray(deploymentSummary.items);
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    const filtered = normalizedQuery
+      ? deployments.filter(function (item) {
+          return [item.group, item.providerKey, item.model, item.commercialType, item.protocol, item.credential]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(normalizedQuery);
+        })
+      : deployments;
+    const adminUrl = String(value.adminUrl || "");
+    const columns = [
+      {
+        key: "group",
+        label: props.t("registry.group"),
+        render: function (item) {
+          return h("div", { className: "hao-primary-cell" }, h("strong", null, item.group || "—"), h("small", { className: "hao-mono" }, item.id || ""));
+        },
+      },
+      { key: "providerKey", label: props.t("registry.provider"), render: function (item) { return item.providerKey || "—"; } },
+      { key: "model", label: props.t("registry.physicalModel"), render: function (item) { return h("span", { className: "hao-mono" }, item.model || "—"); } },
+      { key: "commercialType", label: props.t("registry.commercial"), render: function (item) { return item.commercialType || "—"; } },
+      { key: "protocol", label: props.t("registry.protocol"), render: function (item) { return item.protocol || "—"; } },
+      { key: "order", label: props.t("registry.order"), className: "hao-number-cell", render: function (item) { return item.order == null ? "—" : String(item.order); } },
+      { key: "credential", label: props.t("registry.credential"), render: function (item) { return h("span", { className: "hao-mono" }, item.credential || "—"); } },
+      { key: "blocked", label: props.t("development.status"), render: function (item) { return h(Status, { value: item.blocked ? "PAUSED" : "AVAILABLE", t: props.t }); } },
+    ];
 
     return h(
       "div",
       { className: "hao-section-stack" },
       h(
         "div",
-        { className: "hao-section-head hao-supplier-section-head" },
+        { className: "hao-section-head" },
+        h("div", null, h("h1", null, props.t("registry.title")), h("p", null, props.t("registry.subtitle"))),
         h(
           "div",
-          { className: "hao-section-title-block" },
-          h(
-            "div",
-            { className: "hao-section-title-line" },
-            h("h1", null, props.t("suppliers.title")),
-            h("span", { className: "hao-count hao-count-inline" }, props.number(suppliers.length)),
-          ),
-          h("p", null, props.t("suppliers.subtitle")),
+          { className: "hao-actions" },
+          adminUrl
+            ? h(Button, { kind: "outline", onClick: function () { window.open(adminUrl, "_blank", "noopener,noreferrer"); } }, props.t("registry.openAdmin"))
+            : null,
+          h(Button, { kind: "outline", onClick: load, disabled: loading }, loading ? props.t("shell.refreshing") : props.t("development.refresh")),
         ),
-        h("div", { className: "hao-section-actions" }, h(Button, { onClick: openOnboarding }, "+ " + props.t("suppliers.add"))),
       ),
-      suppliers.length
+      error ? h(ErrorBanner, { title: props.t("registry.loadError"), error: error }) : null,
+      !registry && loading ? h("div", { className: "hao-loading" }, props.t("registry.loading")) : null,
+      registry
         ? h(
-            "div",
-            { className: "hao-supplier-list" },
+            React.Fragment,
+            null,
+            h(Notice, { tone: value.health === "OK" ? "info" : "warn", title: "LiteLLM" }, props.t("registry.adminHint")),
             h(
               "div",
-              { className: "hao-supplier-row hao-supplier-row-head", "aria-hidden": "true" },
-              h("span", null, props.t("suppliers.supplier")),
-              h("span", null, props.t("suppliers.enabledEmployees")),
-              h("span", null, props.t("suppliers.defaultEmployee")),
-              h("span", null, props.t("workforce.state")),
-              h("span", null, props.t("suppliers.actions")),
+              { className: "hao-metrics" },
+              h(Metric, { label: props.t("registry.credentials"), value: props.number(credentials.count || 0), hint: "LiteLLM Credentials" }),
+              h(Metric, { label: props.t("registry.deployments"), value: props.number(deploymentSummary.count || 0), hint: props.number(Object.keys(asObject(deploymentSummary.groups)).length) + " model groups" }),
+              h(Metric, { label: props.t("registry.active"), value: props.number(deploymentSummary.active || 0), hint: "routable" }),
+              h(Metric, { label: props.t("registry.paused"), value: props.number(deploymentSummary.paused || 0), hint: "blocked / unavailable" }),
+              h(Metric, { label: props.t("registry.aliases"), value: props.number(Object.keys(aliases).length), hint: Object.entries(aliases).map(function (entry) { return entry[0] + " → " + entry[1]; }).join(" · ") || "—" }),
+              h(Metric, { label: props.t("development.health"), value: h(Status, { value: value.health || "UNKNOWN", t: props.t }), hint: "runtime authority" }),
             ),
-            suppliers.map(function (supplier) {
-              const facts = supplierFacts(supplier);
-              const internal = String(supplier.sourceKind || "EXTERNAL") === "INTERNAL";
-              return h(
-                "article",
-                { className: "hao-supplier-row", key: supplier.id },
-                h(
-                  "div",
-                  { className: "hao-supplier-row-main" },
-                  h("span", { className: "hao-supplier-mark", "aria-hidden": "true" }, String(supplier.name || "S")[0]),
-                  h(
-                    "div",
-                    { className: "hao-supplier-row-copy" },
-                    h("h2", null, supplier.name, internal ? h("span", { className: "hao-badge hao-badge-internal" }, props.t("suppliers.internal")) : null),
-                    h(
-                      "div",
-                      { className: "hao-economics-tags" },
-                      economicsBadge("suppliers.origin.", facts.economics.supplyOrigin, "origin"),
-                      economicsBadge("suppliers.commercial.", facts.economics.commercialType, "commercial"),
-                      facts.economics.routingPolicy !== "AUTO"
-                        ? economicsBadge("suppliers.routing.", facts.economics.routingPolicy, "routing")
-                        : null,
-                    ),
-                    h("p", { className: "hao-supplier-slug" }, supplier.slug),
-                  ),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-compact-stat" },
-                  h("strong", null, props.number(facts.enabledIds.length) + " / " + props.number(facts.employees.length)),
-                  h("span", null, props.t("suppliers.enabledOfTotal")),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-default" },
-                  h("span", { className: "hao-supplier-mobile-label" }, props.t("suppliers.defaultEmployee")),
-                  h("strong", null, facts.defaultEmployee ? facts.defaultEmployee.displayName : props.t("suppliers.defaultEmployeeNone")),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-row-status" },
-                  h(
-                    "div",
-                    { className: "hao-supplier-status-copy" },
-                    h(Status, { value: supplier.lifecycle, t: props.t }),
-                    facts.nativeAccess.length
-                      ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.nativeAccess.length) + " " + props.t("suppliers.nativeAccess"))
-                      : facts.channels.length
-                        ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
-                        : h("span", { className: "hao-supplier-route-health" }, "—"),
-                  ),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-row-actions" },
-                  h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
-                  h(Button, { kind: "outline", onClick: function () { openSupplierManage(supplier); } }, props.t("suppliers.manage")),
-                ),
-              );
-            }),
+            h(
+              "label",
+              { className: "hao-search" },
+              h("span", { className: "hao-search-icon", "aria-hidden": "true" }, "⌕"),
+              h("span", { className: "hao-visually-hidden" }, props.t("common.search")),
+              h("input", { type: "search", value: query, placeholder: props.t("common.search"), onChange: function (event) { setQuery(event.target.value); } }),
+            ),
+            h(DataTable, { columns: columns, rows: filtered, keyField: "id", empty: props.t("registry.noDeployments") }),
           )
-        : h(Empty, null, props.t("common.noData")),
-      h(
-        Modal,
-        {
-          open: Boolean(detailSupplier),
-          onClose: closeSupplierDetail,
-          labelledBy: "hao-supplier-detail-title",
-          title: detailSupplier ? detailSupplier.name : props.t("suppliers.detailTitle"),
-          subtitle: props.t("suppliers.detailSubtitle"),
-          closeLabel: props.t("suppliers.close"),
-          wide: true,
-          footer: h(Button, { kind: "quiet", onClick: closeSupplierDetail }, props.t("suppliers.close")),
-        },
-        detailSupplier && detailFacts
-          ? h(
-              "div",
-              { className: "hao-supplier-detail" },
-              detailSupplier.websiteUrl
-                ? h("div", { className: "hao-detail-website" },
-                    h("span", null, props.t("suppliers.website")),
-                    h("a", { className: "hao-external-link", href: detailSupplier.websiteUrl, target: "_blank", rel: "noreferrer" }, detailSupplier.websiteUrl),
-                  )
-                : null,
-              !detailFacts.explicitlySelected
-                ? h(Notice, { icon: "i" }, props.t("suppliers.legacySelection"))
-                : null,
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.employees")),
-                detailFacts.employees.length
-                  ? h(
-                      "div",
-                      { className: "hao-detail-employee-list" },
-                      detailFacts.employees.map(function (employee) {
-                        const id = String(employee.id);
-                        const enabled = detailFacts.enabledIds.includes(id);
-                        const preferred = detailFacts.defaultEmployeeId === id;
-                        return h(
-                          "div",
-                          { className: "hao-detail-employee", key: id },
-                          h(Avatar, { name: employee.displayName }),
-                          h("div", { className: "hao-detail-employee-copy" }, h("strong", null, employee.displayName), h("small", null, asObject(employee.supplierModel).key || "")),
-                          preferred
-                            ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.preferred"))
-                            : h("span", { className: "hao-badge" }, props.t(enabled ? "suppliers.enabled" : "suppliers.disabled")),
-                        );
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.connections")),
-                detailConnectionsLoading
-                  ? h("span", { className: "hao-muted" }, props.t("suppliers.connectionsLoading"))
-                  : detailConnectionsError
-                    ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailConnectionsError })
-                    : detailConnections.length
-                      ? h(
-                          "div",
-                          { className: "hao-agreement-list" },
-                          detailConnections.map(function (connection) {
-                            const models = asArray(connection.models);
-                            const links = asArray(connection.profileLinks);
-                            const adminState = String(connection.adminState || "DISABLED").toUpperCase();
-                            const effectiveState = String(connection.effectiveState || connection.health || "UNKNOWN").toUpperCase();
-                            const retryStates = ["UNAVAILABLE", "TEMP_UNAVAILABLE"];
-                            const actionEnabled = adminState === "DISABLED" || (adminState === "ENABLED" && retryStates.includes(effectiveState));
-                            const actionLabel = adminState === "DISABLED"
-                              ? props.t("suppliers.enable")
-                              : (adminState === "ENABLED" && retryStates.includes(effectiveState) ? props.t("suppliers.retry") : props.t("suppliers.disable"));
-                            const attempts = asArray(connection.recentAttempts).slice().sort(function (left, right) {
-                              const leftObservedAt = asObject(left).observedAt;
-                              const rightObservedAt = asObject(right).observedAt;
-                              const leftNumeric = Number(leftObservedAt);
-                              const rightNumeric = Number(rightObservedAt);
-                              const leftTime = leftObservedAt != null && leftObservedAt !== "" && Number.isFinite(leftNumeric) ? leftNumeric : Date.parse(String(leftObservedAt || ""));
-                              const rightTime = rightObservedAt != null && rightObservedAt !== "" && Number.isFinite(rightNumeric) ? rightNumeric : Date.parse(String(rightObservedAt || ""));
-                              return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
-                            }).slice(0, 5);
-                            return h(
-                              "div",
-                              { className: "hao-agreement-row hao-supplier-connection", key: connection.id },
-                              h(
-                                "div",
-                                { className: "hao-primary-cell" },
-                                h("strong", null, connection.display_name || connection.provider_key),
-                                h("small", null, connection.base_url || "—"),
-                                h("small", null, [connection.auth_kind, connection.credential_ref].filter(Boolean).join(" · ") || "—"),
-                                models.length
-                                  ? h("div", { className: "hao-chip-row" }, models.slice(0, 6).map(function (model) { return h("code", { className: "hao-code", key: model }, model); }), models.length > 6 ? h("span", { className: "hao-count" }, "+" + props.number(models.length - 6)) : null)
-                                  : null,
-                                links.length
-                                  ? h("small", null, links.map(function (link) { return [link.profile_id, link.runtime_kind, link.model_ref].filter(Boolean).join(" / "); }).join(" · "))
-                                  : null,
-                                h("small", null, props.t("suppliers.effectiveState") + ": " + effectiveState + " · " + props.t("suppliers.adminState") + ": " + adminState),
-                                h("small", null, props.t("suppliers.routable") + ": " + (connection.routable ? "yes" : "no") + " · " + props.t("suppliers.retryable") + ": " + (connection.retryable ? "yes" : "no") + " · " + props.t("suppliers.consecutiveFailures") + ": " + String(connection.consecutiveFailures == null ? 0 : connection.consecutiveFailures)),
-                                connection.lastErrorKind || connection.lastErrorStatus || connection.lastErrorMessage
-                                  ? h("small", null, props.t("suppliers.lastError") + ": " + [connection.lastErrorKind, connection.lastErrorStatus, connection.lastErrorMessage].filter(Boolean).join(" · "))
-                                  : null,
-                                h("small", null, [props.t("suppliers.lastSuccess") + ": " + connectionTime(connection.lastSuccessAt), props.t("suppliers.lastFailure") + ": " + connectionTime(connection.lastFailureAt), props.t("suppliers.retryAfter") + ": " + connectionTime(connection.retryAfterAt)].join(" · ")),
-                                h("small", null, props.t("suppliers.recentAttempts") + ": " + props.number(attempts.length)),
-                                attempts.length
-                                  ? h("div", { className: "hao-supplier-attempts" }, attempts.map(function (attempt, index) {
-                                      const item = asObject(attempt);
-                                      return h("small", { key: String(item.id || item.observedAt || index) }, [item.outcome, item.errorKind, item.httpStatus, item.observedAt == null ? null : connectionTime(item.observedAt), item.errorMessage].filter(function (value) { return value != null && String(value) !== ""; }).map(String).join(" · "));
-                                    }))
-                                  : null,
-                              ),
-                              h("div", { className: "hao-supplier-connection-actions" }, h(Status, { value: effectiveState, t: props.t }), h(Button, { kind: "quiet", disabled: connectionActionId === String(connection.id), onClick: function () { controlConnection(connection, actionEnabled); } }, connectionActionId === String(connection.id) ? props.t("suppliers.controlBusy") : actionLabel)),
-                            );
-                          }),
-                        )
-                      : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noConnections")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.runtimeAccess")),
-                detailFacts.runtimeAccess.length
-                  ? h(
-                      "div",
-                      { className: "hao-agreement-list" },
-                      detailFacts.runtimeAccess.map(function (access) {
-                        const provider = access.profileRef || access.providerRef || "—";
-                        return h(
-                          "div",
-                          { className: "hao-agreement-row", key: access.id },
-                          h(
-                            "div",
-                            null,
-                            h("strong", null, (access.employeeName || "") + " · " + (access.runtimeKind || "")),
-                            h("small", null, props.t("suppliers.accessProvider") + ": " + provider + " · " + props.t("suppliers.accessModel") + ": " + (access.modelRef || "—")),
-                          ),
-                          h("span", { className: access.adapterKind === "NATIVE_CONFIG" ? "hao-badge hao-badge-good" : "hao-badge" }, access.adapterKind === "NATIVE_CONFIG" ? props.t("suppliers.nativeAccess") : props.t("suppliers.gatewayAccess")),
-                        );
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.agreements")),
-                detailFacts.agreements.length
-                  ? h(
-                      "div",
-                      { className: "hao-agreement-list" },
-                      detailFacts.agreements.map(function (agreement) {
-                        return h("div", { className: "hao-agreement-row", key: agreement.id }, h("div", null, h("strong", null, agreement.name), h("small", null, agreement.planName || props.t("suppliers.noPlan"))), h(Status, { value: agreement.lifecycle, t: props.t }));
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
-              ),
-              h(
-                "div",
-                { className: "hao-detail-metrics" },
-                h("div", null, h("span", null, props.t("suppliers.channels")), h("strong", null, props.number(detailFacts.healthyChannels) + "/" + props.number(detailFacts.channels.length))),
-                h("div", null, h("span", null, props.t("suppliers.observed")), h("strong", null, props.number(detailFacts.observedRequests))),
-              ),
-            )
-          : null,
-      ),
-      h(
-        Modal,
-        {
-          open: Boolean(manageSupplier),
-          onClose: closeSupplierManage,
-          labelledBy: "hao-supplier-manage-title",
-          title: manageSupplier ? props.t("suppliers.manageTitle") + " · " + manageSupplier.name : props.t("suppliers.manageTitle"),
-          subtitle: props.t("suppliers.manageSubtitle"),
-          closeLabel: props.t("suppliers.close"),
-          wide: true,
-          footer: manageSupplier
-            ? h(
-                "div",
-                { className: "hao-manage-footer" },
-                h(Button, { kind: "danger", disabled: Boolean(manageBusy), onClick: deleteManagedSupplier }, props.t("suppliers.deleteSupplier")),
-                h(Button, { kind: "quiet", onClick: closeSupplierManage }, props.t("suppliers.close")),
-              )
-            : null,
-        },
-        manageSupplier
-          ? h(
-              "div",
-              { className: "hao-provider-manage" },
-              manageMessage ? h(Notice, { icon: "i" }, manageMessage) : null,
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.supplier")),
-                h(
-                  "div",
-                  { className: "hao-provider-manage-grid" },
-                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { value: manageName, onChange: function (event) { setManageName(event.target.value); } })),
-                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { value: manageWebsite, onChange: function (event) { setManageWebsite(event.target.value); }, placeholder: "https://…" })),
-                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplyOrigin")), h("select", { value: manageSupplyOrigin, onChange: function (event) { setManageSupplyOrigin(event.target.value); } }, (supplyOrigins.length ? supplyOrigins : ["OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.origin." + value)); }))),
-                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.commercialType")), h("select", { value: manageCommercialType, onChange: function (event) { setManageCommercialType(event.target.value); } }, (commercialTypes.length ? commercialTypes : ["FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.commercial." + value)); }))),
-                  h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.routingPolicy")), h("select", { value: manageRoutingPolicy, onChange: function (event) { setManageRoutingPolicy(event.target.value); } }, (routingPolicies.length ? routingPolicies : ["AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"]).map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.routing." + value)); }))),
-                ),
-                h("div", { className: "hao-provider-manage-actions" }, h(Button, { disabled: Boolean(manageBusy) || !manageName.trim(), onClick: saveManagedSupplier }, manageBusy === "supplier" ? props.t("suppliers.controlBusy") : props.t("suppliers.saveProfile"))),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.connections")),
-                manageBusy === "loading"
-                  ? h("span", { className: "hao-muted" }, props.t("suppliers.connectionsLoading"))
-                  : manageConnections.length
-                    ? h(
-                        "div",
-                        { className: "hao-provider-manage-connections" },
-                        manageConnections.map(function (connection) {
-                          const id = String(connection.id);
-                          const draft = asObject(manageDrafts[id]);
-                          const busy = manageBusy === "connection:" + id || manageBusy === "connection-delete:" + id;
-                          return h(
-                            "div",
-                            { className: "hao-provider-manage-connection", key: id },
-                            h("div", { className: "hao-provider-manage-connection-head" }, h("strong", null, connection.provider_key || id), h(Status, { value: connection.effectiveState || connection.health, t: props.t })),
-                            h(
-                              "div",
-                              { className: "hao-provider-manage-grid" },
-                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.connectionName")), h("input", { value: String(draft.display_name || ""), onChange: function (event) { updateManageDraft(id, "display_name", event.target.value); } })),
-                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { value: String(draft.base_url || ""), onChange: function (event) { updateManageDraft(id, "base_url", event.target.value); } })),
-                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { value: String(draft.website_url || ""), onChange: function (event) { updateManageDraft(id, "website_url", event.target.value); } })),
-                              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.protocol")), h("input", { value: String(draft.protocol || ""), onChange: function (event) { updateManageDraft(id, "protocol", event.target.value); } })),
-                            ),
-                            h(
-                              "div",
-                              { className: "hao-provider-manage-actions" },
-                              h(Button, { disabled: busy || !String(draft.display_name || "").trim(), onClick: function () { saveManagedConnection(connection); } }, busy && manageBusy === "connection:" + id ? props.t("suppliers.controlBusy") : props.t("suppliers.saveConnection")),
-                              h(Button, { kind: "danger", disabled: busy, onClick: function () { deleteManagedConnection(connection); } }, props.t("suppliers.deleteConnection")),
-                            ),
-                          );
-                        }),
-                      )
-                    : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noConnections")),
-              ),
-            )
-          : null,
-      ),
-      h(
-        Modal,
-        {
-          open: addOpen,
-          onClose: function () { setAddOpen(false); },
-          labelledBy: "hao-supplier-add-title",
-          title: props.t("suppliers.addTitle"),
-          subtitle: props.t("suppliers.addSubtitle"),
-          closeLabel: props.t("suppliers.close"),
-          wide: true,
-          footer: models.length
-            ? h(
-                "div",
-                { className: "hao-onboarding-footer" },
-                h("span", null, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) })),
-                h(Button, { disabled: saving || !selectedModels.length, onClick: saveSupplier }, saving ? props.t("suppliers.savingSupplier") : props.t("suppliers.saveSupplier")),
-              )
-            : null,
-        },
-        h(
-          "div",
-          { className: "hao-onboarding" },
-          h(
-            "section",
-            { className: "hao-onboarding-step" },
-            h("h3", null, props.t("suppliers.chooseProvider")),
-            h(
-              "div",
-              { className: "hao-preset-grid" },
-              presets.map(function (preset) {
-                return h(
-                  "button",
-                  {
-                    className: "hao-preset-card",
-                    key: preset.id,
-                    type: "button",
-                    "aria-pressed": presetId === preset.id,
-                    onClick: function () { choosePreset(preset.id); },
-                  },
-                  h("span", { className: "hao-preset-mark", "aria-hidden": "true" }, preset.id === "custom" ? "+" : String(preset.name || "P")[0]),
-                  h("span", { className: "hao-preset-copy" }, h("strong", null, preset.id === "custom" ? props.t("suppliers.custom") : preset.name), h("small", null, preset.id === "custom" ? props.t("suppliers.customHint") : preset.supplierName || preset.name)),
-                  preset.configured ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.configured")) : null,
-                );
-              }),
-            ),
-          ),
-          h(
-            "section",
-            { className: "hao-onboarding-step" },
-            h("div", { className: "hao-onboarding-step-head" }, h("div", null, h("h3", null, props.t("suppliers.economics")), h("p", null, props.t("suppliers.economicsHint")))),
-            h(
-              "div",
-              { className: "hao-economics-quick-grid" },
-              economicsQuickProfiles.map(function (profile) {
-                const selected = supplyOrigin === profile.supplyOrigin && commercialType === profile.commercialType && routingPolicy === profile.routingPolicy;
-                return h(
-                  "button",
-                  {
-                    className: "hao-economics-quick",
-                    type: "button",
-                    key: profile.id,
-                    "aria-pressed": selected,
-                    onClick: function () { applyEconomics(profile); },
-                  },
-                  props.t("suppliers.quick." + profile.id),
-                );
-              }),
-            ),
-            h(
-              "div",
-              { className: "hao-economics-fields" },
-              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplyOrigin")), h("select", { value: supplyOrigin, onChange: function (event) { setSupplyOrigin(event.target.value); } }, supplyOrigins.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.origin." + value)); }))),
-              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.commercialType")), h("select", { value: commercialType, onChange: function (event) { setCommercialType(event.target.value); } }, commercialTypes.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.commercial." + value)); }))),
-              h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.routingPolicy")), h("select", { value: routingPolicy, onChange: function (event) { setRoutingPolicy(event.target.value); } }, routingPolicies.map(function (value) { return h("option", { key: value, value: value }, props.t("suppliers.routing." + value)); }))),
-            ),
-          ),
-          h(
-            "section",
-            { className: "hao-onboarding-step" },
-            h("h3", null, props.t("suppliers.credentials")),
-            h(
-              "div",
-              { className: "hao-onboarding-form" },
-              presetId === "custom"
-                ? h(
-                    React.Fragment,
-                    null,
-                    h("label", { className: "hao-field hao-field-wide" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { type: "url", value: baseUrl, placeholder: "https://api.example.com/v1", onChange: function (event) { setBaseUrl(event.target.value); } })),
-                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { type: "text", value: supplierName, placeholder: props.t("suppliers.supplierNameHint"), onChange: function (event) { setSupplierName(event.target.value); } })),
-                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { type: "url", value: websiteUrl, placeholder: "https://example.com", onChange: function (event) { setWebsiteUrl(event.target.value); } })),
-                  )
-                : null,
-              h(
-                "label",
-                { className: "hao-field " + (presetId === "custom" ? "" : "hao-field-wide") },
-                h("span", null, props.t("suppliers.apiKey")),
-                h("input", { type: "password", value: apiKey, autoComplete: "off", placeholder: currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired"), onChange: function (event) { setApiKey(event.target.value); } }),
-                h("small", null, currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired")),
-              ),
-              h("div", { className: "hao-discover-action" }, h(Button, { disabled: discovering || (presetId === "custom" && !baseUrl.trim()), onClick: discoverModels }, discovering ? props.t("suppliers.discovering") : props.t("suppliers.discover"))),
-            ),
-            h("p", { className: "hao-security-note" }, props.t("suppliers.security")),
-          ),
-          models.length
-            ? h(
-                "section",
-                { className: "hao-onboarding-step" },
-                h("div", { className: "hao-onboarding-step-head" }, h("div", null, h("h3", null, props.t("suppliers.selectModels")), h("p", null, props.t("suppliers.selectModelsHint"))), h("span", { className: "hao-count" }, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) }))),
-                h("input", { className: "hao-model-search", type: "search", value: modelQuery, placeholder: props.t("suppliers.modelSearch"), onChange: function (event) { setModelQuery(event.target.value); } }),
-                h(
-                  "div",
-                  { className: "hao-model-picker" },
-                  visibleModels.map(function (model) {
-                    const modelId = String(model.id);
-                    const checked = selectedModels.includes(modelId);
-                    return h(
-                      "label",
-                      { className: "hao-model-option", key: modelId },
-                      h("input", { type: "checkbox", checked: checked, onChange: function () { toggleModel(modelId); } }),
-                      h("span", { className: "hao-model-name" }, model.name || modelId),
-                      h(
-                        "span",
-                        { className: "hao-default-choice" },
-                        h("input", { type: "radio", name: "hao-default-employee", disabled: !checked, checked: defaultModel === modelId, onChange: function () { if (checked) setDefaultModel(modelId); } }),
-                        h("span", null, props.t("suppliers.preferred")),
-                      ),
-                    );
-                  }),
-                ),
-              )
-            : null,
-          formMessage ? h("div", { className: "hao-save-message", role: "status" }, formMessage) : null,
-        ),
-      ),
+        : null,
     );
   }
 
@@ -3181,7 +2407,7 @@
     const usage = asObject(summary.usage);
     const runtime = asObject(development.runtime);
     const health = asObject(runtime.sourceHealth);
-    const providerSummary = asObject(asObject(development.providers).summary);
+    const providerSummary = asObject(asObject(development.providers).deployments);
     const readiness = asObject(development.readiness);
     const readinessGates = asObject(readiness.gates);
     const policy = asObject(development.policy);
@@ -3397,9 +2623,9 @@
               : h(
                   "div",
                   { className: "hao-mini-metrics" },
-                  h(Metric, { label: props.t("development.connections", { count: props.number(providerSummary.connections || 0) }), value: props.number(providerSummary.connections || 0), hint: "ProviderConnection" }),
-                  h(Metric, { label: props.t("development.available", { count: props.number(providerSummary.available || 0) }), value: props.number(providerSummary.available || 0), hint: props.t("status.READY") }),
-                  h(Metric, { label: props.t("development.congested", { count: props.number(providerSummary.congested || 0) }), value: props.number(providerSummary.congested || 0), hint: props.t("development.unavailable", { count: props.number(providerSummary.unavailable || 0) }) }),
+                  h(Metric, { label: props.t("development.connections", { count: props.number(providerSummary.count || 0) }), value: props.number(providerSummary.count || 0), hint: "LiteLLM DB" }),
+                  h(Metric, { label: props.t("development.available", { count: props.number(providerSummary.active || 0) }), value: props.number(providerSummary.active || 0), hint: "active deployments" }),
+                  h(Metric, { label: props.t("registry.paused"), value: props.number(providerSummary.paused || 0), hint: "blocked" }),
                 ),
           ),
           h(

@@ -1249,10 +1249,9 @@ async def health() -> Dict[str, Any]:
 
 @router.get("/overview")
 async def overview() -> Dict[str, Any]:
-    try:
-        await asyncio.to_thread(_sync_profile_native_provider_hub)
-    except Exception:
-        pass
+    # V3 cutover: dashboard reads must not keep the retired Provider Hub alive by
+    # discovering or writing provider connections. The retained V2 projections below
+    # are workforce/business history only; provider runtime authority is LiteLLM.
     requests = [
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
@@ -1331,7 +1330,7 @@ async def development(limit: int = 80, detail_limit: int = 24) -> Dict[str, Any]
         _partial("policy", "/api/v3/development/policy"),
         _partial("readiness", "/api/v3/development/readiness"),
         _partial("executions", f"/api/v3/development/executions?limit={safe_limit}"),
-        _partial("providers", "/api/v2/projections/provider-hub-summary"),
+        _partial("providers", "/api/v3/development/model-registry"),
     )
     values = dict((runtime_value, policy_value, readiness_value, execution_value, provider_value))
     raw_items = values.get("executions", {}).get("items", []) if isinstance(values.get("executions"), Mapping) else []
@@ -1395,16 +1394,30 @@ async def employee_dossier(employee_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.get("/providers/hub")
-async def provider_hub(force: bool = False) -> Dict[str, Any]:
+@router.get("/model-registry")
+async def model_registry() -> Dict[str, Any]:
     try:
-        return await asyncio.to_thread(_sync_profile_native_provider_hub, force)
+        return await asyncio.to_thread(_fetch_json, "/api/v3/development/model-registry")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _provider_hub_retired() -> None:
+    raise HTTPException(
+        status_code=410,
+        detail="Provider Hub runtime authority was retired. Manage providers, credentials, models, health, and routing in LiteLLM Admin.",
+    )
+
+
+@router.get("/providers/hub")
+async def provider_hub(force: bool = False) -> Dict[str, Any]:
+    del force
+    _provider_hub_retired()
+
+
 @router.get("/providers/hub/{connection_id}")
 async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1418,6 +1431,7 @@ async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
 async def provider_hub_control(
     connection_id: str, request: ProviderControlRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1438,6 +1452,7 @@ async def provider_hub_control(
 async def provider_hub_profile(
     connection_id: str, request: ProviderProfileRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1461,6 +1476,7 @@ async def provider_hub_profile(
 async def provider_hub_retire(
     connection_id: str, request: ProviderRetireRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1478,6 +1494,7 @@ async def provider_hub_retire(
 async def supplier_profile(
     supplier_id: str, request: SupplierProfileRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = supplier_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid supplier id")
@@ -1495,6 +1512,7 @@ async def supplier_profile(
 async def supplier_economics(
     supplier_id: str, request: SupplierEconomicsRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = supplier_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid supplier id")
@@ -1515,6 +1533,7 @@ async def supplier_economics(
 async def supplier_retire(
     supplier_id: str, request: SupplierRetireRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = supplier_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid supplier id")
@@ -1533,6 +1552,7 @@ async def supplier_retire(
 
 @router.get("/suppliers/{supplier_id}/connections")
 async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = supplier_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid supplier id")
@@ -1546,6 +1566,7 @@ async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
 
 @router.get("/providers/presets")
 async def provider_presets() -> Dict[str, Any]:
+    _provider_hub_retired()
     items = []
     for preset_id, raw in _PROVIDER_PRESETS.items():
         descriptor = _provider_descriptor(preset_id, "https://example.invalid/v1" if preset_id == "custom" else "", "") if preset_id != "custom" else raw
@@ -1571,6 +1592,7 @@ async def provider_presets() -> Dict[str, Any]:
 
 @router.post("/providers/discover")
 async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
+    _provider_hub_retired()
     try:
         descriptor, models, configured = await asyncio.to_thread(_discover_provider_models, body)
         return {
@@ -1593,6 +1615,7 @@ async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
 
 @router.post("/providers/register")
 async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
+    _provider_hub_retired()
     try:
         descriptor, discovered, _configured = await asyncio.to_thread(_discover_provider_models, body)
         if _is_official_deepseek_endpoint(descriptor.get("baseUrl")):

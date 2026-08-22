@@ -72,8 +72,9 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         }
         with mock.patch.object(api, "_fetch_json", side_effect=lambda path: payloads[path]), mock.patch.object(
             api, "_runtime_policy_settings", return_value={"mode": "prefer"}
-        ):
+        ), mock.patch.object(api, "_sync_profile_native_provider_hub") as legacy_sync:
             result = await api.overview()
+        legacy_sync.assert_not_called()
         self.assertEqual(result["workforce"]["summary"]["employees"], 2)
         self.assertEqual(result["supply"]["summary"]["suppliers"], 1)
         self.assertNotIn("personalChannels", result)
@@ -121,7 +122,14 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
                     {"executionId": "exec-done", "projectKey": "body", "phase": "VERIFY_REVIEW", "status": "SUCCEEDED"},
                 ]
             },
-            "/api/v2/projections/provider-hub-summary": {"summary": {"connections": 3, "available": 2, "congested": 1}},
+            "/api/v3/development/model-registry": {
+                "authority": "LITELLM",
+                "health": "OK",
+                "adminUrl": "https://oracle.example:10446/ui/",
+                "credentials": {"count": 2, "items": []},
+                "deployments": {"count": 3, "active": 2, "paused": 1, "groups": {"gpt-5.6-sol": 2}, "items": []},
+                "aliases": {"review-premium": "gpt-5.6-sol"},
+            },
             "/api/v3/development/executions/exec-run": {
                 "executionId": "exec-run", "projectKey": "body", "phase": "IMPLEMENT", "status": "RUNNING",
                 "usage": {"input": 100, "output": 10, "cachedInput": 40, "costUsd": 0.1, "calls": 2},
@@ -150,7 +158,7 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["runtime"]["logicalModels"][0], "implementation-efficient")
         self.assertEqual(result["readiness"]["status"], "NOT_READY")
         self.assertFalse(result["readiness"]["gates"]["representativeWorkflows"]["pass"])
-        self.assertEqual(result["providers"]["summary"]["available"], 2)
+        self.assertEqual(result["providers"]["deployments"]["active"], 2)
 
     async def test_development_projection_degrades_partially_without_hiding_execution_history(self) -> None:
         def fetch(path: str, **_kwargs):
@@ -167,117 +175,74 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["runtime"]["unavailable"])
         self.assertEqual(result["history"][0]["executionId"], "exec-old")
 
-    async def test_provider_hub_control_forwards_enabled_and_reason(self) -> None:
-        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
-            result = await api.provider_hub_control(
-                "pconn_1", api.ProviderControlRequest(enabled=False, reason="maintenance")
-            )
-        self.assertEqual(result, {"ok": True})
-        post.assert_called_once_with(
-            "/api/v2/commands/provider-connections/pconn_1/control",
-            {"enabled": False, "reason": "maintenance"},
-        )
+    async def test_model_registry_is_a_thin_v3_litellm_proxy(self) -> None:
+        expected = {
+            "authority": "LITELLM",
+            "health": "OK",
+            "adminUrl": "https://oracle.example:10446/ui/",
+            "credentials": {"count": 15, "items": []},
+            "deployments": {"count": 98, "active": 15, "paused": 83, "groups": {}, "items": []},
+            "aliases": {"planning-premium": "gpt-5.6-sol"},
+        }
+        with mock.patch.object(api, "_fetch_json", return_value=expected) as fetch:
+            result = await api.model_registry()
+        self.assertEqual(result, expected)
+        fetch.assert_called_once_with("/api/v3/development/model-registry")
 
-    async def test_provider_hub_control_rejects_invalid_connection_id(self) -> None:
-        with self.assertRaises(api.HTTPException) as raised:
-            await api.provider_hub_control(
-                "bad/id", api.ProviderControlRequest(enabled=True)
-            )
-        self.assertEqual(raised.exception.status_code, 400)
-
-    async def test_provider_management_proxies_profile_and_retire_commands(self) -> None:
-        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
-            updated = await api.provider_hub_profile(
+    async def test_legacy_provider_and_supplier_management_endpoints_are_gone(self) -> None:
+        calls = [
+            lambda: api.provider_hub(False),
+            lambda: api.provider_hub_detail("pconn_1"),
+            lambda: api.provider_hub_control("pconn_1", api.ProviderControlRequest(enabled=False)),
+            lambda: api.provider_hub_profile(
                 "pconn_1",
                 api.ProviderProfileRequest(
                     display_name="Relay",
                     base_url="https://relay.example/v1",
                     website_url="https://relay.example",
-                    protocol="openai-responses",
+                    protocol="openai-chat-completions",
                 ),
-            )
-            retired = await api.provider_hub_retire(
-                "pconn_1", api.ProviderRetireRequest(reason="cleanup")
-            )
-        self.assertEqual(updated, {"ok": True})
-        self.assertEqual(retired, {"ok": True})
-        self.assertEqual(post.call_args_list[0].args[0], "/api/v2/commands/provider-connections/pconn_1/profile")
-        self.assertEqual(post.call_args_list[1].args[0], "/api/v2/commands/provider-connections/pconn_1/retire")
-
-    async def test_supplier_management_proxies_profile_and_force_retire(self) -> None:
-        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
-            updated = await api.supplier_profile(
-                "sup_1", api.SupplierProfileRequest(name="Relay", website_url="https://relay.example")
-            )
-            retired = await api.supplier_retire(
-                "sup_1", api.SupplierRetireRequest(reason="cleanup", force=True)
-            )
-        self.assertEqual(updated, {"ok": True})
-        self.assertEqual(retired, {"ok": True})
-        self.assertEqual(post.call_args_list[0].args[0], "/api/v2/commands/suppliers/sup_1/profile")
-        self.assertEqual(post.call_args_list[1].args[0], "/api/v2/commands/suppliers/sup_1/retire")
-        self.assertTrue(post.call_args_list[1].args[1]["force"])
-
-    async def test_supplier_economics_proxy_persists_orthogonal_tags(self) -> None:
-        with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
-            result = await api.supplier_economics(
+            ),
+            lambda: api.provider_hub_retire("pconn_1", api.ProviderRetireRequest(reason="retired")),
+            lambda: api.supplier_profile("sup_1", api.SupplierProfileRequest(name="Relay", website_url="")),
+            lambda: api.supplier_economics(
                 "sup_1",
                 api.SupplierEconomicsRequest(
                     supply_origin="COMMUNITY_RELAY",
                     commercial_type="SPONSORED",
                     routing_policy="AUTO",
                 ),
-            )
-        self.assertEqual(result, {"ok": True})
-        post.assert_called_once_with(
-            "/api/v2/commands/suppliers/sup_1/economics",
-            {
-                "supplyOrigin": "COMMUNITY_RELAY",
-                "commercialType": "SPONSORED",
-                "routingPolicy": "AUTO",
-            },
-        )
+            ),
+            lambda: api.supplier_retire("sup_1", api.SupplierRetireRequest(reason="retired", force=True)),
+            lambda: api.supplier_connections("sup_1"),
+            lambda: api.provider_presets(),
+        ]
+        with mock.patch.object(api, "_post_json") as post, mock.patch.object(api, "_fetch_json") as fetch:
+            for call in calls:
+                with self.assertRaises(api.HTTPException) as raised:
+                    await call()
+                self.assertEqual(raised.exception.status_code, 410)
+                self.assertIn("LiteLLM Admin", str(raised.exception.detail))
+        post.assert_not_called()
+        fetch.assert_not_called()
 
-    async def test_provider_presets_hide_expensive_deepseek_official_api(self) -> None:
-        result = await api.provider_presets()
-        ids = [item["id"] for item in result["items"]]
-        self.assertNotIn("deepseek", ids)
-        self.assertIn("opencode-go", ids)
-        profiles = {item["id"]: item for item in result["quickProfiles"]}
-        self.assertEqual(profiles["community-free"]["commercialType"], "FREE")
-        self.assertEqual(profiles["event-free"]["supplyOrigin"], "EVENT_GRANT")
-        self.assertEqual(profiles["personal-hosted"]["routingPolicy"], "MANUAL_ONLY")
-        opencode = next(item for item in result["items"] if item["id"] == "opencode-go")
-        self.assertEqual(opencode["economics"]["supplyOrigin"], "OFFICIAL")
-        self.assertEqual(opencode["economics"]["commercialType"], "SUBSCRIPTION")
-
-    async def test_custom_onboarding_rejects_deepseek_official_as_brain_only(self) -> None:
-        descriptor = {
-            "id": "custom-deepseek",
-            "name": "DeepSeek official",
-            "supplierSlug": "custom-deepseek",
-            "supplierName": "DeepSeek official",
-            "baseUrl": "https://api.deepseek.com/v1",
-            "keyEnv": "DEEPSEEK_API_KEY",
-            "transport": "openai_chat",
-        }
+    async def test_legacy_provider_registration_is_retired_before_secret_or_domain_write(self) -> None:
         body = api.ProviderRegisterRequest(
             preset_id="custom",
             api_key="do-not-store",
-            selected_models=["deepseek-chat"],
-            default_model="deepseek-chat",
+            base_url="https://relay.example/v1",
+            selected_models=["alpha"],
+            default_model="alpha",
         )
-        with mock.patch.object(
-            api, "_discover_provider_models", return_value=(descriptor, ["deepseek-chat"], False)
-        ), mock.patch.object(api, "_save_provider_secret") as save, mock.patch.object(
-            api, "_hub_upsert_connection"
-        ) as upsert:
+        with mock.patch.object(api, "_discover_provider_models") as discover, mock.patch.object(
+            api, "_save_provider_secret"
+        ) as save, mock.patch.object(api, "_post_json") as post:
             with self.assertRaises(api.HTTPException) as raised:
                 await api.register_provider(body)
-        self.assertEqual(raised.exception.status_code, 422)
-        self.assertIn("Hermes 大脑", str(raised.exception.detail))
+        self.assertEqual(raised.exception.status_code, 410)
+        discover.assert_not_called()
         save.assert_not_called()
-        upsert.assert_not_called()
+        post.assert_not_called()
 
     def test_profile_discovery_ignores_ai_office_managed_codex_and_opencode_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -445,181 +410,13 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["runtimePolicy"]["opencodePosition"], "review-executor")
             self.assertEqual(result["runtimePolicy"]["codexPosition"], "codex-reviewer")
 
-    async def test_provider_registration_only_materializes_selected_models_and_never_sends_key_to_domain(self) -> None:
-        descriptor = {
-            "id": "deepseek",
-            "name": "DeepSeek API",
-            "supplierSlug": "deepseek",
-            "supplierName": "DeepSeek",
-            "baseUrl": "https://relay.example/v1",
-            "keyEnv": "DEEPSEEK_API_KEY",
-            "transport": "openai_chat",
-            "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
-            "opencodePrefix": "deepseek",
-        }
-        calls = []
-
-        def post(path, payload, **kwargs):
-            calls.append((path, payload, kwargs))
-            if path.endswith("provider-connections/upsert"):
-                return {
-                    "id": "pconn_deepseek",
-                    "provider_key": payload["providerKey"],
-                    "display_name": payload["displayName"],
-                    "supplier_id": payload.get("supplierId"),
-                    "base_url": payload.get("baseUrl"),
-                    "protocol": payload.get("protocol"),
-                    "auth_kind": payload.get("authKind"),
-                    "credential_ref": payload.get("credentialRef"),
-                    "credential_scope": payload.get("credentialScope"),
-                    "source_profile_id": payload.get("sourceProfileId"),
-                    "source_kind": payload.get("sourceKind"),
-                    "share_scope": payload.get("shareScope"),
-                    "health": payload.get("health"),
-                    "models": payload.get("models") or [],
-                    "metadata": payload.get("metadata") or {},
-                }
-            if path.endswith("workforce-sources/upsert"):
-                return {"id": "sup_deepseek", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
-            if path.endswith("/economics"):
-                return {"ok": True}
-            if path.endswith("/staffing-preferences"):
-                return {"metadata": {"staffingPreferences": payload}}
-            if path.endswith("/runtime-access"):
-                return {"id": "raccess_" + str(payload["runtimeKind"]).lower(), **payload}
-            model = payload["supplierModel"]["key"]
-            suffix = model.replace("/", "-")
-            return {
-                "supplier": {"id": "sup_deepseek"},
-                "employee": {"id": f"emp_{suffix}", "displayName": model},
-                "employment": {"id": f"empl_{suffix}"},
-            }
-
-        body = api.ProviderRegisterRequest(
-            preset_id="deepseek",
-            api_key="secret-key-value",
-            selected_models=["deepseek-chat", "deepseek-reasoner"],
-            default_model="deepseek-reasoner",
-        )
-        with mock.patch.object(
-            api,
-            "_discover_provider_models",
-            return_value=(descriptor, ["deepseek-chat", "deepseek-reasoner", "unused"], False),
-        ), mock.patch.object(api, "_post_json", side_effect=post), mock.patch.object(
-            api, "_save_provider_secret"
-        ) as save_secret:
-            result = await api.register_provider(body)
-
-        self.assertTrue(result["ok"])
-        self.assertEqual([item["model"] for item in result["employees"]], ["deepseek-chat", "deepseek-reasoner"])
-        self.assertEqual(result["defaultEmployeeId"], "emp_deepseek-reasoner")
-        save_secret.assert_called_once()
-        self.assertEqual(save_secret.call_args.args[0]["keyEnv"], "DEEPSEEK_API_KEY")
-        self.assertEqual(save_secret.call_args.args[1], "secret-key-value")
-        catalog_calls = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
-        self.assertEqual(len(catalog_calls), 2)
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_calls))
-        source_calls = [payload for path, payload, _ in calls if path.endswith("workforce-sources/upsert")]
-        self.assertGreaterEqual(len(source_calls), 1)
-        self.assertTrue(all(payload["sourceKind"] == "EXTERNAL" for payload in source_calls))
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in source_calls))
-        hub_calls = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
-        self.assertGreaterEqual(len(hub_calls), 1)
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_calls))
-        preference = [payload for path, payload, _ in calls if path.endswith("staffing-preferences")][0]
-        self.assertEqual(preference["enabledEmployeeIds"], ["emp_deepseek-chat", "emp_deepseek-reasoner"])
-        self.assertEqual(preference["defaultEmployeeId"], "emp_deepseek-reasoner")
-
-    async def test_custom_provider_creates_native_runtime_access_without_business_secret_leak(self) -> None:
-        descriptor = {
-            "id": "custom",
-            "providerId": "custom:abc123",
-            "name": "Team Router",
-            "supplierSlug": "custom-abc123",
-            "supplierName": "Team Router",
-            "keyEnv": "HERMES_AI_OFFICE_ABC123_API_KEY",
-            "baseUrl": "https://proxy.example.com/v1",
-            "transport": "openai_chat",
-        }
-        calls = []
-
-        def post(path, payload, idempotency_key=None):
-            calls.append((path, payload, idempotency_key))
-            if path.endswith("provider-connections/upsert"):
-                return {
-                    "id": "pconn_custom",
-                    "provider_key": payload["providerKey"],
-                    "display_name": payload["displayName"],
-                    "supplier_id": payload.get("supplierId"),
-                    "base_url": payload.get("baseUrl"),
-                    "protocol": payload.get("protocol"),
-                    "auth_kind": payload.get("authKind"),
-                    "credential_ref": payload.get("credentialRef"),
-                    "credential_scope": payload.get("credentialScope"),
-                    "source_profile_id": payload.get("sourceProfileId"),
-                    "source_kind": payload.get("sourceKind"),
-                    "share_scope": payload.get("shareScope"),
-                    "health": payload.get("health"),
-                    "models": payload.get("models") or [],
-                    "metadata": payload.get("metadata") or {},
-                }
-            if path.endswith("workforce-sources/upsert"):
-                return {"id": "sup_custom", "slug": payload["slug"], "name": payload["name"], "source_kind": payload["sourceKind"]}
-            if path.endswith("/economics"):
-                return {"ok": True}
-            if path.endswith("supply-catalog/register"):
-                model = payload["supplierModel"]["key"]
-                return {
-                    "supplier": {"id": "sup_custom"},
-                    "employee": {"id": f"emp_{model}", "displayName": model},
-                    "employment": {"id": f"empl_{model}"},
-                }
-            if path.endswith("runtime-access"):
-                return {"id": "raccess_" + str(payload["runtimeKind"]).lower(), **payload}
-            if path.endswith("staffing-preferences"):
-                return {"metadata": {"staffingPreferences": payload}}
-            raise AssertionError(path)
-
-        body = api.ProviderRegisterRequest(
-            preset_id="custom",
-            api_key="secret-key-value",
-            base_url="https://proxy.example.com/v1",
-            supplier_name="Team Router",
-            selected_models=["alpha", "beta"],
-            default_model="beta",
-        )
-        with mock.patch.object(
-            api,
-            "_discover_provider_models",
-            return_value=(descriptor, ["alpha", "beta", "unused"], False),
-        ), mock.patch.object(api, "_post_json", side_effect=post), mock.patch.object(
-            api, "_save_provider_secret"
-        ), mock.patch.object(api, "_save_custom_provider"):
-            result = await api.register_provider(body)
-
-        self.assertTrue(result["ok"])
-        catalog_payloads = [payload for path, payload, _ in calls if path.endswith("supply-catalog/register")]
-        self.assertEqual(len(catalog_payloads), 2)
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in catalog_payloads))
-        source_payloads = [payload for path, payload, _ in calls if path.endswith("workforce-sources/upsert")]
-        self.assertGreaterEqual(len(source_payloads), 1)
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in source_payloads))
-        hub_payloads = [payload for path, payload, _ in calls if path.endswith("provider-connections/upsert")]
-        self.assertGreaterEqual(len(hub_payloads), 1)
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for payload in hub_payloads))
-        access_calls = [(path, payload) for path, payload, _ in calls if path.endswith("runtime-access")]
-        self.assertEqual(len(access_calls), 4)
-        self.assertTrue(all(payload["adapterKind"] == "NATIVE_CONFIG" for _, payload in access_calls))
-        self.assertFalse(any("secret-key-value" in json.dumps(payload) for _, payload in access_calls))
-        opencode = next(payload for _, payload in access_calls if payload["runtimeKind"] == "OPENCODE")
-        self.assertEqual(opencode["providerRef"], "hao-custom-abc123")
-        self.assertEqual(opencode["baseUrl"], "https://proxy.example.com/v1")
-        self.assertEqual(opencode["credentialRef"], "HERMES_AI_OFFICE_ABC123_API_KEY")
-        self.assertEqual(opencode["config"]["providerHubConnectionId"], "pconn_custom")
-        codex = next(payload for _, payload in access_calls if payload["runtimeKind"] == "CODEX")
-        self.assertEqual(codex["config"]["providerHubConnectionId"], "pconn_custom")
-        self.assertEqual(result["employees"][0]["runtimeAccess"][0]["adapterKind"], "NATIVE_CONFIG")
-        self.assertEqual(result["defaultEmployeeId"], "emp_beta")
+    async def test_provider_discovery_endpoint_is_retired_in_favor_of_litellm_admin(self) -> None:
+        body = api.ProviderDiscoverRequest(preset_id="custom", api_key="secret", base_url="https://relay.example/v1")
+        with mock.patch.object(api, "_discover_provider_models") as discover:
+            with self.assertRaises(api.HTTPException) as raised:
+                await api.discover_provider(body)
+        self.assertEqual(raised.exception.status_code, 410)
+        discover.assert_not_called()
 
     def test_local_provider_endpoint_is_not_presented_as_an_official_website(self) -> None:
         self.assertEqual(api._website_origin("http://127.0.0.1:8317/v1"), "")
@@ -651,13 +448,17 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["key_env"], "HERMES_AI_OFFICE_ABC123_API_KEY")
         self.assertNotIn("api_key", row)
 
-    def test_provider_hub_remains_backend_registry_but_not_business_navigation(self) -> None:
+    def test_litellm_registry_replaces_provider_hub_runtime_authority(self) -> None:
         source = API_PATH.read_text(encoding="utf-8")
-        self.assertIn('@router.get("/providers/hub/{connection_id}")', source)
-        self.assertIn('_sync_profile_native_provider_hub', source)
+        self.assertIn('@router.get("/model-registry")', source)
+        self.assertIn('/api/v3/development/model-registry', source)
+        self.assertIn('_provider_hub_retired()', source)
         bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertNotIn('tab === "providers"', bundle)
-        self.assertNotIn('"overview", "organization", "workforce", "suppliers", "providers"', bundle)
+        self.assertIn('api("/model-registry")', bundle)
+        self.assertIn('registry.openAdmin', bundle)
+        self.assertNotIn('api("/providers/presets")', bundle)
+        self.assertNotIn('api("/providers/register"', bundle)
+        self.assertNotIn('api("/providers/hub/" + encodeURIComponent', bundle)
 
     def test_control_plane_url_is_forced_to_loopback(self) -> None:
         with mock.patch.dict(os.environ, {"HERMES_AI_OFFICE_CONTROL_PLANE_URL": "https://attacker.example"}):
@@ -688,98 +489,25 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('aria-selected', source)
         self.assertIn('className: "hao-data-table"', source)
 
-    def test_supplier_detail_owns_website_and_provider_connection_metadata(self) -> None:
+    def test_model_registry_ui_delegates_provider_crud_to_native_litellm_admin(self) -> None:
         bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('supplier.websiteUrl', bundle)
-        self.assertIn('suppliers.website', bundle)
-        self.assertIn('api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections")', bundle)
-        self.assertIn('connection.base_url', bundle)
-        self.assertIn('connection.credential_ref', bundle)
-        self.assertIn('hao-external-link', bundle)
-        self.assertNotIn('function ProviderHub(props)', bundle)
-
-    def test_provider_connection_controls_distinguish_admin_and_effective_state(self) -> None:
-        bundle = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn('api("/providers/hub/" + encodeURIComponent(String(connection.id)) + "/control"', bundle)
-        self.assertIn('const adminState = String(connection.adminState || "DISABLED").toUpperCase()', bundle)
-        self.assertIn('const effectiveState = String(connection.effectiveState || connection.health || "UNKNOWN").toUpperCase()', bundle)
-        self.assertIn('const retryStates = ["UNAVAILABLE", "TEMP_UNAVAILABLE"]', bundle)
-        self.assertIn('props.t("suppliers.enable")', bundle)
-        self.assertIn('props.t("suppliers.retry")', bundle)
-        self.assertIn('props.t("suppliers.disable")', bundle)
-        self.assertIn('JSON.stringify({ enabled: Boolean(enabled)', bundle)
-        self.assertIn('asArray(connection.recentAttempts).slice().sort', bundle)
-        self.assertIn('Number.isFinite(leftNumeric) ? leftNumeric : Date.parse', bundle)
-        self.assertIn('Number.isFinite(rightNumeric) ? rightNumeric : Date.parse', bundle)
-        self.assertIn(').slice(0, 5)', bundle)
-        for field in ("outcome", "errorKind", "httpStatus", "observedAt", "errorMessage"):
-            self.assertIn('item.' + field, bundle)
-        self.assertIn('connectionTime(item.observedAt)', bundle)
-        self.assertNotIn('tab === "providers"', bundle)
-
-    def test_supplier_ui_is_compact_and_exposes_onboarding_flow(self) -> None:
-        source = (DASHBOARD / "dist" / "index.js").read_text()
-        css = (DASHBOARD / "dist" / "style.css").read_text()
-        self.assertIn('"suppliers.add": "添加供应商"', source)
-        self.assertIn('"suppliers.details": "查看详情"', source)
-        self.assertIn('"suppliers.manage": "管理"', source)
-        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/profile"', source)
-        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/retire"', source)
-        self.assertIn('api("/providers/hub/" + encodeURIComponent(id) + "/profile"', source)
-        self.assertIn('api("/providers/hub/" + encodeURIComponent(id) + "/retire"', source)
-        self.assertIn('className: "hao-provider-manage"', source)
-        self.assertIn('className: "hao-supplier-row-actions"', source)
-        self.assertIn('className: "hao-section-head hao-supplier-section-head"', source)
-        self.assertIn('className: "hao-section-title-line"', source)
-        self.assertIn('className: "hao-count hao-count-inline"', source)
-        self.assertIn('props.t("suppliers.enabledOfTotal")', source)
-        self.assertIn('className: "hao-supplier-status-copy"', source)
-        self.assertIn('kind: "outline"', source)
-        self.assertIn('api("/providers/presets")', source)
-        self.assertIn('api("/providers/discover"', source)
-        self.assertIn('api("/providers/register"', source)
-        self.assertIn('selected_models: selectedModels', source)
-        self.assertIn('default_model: defaultModel || selectedModels[0]', source)
-        self.assertIn('supply_origin: supplyOrigin', source)
-        self.assertIn('commercial_type: commercialType', source)
-        self.assertIn('routing_policy: routingPolicy', source)
-        self.assertIn('className: "hao-economics-quick-grid"', source)
-        self.assertIn('props.t("suppliers.quick." + profile.id)', source)
-        self.assertIn('className: "hao-economics-tags"', source)
-        self.assertIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id)) + "/economics"', source)
-        self.assertIn('className: "hao-supplier-list"', source)
-        self.assertIn('className: "hao-supplier-row hao-supplier-row-head"', source)
-        self.assertIn('props.t("suppliers.internal")', source)
-        self.assertNotIn("const suppliers = asArray(supply.suppliers).filter", source)
-        self.assertIn('className: "hao-workforce-row"', source)
-        self.assertIn('props.t("workforce.contributionTokens")', source)
-        self.assertIn('contributionTokens(right) - contributionTokens(left)', source)
-        self.assertIn('supplySummary.workforceSources || supplySummary.suppliers', source)
-        self.assertIn('api("/employees/" + encodeURIComponent(String(employee.id)) + "/dossier")', source)
-        self.assertIn('className: "hao-modal ', source)
-        self.assertIn('className: "hao-preset-grid"', source)
-        self.assertNotIn('const personalChannels = asArray(personalChannelProjection.channels)', source)
-        self.assertIn("const suppliers = asArray(supply.suppliers);", source)
-        self.assertIn('"workforce.filterInternal": "内部员工"', source)
-        self.assertNotIn('personalGateways.length', source)
-        self.assertNotIn('props.t("suppliers.cpaDeepseek")', source)
-        self.assertNotIn('props.t("suppliers.unclassified")', source)
-        self.assertIn('.hao-supplier-row {', css)
-        self.assertIn('.hao-button-danger {', css)
-        self.assertIn('.hao-provider-manage-grid {', css)
-        self.assertIn('.hao-economics-quick-grid {', css)
-        self.assertIn('.hao-economics-tags {', css)
-        self.assertIn('.hao-button-outline {', css)
-        self.assertIn('.hao-supplier-section-head {', css)
-        self.assertIn('.hao-section-title-line {', css)
-        self.assertIn('.hao-supplier-status-copy {', css)
-        self.assertRegex(css, r"\.hao-supplier-list\s*\{[^}]*overflow:\s*hidden;[^}]*border:\s*1px solid var\(--hao-border\);[^}]*border-radius:\s*14px")
-        self.assertIn('grid-template-columns: minmax(340px, 2fr) 150px minmax(210px, 1fr) 150px 246px;', css)
-        self.assertRegex(css, r"\.hao-supplier-row-actions\s*\{[^}]*flex-wrap:\s*nowrap")
-        self.assertRegex(css, r"\.hao-supplier-row-actions\s+\.hao-button\s*\{[^}]*white-space:\s*nowrap")
-        self.assertIn('190px max-content;', css)
-        self.assertIn('.hao-modal-backdrop {', css)
-        self.assertIn('.hao-model-picker {', css)
+        self.assertIn('"tabs.suppliers": "模型与供应商"', bundle)
+        self.assertIn('function Suppliers(props)', bundle)
+        self.assertIn('api("/model-registry")', bundle)
+        self.assertIn('window.open(adminUrl, "_blank", "noopener,noreferrer")', bundle)
+        self.assertIn('props.t("registry.credentials")', bundle)
+        self.assertIn('props.t("registry.deployments")', bundle)
+        self.assertIn('props.t("registry.aliases")', bundle)
+        self.assertIn('item.providerKey', bundle)
+        self.assertIn('item.commercialType', bundle)
+        self.assertIn('item.protocol', bundle)
+        self.assertIn('item.credential', bundle)
+        self.assertIn('item.blocked ? "PAUSED" : "AVAILABLE"', bundle)
+        self.assertNotIn('api("/providers/presets")', bundle)
+        self.assertNotIn('api("/providers/discover"', bundle)
+        self.assertNotIn('api("/providers/register"', bundle)
+        self.assertNotIn('api("/providers/hub/" + encodeURIComponent', bundle)
+        self.assertNotIn('api("/suppliers/" + encodeURIComponent(String(manageSupplier.id))', bundle)
 
     def test_development_tab_exposes_v3_execution_policy_health_and_usage(self) -> None:
         source = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")

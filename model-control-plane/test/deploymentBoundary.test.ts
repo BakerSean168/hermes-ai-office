@@ -6,8 +6,9 @@ import { parse } from 'yaml';
 
 const root = path.resolve(import.meta.dirname, '..');
 
-test('LiteLLM deployment contains only V3 logical capability routes, never historical Employment routes', () => {
-  const config = fs.readFileSync(path.join(root, 'deploy/litellm/config.yaml'), 'utf8');
+test('LiteLLM config keeps provider/model CRUD in the DB and exposes only stable V3 aliases', () => {
+  const raw = fs.readFileSync(path.join(root, 'deploy/litellm/config.yaml'), 'utf8');
+  const config = parse(raw) as any;
   const bootstrap = fs.readFileSync(
     path.join(root, 'deploy/litellm/bootstrap-dynamic-gateway.sh'),
     'utf8',
@@ -16,11 +17,16 @@ test('LiteLLM deployment contains only V3 logical capability routes, never histo
     scripts: Record<string, string>;
   };
 
-  assert.match(config, /model_name:\s*planning-premium/);
-  assert.match(config, /model_name:\s*implementation-efficient/);
-  assert.match(config, /model_name:\s*review-premium/);
-  assert.doesNotMatch(config, /model_name:\s*employment:/);
-  assert.doesNotMatch(config, /V2_REFERENCE_ROUTE|V2_REFERENCE_UPSTREAM_MODEL/);
+  assert.deepEqual(config.model_list, []);
+  assert.deepEqual(config.router_settings.model_group_alias, {
+    'planning-premium': 'gpt-5.6-sol',
+    'review-premium': 'gpt-5.6-sol',
+    'implementation-efficient': 'deepseek-v4-flash',
+  });
+  assert.equal(config.general_settings.store_model_in_db, true);
+  assert.doesNotMatch(raw, /api_base:|api_key:|TEAMOROUTER|FORAPI|WORLDCLAW|OPENCODE_GO/);
+  assert.doesNotMatch(raw, /model_name:\s*employment:/);
+  assert.doesNotMatch(raw, /V2_REFERENCE_ROUTE|V2_REFERENCE_UPSTREAM_MODEL/);
   assert.doesNotMatch(bootstrap, /V2_REFERENCE_ROUTE|V2_REFERENCE_UPSTREAM_MODEL/);
   assert.equal(
     fs.existsSync(path.join(root, 'deploy/litellm/configure-reference-route.sh')),
@@ -29,6 +35,30 @@ test('LiteLLM deployment contains only V3 logical capability routes, never histo
   assert.equal('bootstrap:v2-reference' in pkg.scripts, false);
   assert.equal('bootstrap:v2-reference:prod' in pkg.scripts, false);
   assert.equal(fs.existsSync(path.join(root, 'src/v2/bootstrapReference.ts')), false);
+});
+
+test('oracle2 systemd deployment is reproducible from the canonical checkout and publishes LiteLLM Admin metadata', () => {
+  const unit = fs.readFileSync(
+    path.join(root, 'deploy/hermes-model-control-plane.service'),
+    'utf8',
+  );
+  const dropin = fs.readFileSync(
+    path.join(root, 'deploy/hermes-model-control-plane.service.d/v3-production.conf'),
+    'utf8',
+  );
+  const installer = fs.readFileSync(path.join(root, 'deploy/install-oracle2-systemd.sh'), 'utf8');
+
+  assert.match(unit, /WorkingDirectory=\/home\/ubuntu\/projects\/pixel-agents/);
+  assert.doesNotMatch(unit, /\/srv\/hermes-personal\/workspace\/repos\/pixel-agents/);
+  assert.match(dropin, /MODEL_CP_V3_LITELLM_URL=http:\/\/127\.0\.0\.1:4000/);
+  assert.match(
+    dropin,
+    /MODEL_CP_V3_LITELLM_ADMIN_URL=https:\/\/oracle\.taile92a8e\.ts\.net:10446\/ui\//,
+  );
+  assert.match(dropin, /MODEL_CP_V3_LITELLM_OBSERVABILITY=1/);
+  assert.match(installer, /rm -f \"\$dropin_dir\/v3-shadow\.conf\"/);
+  assert.match(installer, /systemctl restart hermes-model-control-plane\.service/);
+  assert.doesNotMatch(installer, /hermes gateway|hermes-personal/);
 });
 
 test('OpenCode V3 logical models correlate LiteLLM spend by execution ID', () => {
@@ -41,43 +71,19 @@ test('OpenCode V3 logical models correlate LiteLLM spend by execution ID', () =>
   }
 });
 
-test('premium logical classes use deterministic ordered provider fallback while implementation stays single-route', () => {
-  const raw = fs.readFileSync(path.join(root, 'deploy/litellm/config.yaml'), 'utf8');
-  const config = parse(raw) as any;
-  const routes = config.model_list as any[];
-  const byName = (name: string) => routes.filter((route) => route.model_name === name);
+test('Provider Hub migration preserves qualified fallback and economics order inside LiteLLM DB metadata', () => {
+  const migration = fs.readFileSync(
+    path.join(root, 'scripts/migrate-provider-hub-to-litellm.py'),
+    'utf8',
+  );
 
-  for (const logical of ['planning-premium', 'review-premium']) {
-    const deployments = byName(logical);
-    assert.equal(deployments.length, 2);
-    assert.deepEqual(
-      deployments.map((route) => ({
-        order: route.litellm_params.order,
-        base: route.litellm_params.api_base,
-        source: route.model_info.metadata.source,
-        role: route.model_info.metadata.route_role,
-      })),
-      [
-        {
-          order: 1,
-          base: 'https://api.teamorouter.com/v1',
-          source: 'teamorouter',
-          role: 'primary',
-        },
-        { order: 2, base: 'https://4sapi.org/v1', source: 'forapi-4sapi-org', role: 'fallback' },
-      ],
-    );
-    assert.equal(deployments[0].litellm_params.model, 'openai/gpt-5.6-sol');
-    assert.equal(deployments[1].litellm_params.model, 'openai/gpt-5.6-sol');
-    assert.equal(
-      deployments[1].litellm_params.api_key,
-      'os.environ/FORAPI_4SAPI_ORG_GPT_5_6_API_KEY',
-    );
-  }
-
-  const implementation = byName('implementation-efficient');
-  assert.equal(implementation.length, 1);
-  assert.equal(implementation[0].litellm_params.order, 1);
-  assert.equal(config.router_settings.max_fallbacks, 2);
-  assert.equal(config.router_settings.enable_weighted_failover, undefined);
+  assert.match(migration, /\("teamorouter-gpt-5-6", "gpt-5\.6-sol"\): 1/);
+  assert.match(migration, /\("forapi-4sapi-org-gpt-5-6", "gpt-5\.6-sol"\): 2/);
+  assert.match(migration, /\("teamorouter-gpt-5-6", "deepseek-v4-flash-free"\): 1/);
+  assert.match(migration, /\("opencode-go", "deepseek-v4-flash"\): 2/);
+  assert.match(migration, /"FREE": 20/);
+  assert.match(migration, /"SPONSORED": 20/);
+  assert.match(migration, /"SUBSCRIPTION": 30/);
+  assert.match(migration, /"METERED": 40/);
+  assert.match(migration, /migrated_from.*ai-office-provider-hub/);
 });

@@ -46,6 +46,44 @@ export interface ModelGatewayPort {
   summary(): Promise<ModelGatewaySummary>;
 }
 
+export interface ModelRegistryCredentialSummary {
+  name: string;
+  provider?: string;
+}
+
+export interface ModelRegistryDeploymentSummary {
+  id: string;
+  group: string;
+  model?: string;
+  credential?: string;
+  order?: number;
+  blocked: boolean;
+  providerKey?: string;
+  commercialType?: string;
+  protocol?: string;
+  supplyOrigin?: string;
+}
+
+export interface ModelRegistrySummary {
+  authority: 'LITELLM';
+  health: SourceHealthState;
+  adminUrl?: string;
+  credentials: { count: number; items: ModelRegistryCredentialSummary[] };
+  deployments: {
+    count: number;
+    active: number;
+    paused: number;
+    groups: Record<string, number>;
+    items: ModelRegistryDeploymentSummary[];
+  };
+  aliases: Record<string, string>;
+  upstream?: Record<string, unknown>;
+}
+
+export interface ModelRegistryPort {
+  summary(): Promise<ModelRegistrySummary>;
+}
+
 export interface ObservabilityExecutionSummary {
   health: SourceHealthState;
   traceId?: string;

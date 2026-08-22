@@ -174,35 +174,28 @@ No API keys appear here.
 
 ## 6. LiteLLM logical model groups
 
-Conceptual example:
+Production no longer stores provider deployments or API keys in `config.yaml`.
+LiteLLM Credential Store + PostgreSQL-backed model deployments are the runtime source
+of truth. The checked-in config keeps only router policy and stable aliases:
 
 ```yaml
-model_list:
-  - model_name: planning-premium
-    litellm_params:
-      model: <provider-a>/<premium-model>
-      api_key: os.environ/PROVIDER_A_KEY
-      api_base: os.environ/PROVIDER_A_BASE
-
-  - model_name: planning-premium
-    litellm_params:
-      model: <provider-b>/<premium-model>
-      api_key: os.environ/PROVIDER_B_KEY
-      api_base: os.environ/PROVIDER_B_BASE
-
-  - model_name: implementation-efficient
-    litellm_params:
-      model: <provider-c>/<efficient-model>
-      api_key: os.environ/PROVIDER_C_KEY
+model_list: []
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 1
+  max_fallbacks: 2
+  allowed_fails: 1
+  cooldown_time: 30
+  model_group_alias:
+    planning-premium: gpt-5.6-sol
+    review-premium: gpt-5.6-sol
+    implementation-efficient: deepseek-v4-flash
 ```
 
-Exact routing/cooldown settings must follow the pinned LiteLLM release documentation.
-
-Current premium classes use LiteLLM's native deployment `order`: TeamOrRouter is
-order 1 and ForAPI is order 2 for `planning-premium` and `review-premium`. The
-Router stays on the lowest healthy order and advances after a retryable failure.
-`implementation-efficient` intentionally remains a single validated free DeepSeek
-route rather than silently falling back to a more expensive class.
+Provider credentials and endpoint URLs are created/edited in LiteLLM Admin/API, not
+in AI Office. Physical deployments carry `order` plus safe economics/protocol metadata.
+The router selects the lowest healthy order and advances after retryable failure or
+cooldown. This keeps provider choice beneath the stable V3 logical model boundary.
 
 ## 7. LiteLLM observability
 
@@ -228,6 +221,7 @@ Control-plane-only environment:
 ```text
 MODEL_CP_V3_LITELLM_OBSERVABILITY=1
 MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE=/srv/hermes-personal/secrets/litellm.env
+MODEL_CP_V3_LITELLM_ADMIN_URL=https://oracle.taile92a8e.ts.net:10446/ui/
 ```
 
 The admin/master credential is root-only and is never injected into OpenHands or

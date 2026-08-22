@@ -15,9 +15,18 @@ import { GatewayRegistry } from './gateway/registry.js';
 import { registerV2Routes } from './v2/api.js';
 import { registerV3Routes } from './v3/api.js';
 import { ExecutionLinkRepository } from './v3/correlation.js';
-import { LiteLlmModelGateway, LiteLlmSpendObservability } from './v3/adapters/liteLlm.js';
+import {
+  LiteLlmModelGateway,
+  LiteLlmModelRegistry,
+  LiteLlmSpendObservability,
+} from './v3/adapters/liteLlm.js';
 import { EnvFileValueProvider, OpenHandsExecutionHost } from './v3/adapters/openHands.js';
-import type { ExecutionHostPort, ModelGatewayPort, ObservabilityPort } from './v3/ports.js';
+import type {
+  ExecutionHostPort,
+  ModelGatewayPort,
+  ModelRegistryPort,
+  ObservabilityPort,
+} from './v3/ports.js';
 import { DevelopmentPolicy } from './v3/policy.js';
 import { DevelopmentExecutionService } from './v3/service.js';
 import { loadV3ReadinessEvidence } from './v3/readiness.js';
@@ -71,6 +80,7 @@ export interface BuildControlPlaneOptions {
   v3Policy?: DevelopmentPolicy;
   v3ExecutionHost?: ExecutionHostPort;
   v3ModelGateway?: ModelGatewayPort;
+  v3ModelRegistry?: ModelRegistryPort;
   v3Observability?: ObservabilityPort;
   v3Workspace?: WorkspaceProvisioningPort;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
@@ -250,16 +260,25 @@ export async function buildControlPlane(
         baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
         secrets: v3Secrets,
       });
+    const adminSecrets = new EnvFileValueProvider(
+      env.MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE ??
+        env.LITELLM_ENV_FILE ??
+        '/srv/hermes-personal/secrets/litellm.env',
+    );
+    const modelRegistry =
+      options.v3ModelRegistry ??
+      new LiteLlmModelRegistry({
+        baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
+        secrets: adminSecrets,
+        keyName: env.MODEL_CP_V3_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+        adminUrl: env.MODEL_CP_V3_LITELLM_ADMIN_URL,
+      });
     const observability =
       options.v3Observability ??
       (env.MODEL_CP_V3_LITELLM_OBSERVABILITY === '1'
         ? new LiteLlmSpendObservability({
             baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
-            secrets: new EnvFileValueProvider(
-              env.MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE ??
-                env.LITELLM_ENV_FILE ??
-                '/srv/hermes-personal/secrets/litellm.env',
-            ),
+            secrets: adminSecrets,
             keyName: env.MODEL_CP_V3_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
             lookbackDays: Number(env.MODEL_CP_V3_LITELLM_OBSERVABILITY_LOOKBACK_DAYS ?? 30),
           })
@@ -306,7 +325,7 @@ export async function buildControlPlane(
       env.MODEL_CP_V3_READINESS_EVIDENCE_FILE ??
         path.resolve(here, '../config/v3-readiness-evidence.yaml'),
     );
-    registerV3Routes(app, v3, policy, readinessEvidence);
+    registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry);
   }
 
   app.get('/api/health', async () => ({

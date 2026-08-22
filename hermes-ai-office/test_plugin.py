@@ -543,31 +543,41 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         ):
             self.assertEqual(plugin._available_execution_provider_ids("coder"), ["charity"])
 
-    def test_list_shared_providers_reads_central_hub_state(self) -> None:
+    def test_list_shared_providers_reads_litellm_registry_state(self) -> None:
         with mock.patch.object(
             plugin,
             "_control_plane_request",
             return_value={
-                "summary": {"connections": 1},
-                "items": [
-                    {
-                        "display_name": "worldclaw",
-                        "provider_key": "worldclaw",
-                        "base_url": "https://worldclawpro.ai/v1",
-                        "website_url": "https://worldclawpro.ai",
-                        "health": "READY",
-                        "credential_scope": "GLOBAL",
-                        "models": ["gpt-test"],
-                        "supplier": None,
-                        "profileLinks": [],
-                    }
-                ],
+                "authority": "LITELLM",
+                "health": "OK",
+                "adminUrl": "https://oracle.example:10446/ui/",
+                "credentials": {"count": 1},
+                "deployments": {
+                    "count": 1,
+                    "active": 1,
+                    "paused": 0,
+                    "groups": {"gpt-test": 1},
+                    "items": [
+                        {
+                            "id": "dep-worldclaw",
+                            "group": "gpt-test",
+                            "model": "openai/gpt-test",
+                            "credential": "ai-office-worldclaw",
+                            "blocked": False,
+                            "providerKey": "worldclaw",
+                            "commercialType": "METERED",
+                            "protocol": "openai-chat-completions",
+                        }
+                    ],
+                },
+                "aliases": {},
             },
         ):
             result = json.loads(plugin._list_shared_providers_tool({}))
         self.assertTrue(result["ok"])
-        self.assertEqual(result["items"][0]["name"], "worldclaw")
-        self.assertEqual(result["items"][0]["websiteUrl"], "https://worldclawpro.ai")
+        self.assertEqual(result["authority"], "LITELLM")
+        self.assertEqual(result["providers"][0]["providerKey"], "worldclaw")
+        self.assertEqual(result["providers"][0]["commercialTypes"], ["METERED"])
 
     def test_register_exposes_native_hooks(self) -> None:
         ctx = FakeContext()
@@ -588,7 +598,6 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertEqual(
             set(ctx.tools),
             {
-                "ai_office_add_provider",
                 "ai_office_list_providers",
                 "ai_office_run_phase",
                 "ai_office_get_execution",
@@ -596,7 +605,6 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 "ai_office_cancel_execution",
                 "ai_office_list_active",
                 "ai_office_resolve_execution",
-                "ai_office_set_provider_state",
             },
         )
 
@@ -617,50 +625,77 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             plugin._on_pre_tool_call(tool_name="terminal", args={"command": "opencode run test"}, tool_call_id="carry-1")
         self.assertEqual(plugin._PENDING["carry-1"]["providerHubConnectionId"], "conn-9")
 
-    def test_list_provider_exposes_supply_economics_for_routing_explanations(self) -> None:
-        hub = {
-            "items": [
-                {
-                    "id": "conn-free",
-                    "display_name": "Free Relay",
-                    "provider_key": "free-relay",
-                    "supplier": {
-                        "id": "sup-free",
-                        "name": "Free Relay",
-                        "supplyOrigin": "COMMUNITY_RELAY",
-                        "routingPolicy": "AUTO",
+    def test_list_provider_reads_litellm_registry_and_preserves_economics_metadata(self) -> None:
+        registry = {
+            "authority": "LITELLM",
+            "health": "OK",
+            "adminUrl": "https://oracle.example:10446/ui/",
+            "credentials": {"count": 2, "items": []},
+            "deployments": {
+                "count": 3,
+                "active": 2,
+                "paused": 1,
+                "groups": {"gpt-5.6-sol": 2, "deepseek-v4-flash": 1},
+                "items": [
+                    {
+                        "id": "dep-free",
+                        "group": "deepseek-v4-flash",
+                        "model": "openai/deepseek-v4-flash-free",
+                        "credential": "ai-office-teamorouter",
+                        "order": 1,
+                        "blocked": False,
+                        "providerKey": "teamorouter-gpt-5-6",
+                        "commercialType": "OTHER",
+                        "protocol": "openai-chat-completions",
                     },
-                    "profileLinks": [],
-                }
-            ]
+                    {
+                        "id": "dep-sub",
+                        "group": "deepseek-v4-flash",
+                        "model": "openai/deepseek-v4-flash",
+                        "credential": "ai-office-opencode-go",
+                        "order": 2,
+                        "blocked": False,
+                        "providerKey": "opencode-go",
+                        "commercialType": "SUBSCRIPTION",
+                        "protocol": "openai-chat-completions",
+                    },
+                    {
+                        "id": "dep-paused",
+                        "group": "gpt-5.6-sol",
+                        "model": "openai/gpt-5.6-sol",
+                        "credential": "ai-office-anyrouter",
+                        "order": 20,
+                        "blocked": True,
+                        "providerKey": "anyrouter",
+                        "commercialType": "METERED",
+                        "protocol": "openai-responses",
+                    },
+                ],
+            },
+            "aliases": {"implementation-efficient": "deepseek-v4-flash"},
         }
-        supply = {
-            "suppliers": [
-                {
-                    "id": "sup-free",
-                    "supplyOrigin": "COMMUNITY_RELAY",
-                    "routingPolicy": "AUTO",
-                    "plans": [{"commercialType": "SPONSORED", "lifecycle": "ACTIVE"}],
-                }
-            ]
-        }
-        with mock.patch.object(plugin, "_control_plane_request", side_effect=[hub, supply]):
-            item = json.loads(plugin._list_shared_providers_tool({}))["items"][0]
-        self.assertEqual(item["supplyOrigin"], "COMMUNITY_RELAY")
-        self.assertEqual(item["commercialType"], "SPONSORED")
-        self.assertEqual(item["spendTier"], "ZERO_COST")
-        self.assertEqual(item["routingPolicy"], "AUTO")
+        with mock.patch.object(plugin, "_control_plane_request", return_value=registry) as request:
+            result = json.loads(plugin._list_shared_providers_tool({}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["authority"], "LITELLM")
+        self.assertEqual(result["adminUrl"], "https://oracle.example:10446/ui/")
+        self.assertEqual(result["summary"]["deployments"], 3)
+        self.assertEqual(result["summary"]["active"], 2)
+        self.assertEqual(result["summary"]["paused"], 1)
+        providers = {item["providerKey"]: item for item in result["providers"]}
+        self.assertEqual(providers["opencode-go"]["commercialTypes"], ["SUBSCRIPTION"])
+        self.assertEqual(providers["anyrouter"]["paused"], 1)
+        self.assertIn("deepseek-v4-flash", result["modelGroups"])
+        request.assert_called_once_with("/api/v3/development/model-registry", timeout=5.0)
+        self.assertIn("LiteLLM", plugin._LIST_PROVIDERS_SCHEMA["description"])
 
-    def test_list_provider_includes_availability_projection_fields(self) -> None:
-        fields = {"adminState", "availabilityState", "effectiveState", "routable", "retryable", "consecutiveFailures", "totalSuccesses", "totalFailures", "lastSuccessAt", "lastFailureAt", "lastErrorKind", "lastErrorStatus", "lastErrorMessage", "retryAfterAt"}
-        with mock.patch.object(plugin, "_control_plane_request", return_value={"items": [{}]}):
-            item = json.loads(plugin._list_shared_providers_tool({}))["items"][0]
-        self.assertTrue(fields.issubset(item))
-        self.assertIn("authoritative", plugin._LIST_PROVIDERS_SCHEMA["description"])
-
-    def test_set_provider_state_rejects_string_boolean(self) -> None:
-        result = json.loads(plugin._set_provider_state_tool({"connection_id": "conn-1", "enabled": "false"}))
-        self.assertFalse(result["ok"])
+    def test_provider_mutation_tools_are_not_registered_in_v3_plugin_surface(self) -> None:
+        ctx = FakeContext()
+        with mock.patch.object(plugin, "_ensure_worker"):
+            plugin.register(ctx)
+        self.assertNotIn("ai_office_add_provider", ctx.tools)
+        self.assertNotIn("ai_office_set_provider_state", ctx.tools)
+        self.assertIn("ai_office_list_providers", ctx.tools)
 
     def test_provider_attempt_sync_success_exact_payload(self) -> None:
         plugin._PENDING["success"] = {"providerHubConnectionId": "conn-1", "runtime": "opencode", "background": False, "pty": False}
@@ -761,6 +796,23 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 "deepseek", "http://127.0.0.1:8317/v1"
             )
         self.assertEqual(connection_id, "conn-proxy")
+
+    def test_v3_provider_telemetry_does_not_shadow_write_retired_provider_hub(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        with mock.patch.object(plugin, "_record_api_provider_attempt") as record:
+            plugin._on_post_api_request(
+                api_request_id="api-v3",
+                provider="opencode-go",
+                model="deepseek-v4-flash",
+            )
+            plugin._on_api_request_error(
+                api_request_id="api-v3-error",
+                provider="opencode-go",
+                model="deepseek-v4-flash",
+                status_code=429,
+                reason="rate_limit",
+            )
+        record.assert_not_called()
 
     def test_post_api_request_records_success_for_main_agent_provider(self) -> None:
         with mock.patch.object(
@@ -1209,23 +1261,32 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         self.assertFalse(missing["ok"])
         self.assertIn("repository_path is required", missing["message"])
 
-    def test_pre_llm_authority_context_recognizes_ai_office_and_current_provider_state(self) -> None:
-        hub = {
-            "summary": {"connections": 2, "available": 1, "congested": 1, "unavailable": 0, "disabled": 0},
-            "items": [
-                {"providerKey": "worldclaw", "displayName": "worldclaw", "effectiveState": "AVAILABLE", "routable": True},
-                {"providerKey": "anyrouter", "displayName": "AnyRouter", "effectiveState": "CONGESTED", "routable": False},
-            ],
+    def test_pre_llm_authority_context_recognizes_ai_office_and_current_litellm_registry(self) -> None:
+        registry = {
+            "authority": "LITELLM",
+            "health": "OK",
+            "credentials": {"count": 2},
+            "deployments": {
+                "count": 3,
+                "active": 2,
+                "paused": 1,
+                "items": [
+                    {"providerKey": "worldclaw", "blocked": False},
+                    {"providerKey": "worldclaw", "blocked": False},
+                    {"providerKey": "anyrouter", "blocked": True},
+                ],
+            },
         }
-        with mock.patch.object(plugin, "_control_plane_request", return_value=hub) as request:
+        with mock.patch.object(plugin, "_control_plane_request", return_value=registry) as request:
             result = plugin._on_pre_llm_call(user_message="继续看当前可用供应商，能识别到 AI Office 吗")
         self.assertIsNotNone(result)
         context = result["context"]
         self.assertIn("internal control-plane", context)
         self.assertIn("ai_office_list_providers", context)
-        self.assertIn("worldclaw: AVAILABLE", context)
-        self.assertIn("AnyRouter: CONGESTED", context)
-        request.assert_called_once_with("/api/v2/projections/provider-hub-summary", timeout=2.0)
+        self.assertIn("LiteLLM model/provider registry", context)
+        self.assertIn("worldclaw: active=2; paused=0", context)
+        self.assertIn("anyrouter: active=0; paused=1", context)
+        request.assert_called_once_with("/api/v3/development/model-registry", timeout=3.0)
 
     def test_pre_llm_execution_context_requires_ai_office_placement_before_coding_harness(self) -> None:
         plugin._CTX = FakeContext({"execution_mode": "v3"})
@@ -1459,6 +1520,17 @@ class HermesAiOfficePluginTest(unittest.TestCase):
                 {"kind": "DSH", "path": "/opt/data/runtime/npm/bin/dsh", "mode": "HEADLESS"},
             ],
         )
+
+    def test_v3_rejects_legacy_resolve_execution_before_provider_hub_reconciliation(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        with mock.patch.object(plugin, "_reconcile_policy_workforce_from_hub") as reconcile, mock.patch.object(
+            plugin, "_control_plane_request"
+        ) as request:
+            result = json.loads(plugin._resolve_execution_tool({"intent": "REVIEW"}))
+        self.assertFalse(result["ok"])
+        self.assertIn("V2 rollback-only", result["message"])
+        reconcile.assert_not_called()
+        request.assert_not_called()
 
     def test_resolve_execution_tool_sends_safe_runtime_inventory_and_returns_guidance(self) -> None:
         captured: dict[str, object] = {}

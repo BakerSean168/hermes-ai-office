@@ -120,7 +120,7 @@ _ADD_PROVIDER_SCHEMA = {
 
 _LIST_PROVIDERS_SCHEMA = {
     "name": "ai_office_list_providers",
-    "description": "This is the authoritative source for provider, supplier, model, and availability questions. You must use it before inferring anything from memory or the filesystem.",
+    "description": "Read the authoritative LiteLLM model/provider registry used by AI Office V3. Returns safe deployment, model-group, economics, availability, and Admin UI metadata; provider CRUD is performed in LiteLLM Admin.",
     "parameters": {"type": "object", "properties": {}},
 }
 
@@ -829,98 +829,84 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
 
 def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
     try:
-        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
-        try:
-            supply = _control_plane_request("/api/v2/projections/supply", timeout=3.0)
-        except Exception:
-            supply = {"suppliers": []}
-        supplier_economics: dict[str, dict[str, Any]] = {}
-        for supplier_row in supply.get("suppliers") or []:
-            if not isinstance(supplier_row, dict):
+        registry = _control_plane_request("/api/v3/development/model-registry", timeout=5.0)
+        deployments = (
+            registry.get("deployments", {}).get("items", [])
+            if isinstance(registry.get("deployments"), dict)
+            else []
+        )
+        by_provider: dict[str, dict[str, Any]] = {}
+        for raw in deployments:
+            if not isinstance(raw, dict):
                 continue
-            supplier_id = str(supplier_row.get("id") or "").strip()
-            commercial_type = "OTHER"
-            for plan in supplier_row.get("plans") or []:
-                if isinstance(plan, dict) and str(plan.get("lifecycle") or "ACTIVE").upper() == "ACTIVE":
-                    candidate = str(plan.get("commercialType") or "OTHER").upper()
-                    if candidate != "OTHER":
-                        commercial_type = candidate
-                        break
-            spend_tier = (
-                "ZERO_COST"
-                if commercial_type in {"FREE", "SPONSORED"}
-                else "COMMITTED_EXPIRING"
-                if commercial_type in {"SUBSCRIPTION", "PREPAID"}
-                else "PAY_AS_YOU_GO"
-                if commercial_type == "METERED"
-                else "UNKNOWN"
-            )
-            if supplier_id:
-                supplier_economics[supplier_id] = {
-                    "supplyOrigin": str(supplier_row.get("supplyOrigin") or "UNKNOWN"),
-                    "routingPolicy": str(supplier_row.get("routingPolicy") or "AUTO"),
-                    "commercialType": commercial_type,
-                    "spendTier": spend_tier,
-                }
-        items = []
-        for item in hub.get("items") or []:
-            if not isinstance(item, dict):
-                continue
-            supplier = item.get("supplier") if isinstance(item.get("supplier"), dict) else {}
-            economics = supplier_economics.get(
-                str(supplier.get("id") or ""),
+            provider_key = str(raw.get("providerKey") or "unclassified").strip() or "unclassified"
+            row = by_provider.setdefault(
+                provider_key,
                 {
-                    "supplyOrigin": str(supplier.get("supplyOrigin") or "UNKNOWN"),
-                    "routingPolicy": str(supplier.get("routingPolicy") or "AUTO"),
-                    "commercialType": "OTHER",
-                    "spendTier": "UNKNOWN",
+                    "providerKey": provider_key,
+                    "deployments": 0,
+                    "active": 0,
+                    "paused": 0,
+                    "modelGroups": set(),
+                    "physicalModels": set(),
+                    "commercialTypes": set(),
+                    "protocols": set(),
+                    "credentials": set(),
                 },
             )
-            profiles = sorted(
+            row["deployments"] += 1
+            if raw.get("blocked") is True:
+                row["paused"] += 1
+            else:
+                row["active"] += 1
+            for field, target in (
+                ("group", "modelGroups"),
+                ("model", "physicalModels"),
+                ("commercialType", "commercialTypes"),
+                ("protocol", "protocols"),
+                ("credential", "credentials"),
+            ):
+                value = str(raw.get(field) or "").strip()
+                if value:
+                    row[target].add(value)
+        providers = []
+        for provider_key in sorted(by_provider):
+            raw = by_provider[provider_key]
+            providers.append(
                 {
-                    str(link.get("profile_id"))
-                    for link in (item.get("profileLinks") or [])
-                    if isinstance(link, dict) and link.get("profile_id")
+                    **{k: v for k, v in raw.items() if not isinstance(v, set)},
+                    "modelGroups": sorted(raw["modelGroups"]),
+                    "physicalModels": sorted(raw["physicalModels"]),
+                    "commercialTypes": sorted(raw["commercialTypes"]),
+                    "protocols": sorted(raw["protocols"]),
+                    "credentials": sorted(raw["credentials"]),
                 }
             )
-            items.append(
-                {
-                    "name": item.get("display_name"),
-                    "providerKey": item.get("provider_key"),
-                    "baseUrl": item.get("base_url"),
-                    "websiteUrl": item.get("website_url"),
-                    "health": item.get("health"),
-                    "adminState": item.get("admin_state", item.get("adminState")),
-                    "availabilityState": item.get("availability_state", item.get("availabilityState")),
-                    "effectiveState": item.get("effective_state", item.get("effectiveState")),
-                    "routable": item.get("routable"),
-                    "retryable": item.get("retryable"),
-                    "consecutiveFailures": item.get("consecutive_failures", item.get("consecutiveFailures")),
-                    "totalSuccesses": item.get("total_successes", item.get("totalSuccesses")),
-                    "totalFailures": item.get("total_failures", item.get("totalFailures")),
-                    "lastSuccessAt": item.get("last_success_at", item.get("lastSuccessAt")),
-                    "lastFailureAt": item.get("last_failure_at", item.get("lastFailureAt")),
-                    "lastErrorKind": item.get("last_error_kind", item.get("lastErrorKind")),
-                    "lastErrorStatus": item.get("last_error_status", item.get("lastErrorStatus")),
-                    "lastErrorMessage": item.get("last_error_message", item.get("lastErrorMessage")),
-                    "retryAfterAt": item.get("retry_after_at", item.get("retryAfterAt")),
-                    "credentialScope": item.get("credential_scope"),
-                    "models": item.get("models") or [],
-                    "supplier": supplier.get("name"),
-                    "supplyOrigin": economics["supplyOrigin"],
-                    "commercialType": economics["commercialType"],
-                    "routingPolicy": economics["routingPolicy"],
-                    "spendTier": economics["spendTier"],
-                    "profiles": profiles,
-                }
-            )
+        deployment_summary = registry.get("deployments") if isinstance(registry.get("deployments"), dict) else {}
+        credential_summary = registry.get("credentials") if isinstance(registry.get("credentials"), dict) else {}
         return json.dumps(
-            {"ok": True, "summary": hub.get("summary") or {}, "items": items},
+            {
+                "ok": registry.get("health") == "OK",
+                "authority": "LITELLM",
+                "health": registry.get("health"),
+                "adminUrl": registry.get("adminUrl"),
+                "aliases": registry.get("aliases") or {},
+                "summary": {
+                    "credentials": credential_summary.get("count", 0),
+                    "deployments": deployment_summary.get("count", 0),
+                    "active": deployment_summary.get("active", 0),
+                    "paused": deployment_summary.get("paused", 0),
+                    "modelGroups": len(deployment_summary.get("groups") or {}),
+                    "providers": len(providers),
+                },
+                "providers": providers,
+                "modelGroups": sorted((deployment_summary.get("groups") or {}).keys()),
+            },
             ensure_ascii=False,
         )
     except Exception as exc:
         return json.dumps(
-            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
+            {"ok": False, "authority": "LITELLM", "error": type(exc).__name__, "message": str(exc)[:300]},
             ensure_ascii=False,
         )
 
@@ -1715,9 +1701,14 @@ def _prepare_execution_result(result: dict[str, Any], project_path: str = "") ->
 
 def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
-        if _execution_mode() == "DISABLED":
+        execution_mode = _execution_mode()
+        if execution_mode == "DISABLED":
             raise RuntimeError(
                 f"AI Office execution delegation is disabled for profile {_active_profile_name()}"
+            )
+        if execution_mode != "V2":
+            raise RuntimeError(
+                "ai_office_resolve_execution is a V2 rollback-only path; use ai_office_run_phase in V3"
             )
         intent = str(args.get("intent") or "").strip().upper()
         allowed = {"PLAN", "REVIEW", "IMPLEMENT", "DEBUG", "TEST", "RESEARCH", "QUICK_FIX"}
@@ -3411,12 +3402,19 @@ def _record_api_provider_attempt(
 
 
 def _on_post_api_request(**kwargs: Any) -> None:
+    # Provider Hub telemetry is retained strictly for the explicit V2 rollback lane.
+    # V3 provider health/routing/spend authority belongs to LiteLLM and must not be
+    # shadow-written into a second registry.
+    if _execution_mode() != "V2":
+        return
     _record_api_provider_attempt(
         {"outcome": "SUCCESS"}, event_kind="success", kwargs=kwargs
     )
 
 
 def _on_api_request_error(**kwargs: Any) -> None:
+    if _execution_mode() != "V2":
+        return
     classification = _api_error_outcome(**kwargs)
     if classification is None:
         return
@@ -3465,7 +3463,7 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
             sections.append(
                 "AI Office execution delegation is disabled for this profile. "
                 "Do not call ai_office_run_phase or ai_office_resolve_execution for software-development execution. "
-                "Provider Hub/dashboard capabilities may still be queried, but AI Office must not choose or launch a coding worker."
+                "LiteLLM registry/dashboard capabilities may still be queried, but AI Office must not choose or launch a coding worker."
             )
 
     if not provider_authority:
@@ -3475,44 +3473,41 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
         "Hermes AI Office is an internal control-plane/dashboard capability, "
         "not an upstream model provider. Do not search the filesystem or the "
         "Hermes built-in provider catalog to decide whether AI Office exists. "
-        "For current provider/model/supplier availability, use the native "
+        "For current provider/model availability, use the native "
         "ai_office_list_providers tool first (use tool_search for 'ai_office' "
         "if the tool is deferred). Memory and local config are fallback "
         "troubleshooting evidence only."
     )
     sections.append(header)
     try:
-        hub = _control_plane_request("/api/v2/projections/provider-hub-summary", timeout=2.0)
-        summary = hub.get("summary") if isinstance(hub.get("summary"), dict) else {}
-        items = hub.get("items") if isinstance(hub.get("items"), list) else []
-        facts: list[str] = []
-        for raw in items[:20]:
+        hub = _control_plane_request("/api/v3/development/model-registry", timeout=3.0)
+        deployments = hub.get("deployments") if isinstance(hub.get("deployments"), dict) else {}
+        items = deployments.get("items") if isinstance(deployments.get("items"), list) else []
+        provider_counts: dict[str, dict[str, int]] = {}
+        for raw in items:
             if not isinstance(raw, dict):
                 continue
-            name = str(raw.get("displayName") or raw.get("providerKey") or "provider").strip()
-            state = str(raw.get("effectiveState") or raw.get("health") or "UNKNOWN").strip()
-            if raw.get("routable") is True:
-                routable = "yes"
-            elif raw.get("routable") is False:
-                routable = "no"
-            else:
-                routable = "unknown"
-            facts.append(f"- {name}: {state}; routable={routable}")
+            key = str(raw.get("providerKey") or "unclassified")
+            row = provider_counts.setdefault(key, {"active": 0, "paused": 0})
+            row["paused" if raw.get("blocked") is True else "active"] += 1
+        facts = [
+            f"- {name}: active={counts['active']}; paused={counts['paused']}"
+            for name, counts in sorted(provider_counts.items())[:20]
+        ]
         counts = (
-            f"connections={summary.get('connections', '?')}, "
-            f"available={summary.get('available', '?')}, "
-            f"congested={summary.get('congested', '?')}, "
-            f"unavailable={summary.get('unavailable', '?')}, "
-            f"disabled={summary.get('disabled', '?')}"
+            f"credentials={hub.get('credentials', {}).get('count', '?') if isinstance(hub.get('credentials'), dict) else '?'}, "
+            f"deployments={deployments.get('count', '?')}, "
+            f"active={deployments.get('active', '?')}, "
+            f"paused={deployments.get('paused', '?')}"
         )
-        snapshot = "AI Office Provider Hub turn snapshot: " + counts
+        snapshot = "LiteLLM model/provider registry turn snapshot: " + counts
         if facts:
             snapshot += "\n" + "\n".join(facts)
         sections.append(snapshot)
         return {"context": "\n\n".join(sections)}
     except Exception:
         sections.append(
-            "AI Office Provider Hub is currently unreachable. State that explicitly before any stale/local fallback."
+            "LiteLLM model/provider registry is currently unreachable. State that explicitly before any stale/local fallback."
         )
         return {"context": "\n\n".join(sections)}
 
@@ -3595,22 +3590,6 @@ def register(ctx: Any) -> None:
     global _CTX
     _CTX = ctx
     _ensure_worker()
-    ctx.register_tool(
-        name="ai_office_add_provider",
-        toolset="ai_office",
-        schema=_ADD_PROVIDER_SCHEMA,
-        handler=_add_shared_provider_tool,
-        description=_ADD_PROVIDER_SCHEMA["description"],
-        emoji="🔌",
-    )
-    ctx.register_tool(
-        name="ai_office_set_provider_state",
-        toolset="ai_office",
-        schema=_SET_PROVIDER_STATE_SCHEMA,
-        handler=_set_provider_state_tool,
-        description=_SET_PROVIDER_STATE_SCHEMA["description"],
-        emoji="🔧",
-    )
     ctx.register_tool(
         name="ai_office_list_providers",
         toolset="ai_office",

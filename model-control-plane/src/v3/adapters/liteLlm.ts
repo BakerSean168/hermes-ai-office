@@ -1,6 +1,8 @@
 import type {
   ModelGatewayPort,
   ModelGatewaySummary,
+  ModelRegistryPort,
+  ModelRegistrySummary,
   ObservabilityExecutionSummary,
   ObservabilityPort,
 } from '../ports.js';
@@ -53,6 +55,145 @@ export class LiteLlmModelGateway implements ModelGatewayPort {
       return {
         health: 'UNAVAILABLE',
         logicalModels: [],
+        upstream: { error: error instanceof Error ? error.message : String(error) },
+      };
+    }
+  }
+}
+
+export class LiteLlmModelRegistry implements ModelRegistryPort {
+  readonly #baseUrl: string;
+  readonly #secrets: EnvFileValueProvider;
+  readonly #keyName: string;
+  readonly #adminUrl?: string;
+
+  constructor(options: {
+    baseUrl: string;
+    secrets: EnvFileValueProvider;
+    keyName?: string;
+    adminUrl?: string;
+  }) {
+    this.#baseUrl = options.baseUrl.replace(/\/$/, '');
+    this.#secrets = options.secrets;
+    this.#keyName = options.keyName ?? 'LITELLM_MASTER_KEY';
+    this.#adminUrl = options.adminUrl?.trim() || undefined;
+  }
+
+  async #json(path: string): Promise<JsonRecord> {
+    const response = await fetch(`${this.#baseUrl}${path}`, {
+      headers: { Authorization: `Bearer ${this.#secrets.read(this.#keyName)}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!response.ok) throw new Error(`LITELLM_REGISTRY_HTTP_${response.status}`);
+    return asRecord(await response.json());
+  }
+
+  async summary(): Promise<ModelRegistrySummary> {
+    try {
+      const [credentialsPayload, modelsPayload, routerPayload] = await Promise.all([
+        this.#json('/credentials'),
+        this.#json('/model/info'),
+        this.#json('/router/settings'),
+      ]);
+      const credentialRows = Array.isArray(credentialsPayload.credentials)
+        ? credentialsPayload.credentials.map(asRecord)
+        : [];
+      const routerValues = asRecord(routerPayload.current_values);
+      const aliasPayload = asRecord(routerValues.model_group_alias);
+      const aliases = Object.fromEntries(
+        Object.entries(aliasPayload)
+          .map(([alias, target]) => [alias, String(target ?? '')] as const)
+          .filter(([, target]) => Boolean(target))
+          .sort(([left], [right]) => left.localeCompare(right)),
+      );
+      const aliasNames = new Set(Object.keys(aliases));
+      const modelRows = Array.isArray(modelsPayload.data) ? modelsPayload.data.map(asRecord) : [];
+
+      // /model/info projects one DB deployment through every matching model-group alias.
+      // Dedupe by immutable model id and prefer the canonical non-alias group.
+      const unique = new Map<string, JsonRecord>();
+      for (const row of modelRows) {
+        const info = asRecord(row.model_info);
+        const id = String(info.id ?? '').trim();
+        if (!id || info.db_model !== true) continue;
+        const existing = unique.get(id);
+        if (!existing) {
+          unique.set(id, row);
+          continue;
+        }
+        const existingName = String(existing.model_name ?? '');
+        const candidateName = String(row.model_name ?? '');
+        if (aliasNames.has(existingName) && !aliasNames.has(candidateName)) unique.set(id, row);
+      }
+
+      const deployments = [...unique.values()]
+        .map((row) => {
+          const info = asRecord(row.model_info);
+          const params = asRecord(row.litellm_params);
+          const metadata = asRecord(info.metadata);
+          const order = Number(params.order);
+          return {
+            id: String(info.id ?? ''),
+            group: String(row.model_name ?? ''),
+            ...(params.model ? { model: String(params.model) } : {}),
+            ...(params.litellm_credential_name
+              ? { credential: String(params.litellm_credential_name) }
+              : {}),
+            ...(Number.isFinite(order) ? { order } : {}),
+            blocked: info.blocked === true,
+            ...(metadata.legacy_provider_key
+              ? { providerKey: String(metadata.legacy_provider_key) }
+              : {}),
+            ...(metadata.commercial_type
+              ? { commercialType: String(metadata.commercial_type) }
+              : {}),
+            ...(metadata.protocol ? { protocol: String(metadata.protocol) } : {}),
+            ...(metadata.supply_origin ? { supplyOrigin: String(metadata.supply_origin) } : {}),
+          };
+        })
+        .sort(
+          (left, right) =>
+            left.group.localeCompare(right.group) ||
+            (left.order ?? 999) - (right.order ?? 999) ||
+            left.id.localeCompare(right.id),
+        );
+      const groups: Record<string, number> = {};
+      for (const deployment of deployments)
+        groups[deployment.group] = (groups[deployment.group] ?? 0) + 1;
+      const active = deployments.filter((item) => !item.blocked).length;
+      const credentials = credentialRows
+        .map((row) => {
+          const info = asRecord(row.credential_info);
+          return {
+            name: String(row.credential_name ?? ''),
+            ...(info.custom_llm_provider ? { provider: String(info.custom_llm_provider) } : {}),
+          };
+        })
+        .filter((item) => Boolean(item.name))
+        .sort((left, right) => left.name.localeCompare(right.name));
+
+      return {
+        authority: 'LITELLM',
+        health: 'OK',
+        ...(this.#adminUrl ? { adminUrl: this.#adminUrl } : {}),
+        credentials: { count: credentials.length, items: credentials },
+        deployments: {
+          count: deployments.length,
+          active,
+          paused: deployments.length - active,
+          groups,
+          items: deployments,
+        },
+        aliases,
+      };
+    } catch (error) {
+      return {
+        authority: 'LITELLM',
+        health: 'UNAVAILABLE',
+        ...(this.#adminUrl ? { adminUrl: this.#adminUrl } : {}),
+        credentials: { count: 0, items: [] },
+        deployments: { count: 0, active: 0, paused: 0, groups: {}, items: [] },
+        aliases: {},
         upstream: { error: error instanceof Error ? error.message : String(error) },
       };
     }

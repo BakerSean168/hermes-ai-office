@@ -27,8 +27,8 @@ Hermes Brain
 Hermes chooses the semantic phase and objective only. AI Office owns backend/model
 selection, workspace isolation, fresh review snapshots, lifecycle correlation,
 usage evidence, and deterministic finalization. The older terminal staffing hook
-and `ai_office_resolve_execution` remain available for explicitly requested legacy
-direct-harness flows during migration.
+and `ai_office_resolve_execution` are active only when a profile is explicitly put in
+`execution_mode=v2` for rollback; V3 rejects that second routing path.
 
 Raw prompts, raw tool results, and provider credentials are never sent to the
 dashboard. V3 forwards only the bounded phase objective/context required for the
@@ -36,8 +36,7 @@ selected development execution.
 
 ## Included surfaces
 
-- Hermes dashboard tab: Overview, Organization, Workforce, Suppliers, Operations,
-  Runtime Policy, and Incidents.
+- Hermes dashboard tab: Overview, Organization, Workforce, **Models & Providers** (read-only LiteLLM registry), Operations, Runtime Policy, and Incidents.
 - `ai_office_run_phase` V3 development delegation plus execution get/cancel/list tools.
 - `pre_tool_call` legacy runtime staffing policy for direct OpenCode/Codex launches.
 - `post_tool_call` runtime launch telemetry.
@@ -149,11 +148,11 @@ and intentional failure injections do not count toward that gate.
 
 ### Legacy direct-harness placement
 
-`ai_office_resolve_execution(intent=...)` and the terminal staffing hook remain for
-legacy or explicitly requested direct-harness flows. They are not the normal V3
-development path. Provider Hub economics, credential-scope gates, model-family
-harness compatibility, and runtime telemetry continue to support those flows while
-V3 migration proceeds.
+`ai_office_resolve_execution(intent=...)` and the terminal staffing hook remain only
+as the explicit V2 rollback/direct-harness path. They are not the normal production
+V3 development path and do not define current provider authority. LiteLLM owns V3
+provider credentials, deployments, routing, health and spend; the V2 Provider Hub is
+retained as compatibility/history for that legacy path.
 
 ## Runtime policy modes
 
@@ -201,14 +200,12 @@ The script links the default AI Office plugin into each profile and enables it
 there without copying credentials. This is required for profile-routed Telegram
 threads such as `memoflow` to expose the `ai_office` toolset.
 
-AI Office also consumes Hermes' request-scoped `post_api_request` and
-`api_request_error` hooks. Successful main-Agent LLM calls provide sampled
-operational evidence to the Provider Hub, while rate-limit/auth/quota/network/
-timeout/server failures are recorded immediately. Request-specific failures
-such as content-policy blocks, context overflow, bad payloads, and missing
-models are excluded so they cannot degrade supplier availability. Prompt,
-response, request-body, and provider secret content are never forwarded by
-this telemetry path.
+AI Office also retains Hermes' request-scoped `post_api_request` and
+`api_request_error` hooks for the explicit **V2 rollback mode only**. In V3 they are
+no-ops, so normal V3 traffic cannot shadow-write provider health into Provider Hub.
+When a profile is deliberately rolled back to V2, those observations may refresh
+legacy Provider Hub availability/capacity evidence. Prompt, response, request-body,
+and provider secret content are never forwarded by this telemetry path.
 
 For a local checkout:
 
@@ -236,7 +233,9 @@ HERMES_OFFICE_OBSERVER_URL
 ```
 
 The control-plane override is intentionally restricted to loopback HTTP. The
-plugin is not a generic remote credential proxy.
+plugin is not a generic remote credential proxy. Provider/model CRUD is intentionally
+absent from the plugin surface: use the tailnet-only LiteLLM Admin UI exposed by the
+control plane's `adminUrl` metadata.
 
 ## Development checks
 

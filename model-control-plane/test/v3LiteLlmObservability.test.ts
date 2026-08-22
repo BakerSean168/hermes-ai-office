@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { LiteLlmSpendObservability } from '../src/v3/adapters/liteLlm.js';
+import { LiteLlmModelRegistry, LiteLlmSpendObservability } from '../src/v3/adapters/liteLlm.js';
 import { EnvFileValueProvider } from '../src/v3/adapters/openHands.js';
 
 async function listen(server: Server): Promise<number> {
@@ -168,6 +168,112 @@ test('LiteLLM spend observability degrades without failing the execution facade'
     assert.deepEqual(await adapter.getExecutionSummary('exec_down'), { health: 'UNAVAILABLE' });
     assert.equal(await adapter.health(), 'UNAVAILABLE');
   } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('LiteLLM model registry deduplicates alias projections and never exposes credential values', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'litellm-registry-'));
+  const envFile = path.join(directory, 'litellm.env');
+  fs.writeFileSync(envFile, 'LITELLM_MASTER_KEY=admin-secret\n');
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== 'Bearer admin-secret') {
+      response.writeHead(401).end('{}');
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/credentials') {
+      response.end(
+        JSON.stringify({
+          credentials: [
+            {
+              credential_name: 'ai-office-teamorouter',
+              credential_info: { custom_llm_provider: 'openai' },
+              credential_values: {
+                api_key: 'must-not-leak',
+                api_base: 'https://secret.example/v1',
+              },
+            },
+          ],
+        }),
+      );
+      return;
+    }
+    if (request.url === '/router/settings') {
+      response.end(
+        JSON.stringify({
+          current_values: {
+            model_group_alias: {
+              'planning-premium': 'gpt-5.6-sol',
+              'review-premium': 'gpt-5.6-sol',
+            },
+          },
+        }),
+      );
+      return;
+    }
+    if (request.url === '/model/info') {
+      const base = {
+        litellm_params: {
+          model: 'openai/gpt-5.6-sol',
+          litellm_credential_name: 'ai-office-teamorouter',
+          order: 1,
+        },
+        model_info: {
+          id: 'deployment-1',
+          db_model: true,
+          blocked: false,
+          metadata: {
+            legacy_provider_key: 'teamorouter-gpt-5-6',
+            commercial_type: 'OTHER',
+            protocol: 'openai-chat-completions',
+            supply_origin: 'UNKNOWN',
+          },
+        },
+      };
+      response.end(
+        JSON.stringify({
+          data: [
+            { ...base, model_name: 'planning-premium' },
+            { ...base, model_name: 'review-premium' },
+            { ...base, model_name: 'gpt-5.6-sol' },
+          ],
+        }),
+      );
+      return;
+    }
+    response.writeHead(404).end('{}');
+  });
+  const port = await listen(server);
+  const registry = new LiteLlmModelRegistry({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secrets: new EnvFileValueProvider(envFile),
+    adminUrl: 'https://oracle.example:10446/ui/',
+  });
+  try {
+    const summary = await registry.summary();
+    assert.equal(summary.health, 'OK');
+    assert.equal(summary.authority, 'LITELLM');
+    assert.equal(summary.adminUrl, 'https://oracle.example:10446/ui/');
+    assert.deepEqual(summary.aliases, {
+      'planning-premium': 'gpt-5.6-sol',
+      'review-premium': 'gpt-5.6-sol',
+    });
+    assert.deepEqual(summary.credentials, {
+      count: 1,
+      items: [{ name: 'ai-office-teamorouter', provider: 'openai' }],
+    });
+    assert.equal(summary.deployments.count, 1);
+    assert.equal(summary.deployments.active, 1);
+    assert.equal(summary.deployments.paused, 0);
+    assert.deepEqual(summary.deployments.groups, { 'gpt-5.6-sol': 1 });
+    assert.equal(summary.deployments.items[0]?.group, 'gpt-5.6-sol');
+    assert.equal(summary.deployments.items[0]?.providerKey, 'teamorouter-gpt-5-6');
+    assert.doesNotMatch(JSON.stringify(summary), /must-not-leak|secret\.example/);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

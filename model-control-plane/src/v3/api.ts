@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 
 import type { DevelopmentPolicy } from './policy.js';
+import type { ModelRegistryPort } from './ports.js';
 import type { DevelopmentExecutionService } from './service.js';
 import { buildV3ReadinessReport, type V3ReadinessEvidence } from './readiness.js';
 import {
@@ -48,6 +49,7 @@ export function registerV3Routes(
   service: DevelopmentExecutionService,
   policy: DevelopmentPolicy,
   readinessEvidence?: V3ReadinessEvidence,
+  modelRegistry?: ModelRegistryPort,
 ): void {
   app.get('/api/v3/health', async () => ({
     status: 'ok',
@@ -57,6 +59,23 @@ export function registerV3Routes(
   }));
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
+
+  app.get('/api/v3/development/model-registry', async (_request, reply) => {
+    if (!modelRegistry) {
+      reply.code(503);
+      return {
+        authority: 'LITELLM',
+        health: 'UNAVAILABLE',
+        credentials: { count: 0, items: [] },
+        deployments: { count: 0, active: 0, paused: 0, groups: {}, items: [] },
+        aliases: {},
+        upstream: { error: 'LITELLM_REGISTRY_UNCONFIGURED' },
+      };
+    }
+    const summary = await modelRegistry.summary();
+    if (summary.health !== 'OK') reply.code(503);
+    return summary;
+  });
 
   app.get('/api/v3/development/readiness', async (_request, reply) => {
     if (!readinessEvidence) {
