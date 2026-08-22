@@ -7,13 +7,7 @@ export function reviewVerdict(value: string): ReviewVerdict {
     .find(Boolean);
   if (!firstLine) return 'UNKNOWN';
 
-  const [rawToken] = firstLine.split(':', 1);
-  const token =
-    rawToken
-      ?.trim()
-      .toUpperCase()
-      .replace(/[\s-]+/g, '_') ?? '';
-  if (token === 'PASS' || token === 'APPROVED') return 'APPROVED';
-  if (['FAIL', 'REJECTED', 'BLOCKED', 'CHANGES_REQUESTED'].includes(token)) return 'BLOCKING';
+  if (firstLine === 'PASS') return 'APPROVED';
+  if (firstLine === 'FAIL') return 'BLOCKING';
   return 'UNKNOWN';
 }

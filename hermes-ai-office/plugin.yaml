@@ -1,6 +1,6 @@
 name: hermes-ai-office
-version: "0.20.0"
-description: Native Hermes V3 development control plane with LiteLLM-backed model/provider registry and OpenHands execution.
+version: '1.0.0'
+description: Thin Hermes development-execution facade backed by OpenHands and LiteLLM.
 provides_tools:
   - ai_office_list_providers
   - ai_office_run_phase
@@ -8,12 +8,5 @@ provides_tools:
   - ai_office_continue_execution
   - ai_office_cancel_execution
   - ai_office_list_active
-  - ai_office_resolve_execution
 provides_hooks:
-  - subagent_start
-  - subagent_stop
   - pre_llm_call
-  - post_api_request
-  - api_request_error
-  - pre_tool_call
-  - post_tool_call

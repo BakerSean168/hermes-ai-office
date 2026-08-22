@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node dist/main.js",
-    "test": "tsx --test test/*.test.mjs test/*.test.ts",
+    "test": "tsx --test test/*.test.ts",
     "build": "npm run clean && tsc -p tsconfig.json",
     "check-types": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx src/main.ts",

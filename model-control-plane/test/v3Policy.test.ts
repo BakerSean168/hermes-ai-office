@@ -8,30 +8,32 @@ import { DevelopmentPolicy } from '../src/v3/policy.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const policyFile = path.resolve(here, '../config/development-policy.yaml');
 
-test('V3 development policy falls back from unavailable ACP backends to OpenHands', () => {
+test('development policy uses LiteLLM-managed execution for all model-backed phases', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
-  const planning = policy.select(
+  for (const phase of [
     'INVESTIGATE_PLAN',
-    {},
-    {
-      'codex-acp': false,
-      'openhands-builtin': true,
-      'opencode-acp': false,
-    },
-  );
-  assert.equal(planning.backend, 'openhands-builtin');
-  assert.equal(planning.modelClass, 'planning-premium');
-  assert.equal(planning.transportMode, 'LITELLM_MANAGED');
-  assert.equal(planning.workspaceMode, 'read_oriented');
+    'IMPLEMENT',
+    'IMPLEMENT_FIX',
+    'VERIFY_REVIEW',
+  ] as const) {
+    const selected = policy.select(phase, {}, { 'openhands-builtin': true, 'opencode-acp': true });
+    assert.equal(selected.transportMode, 'LITELLM_MANAGED');
+    assert.ok(['openhands-builtin', 'opencode-acp'].includes(selected.backend));
+  }
+  assert.equal(policy.config.version, 2);
+  assert.deepEqual(Object.keys(policy.config.backends).sort(), [
+    'control-plane-finalizer',
+    'opencode-acp',
+    'openhands-builtin',
+  ]);
+});
 
+test('development policy falls back from OpenCode ACP to OpenHands', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
   const implementation = policy.select(
     'IMPLEMENT',
     {},
-    {
-      'opencode-acp': false,
-      'openhands-builtin': true,
-      'codex-acp': false,
-    },
+    { 'opencode-acp': false, 'openhands-builtin': true },
   );
   assert.equal(implementation.backend, 'openhands-builtin');
   assert.equal(implementation.modelClass, 'implementation-efficient');
@@ -39,23 +41,15 @@ test('V3 development policy falls back from unavailable ACP backends to OpenHand
   assert.equal(implementation.workspaceMode, 'isolated_write');
 });
 
-test('V3 policy preserves native subscription as a first-class transport lane', () => {
-  const policy = DevelopmentPolicy.fromFile(policyFile);
-  const selected = policy.select('VERIFY_REVIEW', { backend: 'codex-acp' }, { 'codex-acp': true });
-  assert.equal(selected.backend, 'codex-acp');
-  assert.equal(selected.transportMode, 'NATIVE_SUBSCRIPTION');
-  assert.equal(selected.sessionPolicy, 'fresh_required');
-});
-
-test('V3 policy rejects an unavailable explicit backend instead of silently changing an override', () => {
+test('development policy rejects an unavailable explicit backend', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.throws(
-    () => policy.select('INVESTIGATE_PLAN', { backend: 'codex-acp' }, { 'codex-acp': false }),
+    () => policy.select('IMPLEMENT', { backend: 'opencode-acp' }, { 'opencode-acp': false }),
     /POLICY_NO_ELIGIBLE_BACKEND/,
   );
 });
 
-test('V3 FINALIZE uses the deterministic internal finalizer without a model transport', () => {
+test('FINALIZE uses the deterministic internal finalizer', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   const selected = policy.select('FINALIZE', {}, {});
   assert.equal(selected.backend, 'control-plane-finalizer');
@@ -64,7 +58,7 @@ test('V3 FINALIZE uses the deterministic internal finalizer without a model tran
   assert.equal(selected.workspaceMode, 'none');
 });
 
-test('V3 policy exposes bounded writer concurrency caps', () => {
+test('development policy exposes bounded writer concurrency caps', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.equal(policy.config.concurrency.max_active_writers, 4);
   assert.equal(policy.config.concurrency.max_active_writers_per_project, 2);

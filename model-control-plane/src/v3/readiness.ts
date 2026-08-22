@@ -35,7 +35,7 @@ export interface V3ReadinessEvidence {
   observability_execution_ids?: string[];
   provider_fallback?: BooleanEvidence;
   gateway_reconnect?: BooleanEvidence;
-  rollback?: BooleanEvidence;
+  review_verdict?: BooleanEvidence;
   workspace_isolation?: BooleanEvidence;
   operator_recovery?: BooleanEvidence;
   fix_loop?: FixLoopEvidence;
@@ -230,7 +230,10 @@ export async function buildV3ReadinessReport(
       evidence.gateway_reconnect,
       'Gateway restart while external worker continues',
     ),
-    rollback: evidenceGate(evidence.rollback, 'V3 -> V2 -> V3 rollback'),
+    reviewVerdict: evidenceGate(
+      evidence.review_verdict,
+      'strict PASS/FAIL review verdict with durable control-plane evidence',
+    ),
     workspaceIsolation: evidenceGate(
       evidence.workspace_isolation,
       'isolated mutable workspaces and read-only review snapshots',

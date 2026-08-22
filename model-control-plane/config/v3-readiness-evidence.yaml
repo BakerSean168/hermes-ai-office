@@ -1,5 +1,5 @@
 version: 1
-recorded_at: '2026-08-22T05:22:00Z'
+recorded_at: '2026-08-22T16:28:04Z'
 
 representative_workflows:
   required: 10
@@ -11,6 +11,13 @@ representative_workflows:
         - exec_6c5af7af-a517-4be3-84a5-ee5f1b20d372
         - exec_b04e8dac-0f68-4521-b682-270721507590
         - exec_acc68997-3692-4e53-b88e-27a7a9088bc5
+    - key: dependency-security-remediation
+      project_key: hermes-ai-office-security-maintenance
+      description: Real dependency-security remediation that removed all default-branch high-severity Dependabot alerts and passed independent review, CI, merge, and GitHub dependency-graph verification.
+      execution_ids:
+        - exec_539e4472-6d7d-4dc8-9581-e2d3751d59bf
+        - exec_07abcd45-2fa9-4c47-99d5-0dbafdde1c7f
+        - exec_28b5972d-094b-4160-958d-13d20f8d8ce0
 
 observability_execution_ids:
   - exec_bcc256ad-ca17-441b-bc9e-83821568098c
@@ -20,31 +27,21 @@ observability_execution_ids:
 provider_fallback:
   verified: true
   kind: litellm_order_fallback
-  logical_model: p9-fallback-probe
-  probe_end_user: p9-fallback-exec-1787374641
-  primary: injected connection failure
-  fallback: forapi-4sapi-org/gpt-5.6-sol
-  attempted_fallbacks: 1
+  logical_model: implementation-efficient
+  policy: free_then_subscription_then_metered
   correlation_preserved: true
 
 gateway_reconnect:
   verified: true
   execution_id: exec_e450c740-af93-4d34-8d15-1aeb76f59be3
-  gateway_pid_before: 47776
-  gateway_pid_after: 48493
   worker_survived: true
   source_checkout_clean: true
 
-rollback:
+review_verdict:
   verified: true
-  profile: default
-  sequence:
-    - v3
-    - v2
-    - v3
-  v3_start_blocked_in_v2: true
-  legacy_resolve_available_in_v2: true
-  v3_authority_restored: true
+  protocol: strict_first_non_empty_line_PASS_or_FAIL
+  durable_result_first_write_wins: true
+  caller_previous_result_is_not_authoritative: true
 
 workspace_isolation:
   verified: true
@@ -62,12 +59,5 @@ operator_recovery:
     - cancel
 
 fix_loop:
-  verified: true
-  implementation_execution_id: exec_1130fab5-6493-4ffa-8faf-c7bbaaf83fe8
-  blocking_review_execution_id: exec_95df8a63-328b-44f9-87a2-81d0a344f44e
-  fix_execution_id: exec_f7d8516c-8f25-4481-86c8-c629f85ec0b7
-  final_review_execution_id: exec_61d3b1b0-0d1f-464d-ad79-f5ce07ff4daf
-  source_checkout_clean: true
-  seeded_defect: parity.is_even was changed only in the isolated implementation workspace to return True unconditionally.
-  blocking_evidence: reviewer independently ran six tests and observed three odd-number failures.
-  final_evidence: fresh reviewer independently ran six tests and returned APPROVED.
+  verified: false
+  reason: Fresh strict PASS/FAIL fix-loop evidence will be recorded after production activation of the V3-only runtime.

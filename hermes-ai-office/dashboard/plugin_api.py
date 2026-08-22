@@ -1,1395 +1,335 @@
-"""Hermes AI Office dashboard backend.
+"""AI Office V3 dashboard backend.
 
-Mounted by Hermes at ``/api/plugins/hermes-ai-office/``. The module is a thin,
-authenticated adapter over Hermes native provider management and the local AI
-Workforce Domain Service. Provider secrets are handed only to Hermes credential
-storage; they are never forwarded into workforce projections or the domain DB.
+This module is deliberately read-only. It projects authoritative V3 execution facts
+and LiteLLM registry/usage facts into one operational dashboard payload. Provider
+mutation belongs to LiteLLM Admin; AI Office owns no parallel provider state.
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import os
 import threading
 import time
-import tomllib
-import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
-from typing import Any, Dict, Mapping, Sequence
+from typing import Any, Dict, Mapping
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
-
-try:
-    from hermes_cli import config as config_mod
-    from hermes_cli.config import get_hermes_home
-except Exception:  # pragma: no cover - only used by isolated import tests
-    config_mod = None  # type: ignore[assignment]
-    get_hermes_home = None  # type: ignore[assignment]
-
-
-def _safe_yaml_load(text: str) -> Any:
-    yaml_mod = getattr(config_mod, "yaml", None) if config_mod is not None else None
-    if yaml_mod is None:
-        return {}
-    return yaml_mod.safe_load(text)
-
 
 router = APIRouter()
 
-_PLUGIN_ID = "hermes-ai-office"
-_DEFAULT_BASE_URL = "http://127.0.0.1:8320"
-_ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
-_SETTINGS_LOCK = threading.Lock()
-
-_SUPPLY_ORIGINS = (
-    "OFFICIAL",
-    "COMMERCIAL_RELAY",
-    "COMMUNITY_RELAY",
-    "EVENT_GRANT",
-    "PERSONAL_HOSTED",
-    "INTERNAL_POOL",
-    "UNKNOWN",
-)
-_COMMERCIAL_TYPES = ("FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER")
-_ROUTING_POLICIES = ("AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED")
-_ECONOMICS_QUICK_PROFILES = (
-    {"id": "community-free", "supplyOrigin": "COMMUNITY_RELAY", "commercialType": "FREE", "routingPolicy": "AUTO"},
-    {"id": "event-free", "supplyOrigin": "EVENT_GRANT", "commercialType": "SPONSORED", "routingPolicy": "AUTO"},
-    {"id": "personal-hosted", "supplyOrigin": "PERSONAL_HOSTED", "commercialType": "OTHER", "routingPolicy": "MANUAL_ONLY"},
-    {"id": "commercial-metered", "supplyOrigin": "COMMERCIAL_RELAY", "commercialType": "METERED", "routingPolicy": "AUTO"},
-    {"id": "official-metered", "supplyOrigin": "OFFICIAL", "commercialType": "METERED", "routingPolicy": "AUTO"},
-    {"id": "official-subscription", "supplyOrigin": "OFFICIAL", "commercialType": "SUBSCRIPTION", "routingPolicy": "AUTO"},
-)
+_BASE_URL = "http://127.0.0.1:8320"
+_TERMINAL = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+_CACHE_LOCK = threading.Lock()
+_CACHE: tuple[float, int, Dict[str, Any]] | None = None
+_CACHE_TTL_SECONDS = 5.0
+_HISTORY_HYDRATED = False
+_HISTORY_PAGE_SIZE = 500
 
 
-def _economics_choice(
-    descriptor: Mapping[str, Any],
-    supply_origin: str = "",
-    commercial_type: str = "",
-    routing_policy: str = "",
-) -> Dict[str, str]:
-    plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
-    origin = str(supply_origin or descriptor.get("supplyOrigin") or "UNKNOWN").strip().upper()
-    commercial = str(
-        commercial_type
-        or plan.get("commercialType")
-        or descriptor.get("commercialType")
-        or "METERED"
-    ).strip().upper()
-    routing = str(routing_policy or descriptor.get("routingPolicy") or "AUTO").strip().upper()
-    if origin not in _SUPPLY_ORIGINS:
-        raise ValueError("供应来源标签无效")
-    if commercial not in _COMMERCIAL_TYPES:
-        raise ValueError("计费类型标签无效")
-    if routing not in _ROUTING_POLICIES:
-        raise ValueError("路由策略标签无效")
-    return {"supplyOrigin": origin, "commercialType": commercial, "routingPolicy": routing}
-
-
-class RuntimePolicySettings(BaseModel):
-    execution_mode: str = "v2"
-    mode: str = "prefer"
-    opencode_position: str = "coding-executor"
-    codex_position: str = "codex-executor"
-
-class ProviderDiscoverRequest(BaseModel):
-    preset_id: str
-    api_key: str = ""
-    base_url: str = ""
-    supplier_name: str = ""
-    website_url: str = ""
-
-
-class ProviderRegisterRequest(ProviderDiscoverRequest):
-    selected_models: list[str]
-    default_model: str = ""
-    supply_origin: str = ""
-    commercial_type: str = ""
-    routing_policy: str = ""
-
-
-class ProviderControlRequest(BaseModel):
-    enabled: bool
-    reason: str | None = Field(default=None, max_length=500)
-
-
-class ProviderProfileRequest(BaseModel):
-    display_name: str = Field(min_length=1, max_length=240)
-    base_url: str = Field(default="", max_length=1000)
-    website_url: str = Field(default="", max_length=1000)
-    protocol: str = Field(default="", max_length=120)
-
-
-class ProviderRetireRequest(BaseModel):
-    reason: str | None = Field(default=None, max_length=500)
-
-
-class SupplierProfileRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=240)
-    website_url: str = Field(default="", max_length=1000)
-
-
-class SupplierRetireRequest(BaseModel):
-    reason: str | None = Field(default=None, max_length=500)
-    force: bool = True
-
-
-class SupplierEconomicsRequest(BaseModel):
-    supply_origin: str
-    commercial_type: str
-    routing_policy: str
-
-
-_PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
-    "opencode-go": {
-        "id": "opencode-go",
-        "name": "OpenCode Go",
-        "supplierSlug": "opencode",
-        "supplierName": "OpenCode",
-        "baseUrl": "https://opencode.ai/zen/go/v1",
-        "websiteUrl": "https://opencode.ai",
-        "keyEnv": "OPENCODE_GO_API_KEY",
-        "transport": "openai_chat",
-        "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"},
-        "opencodePrefix": "opencode-go",
-        "featured": True,
-        "supplyOrigin": "OFFICIAL",
-        "routingPolicy": "AUTO",
-    },
-    "openrouter": {
-        "id": "openrouter",
-        "name": "OpenRouter",
-        "supplierSlug": "openrouter",
-        "supplierName": "OpenRouter",
-        "baseUrl": "https://openrouter.ai/api/v1",
-        "websiteUrl": "https://openrouter.ai",
-        "keyEnv": "OPENROUTER_API_KEY",
-        "transport": "openai_chat",
-        "plan": {"slug": "api", "name": "OpenRouter API", "commercialType": "METERED"},
-        "opencodePrefix": "openrouter",
-        "supplyOrigin": "COMMERCIAL_RELAY",
-        "routingPolicy": "AUTO",
-    },
-    "openai-api": {
-        "id": "openai-api",
-        "name": "OpenAI API",
-        "supplierSlug": "openai",
-        "supplierName": "OpenAI",
-        "baseUrl": "https://api.openai.com/v1",
-        "websiteUrl": "https://openai.com",
-        "keyEnv": "OPENAI_API_KEY",
-        "transport": "codex_responses",
-        "plan": {"slug": "api", "name": "OpenAI API", "commercialType": "METERED"},
-        "opencodePrefix": "openai",
-        "supplyOrigin": "OFFICIAL",
-        "routingPolicy": "AUTO",
-    },
-    "xai": {
-        "id": "xai",
-        "name": "xAI API",
-        "supplierSlug": "xai",
-        "supplierName": "xAI",
-        "baseUrl": "https://api.x.ai/v1",
-        "websiteUrl": "https://x.ai",
-        "keyEnv": "XAI_API_KEY",
-        "transport": "codex_responses",
-        "plan": {"slug": "api", "name": "xAI API", "commercialType": "METERED"},
-        "opencodePrefix": "xai",
-        "supplyOrigin": "OFFICIAL",
-        "routingPolicy": "AUTO",
-    },
-    "nvidia": {
-        "id": "nvidia",
-        "name": "NVIDIA NIM",
-        "supplierSlug": "nvidia",
-        "supplierName": "NVIDIA",
-        "baseUrl": "https://integrate.api.nvidia.com/v1",
-        "websiteUrl": "https://www.nvidia.com",
-        "keyEnv": "NVIDIA_API_KEY",
-        "transport": "openai_chat",
-        "plan": {"slug": "api", "name": "NVIDIA NIM API", "commercialType": "METERED"},
-        "opencodePrefix": "nvidia",
-        "supplyOrigin": "OFFICIAL",
-        "routingPolicy": "AUTO",
-    },
-    "custom": {
-        "id": "custom",
-        "name": "Custom OpenAI-compatible endpoint",
-        "supplierSlug": "",
-        "supplierName": "",
-        "baseUrl": "",
-        "websiteUrl": "",
-        "keyEnv": "",
-        "transport": "openai_chat",
-        "plan": {"slug": "api", "name": "Custom API", "commercialType": "METERED"},
-        "featured": True,
-        "supplyOrigin": "COMMERCIAL_RELAY",
-        "routingPolicy": "AUTO",
-    },
-}
-
-
-
-_PROVIDER_HUB_SYNC_LOCK = threading.Lock()
-_PROVIDER_HUB_LAST_SYNC = 0.0
-_PROVIDER_HUB_SYNC_TTL = 45.0
-
-_DISCOVERED_SUPPLIERS: Dict[str, Dict[str, Any]] = {
-    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://anyrouter.top"},
-    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "supplyOrigin": "OFFICIAL", "routingPolicy": "AUTO", "websiteUrl": "https://opencode.ai", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
-    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://www.fastaitoken.com"},
-    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://api.ark717.com"},
-    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://chybenzun.top"},
-    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "supplyOrigin": "OFFICIAL", "routingPolicy": "AUTO", "websiteUrl": "https://openai.com", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
-    "abrdns-deepseek-1m-think": {"slug": "abrdns-deepseek-1m-think", "name": "abrdns (公益站 DeepSeek 1M think)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://new-api.abrdns.com"},
-    "llm-pm-deepseek-opus": {"slug": "llm-pm-deepseek-opus", "name": "llm-pm (公益站 deepseek-opus)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://llm.pm"},
-    "wechat-miniapp-free": {"slug": "wechat-miniapp-free", "name": "wechat-miniapp (微信小程序开发大赛 free)", "commercialType": "SPONSORED", "supplyOrigin": "EVENT_GRANT", "routingPolicy": "AUTO", "websiteUrl": "https://developers.weixin.qq.com"},
-    "worldclawpro": {"slug": "worldclawpro", "name": "worldclawpro.ai", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://worldclawpro.ai"},
-}
-
-
-
-def _profile_root(profile_id: str) -> Path:
-    if get_hermes_home is None:
-        raise RuntimeError("Hermes home unavailable")
-    return Path(get_hermes_home()) / "profiles" / profile_id
-
-
-def _read_env_file(path: Path) -> Dict[str, str]:
-    result: Dict[str, str] = {}
-    if not path.exists():
-        return result
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except Exception:
-        return result
-    for raw in lines:
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key.replace("_", "").isalnum():
-            result[key] = value
-    return result
-
-
-def _global_credential_value(key_env: str) -> str:
-    try:
-        if config_mod is not None and hasattr(config_mod, "get_env_value_prefer_dotenv"):
-            return str(config_mod.get_env_value_prefer_dotenv(key_env) or "").strip()
-        if config_mod is not None and hasattr(config_mod, "load_env"):
-            return str((config_mod.load_env() or {}).get(key_env) or "").strip()
-    except Exception:
-        pass
-    return str(os.environ.get(key_env) or "").strip()
-
-
-def _promote_profile_credential(profile_id: str, key_env: str) -> bool:
-    if not key_env:
-        return False
-    if _global_credential_value(key_env):
-        return True
-    env = _read_env_file(_profile_root(profile_id) / "home" / ".clients.env")
-    value = str(env.get(key_env) or "").strip()
-    if not value:
-        return False
-    try:
-        from hermes_cli.credential_lifecycle import save_provider_env_credential
-        save_provider_env_credential(key_env, value)
-        return True
-    except Exception:
-        return False
-
-
-def _connection_supplier(provider_key: str) -> Mapping[str, Any] | None:
-    return _DISCOVERED_SUPPLIERS.get(provider_key)
-
-
-def _connection_website(provider_key: str, base_url: str = "") -> str:
-    supplier = _connection_supplier(provider_key)
-    if supplier and supplier.get("websiteUrl"):
-        return str(supplier["websiteUrl"]).rstrip("/")
-    if base_url and str(base_url).startswith(("http://", "https://")):
-        return _website_origin(str(base_url))
-    return ""
-
-
-def _update_supplier_website(supplier: Mapping[str, Any], supplier_spec: Mapping[str, Any]) -> None:
-    supplier_id = str(supplier.get("id") or "")
-    name = str(supplier_spec.get("name") or supplier.get("name") or "").strip()
-    website_url = str(supplier_spec.get("websiteUrl") or "").strip()
-    if not supplier_id or not name or not website_url:
-        return
-    seed = f"{supplier_id}|{name}|{website_url}"
-    _post_json(
-        f"/api/v2/commands/suppliers/{supplier_id}/profile",
-        {"name": name, "websiteUrl": website_url},
-        idempotency_key="provider-supplier-site-v1-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
-    )
-
-
-def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
-    safe_payload = dict(payload)
-    seed = json.dumps(safe_payload, sort_keys=True, ensure_ascii=False)
-    connection = _post_json(
-        "/api/v2/commands/provider-connections/upsert",
-        safe_payload,
-        idempotency_key="provider-hub-v4-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
-    )
-    provider_key = str(safe_payload.get("providerKey") or connection.get("provider_key") or "").strip()
-    if provider_key in {"cpa", "claude-code-access"} or connection.get("supplier_id"):
-        return connection
-    spec = _connection_supplier(provider_key) or {}
-    economics = _economics_choice(spec or {})
-    source_payload = {
-        "slug": str(spec.get("slug") or provider_key),
-        "name": str(spec.get("name") or safe_payload.get("displayName") or provider_key),
-        "websiteUrl": str(spec.get("websiteUrl") or safe_payload.get("websiteUrl") or "") or None,
-        "sourceKind": "EXTERNAL",
-        "supplyOrigin": economics["supplyOrigin"],
-        "routingPolicy": economics["routingPolicy"],
-    }
-    source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
-    source = _post_json(
-        "/api/v2/commands/workforce-sources/upsert",
-        source_payload,
-        idempotency_key="provider-source-v1-" + hashlib.blake2b(source_seed.encode("utf-8"), digest_size=10).hexdigest(),
-    )
-    supplier_id = str(source.get("id") or "")
-    if not supplier_id:
-        return connection
-    attached = dict(safe_payload)
-    attached["supplierId"] = supplier_id
-    attached_seed = json.dumps(attached, sort_keys=True, ensure_ascii=False)
-    return _post_json(
-        "/api/v2/commands/provider-connections/upsert",
-        attached,
-        idempotency_key="provider-hub-source-v1-" + hashlib.blake2b(attached_seed.encode("utf-8"), digest_size=10).hexdigest(),
-    )
-
-
-def _hub_link(connection_id: str, payload: Mapping[str, Any]) -> Dict[str, Any]:
-    seed = f"{connection_id}|" + json.dumps(dict(payload), sort_keys=True, ensure_ascii=False)
-    return _post_json(
-        f"/api/v2/commands/provider-connections/{connection_id}/profile-links",
-        payload,
-        idempotency_key="provider-link-" + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
-    )
-
-
-def _register_discovered_employee(
-    provider_key: str,
-    connection: Mapping[str, Any],
-    model: str,
-    *,
-    runtime_kind: str,
-    provider_ref: str,
-    profile_ref: str = "",
-    protocol: str = "",
-) -> Dict[str, Any] | None:
-    supplier_spec = _connection_supplier(provider_key)
-    if not supplier_spec or not model:
-        return None
-    economics = _economics_choice(supplier_spec)
-    supplier = {
-        "slug": supplier_spec["slug"],
-        "name": supplier_spec["name"],
-        "supplyOrigin": economics["supplyOrigin"],
-        "routingPolicy": economics["routingPolicy"],
-    }
-    account_ref = f"provider-hub:{provider_key}:{connection.get('id')}"
-    payload: Dict[str, Any] = {
-        "supplier": supplier,
-        "supplierModel": {"key": model, "name": model},
-        "agreement": {
-            "externalAccountRef": account_ref,
-            "name": f"{supplier_spec['name']} shared connection",
-        },
-    }
-    if isinstance(supplier_spec.get("plan"), Mapping):
-        payload["plan"] = dict(supplier_spec["plan"])
-    elif supplier_spec.get("commercialType"):
-        payload["plan"] = {
-            "slug": "default",
-            "name": f"{supplier_spec['name']} access",
-            "commercialType": economics["commercialType"],
-        }
-    result = _post_json(
-        "/api/v2/commands/supply-catalog/register",
-        payload,
-        idempotency_key="provider-catalog-v2-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
-    )
-    employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
-    supplier_row = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
-    _update_supplier_website(supplier_row, supplier_spec)
-    employment_id = str(employment.get("id") or "")
-    if employment_id:
-        access: Dict[str, Any] = {
-            "runtimeKind": runtime_kind,
-            "adapterKind": "NATIVE_CONFIG",
-            "providerRef": provider_ref,
-            "modelRef": model,
-            "baseUrl": connection.get("base_url") or None,
-            "credentialRef": connection.get("credential_ref") or None,
-            "protocol": protocol or connection.get("protocol") or None,
-            "config": {"providerHubConnectionId": connection.get("id")},
-            "priority": 150,
-        }
-        if profile_ref:
-            access["profileRef"] = profile_ref
-        _post_json(
-            f"/api/v2/commands/employments/{employment_id}/runtime-access",
-            access,
-            idempotency_key="hub-runtime-" + hashlib.blake2b(json.dumps(access, sort_keys=True).encode(), digest_size=10).hexdigest(),
-        )
-    if supplier_row.get("id") and not connection.get("supplier_id"):
-        return _hub_upsert_connection({
-            "providerKey": connection.get("provider_key"),
-            "displayName": connection.get("display_name"),
-            "supplierId": supplier_row.get("id"),
-            "baseUrl": connection.get("base_url"),
-            "websiteUrl": connection.get("website_url") or supplier_spec.get("websiteUrl"),
-            "protocol": connection.get("protocol"),
-            "authKind": connection.get("auth_kind"),
-            "credentialRef": connection.get("credential_ref"),
-            "credentialScope": connection.get("credential_scope"),
-            "sourceProfileId": connection.get("source_profile_id"),
-            "sourceKind": connection.get("source_kind"),
-            "shareScope": connection.get("share_scope"),
-            "health": connection.get("health"),
-            "models": connection.get("models") or [],
-            "metadata": connection.get("metadata") or {},
-        })
-    return result
-
-
-def _codex_provider_catalog(profile_home: Path) -> tuple[Dict[str, Dict[str, Any]], list[Dict[str, Any]]]:
-    codex = profile_home / ".codex"
-    main = codex / "config.toml"
-    providers: Dict[str, Dict[str, Any]] = {}
-    configs: list[Dict[str, Any]] = []
-    if main.exists():
-        try:
-            value = tomllib.loads(main.read_text(encoding="utf-8"))
-            for key, raw in (value.get("model_providers") or {}).items():
-                if isinstance(raw, Mapping):
-                    providers[str(key)] = dict(raw)
-            selected_model = str(value.get("model") or "").strip()
-            selected_provider = str(value.get("model_provider") or "").strip()
-            if selected_model and selected_provider:
-                configs.append({"path": "config.toml", "model": selected_model, "provider": selected_provider})
-        except Exception:
-            pass
-    for path in sorted(codex.glob("*.config.toml")):
-        try:
-            raw_text = path.read_text(encoding="utf-8")
-            value = tomllib.loads(raw_text)
-        except Exception:
-            continue
-        model = str(value.get("model") or "").strip()
-        provider = str(value.get("model_provider") or "").strip()
-        if model and provider:
-            configs.append(
-                {
-                    "path": path.name,
-                    "model": model,
-                    "provider": provider,
-                    "managedByAiOffice": raw_text.lstrip().startswith(
-                        "# HERMES AI OFFICE MANAGED PROFILE"
-                    ),
-                }
-            )
-    return providers, configs
-
-
-def _discover_profile_native_connections() -> list[Dict[str, Any]]:
-    if get_hermes_home is None:
-        return []
-    profiles_root = Path(get_hermes_home()) / "profiles"
-    if not profiles_root.exists():
-        return []
-    discovered: list[Dict[str, Any]] = []
-    profile_entries = [(path.name, path, path / "home") for path in sorted(path for path in profiles_root.iterdir() if path.is_dir())]
-    global_home = Path(get_hermes_home()) / "home"
-    if global_home.exists() and not any(item[0] == "default" for item in profile_entries):
-        profile_entries.append(("default", Path(get_hermes_home()), global_home))
-    for profile_id, profile_dir, home in profile_entries:
-        env = _read_env_file(home / ".clients.env")
-        providers, configs = _codex_provider_catalog(home)
-        auth_path = home / ".codex" / "auth.json"
-        auth: Dict[str, Any] = {}
-        if auth_path.exists():
-            try:
-                raw_auth = json.loads(auth_path.read_text(encoding="utf-8"))
-                if isinstance(raw_auth, Mapping):
-                    auth = dict(raw_auth)
-            except Exception:
-                pass
-        for config in configs:
-            provider_ref = str(config["provider"])
-            model = str(config["model"])
-            if bool(config.get("managedByAiOffice")):
-                continue
-            if provider_ref == "openai" and auth.get("auth_mode") == "chatgpt":
-                token_map = auth.get("tokens") if isinstance(auth.get("tokens"), Mapping) else {}
-                ready = bool(token_map)
-                connection = _hub_upsert_connection({
-                    "providerKey": "openai-team",
-                    "displayName": "OpenAI Official · ChatGPT Team / Business",
-                    "websiteUrl": "https://openai.com",
-                    "protocol": "codex-chatgpt-oauth",
-                    "authKind": "OAUTH",
-                    "credentialRef": f"codex-auth:{profile_id}",
-                    "credentialScope": "OAUTH_PROFILE",
-                    "sourceProfileId": profile_id,
-                    "sourceKind": "CODEX_OAUTH",
-                    "shareScope": "GLOBAL",
-                    "health": "READY" if ready else "UNAVAILABLE",
-                    "models": [model],
-                    "metadata": {"configFile": config["path"], "planType": "team"},
-                })
-                _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CODEX", "providerRef": "openai", "modelRef": model, "profileRef": "team", "sourceKind": "PROFILE_DISCOVERY"})
-                _register_discovered_employee("openai-team", connection, model, runtime_kind="CODEX", provider_ref="openai", profile_ref="team", protocol="codex-chatgpt-oauth")
-                discovered.append(connection)
-                continue
-            provider = providers.get(provider_ref) or {}
-            provider_name = str(provider.get("name") or "").strip()
-            if provider_name.startswith("Hermes AI Office ·") or provider_ref == "hermes-office":
-                continue
-            base_url = str(provider.get("base_url") or "").strip().rstrip("/")
-            credential_ref = str(provider.get("env_key") or "").strip()
-            wire_api = str(provider.get("wire_api") or "responses").strip()
-            if not base_url:
-                continue
-            promoted = _promote_profile_credential(profile_id, credential_ref) if credential_ref else False
-            display = {
-                "anyrouter": "AnyRouter",
-                "fastaitoken": "FastAI Token",
-                "ark717": "Ark717",
-            }.get(provider_ref, str(provider.get("name") or provider_ref))
-            connection = _hub_upsert_connection({
-                "providerKey": provider_ref,
-                "displayName": display,
-                "baseUrl": base_url,
-                "websiteUrl": _connection_website(provider_ref, base_url),
-                "protocol": "openai-responses" if wire_api == "responses" else wire_api,
-                "authKind": "API_KEY",
-                "credentialRef": credential_ref or None,
-                "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
-                "sourceProfileId": None if promoted else profile_id,
-                "sourceKind": "CODEX_CONFIG",
-                "shareScope": "GLOBAL",
-                "health": "READY" if promoted or bool(env.get(credential_ref)) else "UNAVAILABLE",
-                "models": [model],
-                "metadata": {"discoveredFromProfile": profile_id, "configFile": config["path"]},
-            })
-            _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CODEX", "providerRef": provider_ref, "modelRef": model, "profileRef": provider_ref, "sourceKind": "PROFILE_DISCOVERY"})
-            _register_discovered_employee(provider_ref, connection, model, runtime_kind="CODEX", provider_ref=provider_ref, profile_ref=provider_ref, protocol="openai-responses" if wire_api == "responses" else wire_api)
-            discovered.append(connection)
-
-        opencode_path = home / ".config" / "opencode" / "opencode.json"
-        if opencode_path.exists():
-            try:
-                opencode = json.loads(opencode_path.read_text(encoding="utf-8"))
-            except Exception:
-                opencode = {}
-            provider_rows = opencode.get("provider") if isinstance(opencode, Mapping) and isinstance(opencode.get("provider"), Mapping) else {}
-            for provider_ref, raw in provider_rows.items():
-                if not isinstance(raw, Mapping):
-                    continue
-                opts = raw.get("options") if isinstance(raw.get("options"), Mapping) else {}
-                base_url = str(opts.get("baseURL") or opts.get("baseUrl") or "").strip().rstrip("/")
-                key_expr = str(opts.get("apiKey") or opts.get("api_key") or "").strip()
-                if (
-                    key_expr.startswith("{file:")
-                    and "/secrets/hermes-ai-office/" in key_expr
-                ):
-                    continue
-                credential_ref = ""
-                if key_expr.startswith("{env:") and key_expr.endswith("}"):
-                    credential_ref = key_expr[5:-1].strip()
-                models = sorted(str(item) for item in (raw.get("models") or {}).keys()) if isinstance(raw.get("models"), Mapping) else []
-                if not base_url:
-                    continue
-                promoted = _promote_profile_credential(profile_id, credential_ref) if credential_ref else False
-                display = {"opencode-go": "OpenCode Go", "chybenzun": "Chybenzun", "cpa": "My CPA"}.get(str(provider_ref), str(provider_ref))
-                connection = _hub_upsert_connection({
-                    "providerKey": str(provider_ref),
-                    "displayName": display,
-                    "baseUrl": base_url,
-                    "websiteUrl": _connection_website(str(provider_ref), base_url),
-                    "protocol": "openai-chat-completions",
-                    "authKind": "API_KEY",
-                    "credentialRef": credential_ref or None,
-                    "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
-                    "sourceProfileId": None if promoted else profile_id,
-                    "sourceKind": "OPENCODE_CONFIG",
-                    "shareScope": "GLOBAL",
-                    "health": "READY" if promoted or bool(env.get(credential_ref)) else "UNKNOWN",
-                    "models": models,
-                    "metadata": {"discoveredFromProfile": profile_id, "package": raw.get("npm") or raw.get("package")},
-                })
-                for model in models:
-                    _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "OPENCODE", "providerRef": str(provider_ref), "modelRef": model, "sourceKind": "PROFILE_DISCOVERY"})
-                selected_provider = ""
-                selected_model = ""
-                profile_config_path = profile_dir / "config.yaml"
-                if profile_config_path.exists():
-                    try:
-                        profile_config = _safe_yaml_load(profile_config_path.read_text(encoding="utf-8")) or {}
-                        model_config = profile_config.get("model") if isinstance(profile_config, Mapping) else None
-                        if isinstance(model_config, Mapping):
-                            selected_provider = str(model_config.get("provider") or "").strip()
-                            selected_model = str(model_config.get("default") or model_config.get("model") or "").strip()
-                    except Exception:
-                        pass
-                if str(provider_ref) == selected_provider and selected_model and selected_model in models and provider_ref in _DISCOVERED_SUPPLIERS:
-                    _register_discovered_employee(str(provider_ref), connection, selected_model, runtime_kind="OPENCODE", provider_ref=str(provider_ref), protocol="openai-chat-completions")
-                discovered.append(connection)
-
-        anthropic_base = str(env.get("ANTHROPIC_BASE_URL") or "").strip().rstrip("/")
-        if anthropic_base:
-            credential_ref = "ANTHROPIC_AUTH_TOKEN"
-            promoted = _promote_profile_credential(profile_id, credential_ref)
-            connection = _hub_upsert_connection({
-                "providerKey": "claude-code-access",
-                "displayName": "Claude Code access",
-                "baseUrl": anthropic_base,
-                "websiteUrl": _website_origin(anthropic_base),
-                "protocol": "anthropic-messages",
-                "authKind": "API_KEY",
-                "credentialRef": credential_ref,
-                "credentialScope": "GLOBAL" if promoted else "PROFILE_LOCAL",
-                "sourceProfileId": None if promoted else profile_id,
-                "sourceKind": "CLAUDE_CODE_ENV",
-                "shareScope": "GLOBAL",
-                "health": "READY" if promoted else "UNAVAILABLE",
-                "models": [],
-                "metadata": {"discoveredFromProfile": profile_id},
-            })
-            _hub_link(str(connection["id"]), {"profileId": profile_id, "runtimeKind": "CLAUDE_CODE", "providerRef": "anthropic", "sourceKind": "PROFILE_DISCOVERY"})
-            discovered.append(connection)
-    return discovered
-
-
-def _sync_profile_native_provider_hub(force: bool = False) -> Dict[str, Any]:
-    global _PROVIDER_HUB_LAST_SYNC
-    now = time.monotonic()
-    if not force and now - _PROVIDER_HUB_LAST_SYNC < _PROVIDER_HUB_SYNC_TTL:
-        return _fetch_json("/api/v2/projections/provider-hub")
-    with _PROVIDER_HUB_SYNC_LOCK:
-        now = time.monotonic()
-        if not force and now - _PROVIDER_HUB_LAST_SYNC < _PROVIDER_HUB_SYNC_TTL:
-            return _fetch_json("/api/v2/projections/provider-hub")
-        _discover_profile_native_connections()
-        _PROVIDER_HUB_LAST_SYNC = time.monotonic()
-        return _fetch_json("/api/v2/projections/provider-hub")
-
-def _base_url() -> str:
-    raw = os.environ.get("HERMES_AI_OFFICE_CONTROL_PLANE_URL", _DEFAULT_BASE_URL).strip()
-    parsed = urllib.parse.urlparse(raw)
-    if parsed.scheme != "http" or parsed.hostname not in _ALLOWED_HOSTS:
-        return _DEFAULT_BASE_URL
-    return raw.rstrip("/")
-
-
-def _control_plane_json(
-    path: str,
-    *,
-    method: str = "GET",
-    payload: Mapping[str, Any] | None = None,
-    timeout: float = 3.0,
-    idempotency_key: str = "",
-) -> Dict[str, Any]:
-    if not path.startswith("/"):
-        raise ValueError("control-plane path must be absolute")
-    headers = {"Accept": "application/json"}
-    body = None
-    if payload is not None:
-        body = json.dumps(dict(payload)).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    if idempotency_key:
-        headers["Idempotency-Key"] = idempotency_key[:200]
-    request = urllib.request.Request(_base_url() + path, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            value = json.load(response)
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = exc.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            detail = ""
-        raise RuntimeError(f"control plane returned HTTP {exc.code}: {detail}") from exc
-    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError("control plane unavailable") from exc
+def _fetch_json(path: str, *, timeout: float = 12.0) -> Dict[str, Any]:
+    if not path.startswith("/api/v3/") and path != "/api/health":
+        raise ValueError("dashboard may access only V3 control-plane APIs")
+    request = urllib.request.Request(_BASE_URL + path, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        value = json.load(response)
     if not isinstance(value, dict):
         raise RuntimeError("control plane returned a non-object payload")
     return value
 
 
-def _fetch_json(path: str, *, timeout: float = 1.5) -> Dict[str, Any]:
-    return _control_plane_json(path, timeout=timeout)
+def _number(value: Any) -> float:
+    try:
+        result = float(value or 0)
+        return result if result == result else 0.0
+    except (TypeError, ValueError):
+        return 0.0
 
 
-def _post_json(
-    path: str,
-    payload: Mapping[str, Any],
+def _usage(value: Any) -> Dict[str, Any]:
+    raw = value if isinstance(value, Mapping) else {}
+    return {
+        "input": int(_number(raw.get("input"))),
+        "output": int(_number(raw.get("output"))),
+        "cachedInput": int(_number(raw.get("cachedInput"))),
+        "reasoningOutput": int(_number(raw.get("reasoningOutput"))),
+        "calls": int(_number(raw.get("calls"))),
+        "costUsd": _number(raw.get("costUsd")),
+    }
+
+
+def _route_catalog(registry: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
+    deployments = registry.get("deployments") if isinstance(registry.get("deployments"), Mapping) else {}
+    result: Dict[str, Dict[str, Any]] = {}
+    for raw in deployments.get("items", []) if isinstance(deployments.get("items"), list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        deployment_id = str(raw.get("id") or "").strip()
+        if deployment_id:
+            result[deployment_id] = dict(raw)
+    return result
+
+
+def _enrich_route(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    deployment_id = str(raw.get("deploymentId") or "").strip()
+    deployment = catalog.get(deployment_id, {}) if deployment_id else {}
+    return {
+        "deploymentId": deployment_id or None,
+        "provider": str(raw.get("provider") or "").strip() or None,
+        "providerKey": str(deployment.get("providerKey") or raw.get("provider") or "unknown"),
+        "physicalModel": str(raw.get("model") or deployment.get("model") or "unknown"),
+        "modelGroup": str(deployment.get("group") or "") or None,
+        "credential": str(deployment.get("credential") or "") or None,
+        "commercialType": str(deployment.get("commercialType") or "") or None,
+        "supplyOrigin": str(deployment.get("supplyOrigin") or "") or None,
+        "order": deployment.get("order"),
+    }
+
+
+def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
+    timing = raw.get("timing") if isinstance(raw.get("timing"), Mapping) else {}
+    usage = _usage(raw.get("usage"))
+    selection = raw.get("selection") if isinstance(raw.get("selection"), Mapping) else {}
+    refs = raw.get("refs") if isinstance(raw.get("refs"), Mapping) else {}
+    upstream = refs.get("upstream") if isinstance(refs.get("upstream"), Mapping) else {}
+    route_usage_raw = upstream.get("routeUsage") if isinstance(upstream.get("routeUsage"), list) else []
+    routes = []
+    for route_raw in route_usage_raw:
+        if not isinstance(route_raw, Mapping):
+            continue
+        route = _enrich_route(route_raw, catalog)
+        route.update(_usage(route_raw))
+        routes.append(route)
+    last_raw = upstream.get("route") if isinstance(upstream.get("route"), Mapping) else {}
+    last_route = _enrich_route(last_raw, catalog) if last_raw else (routes[0] if routes else None)
+    status = str(raw.get("status") or "UNKNOWN").upper()
+    started_at = str(timing.get("startedAt") or raw.get("createdAt") or "") or None
+    ended_at = str(timing.get("endedAt") or "") or None
+    duration_ms = int(_number(timing.get("durationMs"))) if timing.get("durationMs") is not None else None
+    return {
+        "executionId": str(raw.get("executionId") or ""),
+        "projectKey": str(raw.get("projectKey") or "default"),
+        "objective": str(raw.get("objectiveSummary") or ""),
+        "phase": str(raw.get("phase") or "UNKNOWN"),
+        "status": status,
+        "startedAt": started_at,
+        "endedAt": ended_at,
+        "durationMs": duration_ms,
+        "logicalModel": str(selection.get("modelClass") or "") or None,
+        "backend": str(selection.get("backend") or "") or None,
+        "workspaceMode": str(selection.get("workspaceMode") or "") or None,
+        "previousExecutionId": raw.get("previousExecutionId"),
+        "usage": usage,
+        "totalTokens": usage["input"] + usage["output"],
+        "route": last_route,
+        "routeUsage": routes,
+        "terminal": status in _TERMINAL,
+    }
+
+
+def _new_bucket(key: str) -> Dict[str, Any]:
+    return {
+        "key": key,
+        "executions": set(),
+        "succeeded": set(),
+        "failed": set(),
+        "input": 0,
+        "output": 0,
+        "cachedInput": 0,
+        "reasoningOutput": 0,
+        "calls": 0,
+        "costUsd": 0.0,
+        "durationMs": 0,
+    }
+
+
+def _add(
+    bucket: Dict[str, Any],
+    execution: Mapping[str, Any],
+    usage: Mapping[str, Any],
     *,
-    timeout: float = 5.0,
-    idempotency_key: str = "",
-) -> Dict[str, Any]:
-    return _control_plane_json(
-        path,
-        method="POST",
-        payload=payload,
-        timeout=timeout,
-        idempotency_key=idempotency_key,
-    )
+    duration: bool = True,
+    outcome: bool = True,
+) -> None:
+    execution_id = str(execution.get("executionId") or "")
+    if execution_id:
+        bucket["executions"].add(execution_id)
+        if outcome:
+            status = str(execution.get("status") or "")
+            if status == "SUCCEEDED":
+                bucket["succeeded"].add(execution_id)
+            elif status in {"FAILED", "STUCK", "CANCELLED"}:
+                bucket["failed"].add(execution_id)
+    for key in ("input", "output", "cachedInput", "reasoningOutput", "calls"):
+        bucket[key] += int(_number(usage.get(key)))
+    bucket["costUsd"] += _number(usage.get("costUsd"))
+    if duration:
+        bucket["durationMs"] += int(_number(execution.get("durationMs")))
 
 
-def _safe_provider_id(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def _is_official_deepseek_endpoint(value: Any) -> bool:
-    raw = str(value or "").strip()
-    if not raw:
-        return False
-    try:
-        host = str(urllib.parse.urlparse(raw).hostname or "").lower()
-    except ValueError:
-        return False
-    return host == "api.deepseek.com"
-
-
-def _normalize_base_url(value: str) -> str:
-    raw = value.strip().rstrip("/")
-    parsed = urllib.parse.urlparse(raw)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("需要有效的 HTTP(S) API 请求地址")
-    return raw
-
-
-def _website_origin(value: str) -> str:
-    raw = _normalize_base_url(value)
-    parsed = urllib.parse.urlparse(raw)
-    if parsed.hostname in _ALLOWED_HOSTS:
-        return ""
-    return f"{parsed.scheme}://{parsed.netloc}"
-
-
-def _custom_supplier_identity(base_url: str, supplier_name: str = "", website_url: str = "") -> Dict[str, str]:
-    normalized = _normalize_base_url(base_url)
-    digest = hashlib.blake2b(normalized.encode("utf-8"), digest_size=6).hexdigest()
-    hostname = urllib.parse.urlparse(normalized).hostname or "custom"
-    generated_name = supplier_name.strip() or hostname.split(".")[0].replace("-", " ").title() or "Custom API"
-    return {
-        "providerId": f"custom:{digest}",
-        "supplierSlug": f"custom-{digest}",
-        "supplierName": generated_name,
-        "keyEnv": f"HERMES_AI_OFFICE_{digest.upper()}_API_KEY",
-        "baseUrl": normalized,
-        "websiteUrl": _normalize_base_url(website_url) if website_url.strip() else _website_origin(normalized),
-    }
-
-
-def _provider_descriptor(preset_id: str, base_url: str = "", supplier_name: str = "", website_url: str = "") -> Dict[str, Any]:
-    preset_key = _safe_provider_id(preset_id)
-    preset = _PROVIDER_PRESETS.get(preset_key)
-    if not preset:
-        raise ValueError("未知供应商预设")
-    if preset_key == "custom":
-        identity = _custom_supplier_identity(base_url, supplier_name, website_url)
-        return {**preset, **identity}
-    descriptor = dict(preset)
-    try:
-        from hermes_cli.auth import PROVIDER_REGISTRY
-        provider = PROVIDER_REGISTRY.get(preset_key)
-        if provider:
-            descriptor["name"] = provider.name or descriptor["name"]
-            descriptor["baseUrl"] = provider.inference_base_url or descriptor["baseUrl"]
-            descriptor["keyEnv"] = (provider.api_key_env_vars or (descriptor["keyEnv"],))[0]
-    except Exception:
-        pass
-    return descriptor
-
-
-def _existing_provider_key(descriptor: Mapping[str, Any]) -> str:
-    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
-    if provider_id and not provider_id == "custom" or provider_id.startswith("custom:"):
-        try:
-            from hermes_cli.auth import resolve_api_key_provider_credentials
-            credentials = resolve_api_key_provider_credentials(provider_id)
-            value = str(credentials.get("api_key") or "").strip()
-            if value:
-                return value
-        except Exception:
-            pass
-    key_env = str(descriptor.get("keyEnv") or "").strip()
-    if not key_env:
-        return ""
-    try:
-        if config_mod is not None and hasattr(config_mod, "get_env_value_prefer_dotenv"):
-            return str(config_mod.get_env_value_prefer_dotenv(key_env) or "").strip()
-        if config_mod is not None and hasattr(config_mod, "load_env"):
-            return str((config_mod.load_env() or {}).get(key_env) or "").strip()
-    except Exception:
-        pass
-    return str(os.environ.get(key_env) or "").strip()
-
-
-def _discover_provider_models(body: ProviderDiscoverRequest) -> tuple[Dict[str, Any], list[str], bool]:
-    descriptor = _provider_descriptor(body.preset_id, body.base_url, body.supplier_name, body.website_url)
-    api_key = body.api_key.strip() or _existing_provider_key(descriptor)
-    if not api_key:
-        raise ValueError("API Key 尚未配置")
-    base_url = _normalize_base_url(str(descriptor.get("baseUrl") or body.base_url))
-    transport = str(descriptor.get("transport") or "openai_chat")
-    api_mode = {
-        "codex_responses": "responses",
-        "anthropic_messages": "anthropic_messages",
-    }.get(transport, "chat_completions")
-    models: Sequence[str] | None = None
-    try:
-        from hermes_cli.models import fetch_api_models
-        models = fetch_api_models(api_key, base_url, timeout=8.0, api_mode=api_mode)
-    except Exception:
-        models = None
-    if not models and body.preset_id != "custom":
-        try:
-            from hermes_cli.models import provider_model_ids
-            models = provider_model_ids(body.preset_id, force_refresh=True)
-        except Exception:
-            models = None
-    cleaned = sorted({str(model).strip() for model in (models or []) if str(model).strip()})
-    if not cleaned:
-        raise ValueError("没有从该供应商获取到可用模型")
-    return descriptor, cleaned[:800], bool(_existing_provider_key(descriptor))
-
-
-def _save_provider_secret(descriptor: Mapping[str, Any], api_key: str) -> None:
-    value = api_key.strip()
-    if not value:
-        return
-    key_env = str(descriptor.get("keyEnv") or "").strip()
-    if not key_env:
-        raise ValueError("该供应商没有可写入的 Hermes 凭证槽")
-    from hermes_cli.credential_lifecycle import save_provider_env_credential
-    save_provider_env_credential(key_env, value)
-
-
-def _save_custom_provider(descriptor: Mapping[str, Any]) -> None:
-    if config_mod is None:
-        raise RuntimeError("Hermes config service unavailable")
-    base_url = str(descriptor["baseUrl"])
-    provider_id = str(descriptor["providerId"])
-    name = str(descriptor["supplierName"])
-    key_env = str(descriptor["keyEnv"])
-    current = config_mod.load_config_readonly() or {}
-    providers = current.get("custom_providers") if isinstance(current, Mapping) else None
-    rows = [dict(item) for item in providers if isinstance(item, Mapping)] if isinstance(providers, list) else []
-    replacement = {
-        "name": name,
-        "provider_key": provider_id,
-        "base_url": base_url,
-        "key_env": key_env,
-        "api_mode": "chat_completions",
-    }
-    normalized = base_url.rstrip("/")
-    for index, item in enumerate(rows):
-        if str(item.get("base_url") or "").rstrip("/") == normalized:
-            rows[index] = {**item, **replacement}
-            break
-    else:
-        rows.append(replacement)
-    config_mod.save_config({"custom_providers": rows}, merge_existing=True)
-
-
-def _runtime_access_provider_ref(descriptor: Mapping[str, Any]) -> str:
-    preset_id = str(descriptor.get("id") or "").strip().lower()
-    if preset_id and preset_id != "custom":
-        prefix = str(descriptor.get("opencodePrefix") or preset_id).strip().lower()
-        if prefix:
-            return prefix[:120]
-    supplier_slug = str(descriptor.get("supplierSlug") or "custom").strip().lower()
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in supplier_slug)
-    return ("hao-" + safe).strip("-")[:120]
-
-
-def _codex_provider_ref(descriptor: Mapping[str, Any]) -> str:
-    supplier_slug = str(descriptor.get("supplierSlug") or "custom").strip().lower()
-    endpoint = str(descriptor.get("baseUrl") or "")
-    digest = hashlib.blake2b(endpoint.encode("utf-8"), digest_size=4).hexdigest()
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in supplier_slug)
-    return f"hao-{safe}-{digest}"[:120]
-
-
-def _codex_profile_ref(descriptor: Mapping[str, Any], model: str) -> str:
-    seed = f"{descriptor.get('supplierSlug')}|{descriptor.get('baseUrl')}|{model}"
-    digest = hashlib.blake2b(seed.encode("utf-8"), digest_size=5).hexdigest()
-    return f"hao-{str(descriptor.get('supplierSlug') or 'provider')[:40]}-{digest}"[:120]
-
-
-def _runtime_access_payloads(
-    descriptor: Mapping[str, Any], model: str, provider_hub_connection_id: str | None = None
-) -> list[Dict[str, Any]]:
-    transport = str(descriptor.get("transport") or "openai_chat")
-    protocol = {
-        "codex_responses": "openai-responses",
-        "openai_chat": "openai-chat-completions",
-        "anthropic_messages": "anthropic-messages",
-    }.get(transport, transport)
-    base_url = str(descriptor.get("baseUrl") or "").rstrip("/")
-    credential_ref = str(descriptor.get("keyEnv") or "").strip()
-    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "")
-    opencode_provider = _runtime_access_provider_ref(descriptor)
-    custom_provider = provider_id == "custom" or provider_id.startswith("custom:")
-
-    accesses: list[Dict[str, Any]] = []
-    if transport in {"openai_chat", "codex_responses"}:
-        connection_config = (
-            {"providerHubConnectionId": provider_hub_connection_id}
-            if provider_hub_connection_id
-            else {}
-        )
-        accesses.append(
+def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]]:
+    rows = []
+    for bucket in values.values():
+        executions = len(bucket["executions"])
+        succeeded = len(bucket["succeeded"])
+        failed = len(bucket["failed"])
+        row = {k: v for k, v in bucket.items() if k not in {"executions", "succeeded", "failed"}}
+        row.update(
             {
-                "runtimeKind": "OPENCODE",
-                "adapterKind": "NATIVE_CONFIG",
-                "providerRef": opencode_provider,
-                "modelRef": model,
-                "baseUrl": base_url if custom_provider else None,
-                "credentialRef": credential_ref or None,
-                "protocol": protocol,
-                "config": {
-                    "managedProvider": custom_provider,
-                    **connection_config,
-                    **({"package": "@ai-sdk/openai-compatible"} if custom_provider else {}),
-                },
-                "priority": 100,
+                "executions": executions,
+                "succeeded": succeeded,
+                "failed": failed,
+                "successRate": (succeeded / (succeeded + failed)) if succeeded + failed else None,
+                "totalTokens": bucket["input"] + bucket["output"],
             }
         )
-        codex_provider = _codex_provider_ref(descriptor)
-        accesses.append(
-            {
-                "runtimeKind": "CODEX",
-                "adapterKind": "NATIVE_CONFIG",
-                "providerRef": codex_provider,
-                "modelRef": model,
-                "profileRef": _codex_profile_ref(descriptor, model),
-                "baseUrl": base_url or None,
-                "credentialRef": credential_ref or None,
-                "protocol": protocol,
-                "config": {
-                    "wireApi": "responses" if transport == "codex_responses" else "chat",
-                    **connection_config,
-                },
-                "priority": 100,
-            }
-        )
-    elif transport == "anthropic_messages":
-        accesses.append(
-            {
-                "runtimeKind": "CLAUDE_CODE",
-                "adapterKind": "NATIVE_CONFIG",
-                "providerRef": "anthropic",
-                "modelRef": model,
-                "baseUrl": base_url or None,
-                "credentialRef": credential_ref or None,
-                "protocol": protocol,
-                "config": {},
-                "priority": 100,
-            }
-        )
-    return accesses
+        rows.append(row)
+    rows.sort(key=lambda row: (-float(row["costUsd"]), -int(row["totalTokens"]), str(row["key"])))
+    return rows
 
 
-def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any]:
-    provider_id = str(descriptor.get("id") or descriptor.get("providerId") or "custom")
-    supplier_slug = str(descriptor["supplierSlug"])
-    supplier_name = str(descriptor["supplierName"])
-    plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else None
-    endpoint_tag = hashlib.blake2b(str(descriptor["baseUrl"]).encode("utf-8"), digest_size=5).hexdigest()
-    economics = _economics_choice(descriptor)
-    payload: Dict[str, Any] = {
-        "supplier": {
-            "slug": supplier_slug,
-            "name": supplier_name,
-            "supplyOrigin": economics["supplyOrigin"],
-            "routingPolicy": economics["routingPolicy"],
-        },
-        "supplierModel": {"key": model, "name": model},
-        "agreement": {
-            "externalAccountRef": f"hermes-provider:{provider_id}:{endpoint_tag}",
-            "name": f"{str(descriptor.get('name') or supplier_name)} via Hermes",
-        },
-    }
-    if plan:
-        payload["plan"] = {**dict(plan), "commercialType": economics["commercialType"]}
-    else:
-        payload["plan"] = {
-            "slug": "default",
-            "name": f"{str(descriptor.get('name') or supplier_name)} access",
-            "commercialType": economics["commercialType"],
-        }
-    return payload
-
-def _model_config(value: Any) -> Dict[str, str]:
-    if not isinstance(value, Mapping):
-        return {}
-    provider = str(value.get("provider") or "").strip()
-    model = str(value.get("default") or value.get("model") or "").strip()
-    if not model:
-        return {}
-    return {"provider": provider, "model": model}
-
-
-def _hermes_model_defaults() -> Dict[str, Dict[str, str]]:
-    defaults: Dict[str, Dict[str, str]] = {}
-    if config_mod is not None:
-        try:
-            config = config_mod.load_config_readonly() or {}
-            global_model = _model_config(config.get("model") if isinstance(config, Mapping) else None)
-            if global_model:
-                defaults["*"] = {**global_model, "source": "HERMES_GLOBAL_CONFIG"}
-        except Exception:
-            pass
-    if get_hermes_home is None:
-        return defaults
-    try:
-        profiles_root = Path(get_hermes_home()) / "profiles"
-    except Exception:
-        return defaults
-    if not profiles_root.exists():
-        return defaults
-    for config_path in profiles_root.glob("*/config.yaml"):
-        try:
-            value = _safe_yaml_load(config_path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            continue
-        model = _model_config(value.get("model") if isinstance(value, Mapping) else None)
-        if model:
-            defaults[config_path.parent.name] = {**model, "source": "HERMES_PROFILE_CONFIG"}
-    return defaults
-
-
-def _normalized(value: Any) -> str:
-    return str(value or "").strip().lower()
-
-
-def _default_employee(workforce: Mapping[str, Any], provider: str, model: str) -> Dict[str, Any] | None:
-    model_key = _normalized(model).split("/")[-1]
-    candidates = []
-    for employee in workforce.get("employees") or []:
-        if not isinstance(employee, Mapping):
-            continue
-        supplier_model = employee.get("supplierModel") if isinstance(employee.get("supplierModel"), Mapping) else {}
-        key = _normalized(supplier_model.get("key"))
-        if key != model_key:
-            continue
-        candidates.append(employee)
-    provider_key = _normalized(provider)
-    if provider_key and candidates:
-        scoped = []
-        for employee in candidates:
-            supplier = employee.get("supplier") if isinstance(employee.get("supplier"), Mapping) else {}
-            slug = _normalized(supplier.get("slug"))
-            if slug and (provider_key == slug or provider_key.startswith(slug + "-")):
-                scoped.append(employee)
-        if len(scoped) == 1:
-            return dict(scoped[0])
-    return dict(candidates[0]) if len(candidates) == 1 else None
-
-
-def _enrich_organization(organization: Dict[str, Any], workforce: Mapping[str, Any]) -> Dict[str, Any]:
-    defaults = _hermes_model_defaults()
-    positions = organization.get("positions") if isinstance(organization.get("positions"), list) else []
-    explicit = 0
-    defaulted = 0
-    unfilled = 0
-    for position in positions:
-        if not isinstance(position, dict):
-            continue
-        appointments = position.get("currentAppointments") if isinstance(position.get("currentAppointments"), list) else []
-        active_appointments = [item for item in appointments if isinstance(item, Mapping) and item.get("status") == "CURRENT"]
-        if active_appointments:
-            primary = active_appointments[0]
-            position["effectiveStaffing"] = {
-                "state": "APPOINTED",
-                "source": "APPOINTMENT",
-                "employeeId": primary.get("employeeId"),
-                "employeeName": primary.get("employeeName"),
-                "appointmentId": primary.get("id"),
-            }
-            explicit += 1
-            continue
-        if str(position.get("runtimeKind") or "").upper() == "HERMES_PROFILE":
-            scope = position.get("workScope") if isinstance(position.get("workScope"), Mapping) else {}
-            scope_slug = str(scope.get("slug") or "")
-            configured = defaults.get(scope_slug) or defaults.get("*")
-            if configured and configured.get("model"):
-                employee = _default_employee(workforce, configured.get("provider", ""), configured["model"])
-                position["effectiveStaffing"] = {
-                    "state": "DEFAULTED" if employee else "DEFAULT_MODEL",
-                    "source": configured.get("source", "HERMES_PROFILE_CONFIG"),
-                    "provider": configured.get("provider", ""),
-                    "model": configured["model"],
-                    "employeeId": employee.get("id") if employee else None,
-                    "employeeName": employee.get("displayName") if employee else None,
-                    "attribution": "PROVIDER_MODEL" if employee else "MODEL_IDENTITY_AMBIGUOUS",
-                }
-                defaulted += 1
-                if position.get("status") == "UNFILLED":
-                    position["status"] = position["effectiveStaffing"]["state"]
+def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    groups = {name: {} for name in ("projects", "phases", "logicalModels", "providers", "physicalModels")}
+    for execution in executions:
+        usage = execution.get("usage") if isinstance(execution.get("usage"), Mapping) else {}
+        for group_name, key in (
+            ("projects", str(execution.get("projectKey") or "unknown")),
+            ("phases", str(execution.get("phase") or "UNKNOWN")),
+            ("logicalModels", str(execution.get("logicalModel") or "unknown")),
+        ):
+            bucket = groups[group_name].setdefault(key, _new_bucket(key))
+            _add(bucket, execution, usage)
+        routes = execution.get("routeUsage") if isinstance(execution.get("routeUsage"), list) else []
+        for route in routes:
+            if not isinstance(route, Mapping):
                 continue
-        position["effectiveStaffing"] = {"state": "UNFILLED", "source": "NONE"}
-        unfilled += 1
-    summary = organization.get("summary") if isinstance(organization.get("summary"), dict) else {}
-    summary["explicitlyAppointedPositions"] = explicit
-    summary["defaultedPositions"] = defaulted
-    summary["configuredPositions"] = explicit + defaulted
-    summary["unfilledPositions"] = unfilled
-    organization["summary"] = summary
-    organization["hermesModelDefaults"] = defaults
-    return organization
+            provider_key = str(route.get("providerKey") or "unknown")
+            physical_model = str(route.get("physicalModel") or "unknown")
+            _add(
+                groups["providers"].setdefault(provider_key, _new_bucket(provider_key)),
+                execution,
+                route,
+                duration=False,
+                outcome=False,
+            )
+            _add(
+                groups["physicalModels"].setdefault(physical_model, _new_bucket(physical_model)),
+                execution,
+                route,
+                duration=False,
+                outcome=False,
+            )
+    return {name: _finish_buckets(values) for name, values in groups.items()}
 
 
-def _entry_settings() -> Dict[str, Any]:
-    if config_mod is None:
-        return {}
-    try:
-        config = config_mod.load_config_readonly() or {}
-    except Exception:
-        return {}
-    plugins = config.get("plugins") if isinstance(config, Mapping) else None
-    entries = plugins.get("entries") if isinstance(plugins, Mapping) else None
-    entry = entries.get(_PLUGIN_ID) if isinstance(entries, Mapping) else None
-    settings = entry.get("settings") if isinstance(entry, Mapping) else None
-    return dict(settings) if isinstance(settings, Mapping) else {}
-
-
-def _runtime_policy_settings() -> Dict[str, str]:
-    settings = _entry_settings()
-    runtime = settings.get("runtime_policy")
-    runtime = runtime if isinstance(runtime, Mapping) else {}
-    positions = runtime.get("positions")
-    positions = positions if isinstance(positions, Mapping) else {}
-    execution_mode = str(settings.get("execution_mode") or "v2").strip().lower()
-    if execution_mode not in {"v2", "v3", "disabled"}:
-        execution_mode = "v2"
-    mode = str(runtime.get("mode") or "prefer").strip().lower()
-    if mode not in {"observe", "prefer", "enforce"}:
-        mode = "prefer"
+def _summary(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    terminal = [item for item in executions if item.get("terminal")]
+    active = [item for item in executions if not item.get("terminal")]
+    usage = _usage({})
+    duration_ms = 0
+    succeeded = 0
+    failed = 0
+    for item in executions:
+        item_usage = item.get("usage") if isinstance(item.get("usage"), Mapping) else {}
+        for key in ("input", "output", "cachedInput", "reasoningOutput", "calls"):
+            usage[key] += int(_number(item_usage.get(key)))
+        usage["costUsd"] += _number(item_usage.get("costUsd"))
+        duration_ms += int(_number(item.get("durationMs")))
+        if item.get("status") == "SUCCEEDED":
+            succeeded += 1
+        elif item.get("status") in {"FAILED", "STUCK", "CANCELLED"}:
+            failed += 1
     return {
-        "executionMode": execution_mode,
-        "mode": mode,
-        "opencodePosition": str(positions.get("opencode") or "coding-executor"),
-        "codexPosition": str(positions.get("codex") or "codex-executor"),
+        "totalExecutions": len(executions),
+        "activeExecutions": len(active),
+        "terminalExecutions": len(terminal),
+        "succeeded": succeeded,
+        "failed": failed,
+        "successRate": (succeeded / (succeeded + failed)) if succeeded + failed else None,
+        "totalDurationMs": duration_ms,
+        "totalTokens": usage["input"] + usage["output"],
+        **usage,
     }
 
 
-def _save_runtime_policy(value: RuntimePolicySettings) -> Dict[str, str]:
-    if config_mod is None:
-        raise RuntimeError("Hermes config service unavailable")
-    execution_mode = value.execution_mode.strip().lower()
-    if execution_mode not in {"v2", "v3", "disabled"}:
-        raise ValueError("execution mode must be v2, v3, or disabled")
-    mode = value.mode.strip().lower()
-    if mode not in {"observe", "prefer", "enforce"}:
-        raise ValueError("runtime policy mode must be observe, prefer, or enforce")
-    partial = {
-        "plugins": {
-            "entries": {
-                _PLUGIN_ID: {
-                    "settings": {
-                        "execution_mode": execution_mode,
-                        "runtime_policy": {
-                            "mode": mode,
-                            "positions": {
-                                "opencode": value.opencode_position.strip() or "coding-executor",
-                                "codex": value.codex_position.strip() or "codex-executor",
-                            },
-                        }
-                    }
-                }
-            }
+def _fetch_all_executions(max_items: int) -> list[Mapping[str, Any]]:
+    global _HISTORY_HYDRATED
+    hydrate = not _HISTORY_HYDRATED
+    exhausted = False
+    offset = 0
+    items: list[Mapping[str, Any]] = []
+    while max_items == 0 or len(items) < max_items:
+        page_limit = _HISTORY_PAGE_SIZE
+        if max_items:
+            page_limit = min(page_limit, max_items - len(items))
+        query = {
+            "limit": page_limit,
+            "offset": offset,
+            "hydrate": "1" if hydrate else "0",
         }
+        payload = _fetch_json(
+            "/api/v3/development/executions?" + urllib.parse.urlencode(query),
+            timeout=45.0,
+        )
+        page = [item for item in payload.get("items", []) if isinstance(item, Mapping)]
+        items.extend(page)
+        if len(page) < page_limit:
+            exhausted = True
+            break
+        offset += len(page)
+    if hydrate and exhausted:
+        _HISTORY_HYDRATED = True
+    return items
+
+
+def _build_dashboard(limit: int) -> Dict[str, Any]:
+    global _CACHE
+    with _CACHE_LOCK:
+        if (
+            _CACHE
+            and _CACHE[1] == limit
+            and time.monotonic() - _CACHE[0] < _CACHE_TTL_SECONDS
+        ):
+            return _CACHE[2]
+
+    runtime = _fetch_json("/api/v3/development/runtime-summary")
+    readiness = _fetch_json("/api/v3/development/readiness")
+    registry = _fetch_json("/api/v3/development/model-registry")
+    catalog = _route_catalog(registry)
+    executions = [_execution(item, catalog) for item in _fetch_all_executions(limit)]
+    active = [item for item in executions if not item["terminal"]]
+    history = [item for item in executions if item["terminal"]]
+    result: Dict[str, Any] = {
+        "schemaVersion": 2,
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "summary": _summary(executions),
+        "active": active,
+        "history": history,
+        "analytics": _analytics(executions),
+        "runtime": runtime,
+        "readiness": readiness,
+        "registry": registry,
     }
-    with _SETTINGS_LOCK:
-        try:
-            config_mod.save_config(partial, merge_existing=True)
-        except Exception as exc:
-            raise RuntimeError("could not persist Hermes plugin settings") from exc
-    return _runtime_policy_settings()
-
-
-async def _partial(name: str, path: str) -> tuple[str, Dict[str, Any]]:
-    try:
-        return name, await asyncio.to_thread(_fetch_json, path)
-    except Exception as exc:
-        return name, {"error": str(exc), "unavailable": True}
+    with _CACHE_LOCK:
+        _CACHE = (time.monotonic(), limit, result)
+    return result
 
 
 @router.get("/health")
 async def health() -> Dict[str, Any]:
     try:
-        control = await asyncio.to_thread(_fetch_json, "/api/v2/health")
-        return {"status": "ok", "controlPlane": control, "runtimePolicy": _runtime_policy_settings()}
+        value = await asyncio.to_thread(_fetch_json, "/api/v3/health")
+        return {"ok": True, "controlPlane": value}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.get("/overview")
-async def overview() -> Dict[str, Any]:
-    # V3 cutover: dashboard reads must not keep the retired Provider Hub alive by
-    # discovering or writing provider connections. The retained V2 projections below
-    # are workforce/business history only; provider runtime authority is LiteLLM.
-    requests = [
-        _partial("workforce", "/api/v2/projections/workforce"),
-        _partial("supply", "/api/v2/projections/supply"),
-        _partial("organization", "/api/v2/projections/office"),
-        _partial("incidents", "/api/v2/incidents?limit=200"),
-        _partial("runtimeDecisions", "/api/v2/runtime-launch-decisions?limit=100"),
-    ]
-    values = dict(await asyncio.gather(*requests))
-    organization_value = values.get("organization")
-    workforce_value = values.get("workforce")
-    if isinstance(organization_value, dict) and not organization_value.get("unavailable") and isinstance(workforce_value, Mapping):
-        values["organization"] = _enrich_organization(organization_value, workforce_value)
-    values.update(
-        {
-            "generatedAt": int(time.time() * 1000),
-            "runtimePolicy": _runtime_policy_settings(),
-            "controlPlaneUrl": "local",
-        }
-    )
-    return values
-
-
-_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
-
-
-def _v3_usage_totals(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
-    totals: Dict[str, Any] = {
-        "input": 0,
-        "output": 0,
-        "cachedInput": 0,
-        "cacheWrite": 0,
-        "reasoningOutput": 0,
-        "costUsd": 0.0,
-        "calls": 0,
-        "executionsWithUsage": 0,
-        "traces": 0,
-    }
-    for item in items:
-        usage = item.get("usage") if isinstance(item.get("usage"), Mapping) else None
-        if usage:
-            totals["executionsWithUsage"] += 1
-            for key in ("input", "output", "cachedInput", "cacheWrite", "reasoningOutput", "calls"):
-                try:
-                    totals[key] += int(usage.get(key) or 0)
-                except (TypeError, ValueError):
-                    pass
-            try:
-                totals["costUsd"] += float(usage.get("costUsd") or 0.0)
-            except (TypeError, ValueError):
-                pass
-        refs = item.get("refs") if isinstance(item.get("refs"), Mapping) else {}
-        if refs.get("langfuseTraceId"):
-            totals["traces"] += 1
-    totals["costUsd"] = round(float(totals["costUsd"]), 6)
-    return totals
-
-
-async def _v3_execution_detail(item: Mapping[str, Any]) -> Dict[str, Any]:
-    execution_id = str(item.get("executionId") or "").strip()
-    if not execution_id:
-        return dict(item)
+@router.get("/dashboard")
+async def dashboard(limit: int = 0) -> Dict[str, Any]:
+    raw_limit = int(limit)
+    safe_limit = 0 if raw_limit <= 0 else min(50_000, raw_limit)
     try:
-        return await asyncio.to_thread(
-            _fetch_json, f"/api/v3/development/executions/{urllib.parse.quote(execution_id, safe='')}", timeout=2.0
-        )
-    except Exception:
-        return dict(item)
-
-
-@router.get("/development")
-async def development(limit: int = 80, detail_limit: int = 24) -> Dict[str, Any]:
-    safe_limit = min(200, max(10, int(limit)))
-    safe_detail_limit = min(50, max(0, int(detail_limit)))
-    runtime_value, policy_value, readiness_value, execution_value, provider_value = await asyncio.gather(
-        _partial("runtime", "/api/v3/development/runtime-summary"),
-        _partial("policy", "/api/v3/development/policy"),
-        _partial("readiness", "/api/v3/development/readiness"),
-        _partial("executions", f"/api/v3/development/executions?limit={safe_limit}"),
-        _partial("providers", "/api/v3/development/model-registry"),
-    )
-    values = dict((runtime_value, policy_value, readiness_value, execution_value, provider_value))
-    raw_items = values.get("executions", {}).get("items", []) if isinstance(values.get("executions"), Mapping) else []
-    items = [dict(item) for item in raw_items if isinstance(item, Mapping)]
-    active = [item for item in items if str(item.get("status") or "UNKNOWN").upper() not in _V3_TERMINAL_STATUSES]
-    terminal = [item for item in items if str(item.get("status") or "UNKNOWN").upper() in _V3_TERMINAL_STATUSES]
-
-    detail_targets = active + terminal[:safe_detail_limit]
-    detailed = await asyncio.gather(*(_v3_execution_detail(item) for item in detail_targets)) if detail_targets else []
-    detail_by_id = {str(item.get("executionId") or ""): item for item in detailed if isinstance(item, Mapping)}
-    active = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in active]
-    history = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in terminal]
-    observed = active + history[:safe_detail_limit]
-    usage = _v3_usage_totals(observed)
-    statuses: Dict[str, int] = {}
-    for item in items:
-        status = str(item.get("status") or "UNKNOWN").upper()
-        statuses[status] = statuses.get(status, 0) + 1
-    trace_base = max(1, len(observed))
-    summary = {
-        "total": len(items),
-        "active": len(active),
-        "history": len(history),
-        "waiting": statuses.get("PAUSED", 0) + statuses.get("WAITING_FOR_CONFIRMATION", 0),
-        "failed": statuses.get("FAILED", 0) + statuses.get("STUCK", 0),
-        "statuses": statuses,
-        "usage": usage,
-        "traceCoverage": usage["traces"] / trace_base if observed else 0.0,
-    }
-    return {
-        "projectionVersion": 1,
-        "generatedAt": int(time.time() * 1000),
-        "runtime": values.get("runtime", {}),
-        "policy": values.get("policy", {}),
-        "readiness": values.get("readiness", {}),
-        "providers": values.get("providers", {}),
-        "active": active,
-        "history": history,
-        "summary": summary,
-    }
-
-
-@router.get("/workforce")
-async def workforce() -> Dict[str, Any]:
-    try:
-        return await asyncio.to_thread(_fetch_json, "/api/v2/projections/workforce")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/employees/{employee_id}/dossier")
-async def employee_dossier(employee_id: str) -> Dict[str, Any]:
-    safe_id = employee_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid employee id")
-    try:
-        return await asyncio.to_thread(
-            _fetch_json, f"/api/v2/projections/employees/{safe_id}/dossier"
-        )
+        return await asyncio.to_thread(_build_dashboard, safe_limit)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -1400,440 +340,3 @@ async def model_registry() -> Dict[str, Any]:
         return await asyncio.to_thread(_fetch_json, "/api/v3/development/model-registry")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-def _provider_hub_retired() -> None:
-    raise HTTPException(
-        status_code=410,
-        detail="Provider Hub runtime authority was retired. Manage providers, credentials, models, health, and routing in LiteLLM Admin.",
-    )
-
-
-@router.get("/providers/hub")
-async def provider_hub(force: bool = False) -> Dict[str, Any]:
-    del force
-    _provider_hub_retired()
-
-
-@router.get("/providers/hub/{connection_id}")
-async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = connection_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid provider connection id")
-    try:
-        return await asyncio.to_thread(_fetch_json, f"/api/v2/provider-connections/{safe_id}")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/providers/hub/{connection_id}/control")
-async def provider_hub_control(
-    connection_id: str, request: ProviderControlRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = connection_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid provider connection id")
-    payload: Dict[str, Any] = {"enabled": request.enabled}
-    if request.reason is not None:
-        payload["reason"] = request.reason
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/provider-connections/{safe_id}/control",
-            payload,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/providers/hub/{connection_id}/profile")
-async def provider_hub_profile(
-    connection_id: str, request: ProviderProfileRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = connection_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid provider connection id")
-    payload: Dict[str, Any] = {
-        "displayName": request.display_name,
-        "baseUrl": request.base_url,
-        "websiteUrl": request.website_url,
-        "protocol": request.protocol,
-    }
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/provider-connections/{safe_id}/profile",
-            payload,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/providers/hub/{connection_id}/retire")
-async def provider_hub_retire(
-    connection_id: str, request: ProviderRetireRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = connection_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid provider connection id")
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/provider-connections/{safe_id}/retire",
-            {"reason": request.reason or "AI Office dashboard operator"},
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/suppliers/{supplier_id}/profile")
-async def supplier_profile(
-    supplier_id: str, request: SupplierProfileRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = supplier_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid supplier id")
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/suppliers/{safe_id}/profile",
-            {"name": request.name, "websiteUrl": request.website_url},
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/suppliers/{supplier_id}/economics")
-async def supplier_economics(
-    supplier_id: str, request: SupplierEconomicsRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = supplier_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid supplier id")
-    economics = _economics_choice(
-        {}, request.supply_origin, request.commercial_type, request.routing_policy
-    )
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/suppliers/{safe_id}/economics",
-            economics,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.post("/suppliers/{supplier_id}/retire")
-async def supplier_retire(
-    supplier_id: str, request: SupplierRetireRequest
-) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = supplier_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid supplier id")
-    try:
-        return await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/suppliers/{safe_id}/retire",
-            {
-                "reason": request.reason or "AI Office dashboard operator",
-                "force": request.force,
-            },
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/suppliers/{supplier_id}/connections")
-async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
-    _provider_hub_retired()
-    safe_id = supplier_id.strip()
-    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
-        raise HTTPException(status_code=400, detail="invalid supplier id")
-    try:
-        return await asyncio.to_thread(
-            _fetch_json, f"/api/v2/suppliers/{safe_id}/provider-connections"
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/providers/presets")
-async def provider_presets() -> Dict[str, Any]:
-    _provider_hub_retired()
-    items = []
-    for preset_id, raw in _PROVIDER_PRESETS.items():
-        descriptor = _provider_descriptor(preset_id, "https://example.invalid/v1" if preset_id == "custom" else "", "") if preset_id != "custom" else raw
-        items.append(
-            {
-                "id": preset_id,
-                "name": descriptor.get("name"),
-                "supplierName": descriptor.get("supplierName"),
-                "featured": bool(descriptor.get("featured")),
-                "custom": preset_id == "custom",
-                "configured": False if preset_id == "custom" else bool(_existing_provider_key(descriptor)),
-                "economics": _economics_choice(descriptor),
-            }
-        )
-    return {
-        "items": items,
-        "quickProfiles": list(_ECONOMICS_QUICK_PROFILES),
-        "supplyOrigins": list(_SUPPLY_ORIGINS),
-        "commercialTypes": list(_COMMERCIAL_TYPES),
-        "routingPolicies": list(_ROUTING_POLICIES),
-    }
-
-
-@router.post("/providers/discover")
-async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
-    _provider_hub_retired()
-    try:
-        descriptor, models, configured = await asyncio.to_thread(_discover_provider_models, body)
-        return {
-            "provider": {
-                "id": body.preset_id,
-                "name": descriptor.get("name"),
-                "supplierName": descriptor.get("supplierName"),
-                "baseUrl": descriptor.get("baseUrl") if body.preset_id == "custom" else None,
-                "websiteUrl": descriptor.get("websiteUrl"),
-                "configured": configured,
-                "economics": _economics_choice(descriptor),
-            },
-            "models": [{"id": model, "name": model} for model in models],
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="供应商模型发现失败") from exc
-
-
-@router.post("/providers/register")
-async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
-    _provider_hub_retired()
-    try:
-        descriptor, discovered, _configured = await asyncio.to_thread(_discover_provider_models, body)
-        if _is_official_deepseek_endpoint(descriptor.get("baseUrl")):
-            raise ValueError(
-                "DeepSeek 官方 API 仅保留给 Hermes 大脑配置，不进入 AI Office 员工采购与执行路由"
-            )
-        economics = _economics_choice(
-            descriptor,
-            body.supply_origin,
-            body.commercial_type,
-            body.routing_policy,
-        )
-        descriptor = dict(descriptor)
-        descriptor["supplyOrigin"] = economics["supplyOrigin"]
-        descriptor["routingPolicy"] = economics["routingPolicy"]
-        plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
-        descriptor["plan"] = {
-            **dict(plan),
-            "slug": str(plan.get("slug") or "default"),
-            "name": str(plan.get("name") or f"{descriptor.get('name') or descriptor.get('supplierName')} access"),
-            "commercialType": economics["commercialType"],
-        }
-        selected = list(dict.fromkeys(model.strip() for model in body.selected_models if model.strip()))
-        if not selected:
-            raise ValueError("至少选择一个模型作为员工")
-        unknown = [model for model in selected if model not in discovered]
-        if unknown:
-            raise ValueError("所选模型不在本次供应商发现结果中")
-        default_model = body.default_model.strip() or selected[0]
-        if default_model not in selected:
-            raise ValueError("默认员工必须来自已选择的模型")
-
-        if body.api_key.strip():
-            await asyncio.to_thread(_save_provider_secret, descriptor, body.api_key)
-        if body.preset_id == "custom":
-            await asyncio.to_thread(_save_custom_provider, descriptor)
-
-        hub_connection = await asyncio.to_thread(
-            _hub_upsert_connection,
-            {
-                "providerKey": str(descriptor.get("id") or descriptor.get("providerId") or body.preset_id),
-                "displayName": str(descriptor.get("name") or descriptor.get("supplierName") or body.preset_id),
-                "baseUrl": descriptor.get("baseUrl"),
-                "websiteUrl": descriptor.get("websiteUrl") or (_website_origin(str(descriptor.get("baseUrl"))) if descriptor.get("baseUrl") else None),
-                "protocol": {
-                    "codex_responses": "openai-responses",
-                    "anthropic_messages": "anthropic-messages",
-                }.get(str(descriptor.get("transport") or "openai_chat"), "openai-chat-completions"),
-                "authKind": "API_KEY",
-                "credentialRef": descriptor.get("keyEnv"),
-                "credentialScope": "GLOBAL",
-                "sourceKind": "DASHBOARD_ONBOARDING",
-                "shareScope": "GLOBAL",
-                "health": "READY",
-                "models": discovered,
-                "metadata": {"onboardedBy": "hermes-ai-office"},
-            },
-        )
-
-        registrations = []
-        supplier_id = ""
-        employee_ids: list[str] = []
-        default_employee_id = ""
-        for model in selected:
-            payload = _catalog_payload(descriptor, model)
-            digest = hashlib.blake2b(
-                f"{payload['supplier']['slug']}|{model}".encode("utf-8"), digest_size=8
-            ).hexdigest()
-            result = await asyncio.to_thread(
-                _post_json,
-                "/api/v2/commands/supply-catalog/register",
-                payload,
-                idempotency_key=f"office-onboard-v2-{digest}",
-            )
-            supplier = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
-            employee = result.get("employee") if isinstance(result.get("employee"), Mapping) else {}
-            if not supplier.get("id") or not employee.get("id"):
-                raise RuntimeError("control plane did not return supplier/employee identity")
-            supplier_id = str(supplier["id"])
-            website_url = str(descriptor.get("websiteUrl") or "").strip()
-            if website_url:
-                await asyncio.to_thread(
-                    _post_json,
-                    f"/api/v2/commands/suppliers/{supplier_id}/profile",
-                    {"name": str(descriptor.get("supplierName") or supplier.get("name") or "Supplier"), "websiteUrl": website_url},
-                    idempotency_key="office-supplier-site-v1-" + hashlib.blake2b(f"{supplier_id}|{website_url}".encode("utf-8"), digest_size=8).hexdigest(),
-                )
-            employee_id = str(employee["id"])
-            employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
-            employment_id = str(employment.get("id") or "")
-            runtime_accesses = []
-            if not employment_id:
-                raise RuntimeError("control plane did not return employment identity")
-            for access_payload in _runtime_access_payloads(
-                descriptor, model, str(hub_connection.get("id") or "")
-            ):
-                runtime_access = await asyncio.to_thread(
-                    _post_json,
-                    f"/api/v2/commands/employments/{employment_id}/runtime-access",
-                    access_payload,
-                    idempotency_key=(
-                        f"office-runtime-access-{employment_id}-"
-                        f"{str(access_payload.get('runtimeKind') or '').lower()}-"
-                        f"{hashlib.blake2b(json.dumps(access_payload, sort_keys=True).encode('utf-8'), digest_size=5).hexdigest()}"
-                    ),
-                )
-                runtime_accesses.append(runtime_access)
-            employee_ids.append(employee_id)
-            if model == default_model:
-                default_employee_id = employee_id
-            registrations.append(
-                {
-                    "model": model,
-                    "employeeId": employee_id,
-                    "employeeName": employee.get("displayName") or model,
-                    "employmentId": employment_id or None,
-                    "runtimeAccess": runtime_accesses,
-                }
-            )
-        if supplier_id:
-            await asyncio.to_thread(
-                _hub_upsert_connection,
-                {
-                    "providerKey": hub_connection.get("provider_key"),
-                    "displayName": hub_connection.get("display_name"),
-                    "supplierId": supplier_id,
-                    "baseUrl": hub_connection.get("base_url"),
-                    "websiteUrl": hub_connection.get("website_url") or descriptor.get("websiteUrl"),
-                    "protocol": hub_connection.get("protocol"),
-                    "authKind": hub_connection.get("auth_kind"),
-                    "credentialRef": hub_connection.get("credential_ref"),
-                    "credentialScope": hub_connection.get("credential_scope"),
-                    "sourceProfileId": hub_connection.get("source_profile_id"),
-                    "sourceKind": hub_connection.get("source_kind"),
-                    "shareScope": hub_connection.get("share_scope"),
-                    "health": hub_connection.get("health"),
-                    "models": hub_connection.get("models") or discovered,
-                    "metadata": hub_connection.get("metadata") or {},
-                },
-            )
-        plan_spec = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
-        await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/suppliers/{supplier_id}/economics",
-            {
-                **economics,
-                "planSlug": str(plan_spec.get("slug") or "default"),
-                "planName": str(plan_spec.get("name") or f"{descriptor.get('name') or descriptor.get('supplierName')} access"),
-            },
-            idempotency_key=f"office-supplier-economics-{supplier_id}-{hashlib.blake2b(json.dumps(economics, sort_keys=True).encode('utf-8'), digest_size=6).hexdigest()}",
-        )
-        preference = await asyncio.to_thread(
-            _post_json,
-            f"/api/v2/commands/suppliers/{supplier_id}/staffing-preferences",
-            {"enabledEmployeeIds": employee_ids, "defaultEmployeeId": default_employee_id},
-            idempotency_key=f"office-supplier-pref-{supplier_id}-{hashlib.blake2b('|'.join(employee_ids).encode('utf-8'), digest_size=6).hexdigest()}",
-        )
-        return {
-            "ok": True,
-            "supplierId": supplier_id,
-            "employees": registrations,
-            "defaultEmployeeId": default_employee_id,
-            "staffingPreferences": preference.get("metadata", {}).get("staffingPreferences", {}),
-        }
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail="供应商保存失败") from exc
-
-
-@router.get("/supply")
-async def supply() -> Dict[str, Any]:
-    try:
-        return await asyncio.to_thread(_fetch_json, "/api/v2/projections/supply")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/organization")
-async def organization() -> Dict[str, Any]:
-    try:
-        org, workforce = await asyncio.gather(
-            asyncio.to_thread(_fetch_json, "/api/v2/projections/office"),
-            asyncio.to_thread(_fetch_json, "/api/v2/projections/workforce"),
-        )
-        return _enrich_organization(org, workforce)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/runtime-decisions")
-async def runtime_decisions(limit: int = 100) -> Dict[str, Any]:
-    safe_limit = min(500, max(1, int(limit)))
-    try:
-        return await asyncio.to_thread(
-            _fetch_json, f"/api/v2/runtime-launch-decisions?limit={safe_limit}"
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/incidents")
-async def incidents(limit: int = 200) -> Dict[str, Any]:
-    safe_limit = min(500, max(1, int(limit)))
-    try:
-        return await asyncio.to_thread(_fetch_json, f"/api/v2/incidents?limit={safe_limit}")
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
-
-@router.get("/settings/runtime-policy")
-async def get_runtime_policy() -> Dict[str, str]:
-    return _runtime_policy_settings()
-
-
-@router.post("/settings/runtime-policy")
-async def set_runtime_policy(body: RuntimePolicySettings) -> Dict[str, Any]:
-    try:
-        return {"ok": True, "runtimePolicy": await asyncio.to_thread(_save_runtime_policy, body)}
-    except Exception as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc

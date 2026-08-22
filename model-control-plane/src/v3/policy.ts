@@ -16,7 +16,6 @@ import {
 
 interface BackendSupportsConfig {
   litellm_managed?: boolean | 'conditional';
-  native_subscription?: boolean | 'conditional';
   write?: boolean;
 }
 
@@ -54,8 +53,7 @@ function isDevelopmentPhase(value: string): value is DevelopmentPhase {
 function supportsTransport(backend: BackendPolicyConfig, mode: TransportMode): boolean {
   if (mode === 'INTERNAL') return backend.kind === 'internal';
   if (backend.kind === 'internal') return false;
-  if (mode === 'LITELLM_MANAGED') return backend.supports?.litellm_managed !== false;
-  return backend.supports?.native_subscription !== false;
+  return backend.supports?.litellm_managed !== false;
 }
 
 function validateConfig(raw: unknown): DevelopmentPolicyConfig {
@@ -63,7 +61,7 @@ function validateConfig(raw: unknown): DevelopmentPolicyConfig {
     throw new Error('V3_POLICY_INVALID');
   }
   const config = raw as Record<string, unknown>;
-  if (Number(config.version) !== 1) throw new Error('V3_POLICY_VERSION_UNSUPPORTED');
+  if (Number(config.version) !== 2) throw new Error('V3_POLICY_VERSION_UNSUPPORTED');
   if (!config.phases || typeof config.phases !== 'object' || Array.isArray(config.phases)) {
     throw new Error('V3_POLICY_PHASES_REQUIRED');
   }

@@ -315,18 +315,59 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
       let reasoningOutput = 0;
       let costUsd = 0;
       let calls = 0;
+      const routeTotals = new Map<
+        string,
+        {
+          model?: string;
+          provider?: string;
+          deploymentId?: string;
+          input: number;
+          output: number;
+          cachedInput: number;
+          reasoningOutput: number;
+          costUsd: number;
+          calls: number;
+        }
+      >();
       for (const row of rows) {
-        input += finiteNumber(row.prompt_tokens);
-        output += finiteNumber(row.completion_tokens);
-        costUsd += finiteNumber(row.spend);
-        calls += 1;
-
+        const rowInput = finiteNumber(row.prompt_tokens);
+        const rowOutput = finiteNumber(row.completion_tokens);
+        const rowCost = finiteNumber(row.spend);
         const metadata = nestedRecord(row, 'metadata');
         const usageObject = nestedRecord(metadata, 'usage_object');
         const promptDetails = nestedRecord(usageObject, 'prompt_tokens_details');
         const completionDetails = nestedRecord(usageObject, 'completion_tokens_details');
-        cachedInput += finiteNumber(promptDetails.cached_tokens);
-        reasoningOutput += finiteNumber(completionDetails.reasoning_tokens);
+        const rowCached = finiteNumber(promptDetails.cached_tokens);
+        const rowReasoning = finiteNumber(completionDetails.reasoning_tokens);
+        const model = String(row.model ?? '').trim();
+        const provider = String(row.custom_llm_provider ?? row.provider ?? '').trim();
+        const deploymentId = String(row.model_id ?? '').trim();
+        const routeKey = `${deploymentId}\u0000${provider}\u0000${model}`;
+        const route = routeTotals.get(routeKey) ?? {
+          ...(model ? { model } : {}),
+          ...(provider ? { provider } : {}),
+          ...(deploymentId ? { deploymentId } : {}),
+          input: 0,
+          output: 0,
+          cachedInput: 0,
+          reasoningOutput: 0,
+          costUsd: 0,
+          calls: 0,
+        };
+        route.input += rowInput;
+        route.output += rowOutput;
+        route.cachedInput += rowCached;
+        route.reasoningOutput += rowReasoning;
+        route.costUsd += rowCost;
+        route.calls += 1;
+        routeTotals.set(routeKey, route);
+
+        input += rowInput;
+        output += rowOutput;
+        cachedInput += rowCached;
+        reasoningOutput += rowReasoning;
+        costUsd += rowCost;
+        calls += 1;
       }
 
       const latest = rows[0] ?? {};
@@ -353,6 +394,17 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
               },
             }
           : {}),
+        routeUsage: [...routeTotals.values()].map((route) => ({
+          ...(route.model ? { model: route.model } : {}),
+          ...(route.provider ? { provider: route.provider } : {}),
+          ...(route.deploymentId ? { deploymentId: route.deploymentId } : {}),
+          input: route.input,
+          output: route.output,
+          ...(route.cachedInput > 0 ? { cachedInput: route.cachedInput } : {}),
+          ...(route.reasoningOutput > 0 ? { reasoningOutput: route.reasoningOutput } : {}),
+          costUsd: route.costUsd,
+          calls: route.calls,
+        })),
       };
     } catch {
       this.#setHealth('UNAVAILABLE');
