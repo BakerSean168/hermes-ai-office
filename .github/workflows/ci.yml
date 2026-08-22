@@ -50,6 +50,12 @@ jobs:
         id: install_dependencies
         run: npm ci
 
+      - name: Public Repository Safety
+        id: public_safety
+        if: always() && steps.install_dependencies.outcome == 'success'
+        run: npm run check:public-safety
+        continue-on-error: true
+
       # --- Protocol spec checks (blocking) ---
 
       - name: Validate AsyncAPI spec
@@ -168,6 +174,7 @@ jobs:
           CHECKOUT: ${{ steps.checkout.outcome }}
           SETUP_NODE: ${{ steps.setup_node.outcome }}
           INSTALL_DEPENDENCIES: ${{ steps.install_dependencies.outcome }}
+          PUBLIC_SAFETY: ${{ steps.public_safety.outcome }}
           TYPE_CHECK: ${{ steps.type_check.outcome }}
           LINT: ${{ steps.lint.outcome }}
           WEBVIEW_TEST: ${{ steps.webview_test.outcome }}
@@ -192,6 +199,7 @@ jobs:
             echo "| Checkout | $(status "$CHECKOUT") |"
             echo "| Setup Node | $(status "$SETUP_NODE") |"
             echo "| Install dependencies | $(status "$INSTALL_DEPENDENCIES") |"
+            echo "| **Public repository safety** | $(status "$PUBLIC_SAFETY") |"
             echo "| **Type check** | $(status "$TYPE_CHECK") |"
             echo "| **Lint** | $(status "$LINT") |"
             echo "| **Webview tests** | $(status "$WEBVIEW_TEST") |"
@@ -211,6 +219,7 @@ jobs:
           CHECKOUT: ${{ steps.checkout.outcome }}
           SETUP_NODE: ${{ steps.setup_node.outcome }}
           INSTALL_DEPENDENCIES: ${{ steps.install_dependencies.outcome }}
+          PUBLIC_SAFETY: ${{ steps.public_safety.outcome }}
           TYPE_CHECK: ${{ steps.type_check.outcome }}
           LINT: ${{ steps.lint.outcome }}
           WEBVIEW_TEST: ${{ steps.webview_test.outcome }}
@@ -220,7 +229,7 @@ jobs:
           SERVER_TEST: ${{ steps.server_test.outcome }}
         run: |
           failed=0
-          for step in CHECKOUT SETUP_NODE INSTALL_DEPENDENCIES \
+          for step in CHECKOUT SETUP_NODE INSTALL_DEPENDENCIES PUBLIC_SAFETY \
                       TYPE_CHECK LINT \
                       WEBVIEW_TEST FORMAT_CHECK BUILD NPM_PACKAGE SERVER_TEST; do
             val=$(printenv "$step" 2>/dev/null || echo "skipped")

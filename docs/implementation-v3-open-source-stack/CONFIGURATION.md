@@ -221,11 +221,10 @@ Control-plane-only environment:
 ```text
 MODEL_CP_V3_LITELLM_OBSERVABILITY=1
 MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE=/srv/hermes-personal/secrets/litellm.env
-MODEL_CP_V3_LITELLM_ADMIN_URL=https://oracle.taile92a8e.ts.net:10446/ui/
+MODEL_CP_V3_LITELLM_ADMIN_URL=https://<tailnet-host>:10446/ui/
 ```
 
-The admin/master credential is root-only and is never injected into OpenHands or
-OpenCode. Workers keep using the scoped LiteLLM client key.
+The host-specific Admin URL is loaded from `/srv/hermes-personal/secrets/model-control-plane-v3.env` in production so real internal DNS names do not need to be committed. The admin/master credential is root-only and is never injected into OpenHands or OpenCode. Workers keep using the scoped LiteLLM client key.
 
 Langfuse remains an optional deeper analytics/trace plane. If enabled later, its
 credentials stay outside source control:

@@ -117,6 +117,6 @@ Production on oracle2 uses `deploy/hermes-model-control-plane.service` plus `dep
 /srv/hermes-personal/data/model-control-plane/control-plane.sqlite
 ```
 
-The canonical checkout is `/home/ubuntu/projects/pixel-agents`. Install/update the systemd definition with `sudo ./model-control-plane/deploy/install-oracle2-systemd.sh`; the script restarts only the model control plane, not the Hermes Gateway. The V3 drop-in also publishes the tailnet-only LiteLLM Admin URL (`https://oracle.taile92a8e.ts.net:10446/ui/`) to the read-only AI Office registry projection.
+The canonical checkout is `/home/ubuntu/projects/pixel-agents`. Install/update the systemd definition with `sudo ./model-control-plane/deploy/install-oracle2-systemd.sh`; the script restarts only the model control plane, not the Hermes Gateway. Host-specific metadata such as the tailnet-only LiteLLM Admin URL is loaded from the root-owned `/srv/hermes-personal/secrets/model-control-plane-v3.env` file and projected read-only to AI Office. Use `deploy/model-control-plane-v3.env.example` as the public template.
 
 A release rebuilds the control-plane artifact, restarts only `hermes-model-control-plane`, then verifies V2 health, V3 health, `GET /api/v3/development/model-registry`, LiteLLM health, Hermes execution sync, SQLite integrity, and foreign keys.

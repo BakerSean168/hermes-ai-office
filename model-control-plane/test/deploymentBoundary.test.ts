@@ -37,7 +37,7 @@ test('LiteLLM config keeps provider/model CRUD in the DB and exposes only stable
   assert.equal(fs.existsSync(path.join(root, 'src/v2/bootstrapReference.ts')), false);
 });
 
-test('oracle2 systemd deployment is reproducible from the canonical checkout and publishes LiteLLM Admin metadata', () => {
+test('oracle2 systemd deployment is reproducible from the canonical checkout without committing host-specific admin URLs', () => {
   const unit = fs.readFileSync(
     path.join(root, 'deploy/hermes-model-control-plane.service'),
     'utf8',
@@ -53,12 +53,14 @@ test('oracle2 systemd deployment is reproducible from the canonical checkout and
   assert.match(dropin, /MODEL_CP_V3_LITELLM_URL=http:\/\/127\.0\.0\.1:4000/);
   assert.match(
     dropin,
-    /MODEL_CP_V3_LITELLM_ADMIN_URL=https:\/\/oracle\.taile92a8e\.ts\.net:10446\/ui\//,
+    /EnvironmentFile=-\/srv\/hermes-personal\/secrets\/model-control-plane-v3\.env/,
   );
+  assert.doesNotMatch(dropin, /\.ts\.net|MODEL_CP_V3_LITELLM_ADMIN_URL=/);
   assert.match(dropin, /MODEL_CP_V3_LITELLM_OBSERVABILITY=1/);
   assert.match(installer, /rm -f \"\$dropin_dir\/v3-shadow\.conf\"/);
   assert.match(installer, /systemctl restart hermes-model-control-plane\.service/);
-  assert.doesNotMatch(installer, /hermes gateway|hermes-personal/);
+  assert.match(installer, /chmod 0600 \"\$runtime_env\"/);
+  assert.doesNotMatch(installer, /hermes gateway/);
 });
 
 test('OpenCode V3 logical models correlate LiteLLM spend by execution ID', () => {

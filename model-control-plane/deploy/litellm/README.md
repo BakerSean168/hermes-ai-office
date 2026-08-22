@@ -12,7 +12,7 @@ read-only; provider/model mutations belong to LiteLLM Admin/API.
 - The pinned LiteLLM image is AArch64-compatible and digest-pinned in `docker-compose.yml`.
 - `/srv/hermes-personal/secrets/litellm.env` contains the master key and PostgreSQL secrets and stays outside Git.
 - `/srv/hermes-personal/data/secrets/litellm-runtime.key` contains the scoped runtime virtual key used by workers.
-- Tailnet-only Admin UI: `https://oracle.taile92a8e.ts.net:10446/ui/` -> `127.0.0.1:4000` through Tailscale Serve.
+- Tailnet-only Admin UI: `https://<tailnet-host>:10446/ui/` -> `127.0.0.1:4000` through Tailscale Serve. The real host name stays in the root-owned V3 runtime env file, not Git.
 - The master key is used only by the control plane/Admin UI. OpenHands/OpenCode workers never receive it.
 
 `config.yaml` intentionally contains no provider endpoint or provider API key and no
