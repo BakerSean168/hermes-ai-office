@@ -253,13 +253,13 @@ This section is auto-generated. Do not edit between the markers; CI fails on dri
 
 ### `@area:areas` (8 tests)
 
-- `e2e/claude/hooks-off/areas-multiroot.spec.ts:49` — painting an area labels tiles in the layout (Areas (multi-root))
-- `e2e/claude/hooks-off/areas-multiroot.spec.ts:77` — areas can be added and removed (Areas (multi-root))
-- `e2e/claude/hooks-off/areas-multiroot.spec.ts:110` — a folder can be mapped to an area and the mapping persists (Areas (multi-root))
-- `e2e/claude/hooks-off/areas-multiroot.spec.ts:169` — an agent for the MAPPED folder takes a seat inside its area (Areas (multi-root) › seat preference (alpha → Engineering))
-- `e2e/claude/hooks-off/areas-multiroot.spec.ts:200` — an agent for an UNMAPPED folder is not forced into the area (Areas (multi-root) › seat preference (alpha → Engineering))
-- `e2e/claude/hooks-off/areas.spec.ts:39` — seeded areas + areaTiles load and showAreas is effective (Areas (single-folder) › seeded area data + show-areas state)
-- `e2e/claude/hooks-off/areas.spec.ts:71` — the Areas tool button is hidden without workspace folders (Areas (single-folder))
+- `e2e/claude/hooks-off/areas-multiroot.spec.ts:71` — painting an area labels tiles in the layout (Areas (multi-root))
+- `e2e/claude/hooks-off/areas-multiroot.spec.ts:99` — areas can be added and removed (Areas (multi-root))
+- `e2e/claude/hooks-off/areas-multiroot.spec.ts:132` — a folder can be mapped to an area and the mapping persists (Areas (multi-root))
+- `e2e/claude/hooks-off/areas-multiroot.spec.ts:195` — an agent for the MAPPED folder takes a seat inside its area (Areas (multi-root) › seat preference (alpha → Engineering))
+- `e2e/claude/hooks-off/areas-multiroot.spec.ts:226` — an agent for an UNMAPPED folder is not forced into the area (Areas (multi-root) › seat preference (alpha → Engineering))
+- `e2e/claude/hooks-off/areas.spec.ts:38` — seeded areas + areaTiles load and showAreas is effective (Areas (single-folder) › seeded area data + show-areas state)
+- `e2e/claude/hooks-off/areas.spec.ts:70` — the Areas tool button is available in a single-folder workspace (Areas (single-folder))
 - `e2e/claude/hooks-off/areas.spec.ts:90` — the Areas tool button is visible with a seeded areas layout (Areas (single-folder) › seeded areas layout (positive gate))
 
 ### `@area:carpet` (8 tests)

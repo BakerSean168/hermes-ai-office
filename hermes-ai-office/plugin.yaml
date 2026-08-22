@@ -1,10 +1,14 @@
 name: hermes-ai-office
-version: "0.11.3"
-description: Native Hermes AI company dashboard, workforce policy, and runtime staffing for Codex and OpenCode.
+version: "0.20.0"
+description: Native Hermes V3 development control plane with LiteLLM-backed model/provider registry and OpenHands execution.
 provides_tools:
-  - ai_office_add_provider
   - ai_office_list_providers
-  - ai_office_set_provider_state
+  - ai_office_run_phase
+  - ai_office_get_execution
+  - ai_office_continue_execution
+  - ai_office_cancel_execution
+  - ai_office_list_active
+  - ai_office_resolve_execution
 provides_hooks:
   - subagent_start
   - subagent_stop

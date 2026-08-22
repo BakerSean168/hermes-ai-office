@@ -1,0 +1,189 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { fileURLToPath } from 'node:url';
+
+import { EnvFileValueProvider, OpenHandsExecutionHost } from '../src/v3/adapters/openHands.js';
+import { DevelopmentPolicy } from '../src/v3/policy.js';
+
+async function listen(server: Server): Promise<number> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (!address || typeof address === 'string') reject(new Error('missing address'));
+      else resolve(address.port);
+    });
+  });
+}
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const policy = DevelopmentPolicy.fromFile(path.resolve(here, '../config/development-policy.yaml'));
+
+test('OpenHands V3 adapter creates a correlated managed execution and normalizes usage', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'openhands-v3-'));
+  const envFile = path.join(directory, 'openhands.env');
+  fs.writeFileSync(
+    envFile,
+    'SESSION_API_KEY=session-secret\nLITELLM_V3_KEY=virtual-secret\nLITELLM_V3_BASE_URL=http://127.0.0.1:4000\n',
+  );
+  let status = 'running';
+  let createBody: Record<string, unknown> | undefined;
+  const server = createServer((request, response) => {
+    if (request.headers['x-session-api-key'] !== 'session-secret') {
+      response.writeHead(401).end('{}');
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/health') {
+      response.end('{"status":"ok"}');
+      return;
+    }
+    if (request.url === '/api/conversations' && request.method === 'POST') {
+      let body = '';
+      request.on('data', (chunk) => (body += chunk));
+      request.on('end', () => {
+        createBody = JSON.parse(body);
+        response.end(
+          JSON.stringify({
+            id: '11111111-1111-4111-8111-111111111111',
+            execution_status: status,
+            created_at: '2026-08-21T15:00:00Z',
+            updated_at: '2026-08-21T15:00:01Z',
+            stats: {},
+          }),
+        );
+      });
+      return;
+    }
+    if (request.url?.endsWith('/pause') && request.method === 'POST') {
+      status = 'paused';
+      response.end('{"success":true}');
+      return;
+    }
+    if (request.url?.endsWith('/agent_final_response')) {
+      response.end('{"response":"PLAN_OK"}');
+      return;
+    }
+    if (request.url?.startsWith('/api/conversations/')) {
+      status = status === 'paused' ? status : 'finished';
+      response.end(
+        JSON.stringify({
+          id: '11111111-1111-4111-8111-111111111111',
+          execution_status: status,
+          created_at: '2026-08-21T15:00:00Z',
+          updated_at: '2026-08-21T15:00:10Z',
+          stats: {
+            usage_to_metrics: {
+              default: {
+                accumulated_cost: 0.12,
+                accumulated_token_usage: {
+                  prompt_tokens: 100,
+                  completion_tokens: 20,
+                  cache_read_tokens: 10,
+                  cache_write_tokens: 3,
+                  reasoning_tokens: 5,
+                },
+                token_usages: [{}, {}],
+              },
+            },
+          },
+        }),
+      );
+      return;
+    }
+    response.writeHead(404).end('{}');
+  });
+  const port = await listen(server);
+  const host = new OpenHandsExecutionHost({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secrets: new EnvFileValueProvider(envFile),
+    policy,
+  });
+
+  try {
+    const created = await host.createExecution({
+      executionId: 'exec_1',
+      projectKey: 'pixel-agents',
+      phase: 'INVESTIGATE_PLAN',
+      objective: 'Investigate the issue.',
+      repositoryPath: '/workspace/executions/exec_1/repo',
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'planning-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'read_oriented',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_1', phase: 'INVESTIGATE_PLAN' },
+    });
+    assert.equal(created.status, 'RUNNING');
+    const body = createBody as any;
+    assert.equal(body.agent.kind, 'Agent');
+    assert.equal(body.agent.llm.model, 'litellm_proxy/planning-premium');
+    assert.equal(body.agent.llm.base_url, 'http://127.0.0.1:4000');
+    assert.equal(body.agent.llm.api_key, 'virtual-secret');
+    assert.equal(body.agent.llm.api_mode, 'chat');
+    assert.equal(body.agent.llm.reasoning_effort, null);
+    assert.deepEqual(body.agent.llm.litellm_extra_body, { user: 'exec_1' });
+    assert.deepEqual(
+      body.agent.tools.map((tool: any) => tool.name),
+      ['terminal', 'file_editor', 'task_tracker'],
+    );
+    assert.deepEqual(body.tool_module_qualnames, {
+      terminal: 'openhands.tools.terminal.definition',
+      file_editor: 'openhands.tools.file_editor.definition',
+      task_tracker: 'openhands.tools.task_tracker.definition',
+    });
+    assert.equal(body.workspace.working_dir, '/workspace/executions/exec_1/repo');
+    assert.equal(body.observability_metadata.execution_id, 'exec_1');
+
+    const acpCreated = await host.createExecution({
+      executionId: 'exec_acp_1',
+      projectKey: 'pixel-agents',
+      phase: 'IMPLEMENT',
+      objective: 'Implement the bounded change.',
+      repositoryPath: '/workspace/executions/exec_acp_1/repo',
+      selection: {
+        backend: 'opencode-acp',
+        modelClass: 'implementation-efficient',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'isolated_write',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_acp_1', phase: 'IMPLEMENT' },
+    });
+    assert.equal(acpCreated.status, 'RUNNING');
+    const acpBody = createBody as any;
+    assert.equal(acpBody.agent.kind, 'ACPAgent');
+    assert.equal(acpBody.agent.acp_model, 'litellm-v3/implementation-efficient');
+    assert.deepEqual(acpBody.secrets.HERMES_V3_EXECUTION_ID, {
+      kind: 'StaticSecret',
+      value: 'exec_acp_1',
+    });
+
+    const completed = await host.getExecution(created.conversationId);
+    assert.equal(completed.status, 'SUCCEEDED');
+    assert.equal(completed.finalText, 'PLAN_OK');
+    assert.deepEqual(completed.usage, {
+      source: 'OPENHANDS_REPORTED',
+      input: 100,
+      output: 20,
+      cachedInput: 10,
+      cacheWrite: 3,
+      reasoningOutput: 5,
+      costUsd: 0.12,
+      calls: 2,
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

@@ -20,8 +20,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
-import yaml
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -32,6 +30,14 @@ except Exception:  # pragma: no cover - only used by isolated import tests
     config_mod = None  # type: ignore[assignment]
     get_hermes_home = None  # type: ignore[assignment]
 
+
+def _safe_yaml_load(text: str) -> Any:
+    yaml_mod = getattr(config_mod, "yaml", None) if config_mod is not None else None
+    if yaml_mod is None:
+        return {}
+    return yaml_mod.safe_load(text)
+
+
 router = APIRouter()
 
 _PLUGIN_ID = "hermes-ai-office"
@@ -39,8 +45,53 @@ _DEFAULT_BASE_URL = "http://127.0.0.1:8320"
 _ALLOWED_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _SETTINGS_LOCK = threading.Lock()
 
+_SUPPLY_ORIGINS = (
+    "OFFICIAL",
+    "COMMERCIAL_RELAY",
+    "COMMUNITY_RELAY",
+    "EVENT_GRANT",
+    "PERSONAL_HOSTED",
+    "INTERNAL_POOL",
+    "UNKNOWN",
+)
+_COMMERCIAL_TYPES = ("FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER")
+_ROUTING_POLICIES = ("AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED")
+_ECONOMICS_QUICK_PROFILES = (
+    {"id": "community-free", "supplyOrigin": "COMMUNITY_RELAY", "commercialType": "FREE", "routingPolicy": "AUTO"},
+    {"id": "event-free", "supplyOrigin": "EVENT_GRANT", "commercialType": "SPONSORED", "routingPolicy": "AUTO"},
+    {"id": "personal-hosted", "supplyOrigin": "PERSONAL_HOSTED", "commercialType": "OTHER", "routingPolicy": "MANUAL_ONLY"},
+    {"id": "commercial-metered", "supplyOrigin": "COMMERCIAL_RELAY", "commercialType": "METERED", "routingPolicy": "AUTO"},
+    {"id": "official-metered", "supplyOrigin": "OFFICIAL", "commercialType": "METERED", "routingPolicy": "AUTO"},
+    {"id": "official-subscription", "supplyOrigin": "OFFICIAL", "commercialType": "SUBSCRIPTION", "routingPolicy": "AUTO"},
+)
+
+
+def _economics_choice(
+    descriptor: Mapping[str, Any],
+    supply_origin: str = "",
+    commercial_type: str = "",
+    routing_policy: str = "",
+) -> Dict[str, str]:
+    plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
+    origin = str(supply_origin or descriptor.get("supplyOrigin") or "UNKNOWN").strip().upper()
+    commercial = str(
+        commercial_type
+        or plan.get("commercialType")
+        or descriptor.get("commercialType")
+        or "METERED"
+    ).strip().upper()
+    routing = str(routing_policy or descriptor.get("routingPolicy") or "AUTO").strip().upper()
+    if origin not in _SUPPLY_ORIGINS:
+        raise ValueError("供应来源标签无效")
+    if commercial not in _COMMERCIAL_TYPES:
+        raise ValueError("计费类型标签无效")
+    if routing not in _ROUTING_POLICIES:
+        raise ValueError("路由策略标签无效")
+    return {"supplyOrigin": origin, "commercialType": commercial, "routingPolicy": routing}
+
 
 class RuntimePolicySettings(BaseModel):
+    execution_mode: str = "v2"
     mode: str = "prefer"
     opencode_position: str = "coding-executor"
     codex_position: str = "codex-executor"
@@ -56,11 +107,41 @@ class ProviderDiscoverRequest(BaseModel):
 class ProviderRegisterRequest(ProviderDiscoverRequest):
     selected_models: list[str]
     default_model: str = ""
+    supply_origin: str = ""
+    commercial_type: str = ""
+    routing_policy: str = ""
 
 
 class ProviderControlRequest(BaseModel):
     enabled: bool
     reason: str | None = Field(default=None, max_length=500)
+
+
+class ProviderProfileRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=240)
+    base_url: str = Field(default="", max_length=1000)
+    website_url: str = Field(default="", max_length=1000)
+    protocol: str = Field(default="", max_length=120)
+
+
+class ProviderRetireRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class SupplierProfileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=240)
+    website_url: str = Field(default="", max_length=1000)
+
+
+class SupplierRetireRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+    force: bool = True
+
+
+class SupplierEconomicsRequest(BaseModel):
+    supply_origin: str
+    commercial_type: str
+    routing_policy: str
 
 
 _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -76,19 +157,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"},
         "opencodePrefix": "opencode-go",
         "featured": True,
-    },
-    "deepseek": {
-        "id": "deepseek",
-        "name": "DeepSeek API",
-        "supplierSlug": "deepseek",
-        "supplierName": "DeepSeek",
-        "baseUrl": "https://api.deepseek.com/v1",
-        "websiteUrl": "https://www.deepseek.com",
-        "keyEnv": "DEEPSEEK_API_KEY",
-        "transport": "openai_chat",
-        "plan": {"slug": "api", "name": "DeepSeek API", "commercialType": "METERED"},
-        "opencodePrefix": "deepseek",
-        "featured": True,
+        "supplyOrigin": "OFFICIAL",
+        "routingPolicy": "AUTO",
     },
     "openrouter": {
         "id": "openrouter",
@@ -101,6 +171,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "OpenRouter API", "commercialType": "METERED"},
         "opencodePrefix": "openrouter",
+        "supplyOrigin": "COMMERCIAL_RELAY",
+        "routingPolicy": "AUTO",
     },
     "openai-api": {
         "id": "openai-api",
@@ -113,6 +185,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "codex_responses",
         "plan": {"slug": "api", "name": "OpenAI API", "commercialType": "METERED"},
         "opencodePrefix": "openai",
+        "supplyOrigin": "OFFICIAL",
+        "routingPolicy": "AUTO",
     },
     "xai": {
         "id": "xai",
@@ -125,6 +199,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "codex_responses",
         "plan": {"slug": "api", "name": "xAI API", "commercialType": "METERED"},
         "opencodePrefix": "xai",
+        "supplyOrigin": "OFFICIAL",
+        "routingPolicy": "AUTO",
     },
     "nvidia": {
         "id": "nvidia",
@@ -137,6 +213,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "NVIDIA NIM API", "commercialType": "METERED"},
         "opencodePrefix": "nvidia",
+        "supplyOrigin": "OFFICIAL",
+        "routingPolicy": "AUTO",
     },
     "custom": {
         "id": "custom",
@@ -149,6 +227,8 @@ _PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
         "transport": "openai_chat",
         "plan": {"slug": "api", "name": "Custom API", "commercialType": "METERED"},
         "featured": True,
+        "supplyOrigin": "COMMERCIAL_RELAY",
+        "routingPolicy": "AUTO",
     },
 }
 
@@ -159,13 +239,18 @@ _PROVIDER_HUB_LAST_SYNC = 0.0
 _PROVIDER_HUB_SYNC_TTL = 45.0
 
 _DISCOVERED_SUPPLIERS: Dict[str, Dict[str, Any]] = {
-    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED", "websiteUrl": "https://anyrouter.top"},
-    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "websiteUrl": "https://opencode.ai", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
-    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED", "websiteUrl": "https://www.fastaitoken.com"},
-    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED", "websiteUrl": "https://api.ark717.com"},
-    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED", "websiteUrl": "https://chybenzun.top"},
-    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "websiteUrl": "https://openai.com", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
+    "anyrouter": {"slug": "anyrouter", "name": "AnyRouter", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://anyrouter.top"},
+    "opencode-go": {"slug": "opencode", "name": "OpenCode", "commercialType": "SUBSCRIPTION", "supplyOrigin": "OFFICIAL", "routingPolicy": "AUTO", "websiteUrl": "https://opencode.ai", "plan": {"slug": "go", "name": "OpenCode Go", "commercialType": "SUBSCRIPTION"}},
+    "fastaitoken": {"slug": "fastaitoken", "name": "FastAI Token", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://www.fastaitoken.com"},
+    "ark717": {"slug": "ark717", "name": "Ark717", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://api.ark717.com"},
+    "chybenzun": {"slug": "chybenzun", "name": "Chybenzun", "commercialType": "SPONSORED", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://chybenzun.top"},
+    "openai-team": {"slug": "openai-official", "name": "OpenAI Official", "commercialType": "SUBSCRIPTION", "supplyOrigin": "OFFICIAL", "routingPolicy": "AUTO", "websiteUrl": "https://openai.com", "plan": {"slug": "chatgpt-team", "name": "ChatGPT Team / Business", "commercialType": "SUBSCRIPTION"}},
+    "abrdns-deepseek-1m-think": {"slug": "abrdns-deepseek-1m-think", "name": "abrdns (公益站 DeepSeek 1M think)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://new-api.abrdns.com"},
+    "llm-pm-deepseek-opus": {"slug": "llm-pm-deepseek-opus", "name": "llm-pm (公益站 deepseek-opus)", "commercialType": "FREE", "supplyOrigin": "COMMUNITY_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://llm.pm"},
+    "wechat-miniapp-free": {"slug": "wechat-miniapp-free", "name": "wechat-miniapp (微信小程序开发大赛 free)", "commercialType": "SPONSORED", "supplyOrigin": "EVENT_GRANT", "routingPolicy": "AUTO", "websiteUrl": "https://developers.weixin.qq.com"},
+    "worldclawpro": {"slug": "worldclawpro", "name": "worldclawpro.ai", "commercialType": "METERED", "supplyOrigin": "COMMERCIAL_RELAY", "routingPolicy": "AUTO", "websiteUrl": "https://worldclawpro.ai"},
 }
+
 
 
 def _profile_root(profile_id: str) -> Path:
@@ -263,11 +348,14 @@ def _hub_upsert_connection(payload: Mapping[str, Any]) -> Dict[str, Any]:
     if provider_key in {"cpa", "claude-code-access"} or connection.get("supplier_id"):
         return connection
     spec = _connection_supplier(provider_key) or {}
+    economics = _economics_choice(spec or {})
     source_payload = {
         "slug": str(spec.get("slug") or provider_key),
         "name": str(spec.get("name") or safe_payload.get("displayName") or provider_key),
         "websiteUrl": str(spec.get("websiteUrl") or safe_payload.get("websiteUrl") or "") or None,
         "sourceKind": "EXTERNAL",
+        "supplyOrigin": economics["supplyOrigin"],
+        "routingPolicy": economics["routingPolicy"],
     }
     source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
     source = _post_json(
@@ -310,7 +398,13 @@ def _register_discovered_employee(
     supplier_spec = _connection_supplier(provider_key)
     if not supplier_spec or not model:
         return None
-    supplier = {"slug": supplier_spec["slug"], "name": supplier_spec["name"]}
+    economics = _economics_choice(supplier_spec)
+    supplier = {
+        "slug": supplier_spec["slug"],
+        "name": supplier_spec["name"],
+        "supplyOrigin": economics["supplyOrigin"],
+        "routingPolicy": economics["routingPolicy"],
+    }
     account_ref = f"provider-hub:{provider_key}:{connection.get('id')}"
     payload: Dict[str, Any] = {
         "supplier": supplier,
@@ -322,10 +416,16 @@ def _register_discovered_employee(
     }
     if isinstance(supplier_spec.get("plan"), Mapping):
         payload["plan"] = dict(supplier_spec["plan"])
+    elif supplier_spec.get("commercialType"):
+        payload["plan"] = {
+            "slug": "default",
+            "name": f"{supplier_spec['name']} access",
+            "commercialType": economics["commercialType"],
+        }
     result = _post_json(
         "/api/v2/commands/supply-catalog/register",
         payload,
-        idempotency_key="provider-catalog-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
+        idempotency_key="provider-catalog-v2-" + hashlib.blake2b(f"{supplier['slug']}|{model}|{account_ref}".encode(), digest_size=10).hexdigest(),
     )
     employment = result.get("employment") if isinstance(result.get("employment"), Mapping) else {}
     supplier_row = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
@@ -390,13 +490,23 @@ def _codex_provider_catalog(profile_home: Path) -> tuple[Dict[str, Dict[str, Any
             pass
     for path in sorted(codex.glob("*.config.toml")):
         try:
-            value = tomllib.loads(path.read_text(encoding="utf-8"))
+            raw_text = path.read_text(encoding="utf-8")
+            value = tomllib.loads(raw_text)
         except Exception:
             continue
         model = str(value.get("model") or "").strip()
         provider = str(value.get("model_provider") or "").strip()
         if model and provider:
-            configs.append({"path": path.name, "model": model, "provider": provider})
+            configs.append(
+                {
+                    "path": path.name,
+                    "model": model,
+                    "provider": provider,
+                    "managedByAiOffice": raw_text.lstrip().startswith(
+                        "# HERMES AI OFFICE MANAGED PROFILE"
+                    ),
+                }
+            )
     return providers, configs
 
 
@@ -426,6 +536,8 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
         for config in configs:
             provider_ref = str(config["provider"])
             model = str(config["model"])
+            if bool(config.get("managedByAiOffice")):
+                continue
             if provider_ref == "openai" and auth.get("auth_mode") == "chatgpt":
                 token_map = auth.get("tokens") if isinstance(auth.get("tokens"), Mapping) else {}
                 ready = bool(token_map)
@@ -449,6 +561,9 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 discovered.append(connection)
                 continue
             provider = providers.get(provider_ref) or {}
+            provider_name = str(provider.get("name") or "").strip()
+            if provider_name.startswith("Hermes AI Office ·") or provider_ref == "hermes-office":
+                continue
             base_url = str(provider.get("base_url") or "").strip().rstrip("/")
             credential_ref = str(provider.get("env_key") or "").strip()
             wire_api = str(provider.get("wire_api") or "responses").strip()
@@ -493,6 +608,11 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 opts = raw.get("options") if isinstance(raw.get("options"), Mapping) else {}
                 base_url = str(opts.get("baseURL") or opts.get("baseUrl") or "").strip().rstrip("/")
                 key_expr = str(opts.get("apiKey") or opts.get("api_key") or "").strip()
+                if (
+                    key_expr.startswith("{file:")
+                    and "/secrets/hermes-ai-office/" in key_expr
+                ):
+                    continue
                 credential_ref = ""
                 if key_expr.startswith("{env:") and key_expr.endswith("}"):
                     credential_ref = key_expr[5:-1].strip()
@@ -524,7 +644,7 @@ def _discover_profile_native_connections() -> list[Dict[str, Any]]:
                 profile_config_path = profile_dir / "config.yaml"
                 if profile_config_path.exists():
                     try:
-                        profile_config = yaml.safe_load(profile_config_path.read_text(encoding="utf-8")) or {}
+                        profile_config = _safe_yaml_load(profile_config_path.read_text(encoding="utf-8")) or {}
                         model_config = profile_config.get("model") if isinstance(profile_config, Mapping) else None
                         if isinstance(model_config, Mapping):
                             selected_provider = str(model_config.get("provider") or "").strip()
@@ -637,6 +757,17 @@ def _post_json(
 
 def _safe_provider_id(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _is_official_deepseek_endpoint(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        host = str(urllib.parse.urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "api.deepseek.com"
 
 
 def _normalize_base_url(value: str) -> str:
@@ -887,8 +1018,14 @@ def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any
     supplier_name = str(descriptor["supplierName"])
     plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else None
     endpoint_tag = hashlib.blake2b(str(descriptor["baseUrl"]).encode("utf-8"), digest_size=5).hexdigest()
+    economics = _economics_choice(descriptor)
     payload: Dict[str, Any] = {
-        "supplier": {"slug": supplier_slug, "name": supplier_name},
+        "supplier": {
+            "slug": supplier_slug,
+            "name": supplier_name,
+            "supplyOrigin": economics["supplyOrigin"],
+            "routingPolicy": economics["routingPolicy"],
+        },
         "supplierModel": {"key": model, "name": model},
         "agreement": {
             "externalAccountRef": f"hermes-provider:{provider_id}:{endpoint_tag}",
@@ -896,7 +1033,13 @@ def _catalog_payload(descriptor: Mapping[str, Any], model: str) -> Dict[str, Any
         },
     }
     if plan:
-        payload["plan"] = dict(plan)
+        payload["plan"] = {**dict(plan), "commercialType": economics["commercialType"]}
+    else:
+        payload["plan"] = {
+            "slug": "default",
+            "name": f"{str(descriptor.get('name') or supplier_name)} access",
+            "commercialType": economics["commercialType"],
+        }
     return payload
 
 def _model_config(value: Any) -> Dict[str, str]:
@@ -929,7 +1072,7 @@ def _hermes_model_defaults() -> Dict[str, Dict[str, str]]:
         return defaults
     for config_path in profiles_root.glob("*/config.yaml"):
         try:
-            value = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+            value = _safe_yaml_load(config_path.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
         model = _model_config(value.get("model") if isinstance(value, Mapping) else None)
@@ -1039,10 +1182,14 @@ def _runtime_policy_settings() -> Dict[str, str]:
     runtime = runtime if isinstance(runtime, Mapping) else {}
     positions = runtime.get("positions")
     positions = positions if isinstance(positions, Mapping) else {}
+    execution_mode = str(settings.get("execution_mode") or "v2").strip().lower()
+    if execution_mode not in {"v2", "v3", "disabled"}:
+        execution_mode = "v2"
     mode = str(runtime.get("mode") or "prefer").strip().lower()
     if mode not in {"observe", "prefer", "enforce"}:
         mode = "prefer"
     return {
+        "executionMode": execution_mode,
         "mode": mode,
         "opencodePosition": str(positions.get("opencode") or "coding-executor"),
         "codexPosition": str(positions.get("codex") or "codex-executor"),
@@ -1052,6 +1199,9 @@ def _runtime_policy_settings() -> Dict[str, str]:
 def _save_runtime_policy(value: RuntimePolicySettings) -> Dict[str, str]:
     if config_mod is None:
         raise RuntimeError("Hermes config service unavailable")
+    execution_mode = value.execution_mode.strip().lower()
+    if execution_mode not in {"v2", "v3", "disabled"}:
+        raise ValueError("execution mode must be v2, v3, or disabled")
     mode = value.mode.strip().lower()
     if mode not in {"observe", "prefer", "enforce"}:
         raise ValueError("runtime policy mode must be observe, prefer, or enforce")
@@ -1060,6 +1210,7 @@ def _save_runtime_policy(value: RuntimePolicySettings) -> Dict[str, str]:
             "entries": {
                 _PLUGIN_ID: {
                     "settings": {
+                        "execution_mode": execution_mode,
                         "runtime_policy": {
                             "mode": mode,
                             "positions": {
@@ -1098,10 +1249,9 @@ async def health() -> Dict[str, Any]:
 
 @router.get("/overview")
 async def overview() -> Dict[str, Any]:
-    try:
-        await asyncio.to_thread(_sync_profile_native_provider_hub)
-    except Exception:
-        pass
+    # V3 cutover: dashboard reads must not keep the retired Provider Hub alive by
+    # discovering or writing provider connections. The retained V2 projections below
+    # are workforce/business history only; provider runtime authority is LiteLLM.
     requests = [
         _partial("workforce", "/api/v2/projections/workforce"),
         _partial("supply", "/api/v2/projections/supply"),
@@ -1122,6 +1272,105 @@ async def overview() -> Dict[str, Any]:
         }
     )
     return values
+
+
+_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+
+
+def _v3_usage_totals(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    totals: Dict[str, Any] = {
+        "input": 0,
+        "output": 0,
+        "cachedInput": 0,
+        "cacheWrite": 0,
+        "reasoningOutput": 0,
+        "costUsd": 0.0,
+        "calls": 0,
+        "executionsWithUsage": 0,
+        "traces": 0,
+    }
+    for item in items:
+        usage = item.get("usage") if isinstance(item.get("usage"), Mapping) else None
+        if usage:
+            totals["executionsWithUsage"] += 1
+            for key in ("input", "output", "cachedInput", "cacheWrite", "reasoningOutput", "calls"):
+                try:
+                    totals[key] += int(usage.get(key) or 0)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                totals["costUsd"] += float(usage.get("costUsd") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        refs = item.get("refs") if isinstance(item.get("refs"), Mapping) else {}
+        if refs.get("langfuseTraceId"):
+            totals["traces"] += 1
+    totals["costUsd"] = round(float(totals["costUsd"]), 6)
+    return totals
+
+
+async def _v3_execution_detail(item: Mapping[str, Any]) -> Dict[str, Any]:
+    execution_id = str(item.get("executionId") or "").strip()
+    if not execution_id:
+        return dict(item)
+    try:
+        return await asyncio.to_thread(
+            _fetch_json, f"/api/v3/development/executions/{urllib.parse.quote(execution_id, safe='')}", timeout=2.0
+        )
+    except Exception:
+        return dict(item)
+
+
+@router.get("/development")
+async def development(limit: int = 80, detail_limit: int = 24) -> Dict[str, Any]:
+    safe_limit = min(200, max(10, int(limit)))
+    safe_detail_limit = min(50, max(0, int(detail_limit)))
+    runtime_value, policy_value, readiness_value, execution_value, provider_value = await asyncio.gather(
+        _partial("runtime", "/api/v3/development/runtime-summary"),
+        _partial("policy", "/api/v3/development/policy"),
+        _partial("readiness", "/api/v3/development/readiness"),
+        _partial("executions", f"/api/v3/development/executions?limit={safe_limit}"),
+        _partial("providers", "/api/v3/development/model-registry"),
+    )
+    values = dict((runtime_value, policy_value, readiness_value, execution_value, provider_value))
+    raw_items = values.get("executions", {}).get("items", []) if isinstance(values.get("executions"), Mapping) else []
+    items = [dict(item) for item in raw_items if isinstance(item, Mapping)]
+    active = [item for item in items if str(item.get("status") or "UNKNOWN").upper() not in _V3_TERMINAL_STATUSES]
+    terminal = [item for item in items if str(item.get("status") or "UNKNOWN").upper() in _V3_TERMINAL_STATUSES]
+
+    detail_targets = active + terminal[:safe_detail_limit]
+    detailed = await asyncio.gather(*(_v3_execution_detail(item) for item in detail_targets)) if detail_targets else []
+    detail_by_id = {str(item.get("executionId") or ""): item for item in detailed if isinstance(item, Mapping)}
+    active = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in active]
+    history = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in terminal]
+    observed = active + history[:safe_detail_limit]
+    usage = _v3_usage_totals(observed)
+    statuses: Dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "UNKNOWN").upper()
+        statuses[status] = statuses.get(status, 0) + 1
+    trace_base = max(1, len(observed))
+    summary = {
+        "total": len(items),
+        "active": len(active),
+        "history": len(history),
+        "waiting": statuses.get("PAUSED", 0) + statuses.get("WAITING_FOR_CONFIRMATION", 0),
+        "failed": statuses.get("FAILED", 0) + statuses.get("STUCK", 0),
+        "statuses": statuses,
+        "usage": usage,
+        "traceCoverage": usage["traces"] / trace_base if observed else 0.0,
+    }
+    return {
+        "projectionVersion": 1,
+        "generatedAt": int(time.time() * 1000),
+        "runtime": values.get("runtime", {}),
+        "policy": values.get("policy", {}),
+        "readiness": values.get("readiness", {}),
+        "providers": values.get("providers", {}),
+        "active": active,
+        "history": history,
+        "summary": summary,
+    }
 
 
 @router.get("/workforce")
@@ -1145,16 +1394,30 @@ async def employee_dossier(employee_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@router.get("/providers/hub")
-async def provider_hub(force: bool = False) -> Dict[str, Any]:
+@router.get("/model-registry")
+async def model_registry() -> Dict[str, Any]:
     try:
-        return await asyncio.to_thread(_sync_profile_native_provider_hub, force)
+        return await asyncio.to_thread(_fetch_json, "/api/v3/development/model-registry")
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _provider_hub_retired() -> None:
+    raise HTTPException(
+        status_code=410,
+        detail="Provider Hub runtime authority was retired. Manage providers, credentials, models, health, and routing in LiteLLM Admin.",
+    )
+
+
+@router.get("/providers/hub")
+async def provider_hub(force: bool = False) -> Dict[str, Any]:
+    del force
+    _provider_hub_retired()
+
+
 @router.get("/providers/hub/{connection_id}")
 async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1168,6 +1431,7 @@ async def provider_hub_detail(connection_id: str) -> Dict[str, Any]:
 async def provider_hub_control(
     connection_id: str, request: ProviderControlRequest
 ) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = connection_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid provider connection id")
@@ -1184,8 +1448,111 @@ async def provider_hub_control(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.post("/providers/hub/{connection_id}/profile")
+async def provider_hub_profile(
+    connection_id: str, request: ProviderProfileRequest
+) -> Dict[str, Any]:
+    _provider_hub_retired()
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    payload: Dict[str, Any] = {
+        "displayName": request.display_name,
+        "baseUrl": request.base_url,
+        "websiteUrl": request.website_url,
+        "protocol": request.protocol,
+    }
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/provider-connections/{safe_id}/profile",
+            payload,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/providers/hub/{connection_id}/retire")
+async def provider_hub_retire(
+    connection_id: str, request: ProviderRetireRequest
+) -> Dict[str, Any]:
+    _provider_hub_retired()
+    safe_id = connection_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid provider connection id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/provider-connections/{safe_id}/retire",
+            {"reason": request.reason or "AI Office dashboard operator"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/suppliers/{supplier_id}/profile")
+async def supplier_profile(
+    supplier_id: str, request: SupplierProfileRequest
+) -> Dict[str, Any]:
+    _provider_hub_retired()
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{safe_id}/profile",
+            {"name": request.name, "websiteUrl": request.website_url},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/suppliers/{supplier_id}/economics")
+async def supplier_economics(
+    supplier_id: str, request: SupplierEconomicsRequest
+) -> Dict[str, Any]:
+    _provider_hub_retired()
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    economics = _economics_choice(
+        {}, request.supply_origin, request.commercial_type, request.routing_policy
+    )
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{safe_id}/economics",
+            economics,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.post("/suppliers/{supplier_id}/retire")
+async def supplier_retire(
+    supplier_id: str, request: SupplierRetireRequest
+) -> Dict[str, Any]:
+    _provider_hub_retired()
+    safe_id = supplier_id.strip()
+    if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
+        raise HTTPException(status_code=400, detail="invalid supplier id")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{safe_id}/retire",
+            {
+                "reason": request.reason or "AI Office dashboard operator",
+                "force": request.force,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @router.get("/suppliers/{supplier_id}/connections")
 async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
+    _provider_hub_retired()
     safe_id = supplier_id.strip()
     if not safe_id or len(safe_id) > 160 or not all(ch.isalnum() or ch in "_-" for ch in safe_id):
         raise HTTPException(status_code=400, detail="invalid supplier id")
@@ -1199,6 +1566,7 @@ async def supplier_connections(supplier_id: str) -> Dict[str, Any]:
 
 @router.get("/providers/presets")
 async def provider_presets() -> Dict[str, Any]:
+    _provider_hub_retired()
     items = []
     for preset_id, raw in _PROVIDER_PRESETS.items():
         descriptor = _provider_descriptor(preset_id, "https://example.invalid/v1" if preset_id == "custom" else "", "") if preset_id != "custom" else raw
@@ -1210,13 +1578,21 @@ async def provider_presets() -> Dict[str, Any]:
                 "featured": bool(descriptor.get("featured")),
                 "custom": preset_id == "custom",
                 "configured": False if preset_id == "custom" else bool(_existing_provider_key(descriptor)),
+                "economics": _economics_choice(descriptor),
             }
         )
-    return {"items": items}
+    return {
+        "items": items,
+        "quickProfiles": list(_ECONOMICS_QUICK_PROFILES),
+        "supplyOrigins": list(_SUPPLY_ORIGINS),
+        "commercialTypes": list(_COMMERCIAL_TYPES),
+        "routingPolicies": list(_ROUTING_POLICIES),
+    }
 
 
 @router.post("/providers/discover")
 async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
+    _provider_hub_retired()
     try:
         descriptor, models, configured = await asyncio.to_thread(_discover_provider_models, body)
         return {
@@ -1227,6 +1603,7 @@ async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
                 "baseUrl": descriptor.get("baseUrl") if body.preset_id == "custom" else None,
                 "websiteUrl": descriptor.get("websiteUrl"),
                 "configured": configured,
+                "economics": _economics_choice(descriptor),
             },
             "models": [{"id": model, "name": model} for model in models],
         }
@@ -1238,8 +1615,29 @@ async def discover_provider(body: ProviderDiscoverRequest) -> Dict[str, Any]:
 
 @router.post("/providers/register")
 async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
+    _provider_hub_retired()
     try:
         descriptor, discovered, _configured = await asyncio.to_thread(_discover_provider_models, body)
+        if _is_official_deepseek_endpoint(descriptor.get("baseUrl")):
+            raise ValueError(
+                "DeepSeek 官方 API 仅保留给 Hermes 大脑配置，不进入 AI Office 员工采购与执行路由"
+            )
+        economics = _economics_choice(
+            descriptor,
+            body.supply_origin,
+            body.commercial_type,
+            body.routing_policy,
+        )
+        descriptor = dict(descriptor)
+        descriptor["supplyOrigin"] = economics["supplyOrigin"]
+        descriptor["routingPolicy"] = economics["routingPolicy"]
+        plan = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
+        descriptor["plan"] = {
+            **dict(plan),
+            "slug": str(plan.get("slug") or "default"),
+            "name": str(plan.get("name") or f"{descriptor.get('name') or descriptor.get('supplierName')} access"),
+            "commercialType": economics["commercialType"],
+        }
         selected = list(dict.fromkeys(model.strip() for model in body.selected_models if model.strip()))
         if not selected:
             raise ValueError("至少选择一个模型作为员工")
@@ -1290,7 +1688,7 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                 _post_json,
                 "/api/v2/commands/supply-catalog/register",
                 payload,
-                idempotency_key=f"office-onboard-{digest}",
+                idempotency_key=f"office-onboard-v2-{digest}",
             )
             supplier = result.get("supplier") if isinstance(result.get("supplier"), Mapping) else {}
             employee = result.get("employee") if isinstance(result.get("employee"), Mapping) else {}
@@ -1358,6 +1756,17 @@ async def register_provider(body: ProviderRegisterRequest) -> Dict[str, Any]:
                     "metadata": hub_connection.get("metadata") or {},
                 },
             )
+        plan_spec = descriptor.get("plan") if isinstance(descriptor.get("plan"), Mapping) else {}
+        await asyncio.to_thread(
+            _post_json,
+            f"/api/v2/commands/suppliers/{supplier_id}/economics",
+            {
+                **economics,
+                "planSlug": str(plan_spec.get("slug") or "default"),
+                "planName": str(plan_spec.get("name") or f"{descriptor.get('name') or descriptor.get('supplierName')} access"),
+            },
+            idempotency_key=f"office-supplier-economics-{supplier_id}-{hashlib.blake2b(json.dumps(economics, sort_keys=True).encode('utf-8'), digest_size=6).hexdigest()}",
+        )
         preference = await asyncio.to_thread(
             _post_json,
             f"/api/v2/commands/suppliers/{supplier_id}/staffing-preferences",

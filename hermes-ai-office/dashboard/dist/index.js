@@ -74,10 +74,88 @@
       "tabs.overview": "Overview",
       "tabs.organization": "Organization",
       "tabs.workforce": "Workforce",
-      "tabs.suppliers": "Suppliers",
+      "tabs.suppliers": "Models & Providers",
+      "registry.title": "Models & Providers",
+      "registry.subtitle": "LiteLLM is the single runtime authority for provider credentials, model deployments, routing, health, and spend.",
+      "registry.openAdmin": "Open LiteLLM Admin",
+      "registry.adminHint": "Create, edit, pause, test, and delete providers/models in LiteLLM Admin. AI Office is read-only here.",
+      "registry.credentials": "Credentials",
+      "registry.deployments": "Deployments",
+      "registry.active": "Active",
+      "registry.paused": "Paused",
+      "registry.aliases": "Model aliases",
+      "registry.group": "Model group",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "Physical model",
+      "registry.commercial": "Commercial",
+      "registry.protocol": "Protocol",
+      "registry.order": "Order",
+      "registry.credential": "Credential",
+      "registry.loading": "Loading LiteLLM registry…",
+      "registry.loadError": "LiteLLM registry could not refresh",
+      "registry.noDeployments": "No LiteLLM deployments found.",
       "tabs.operations": "Operations",
       "tabs.policy": "Runtime policy",
       "tabs.incidents": "Incidents",
+      "tabs.development": "Development",
+      "development.title": "Development control",
+      "development.readiness": "Cutover readiness",
+      "development.readinessSubtitle": "Qualification gates derived from V3 facts plus explicit verification evidence; probes never count as representative work.",
+      "development.representative": "Representative workflows",
+      "development.fixLoop": "Fix loop",
+      "development.fallback": "Provider fallback",
+      "development.reconnect": "Gateway reconnect",
+      "development.rollback": "Rollback",
+      "development.observabilityGate": "Observability",
+      "development.gatePass": "Verified",
+      "development.gatePending": "Pending",
+      "development.subtitle": "Live V3 execution state, routing policy, provider health, and observed usage without a duplicate orchestration ledger.",
+      "development.active": "Active work",
+      "development.activeSubtitle": "Authoritative execution state reconciled from OpenHands",
+      "development.history": "Recent history",
+      "development.historySubtitle": "Recent terminal executions with usage and trace evidence when available",
+      "development.routing": "V3 routing policy",
+      "development.routingSubtitle": "Phase policy chooses logical model class, backend candidates, transport, and workspace isolation",
+      "development.runtime": "Runtime & providers",
+      "development.runtimeSubtitle": "Execution-plane source health and LiteLLM registry availability",
+      "development.usage": "Usage & trace summary",
+      "development.usageSubtitle": "Observed usage across active work and recent detailed history",
+      "development.noActive": "No V3 execution is active right now.",
+      "development.noHistory": "No terminal V3 execution has been recorded yet.",
+      "development.project": "Project / objective",
+      "development.phase": "Phase",
+      "development.status": "Status",
+      "development.route": "Route",
+      "development.observedRoute": "Observed",
+      "development.elapsed": "Elapsed",
+      "development.tokens": "Usage",
+      "development.references": "References",
+      "development.backends": "Backends",
+      "development.transports": "Transport",
+      "development.workspace": "Workspace",
+      "development.session": "Session",
+      "development.logicalModels": "Logical models",
+      "development.providers": "LiteLLM Registry",
+      "development.health": "Source health",
+      "development.concurrency": "Writer concurrency",
+      "development.globalWriters": "Global writers",
+      "development.projectWriters": "Per-project writers",
+      "development.activeMetric": "Active executions",
+      "development.waitingMetric": "Waiting / paused",
+      "development.totalMetric": "Recent executions",
+      "development.tokenMetric": "Observed tokens",
+      "development.costMetric": "Observed cost",
+      "development.traceMetric": "Trace coverage",
+      "development.available": "{count} available",
+      "development.congested": "{count} congested",
+      "development.unavailable": "{count} unavailable",
+      "development.connections": "{count} connections",
+      "development.calls": "{count} model calls",
+      "development.cache": "{count} cached input",
+      "development.traceCount": "{count} linked traces",
+      "development.refresh": "Refresh V3",
+      "development.loading": "Loading V3 development state…",
+      "development.loadError": "Development state could not refresh",
       "common.search": "Search",
       "common.all": "All",
       "common.noData": "No data",
@@ -208,10 +286,26 @@
       "suppliers.subtitle": "All workforce suppliers in one place. Internal account pools are marked as internal suppliers; technical connections stay in details.",
       "suppliers.add": "Add supplier",
       "suppliers.details": "View details",
+      "suppliers.manage": "Manage",
+      "suppliers.manageTitle": "Manage supplier",
+      "suppliers.manageSubtitle": "Edit supplier metadata or retire it from the active AI Office workforce.",
+      "suppliers.saveProfile": "Save changes",
+      "suppliers.deleteSupplier": "Delete supplier",
+      "suppliers.deleteSupplierConfirm": "Delete this supplier from the active AI Office workforce? Historical execution records will be preserved.",
+      "suppliers.editConnection": "Edit connection",
+      "suppliers.saveConnection": "Save connection",
+      "suppliers.deleteConnection": "Delete connection",
+      "suppliers.deleteConnectionConfirm": "Delete this provider connection from active routing? Historical records will be preserved.",
+      "suppliers.connectionName": "Connection name",
+      "suppliers.protocol": "Protocol",
+      "suppliers.savedProfile": "Supplier updated.",
+      "suppliers.savedConnection": "Connection updated.",
+      "suppliers.deleted": "Removed from active AI Office.",
       "suppliers.website": "Website",
       "suppliers.close": "Close",
       "suppliers.employees": "Employees",
       "suppliers.enabledEmployees": "Enabled employees",
+      "suppliers.enabledOfTotal": "Enabled / total",
       "suppliers.defaultEmployee": "Default employee",
       "suppliers.defaultEmployeeNone": "No preferred employee",
       "suppliers.agreements": "Agreements",
@@ -251,7 +345,36 @@
       "suppliers.addTitle": "Add supplier",
       "suppliers.addSubtitle": "Choose a common provider or use any OpenAI-compatible endpoint.",
       "suppliers.chooseProvider": "1. Choose provider",
-      "suppliers.credentials": "2. Connection",
+      "suppliers.economics": "2. Supply economics",
+      "suppliers.economicsHint": "Choose a quick profile or edit the three independent routing tags.",
+      "suppliers.credentials": "3. Connection",
+      "suppliers.supplyOrigin": "Supply origin",
+      "suppliers.commercialType": "Billing model",
+      "suppliers.routingPolicy": "Routing policy",
+      "suppliers.quick.community-free": "Community relay · free",
+      "suppliers.quick.event-free": "Event grant · free",
+      "suppliers.quick.personal-hosted": "Personal hosted · manual",
+      "suppliers.quick.commercial-metered": "Commercial relay · metered",
+      "suppliers.quick.official-metered": "Official API · metered",
+      "suppliers.quick.official-subscription": "Official coding plan · subscription",
+      "suppliers.origin.OFFICIAL": "Official",
+      "suppliers.origin.COMMERCIAL_RELAY": "Commercial relay",
+      "suppliers.origin.COMMUNITY_RELAY": "Community relay",
+      "suppliers.origin.EVENT_GRANT": "Event grant",
+      "suppliers.origin.PERSONAL_HOSTED": "Personal hosted",
+      "suppliers.origin.INTERNAL_POOL": "Internal pool",
+      "suppliers.origin.UNKNOWN": "Unknown origin",
+      "suppliers.commercial.FREE": "Free",
+      "suppliers.commercial.SPONSORED": "Sponsored / free",
+      "suppliers.commercial.SUBSCRIPTION": "Subscription",
+      "suppliers.commercial.PREPAID": "Prepaid",
+      "suppliers.commercial.METERED": "Pay as you go",
+      "suppliers.commercial.OTHER": "Other",
+      "suppliers.routing.AUTO": "Auto routing",
+      "suppliers.routing.MANUAL_ONLY": "Manual only",
+      "suppliers.routing.BRAIN_ONLY": "Brain only",
+      "suppliers.routing.DISABLED": "Disabled",
+      "suppliers.credentials": "3. Connection",
       "suppliers.apiKey": "API Key",
       "suppliers.apiKeyExisting": "Already configured in Hermes. Leave blank to reuse it.",
       "suppliers.apiKeyRequired": "Paste the provider API key.",
@@ -260,7 +383,7 @@
       "suppliers.supplierNameHint": "Leave blank and Hermes will generate a name from the URL.",
       "suppliers.discover": "Fetch models",
       "suppliers.discovering": "Fetching models…",
-      "suppliers.selectModels": "3. Choose employees",
+      "suppliers.selectModels": "4. Choose employees",
       "suppliers.selectModelsHint": "Only checked models become enabled employees. Pick one as the default employee.",
       "suppliers.modelSearch": "Search discovered models",
       "suppliers.selectedCount": "{count} selected",
@@ -288,12 +411,18 @@
       "operations.noRuntimes": "No active runtimes",
       "policy.title": "OpenCode / Codex staffing policy",
       "policy.subtitle": "Hermes resolves an appointed employee before launching the external runtime",
-      "policy.mode": "Mode",
+      "policy.executionMode": "Execution mode",
+      "policy.executionV3": "V3 — phase delegation through OpenHands",
+      "policy.executionV2": "V2 — legacy direct-harness placement",
+      "policy.executionDisabled": "Disabled — no AI Office execution routing",
+      "policy.mode": "Legacy terminal hook mode",
       "policy.openCodePosition": "OpenCode position slug",
       "policy.codexPosition": "Codex position slug",
       "policy.observe": "Observe — record only",
       "policy.prefer": "Prefer — inject selected employee, fail open",
       "policy.enforce": "Enforce — require an eligible employee",
+      "policy.executionHelp": "V3 and V2 are mutually exclusive routing authorities. Changing mode affects new development work; existing V3 executions remain queryable/cancellable for safe recovery.",
+      "policy.executionHelp": "V3 与 V2 是互斥的路由权威。切换只影响新的开发任务；已有 V3 execution 仍可查询、取消和恢复，便于安全回滚。",
       "policy.help":
         "PREFER preserves an unmatched explicit model. ENFORCE may replace it or block the launch. Raw prompts never enter the policy service.",
       "policy.saved": "Runtime policy saved. New Hermes tool calls use it immediately.",
@@ -329,6 +458,16 @@
       "status.DEFAULTED": "Default staffing",
       "status.DEFAULT_MODEL": "Default model",
       "status.RUNNING": "Running",
+      "status.STARTING": "Starting",
+      "status.PAUSED": "Paused",
+      "status.WAITING_FOR_CONFIRMATION": "Waiting",
+      "status.SUCCEEDED": "Succeeded",
+      "status.FAILED": "Failed",
+      "status.STUCK": "Stuck",
+      "status.CANCELLED": "Cancelled",
+      "status.OK": "OK",
+      "status.UNCONFIGURED": "Not configured",
+      "status.NOT_READY": "Not ready",
       "status.CODING": "Coding",
       "status.REVIEWING": "Reviewing",
       "status.PREFER": "Prefer",
@@ -361,10 +500,96 @@
       "tabs.overview": "总览",
       "tabs.organization": "组织架构",
       "tabs.workforce": "员工",
-      "tabs.suppliers": "供应商",
+      "tabs.suppliers": "模型与供应商",
+      "registry.title": "模型与供应商",
+      "registry.subtitle": "LiteLLM 是 Provider Credential、模型 Deployment、路由、健康度与用量的唯一运行时权威。",
+      "registry.openAdmin": "打开 LiteLLM Admin",
+      "registry.adminHint": "新增、编辑、暂停、测试和删除 Provider/模型都在 LiteLLM Admin 中完成；AI Office 此处只读展示。",
+      "registry.credentials": "Credential",
+      "registry.deployments": "Deployment",
+      "registry.active": "启用",
+      "registry.paused": "暂停",
+      "registry.aliases": "模型 Alias",
+      "registry.group": "模型组",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "物理模型",
+      "registry.commercial": "商业类型",
+      "registry.protocol": "协议",
+      "registry.order": "优先级",
+      "registry.credential": "Credential",
+      "registry.loading": "正在加载 LiteLLM Registry…",
+      "registry.loadError": "LiteLLM Registry 刷新失败",
+      "registry.noDeployments": "暂无 LiteLLM Deployment。",
       "tabs.operations": "运营",
       "tabs.policy": "运行时策略",
       "tabs.incidents": "事件",
+    "tabs.development": "開發控制",
+    "development.title": "開發控制",
+    "development.subtitle": "統一查看 V3 執行狀態、路由策略、Provider 健康度與真實用量，不維護第二套編排狀態。",
+    "development.active": "正在執行",
+    "development.history": "最近歷史",
+    "development.routing": "V3 路由策略",
+    "development.runtime": "執行環境與 Provider",
+    "development.usage": "用量與 Trace",
+      "tabs.development": "开发控制",
+      "development.title": "开发控制",
+      "development.readiness": "切换就绪度",
+      "development.readinessSubtitle": "由 V3 事实与显式验证证据派生的资格门槛；探针数量不会冒充代表性真实任务。",
+      "development.representative": "代表性工作流",
+      "development.fixLoop": "修复闭环",
+      "development.fallback": "Provider Fallback",
+      "development.reconnect": "Gateway 重连",
+      "development.rollback": "回滚",
+      "development.observabilityGate": "可观测性",
+      "development.gatePass": "已验证",
+      "development.gatePending": "待完成",
+      "development.subtitle": "统一查看 V3 执行状态、路由策略、Provider 健康度和真实用量，不再维护第二套编排状态。",
+      "development.active": "正在执行",
+      "development.activeSubtitle": "从 OpenHands 权威状态实时对账后的执行列表",
+      "development.history": "最近历史",
+      "development.historySubtitle": "最近已结束的执行；有数据时展示用量与 Trace 证据",
+      "development.routing": "V3 路由策略",
+      "development.routingSubtitle": "按阶段选择逻辑模型类、Backend 候选、传输方式与工作区隔离策略",
+      "development.runtime": "运行时与 Provider",
+      "development.runtimeSubtitle": "执行平面健康状态与 LiteLLM Registry 可用性",
+      "development.usage": "用量与 Trace",
+      "development.usageSubtitle": "正在执行与最近详细历史中的可观测用量汇总",
+      "development.noActive": "当前没有正在运行的 V3 执行。",
+      "development.noHistory": "还没有已结束的 V3 执行记录。",
+      "development.project": "项目 / 目标",
+      "development.phase": "阶段",
+      "development.status": "状态",
+      "development.route": "路由",
+      "development.observedRoute": "已观测",
+      "development.elapsed": "耗时",
+      "development.tokens": "用量",
+      "development.references": "引用",
+      "development.backends": "Backend",
+      "development.transports": "传输",
+      "development.workspace": "工作区",
+      "development.session": "会话",
+      "development.logicalModels": "逻辑模型",
+      "development.providers": "LiteLLM Registry",
+      "development.health": "源健康度",
+      "development.concurrency": "写入并发",
+      "development.globalWriters": "全局 writer",
+      "development.projectWriters": "单项目 writer",
+      "development.activeMetric": "活跃执行",
+      "development.waitingMetric": "等待 / 暂停",
+      "development.totalMetric": "最近执行",
+      "development.tokenMetric": "已观测 Token",
+      "development.costMetric": "已观测成本",
+      "development.traceMetric": "Trace 覆盖率",
+      "development.available": "{count} 可用",
+      "development.congested": "{count} 拥挤",
+      "development.unavailable": "{count} 不可用",
+      "development.connections": "{count} 条连接",
+      "development.calls": "{count} 次模型调用",
+      "development.cache": "{count} 缓存输入",
+      "development.traceCount": "{count} 条 Trace",
+      "development.refresh": "刷新 V3",
+      "development.loading": "正在加载 V3 开发状态…",
+      "development.loadError": "开发状态刷新失败",
       "common.search": "搜索",
       "common.all": "全部",
       "common.noData": "暂无数据",
@@ -494,10 +719,26 @@
       "suppliers.subtitle": "统一管理所有员工来源；My CPA、Grok2API 等账号池作为内部供应商展示，技术连接仍收进详情。",
       "suppliers.add": "添加供应商",
       "suppliers.details": "查看详情",
+      "suppliers.manage": "管理",
+      "suppliers.manageTitle": "管理供应商",
+      "suppliers.manageSubtitle": "编辑供应商与连接信息，或将其从当前 AI Office 员工体系中退休。",
+      "suppliers.saveProfile": "保存修改",
+      "suppliers.deleteSupplier": "删除供应商",
+      "suppliers.deleteSupplierConfirm": "确定从当前 AI Office 中删除这个供应商吗？历史执行记录会保留。",
+      "suppliers.editConnection": "编辑连接",
+      "suppliers.saveConnection": "保存连接",
+      "suppliers.deleteConnection": "删除连接",
+      "suppliers.deleteConnectionConfirm": "确定删除这个 Provider 连接并停止当前路由吗？历史记录会保留。",
+      "suppliers.connectionName": "连接名称",
+      "suppliers.protocol": "协议",
+      "suppliers.savedProfile": "供应商已更新。",
+      "suppliers.savedConnection": "连接已更新。",
+      "suppliers.deleted": "已从当前 AI Office 中移除。",
       "suppliers.website": "官网",
       "suppliers.close": "关闭",
       "suppliers.employees": "员工",
       "suppliers.enabledEmployees": "启用员工",
+      "suppliers.enabledOfTotal": "已启用 / 总数",
       "suppliers.defaultEmployee": "默认员工",
       "suppliers.defaultEmployeeNone": "暂无默认员工",
       "suppliers.agreements": "供应协议",
@@ -537,7 +778,36 @@
       "suppliers.addTitle": "添加供应商",
       "suppliers.addSubtitle": "选择常用供应商，或者直接填写任意 OpenAI 兼容请求地址。",
       "suppliers.chooseProvider": "1. 选择供应商",
-      "suppliers.credentials": "2. 连接信息",
+      "suppliers.economics": "2. 供给与费用策略",
+      "suppliers.economicsHint": "可一键选择常用标签组合，也可以分别调整三个独立属性。",
+      "suppliers.credentials": "3. 连接信息",
+      "suppliers.supplyOrigin": "供给来源",
+      "suppliers.commercialType": "计费方式",
+      "suppliers.routingPolicy": "路由策略",
+      "suppliers.quick.community-free": "公益中转 · 免费",
+      "suppliers.quick.event-free": "赛事活动 · 免费",
+      "suppliers.quick.personal-hosted": "个人搭建 · 手动",
+      "suppliers.quick.commercial-metered": "商业中转 · 按量",
+      "suppliers.quick.official-metered": "官方 API · 按量",
+      "suppliers.quick.official-subscription": "官方 Coding Plan · 包月",
+      "suppliers.origin.OFFICIAL": "官方",
+      "suppliers.origin.COMMERCIAL_RELAY": "商业中转",
+      "suppliers.origin.COMMUNITY_RELAY": "公益中转",
+      "suppliers.origin.EVENT_GRANT": "赛事/活动赠送",
+      "suppliers.origin.PERSONAL_HOSTED": "个人搭建",
+      "suppliers.origin.INTERNAL_POOL": "内部账号池",
+      "suppliers.origin.UNKNOWN": "来源待确认",
+      "suppliers.commercial.FREE": "免费",
+      "suppliers.commercial.SPONSORED": "赠送/免费",
+      "suppliers.commercial.SUBSCRIPTION": "包月/订阅",
+      "suppliers.commercial.PREPAID": "预付额度",
+      "suppliers.commercial.METERED": "按量付费",
+      "suppliers.commercial.OTHER": "其他",
+      "suppliers.routing.AUTO": "自动调度",
+      "suppliers.routing.MANUAL_ONLY": "仅手动",
+      "suppliers.routing.BRAIN_ONLY": "仅大脑",
+      "suppliers.routing.DISABLED": "禁用",
+      "suppliers.credentials": "3. 连接信息",
       "suppliers.apiKey": "API Key",
       "suppliers.apiKeyExisting": "Hermes 已经配置过凭证；留空即可复用。",
       "suppliers.apiKeyRequired": "粘贴该供应商的 API Key。",
@@ -546,7 +816,7 @@
       "suppliers.supplierNameHint": "不填写时，Hermes 会根据请求地址自动生成。",
       "suppliers.discover": "获取模型",
       "suppliers.discovering": "正在获取模型…",
-      "suppliers.selectModels": "3. 挑选员工",
+      "suppliers.selectModels": "4. 挑选员工",
       "suppliers.selectModelsHint": "只有勾选的模型会成为启用员工；再指定其中一名作为默认员工。",
       "suppliers.modelSearch": "搜索已发现模型",
       "suppliers.selectedCount": "已选择 {count} 个",
@@ -574,7 +844,11 @@
       "operations.noRuntimes": "暂无活跃运行时",
       "policy.title": "OpenCode / Codex 员工调度策略",
       "policy.subtitle": "Hermes 在启动外部运行时前，先解析已任命的员工",
-      "policy.mode": "模式",
+      "policy.executionMode": "执行模式",
+      "policy.executionV3": "V3 — 通过 OpenHands 按阶段委派",
+      "policy.executionV2": "V2 — 旧版直接 Harness 调度",
+      "policy.executionDisabled": "禁用 — AI Office 不参与开发执行",
+      "policy.mode": "旧版 Terminal Hook 模式",
       "policy.openCodePosition": "OpenCode 岗位标识",
       "policy.codexPosition": "Codex 岗位标识",
       "policy.observe": "观察 — 只记录，不改写",
@@ -615,6 +889,16 @@
       "status.DEFAULTED": "默认指派",
       "status.DEFAULT_MODEL": "默认模型",
       "status.RUNNING": "运行中",
+      "status.STARTING": "启动中",
+      "status.PAUSED": "已暂停",
+      "status.WAITING_FOR_CONFIRMATION": "等待确认",
+      "status.SUCCEEDED": "已成功",
+      "status.FAILED": "失败",
+      "status.STUCK": "卡住",
+      "status.CANCELLED": "已取消",
+      "status.OK": "正常",
+      "status.UNCONFIGURED": "未配置",
+      "status.NOT_READY": "尚未就绪",
       "status.CODING": "编码中",
       "status.REVIEWING": "审查中",
       "status.PREFER": "优先",
@@ -644,7 +928,26 @@
     "tabs.overview": "總覽",
     "tabs.organization": "組織架構",
     "tabs.workforce": "員工",
-    "tabs.suppliers": "供應商",
+    "tabs.suppliers": "模型與供應商",
+      "registry.title": "模型與供應商",
+      "registry.subtitle": "LiteLLM 是 Provider Credential、模型 Deployment、路由、健康度與用量的唯一運行時權威。",
+      "registry.openAdmin": "開啟 LiteLLM Admin",
+      "registry.adminHint": "新增、編輯、暫停、測試和刪除 Provider/模型都在 LiteLLM Admin 中完成；AI Office 此處只讀展示。",
+      "registry.credentials": "Credential",
+      "registry.deployments": "Deployment",
+      "registry.active": "啟用",
+      "registry.paused": "暫停",
+      "registry.aliases": "模型 Alias",
+      "registry.group": "模型組",
+      "registry.provider": "Provider",
+      "registry.physicalModel": "物理模型",
+      "registry.commercial": "商業類型",
+      "registry.protocol": "協議",
+      "registry.order": "優先級",
+      "registry.credential": "Credential",
+      "registry.loading": "正在載入 LiteLLM Registry…",
+      "registry.loadError": "LiteLLM Registry 更新失敗",
+      "registry.noDeployments": "暫無 LiteLLM Deployment。",
     "tabs.operations": "營運",
     "tabs.policy": "執行階段策略",
     "tabs.incidents": "事件",
@@ -739,6 +1042,26 @@
     return Math.floor(seconds / 86400) + "d ago";
   }
 
+  function durationLabel(milliseconds, locale) {
+    const ms = Math.max(0, Number(milliseconds || 0));
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return seconds + "s";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m " + (seconds % 60) + "s";
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + "h " + (minutes % 60) + "m";
+    const days = Math.floor(hours / 24);
+    return days + (locale === "zh" || locale === "zh-hant" ? "天 " : "d ") + (hours % 24) + "h";
+  }
+
+  function executionDuration(item, locale) {
+    const timing = asObject(item && item.timing);
+    if (Number(timing.durationMs || 0) > 0) return durationLabel(timing.durationMs, locale);
+    const started = Date.parse(String(timing.startedAt || item.createdAt || ""));
+    if (!Number.isFinite(started)) return "—";
+    return durationLabel(Date.now() - started, locale);
+  }
+
   function signalTotal(usage) {
     const value = asObject(usage);
     return (
@@ -762,6 +1085,8 @@
         "CURRENT",
         "STAFFED",
         "RUNNING",
+        "SUCCEEDED",
+        "OK",
         "CODING",
         "REVIEWING",
         "APPOINTED",
@@ -770,11 +1095,11 @@
     ) {
       return "good";
     }
-    if (["DEGRADED", "WARNING", "SCHEDULED", "PREFER", "UNRESOLVED", "DEFAULT_MODEL"].includes(normalized)) {
+    if (["DEGRADED", "WARNING", "SCHEDULED", "PREFER", "UNRESOLVED", "DEFAULT_MODEL", "STARTING", "PAUSED", "WAITING_FOR_CONFIRMATION", "UNCONFIGURED"].includes(normalized)) {
       return "warn";
     }
     if (
-      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "UNAVAILABLE", "DORMANT", "UNFILLED"].includes(
+      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "UNAVAILABLE", "DORMANT", "UNFILLED", "FAILED", "STUCK"].includes(
         normalized,
       )
     ) {
@@ -811,7 +1136,15 @@
     return h(
       "button",
       {
-        className: "hao-button " + (props.kind === "quiet" ? "hao-button-quiet" : ""),
+        className:
+          "hao-button " +
+          (props.kind === "quiet"
+            ? "hao-button-quiet"
+            : props.kind === "outline"
+              ? "hao-button-outline"
+              : props.kind === "danger"
+                ? "hao-button-danger"
+                : ""),
         type: props.type || "button",
         disabled: props.disabled,
         onClick: props.onClick,
@@ -1771,259 +2104,60 @@
   }
 
   function Suppliers(props) {
-    const supply = asObject(props.data.supply);
-    const workforce = asObject(props.data.workforce);
-    const error = sourceError(supply);
-    const [detailSupplier, setDetailSupplier] = React.useState(null);
-    const [detailConnections, setDetailConnections] = React.useState([]);
-    const [detailConnectionsLoading, setDetailConnectionsLoading] = React.useState(false);
-    const [detailConnectionsError, setDetailConnectionsError] = React.useState("");
-    const [connectionActionId, setConnectionActionId] = React.useState("");
-    const [addOpen, setAddOpen] = React.useState(false);
-    const [presets, setPresets] = React.useState([]);
-    const [presetId, setPresetId] = React.useState("opencode-go");
-    const [apiKey, setApiKey] = React.useState("");
-    const [baseUrl, setBaseUrl] = React.useState("");
-    const [supplierName, setSupplierName] = React.useState("");
-    const [websiteUrl, setWebsiteUrl] = React.useState("");
-    const [models, setModels] = React.useState([]);
-    const [selectedModels, setSelectedModels] = React.useState([]);
-    const [defaultModel, setDefaultModel] = React.useState("");
-    const [modelQuery, setModelQuery] = React.useState("");
-    const [discovering, setDiscovering] = React.useState(false);
-    const [saving, setSaving] = React.useState(false);
-    const [formMessage, setFormMessage] = React.useState("");
+    const [registry, setRegistry] = React.useState(null);
+    const [error, setError] = React.useState("");
+    const [loading, setLoading] = React.useState(true);
+    const [query, setQuery] = React.useState("");
 
-    if (error) return h(ErrorBanner, { title: props.t("shell.loadError"), error: error });
-
-    const workforceById = new Map(
-      asArray(workforce.employees).map(function (employee) {
-        return [employee.id, employee];
-      }),
-    );
-    const suppliers = asArray(supply.suppliers);
-    const currentPreset =
-      presets.find(function (preset) {
-        return preset.id === presetId;
-      }) || null;
-    const visibleModels = models.filter(function (model) {
-      const needle = modelQuery.trim().toLowerCase();
-      return !needle || String(model.name || model.id).toLowerCase().includes(needle);
-    });
-
-    function resetOnboarding() {
-      setPresetId("opencode-go");
-      setApiKey("");
-      setBaseUrl("");
-      setSupplierName("");
-      setWebsiteUrl("");
-      setModels([]);
-      setSelectedModels([]);
-      setDefaultModel("");
-      setModelQuery("");
-      setFormMessage("");
-      setDiscovering(false);
-      setSaving(false);
-    }
-
-    async function openSupplierDetail(supplier) {
-      setDetailSupplier(supplier);
-      setDetailConnections([]);
-      setDetailConnectionsError("");
-      setDetailConnectionsLoading(true);
+    const load = React.useCallback(async function () {
+      setLoading(true);
       try {
-        const result = await api("/suppliers/" + encodeURIComponent(String(supplier.id)) + "/connections");
-        setDetailConnections(asArray(result.items));
+        const value = await api("/model-registry");
+        setRegistry(value);
+        setError("");
       } catch (cause) {
-        setDetailConnectionsError(String(cause));
+        setError(String(cause));
       } finally {
-        setDetailConnectionsLoading(false);
+        setLoading(false);
       }
-    }
+    }, []);
 
-    async function controlConnection(connection, enabled) {
-      setConnectionActionId(String(connection.id));
-      try {
-        await api("/providers/hub/" + encodeURIComponent(String(connection.id)) + "/control", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled: Boolean(enabled), reason: "AI Office dashboard operator" }),
-        });
-        if (detailSupplier) await openSupplierDetail(detailSupplier);
-      } catch (cause) {
-        setDetailConnectionsError(String(cause));
-      } finally {
-        setConnectionActionId("");
-      }
-    }
+    React.useEffect(function () {
+      load();
+    }, [load]);
 
-    function connectionTime(value) {
-      if (!value) return props.t("common.notRecorded");
-      const numeric = Number(value);
-      return props.relativeTime(Number.isFinite(numeric) && numeric ? numeric : Date.parse(String(value)));
-    }
-
-    function closeSupplierDetail() {
-      setDetailSupplier(null);
-      setDetailConnections([]);
-      setDetailConnectionsError("");
-      setDetailConnectionsLoading(false);
-    }
-
-    async function openOnboarding() {
-      resetOnboarding();
-      setAddOpen(true);
-      try {
-        const result = await api("/providers/presets");
-        const items = asArray(result.items);
-        setPresets(items);
-        const preferred =
-          items.find(function (item) {
-            return item.id === "opencode-go";
-          }) || items[0];
-        if (preferred) setPresetId(preferred.id);
-      } catch (cause) {
-        setFormMessage(String(cause));
-      }
-    }
-
-    function choosePreset(id) {
-      setPresetId(id);
-      setModels([]);
-      setSelectedModels([]);
-      setDefaultModel("");
-      setModelQuery("");
-      setFormMessage("");
-      if (id !== "custom") {
-        setBaseUrl("");
-        setSupplierName("");
-        setWebsiteUrl("");
-      }
-    }
-
-    async function discoverModels() {
-      setDiscovering(true);
-      setFormMessage("");
-      try {
-        const result = await api("/providers/discover", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preset_id: presetId,
-            api_key: apiKey,
-            base_url: baseUrl,
-            supplier_name: supplierName,
-            website_url: websiteUrl,
-          }),
-        });
-        setModels(asArray(result.models));
-        setSelectedModels([]);
-        setDefaultModel("");
-      } catch (cause) {
-        setModels([]);
-        setFormMessage(String(cause));
-      } finally {
-        setDiscovering(false);
-      }
-    }
-
-    function toggleModel(modelId) {
-      setSelectedModels(function (current) {
-        if (current.includes(modelId)) {
-          const next = current.filter(function (value) {
-            return value !== modelId;
-          });
-          if (defaultModel === modelId) setDefaultModel(next[0] || "");
-          return next;
-        }
-        const next = current.concat([modelId]);
-        if (!defaultModel) setDefaultModel(modelId);
-        return next;
-      });
-    }
-
-    async function saveSupplier() {
-      if (!selectedModels.length) return;
-      setSaving(true);
-      setFormMessage("");
-      try {
-        await api("/providers/register", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            preset_id: presetId,
-            api_key: apiKey,
-            base_url: baseUrl,
-            supplier_name: supplierName,
-            website_url: websiteUrl,
-            selected_models: selectedModels,
-            default_model: defaultModel || selectedModels[0],
-          }),
-        });
-        setFormMessage(props.t("suppliers.saved"));
-        await props.onRefresh();
-        setAddOpen(false);
-        resetOnboarding();
-      } catch (cause) {
-        setFormMessage(String(cause));
-      } finally {
-        setSaving(false);
-      }
-    }
-
-    function supplierFacts(supplier) {
-      const employees = asArray(supplier.employees);
-      const agreements = asArray(supplier.agreements);
-      const channels = agreements.flatMap(function (agreement) {
-        return asArray(agreement.channels);
-      });
-      const employments = agreements.flatMap(function (agreement) {
-        return asArray(agreement.employments);
-      });
-      const runtimeAccess = employments.flatMap(function (employment) {
-        return asArray(employment.runtimeAccess).map(function (access) {
-          return Object.assign({ employeeName: employment.employeeName, employmentId: employment.id }, access);
-        });
-      });
-      const nativeAccess = runtimeAccess.filter(function (access) {
-        return access.adapterKind === "NATIVE_CONFIG" && access.lifecycle === "ACTIVE";
-      });
-      const gatewayAccess = runtimeAccess.filter(function (access) {
-        return access.adapterKind === "GATEWAY" && access.lifecycle === "ACTIVE";
-      });
-      const metadata = asObject(supplier.metadata);
-      const preferences = asObject(metadata.staffingPreferences);
-      const explicitlySelected = Array.isArray(preferences.enabledEmployeeIds);
-      const enabledIds = explicitlySelected ? asArray(preferences.enabledEmployeeIds).map(String) : employees.map(function (employee) { return String(employee.id); });
-      const defaultEmployeeId = String(preferences.defaultEmployeeId || "");
-      const defaultEmployee = employees.find(function (employee) {
-        return String(employee.id) === defaultEmployeeId;
-      });
-      const observedRequests = employees.reduce(function (sum, employee) {
-        const workforceEmployee = workforceById.get(employee.id);
-        return sum + Number(asObject(asObject(workforceEmployee && workforceEmployee.career).observedUsage).requests || 0);
-      }, 0);
-      const healthyChannels = channels.filter(function (channel) {
-        return channel.health === "HEALTHY";
-      }).length;
-      return {
-        employees: employees,
-        agreements: agreements,
-        channels: channels,
-        employments: employments,
-        runtimeAccess: runtimeAccess,
-        nativeAccess: nativeAccess,
-        gatewayAccess: gatewayAccess,
-        enabledIds: enabledIds,
-        explicitlySelected: explicitlySelected,
-        defaultEmployee: defaultEmployee,
-        defaultEmployeeId: defaultEmployeeId,
-        observedRequests: observedRequests,
-        healthyChannels: healthyChannels,
-      };
-    }
-
-    const detailFacts = detailSupplier ? supplierFacts(detailSupplier) : null;
+    const value = asObject(registry);
+    const credentials = asObject(value.credentials);
+    const deploymentSummary = asObject(value.deployments);
+    const aliases = asObject(value.aliases);
+    const deployments = asArray(deploymentSummary.items);
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    const filtered = normalizedQuery
+      ? deployments.filter(function (item) {
+          return [item.group, item.providerKey, item.model, item.commercialType, item.protocol, item.credential]
+            .filter(Boolean)
+            .join(" ")
+            .toLowerCase()
+            .includes(normalizedQuery);
+        })
+      : deployments;
+    const adminUrl = String(value.adminUrl || "");
+    const columns = [
+      {
+        key: "group",
+        label: props.t("registry.group"),
+        render: function (item) {
+          return h("div", { className: "hao-primary-cell" }, h("strong", null, item.group || "—"), h("small", { className: "hao-mono" }, item.id || ""));
+        },
+      },
+      { key: "providerKey", label: props.t("registry.provider"), render: function (item) { return item.providerKey || "—"; } },
+      { key: "model", label: props.t("registry.physicalModel"), render: function (item) { return h("span", { className: "hao-mono" }, item.model || "—"); } },
+      { key: "commercialType", label: props.t("registry.commercial"), render: function (item) { return item.commercialType || "—"; } },
+      { key: "protocol", label: props.t("registry.protocol"), render: function (item) { return item.protocol || "—"; } },
+      { key: "order", label: props.t("registry.order"), className: "hao-number-cell", render: function (item) { return item.order == null ? "—" : String(item.order); } },
+      { key: "credential", label: props.t("registry.credential"), render: function (item) { return h("span", { className: "hao-mono" }, item.credential || "—"); } },
+      { key: "blocked", label: props.t("development.status"), render: function (item) { return h(Status, { value: item.blocked ? "PAUSED" : "AVAILABLE", t: props.t }); } },
+    ];
 
     return h(
       "div",
@@ -2031,342 +2165,43 @@
       h(
         "div",
         { className: "hao-section-head" },
-        h("div", null, h("h1", null, props.t("suppliers.title")), h("p", null, props.t("suppliers.subtitle"))),
+        h("div", null, h("h1", null, props.t("registry.title")), h("p", null, props.t("registry.subtitle"))),
         h(
           "div",
-          { className: "hao-section-actions" },
-          h("span", { className: "hao-count" }, props.t("common.records", { count: props.number(suppliers.length) })),
-          h(Button, { onClick: openOnboarding }, "+ " + props.t("suppliers.add")),
+          { className: "hao-actions" },
+          adminUrl
+            ? h(Button, { kind: "outline", onClick: function () { window.open(adminUrl, "_blank", "noopener,noreferrer"); } }, props.t("registry.openAdmin"))
+            : null,
+          h(Button, { kind: "outline", onClick: load, disabled: loading }, loading ? props.t("shell.refreshing") : props.t("development.refresh")),
         ),
       ),
-      suppliers.length
+      error ? h(ErrorBanner, { title: props.t("registry.loadError"), error: error }) : null,
+      !registry && loading ? h("div", { className: "hao-loading" }, props.t("registry.loading")) : null,
+      registry
         ? h(
-            "div",
-            { className: "hao-supplier-list" },
+            React.Fragment,
+            null,
+            h(Notice, { tone: value.health === "OK" ? "info" : "warn", title: "LiteLLM" }, props.t("registry.adminHint")),
             h(
               "div",
-              { className: "hao-supplier-row hao-supplier-row-head", "aria-hidden": "true" },
-              h("span", null, props.t("suppliers.supplier")),
-              h("span", null, props.t("suppliers.enabledEmployees")),
-              h("span", null, props.t("suppliers.defaultEmployee")),
-              h("span", null, props.t("workforce.state")),
-              h("span", null, props.t("suppliers.actions")),
+              { className: "hao-metrics" },
+              h(Metric, { label: props.t("registry.credentials"), value: props.number(credentials.count || 0), hint: "LiteLLM Credentials" }),
+              h(Metric, { label: props.t("registry.deployments"), value: props.number(deploymentSummary.count || 0), hint: props.number(Object.keys(asObject(deploymentSummary.groups)).length) + " model groups" }),
+              h(Metric, { label: props.t("registry.active"), value: props.number(deploymentSummary.active || 0), hint: "routable" }),
+              h(Metric, { label: props.t("registry.paused"), value: props.number(deploymentSummary.paused || 0), hint: "blocked / unavailable" }),
+              h(Metric, { label: props.t("registry.aliases"), value: props.number(Object.keys(aliases).length), hint: Object.entries(aliases).map(function (entry) { return entry[0] + " → " + entry[1]; }).join(" · ") || "—" }),
+              h(Metric, { label: props.t("development.health"), value: h(Status, { value: value.health || "UNKNOWN", t: props.t }), hint: "runtime authority" }),
             ),
-            suppliers.map(function (supplier) {
-              const facts = supplierFacts(supplier);
-              const internal = String(supplier.sourceKind || "EXTERNAL") === "INTERNAL";
-              return h(
-                "article",
-                { className: "hao-supplier-row", key: supplier.id },
-                h(
-                  "div",
-                  { className: "hao-supplier-row-main" },
-                  h("span", { className: "hao-supplier-mark", "aria-hidden": "true" }, String(supplier.name || "S")[0]),
-                  h(
-                    "div",
-                    { className: "hao-supplier-row-copy" },
-                    h("h2", null, supplier.name, internal ? h("span", { className: "hao-badge hao-badge-internal" }, props.t("suppliers.internal")) : null),
-                    h("p", null, supplier.slug),
-                    supplier.websiteUrl
-                      ? h("a", { className: "hao-external-link hao-supplier-website", href: supplier.websiteUrl, target: "_blank", rel: "noreferrer" }, supplier.websiteUrl)
-                      : null,
-                  ),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-compact-stat" },
-                  h("span", null, props.t("suppliers.enabledEmployees")),
-                  h("strong", null, props.number(facts.enabledIds.length) + " / " + props.number(facts.employees.length)),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-default" },
-                  h("span", null, props.t("suppliers.defaultEmployee")),
-                  h("strong", null, facts.defaultEmployee ? facts.defaultEmployee.displayName : props.t("suppliers.defaultEmployeeNone")),
-                ),
-                h(
-                  "div",
-                  { className: "hao-supplier-row-status" },
-                  h(Status, { value: supplier.lifecycle, t: props.t }),
-                  facts.nativeAccess.length
-                    ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.nativeAccess.length) + " " + props.t("suppliers.nativeAccess"))
-                    : facts.channels.length
-                      ? h("span", { className: "hao-supplier-route-health" }, props.number(facts.healthyChannels) + "/" + props.number(facts.channels.length) + " " + props.t("suppliers.channels"))
-                      : null,
-                ),
-                h(Button, { kind: "quiet", onClick: function () { openSupplierDetail(supplier); } }, props.t("suppliers.details")),
-              );
-            }),
+            h(
+              "label",
+              { className: "hao-search" },
+              h("span", { className: "hao-search-icon", "aria-hidden": "true" }, "⌕"),
+              h("span", { className: "hao-visually-hidden" }, props.t("common.search")),
+              h("input", { type: "search", value: query, placeholder: props.t("common.search"), onChange: function (event) { setQuery(event.target.value); } }),
+            ),
+            h(DataTable, { columns: columns, rows: filtered, keyField: "id", empty: props.t("registry.noDeployments") }),
           )
-        : h(Empty, null, props.t("common.noData")),
-      h(
-        Modal,
-        {
-          open: Boolean(detailSupplier),
-          onClose: closeSupplierDetail,
-          labelledBy: "hao-supplier-detail-title",
-          title: detailSupplier ? detailSupplier.name : props.t("suppliers.detailTitle"),
-          subtitle: props.t("suppliers.detailSubtitle"),
-          closeLabel: props.t("suppliers.close"),
-          wide: true,
-          footer: h(Button, { kind: "quiet", onClick: closeSupplierDetail }, props.t("suppliers.close")),
-        },
-        detailSupplier && detailFacts
-          ? h(
-              "div",
-              { className: "hao-supplier-detail" },
-              detailSupplier.websiteUrl
-                ? h("div", { className: "hao-detail-website" },
-                    h("span", null, props.t("suppliers.website")),
-                    h("a", { className: "hao-external-link", href: detailSupplier.websiteUrl, target: "_blank", rel: "noreferrer" }, detailSupplier.websiteUrl),
-                  )
-                : null,
-              !detailFacts.explicitlySelected
-                ? h(Notice, { icon: "i" }, props.t("suppliers.legacySelection"))
-                : null,
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.employees")),
-                detailFacts.employees.length
-                  ? h(
-                      "div",
-                      { className: "hao-detail-employee-list" },
-                      detailFacts.employees.map(function (employee) {
-                        const id = String(employee.id);
-                        const enabled = detailFacts.enabledIds.includes(id);
-                        const preferred = detailFacts.defaultEmployeeId === id;
-                        return h(
-                          "div",
-                          { className: "hao-detail-employee", key: id },
-                          h(Avatar, { name: employee.displayName }),
-                          h("div", { className: "hao-detail-employee-copy" }, h("strong", null, employee.displayName), h("small", null, asObject(employee.supplierModel).key || "")),
-                          preferred
-                            ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.preferred"))
-                            : h("span", { className: "hao-badge" }, props.t(enabled ? "suppliers.enabled" : "suppliers.disabled")),
-                        );
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noEmployees")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.connections")),
-                detailConnectionsLoading
-                  ? h("span", { className: "hao-muted" }, props.t("suppliers.connectionsLoading"))
-                  : detailConnectionsError
-                    ? h(ErrorBanner, { title: props.t("shell.loadError"), error: detailConnectionsError })
-                    : detailConnections.length
-                      ? h(
-                          "div",
-                          { className: "hao-agreement-list" },
-                          detailConnections.map(function (connection) {
-                            const models = asArray(connection.models);
-                            const links = asArray(connection.profileLinks);
-                            const adminState = String(connection.adminState || "DISABLED").toUpperCase();
-                            const effectiveState = String(connection.effectiveState || connection.health || "UNKNOWN").toUpperCase();
-                            const retryStates = ["UNAVAILABLE", "TEMP_UNAVAILABLE"];
-                            const actionEnabled = adminState === "DISABLED" || (adminState === "ENABLED" && retryStates.includes(effectiveState));
-                            const actionLabel = adminState === "DISABLED"
-                              ? props.t("suppliers.enable")
-                              : (adminState === "ENABLED" && retryStates.includes(effectiveState) ? props.t("suppliers.retry") : props.t("suppliers.disable"));
-                            const attempts = asArray(connection.recentAttempts).slice().sort(function (left, right) {
-                              const leftObservedAt = asObject(left).observedAt;
-                              const rightObservedAt = asObject(right).observedAt;
-                              const leftNumeric = Number(leftObservedAt);
-                              const rightNumeric = Number(rightObservedAt);
-                              const leftTime = leftObservedAt != null && leftObservedAt !== "" && Number.isFinite(leftNumeric) ? leftNumeric : Date.parse(String(leftObservedAt || ""));
-                              const rightTime = rightObservedAt != null && rightObservedAt !== "" && Number.isFinite(rightNumeric) ? rightNumeric : Date.parse(String(rightObservedAt || ""));
-                              return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
-                            }).slice(0, 5);
-                            return h(
-                              "div",
-                              { className: "hao-agreement-row hao-supplier-connection", key: connection.id },
-                              h(
-                                "div",
-                                { className: "hao-primary-cell" },
-                                h("strong", null, connection.display_name || connection.provider_key),
-                                h("small", null, connection.base_url || "—"),
-                                h("small", null, [connection.auth_kind, connection.credential_ref].filter(Boolean).join(" · ") || "—"),
-                                models.length
-                                  ? h("div", { className: "hao-chip-row" }, models.slice(0, 6).map(function (model) { return h("code", { className: "hao-code", key: model }, model); }), models.length > 6 ? h("span", { className: "hao-count" }, "+" + props.number(models.length - 6)) : null)
-                                  : null,
-                                links.length
-                                  ? h("small", null, links.map(function (link) { return [link.profile_id, link.runtime_kind, link.model_ref].filter(Boolean).join(" / "); }).join(" · "))
-                                  : null,
-                                h("small", null, props.t("suppliers.effectiveState") + ": " + effectiveState + " · " + props.t("suppliers.adminState") + ": " + adminState),
-                                h("small", null, props.t("suppliers.routable") + ": " + (connection.routable ? "yes" : "no") + " · " + props.t("suppliers.retryable") + ": " + (connection.retryable ? "yes" : "no") + " · " + props.t("suppliers.consecutiveFailures") + ": " + String(connection.consecutiveFailures == null ? 0 : connection.consecutiveFailures)),
-                                connection.lastErrorKind || connection.lastErrorStatus || connection.lastErrorMessage
-                                  ? h("small", null, props.t("suppliers.lastError") + ": " + [connection.lastErrorKind, connection.lastErrorStatus, connection.lastErrorMessage].filter(Boolean).join(" · "))
-                                  : null,
-                                h("small", null, [props.t("suppliers.lastSuccess") + ": " + connectionTime(connection.lastSuccessAt), props.t("suppliers.lastFailure") + ": " + connectionTime(connection.lastFailureAt), props.t("suppliers.retryAfter") + ": " + connectionTime(connection.retryAfterAt)].join(" · ")),
-                                h("small", null, props.t("suppliers.recentAttempts") + ": " + props.number(attempts.length)),
-                                attempts.length
-                                  ? h("div", { className: "hao-supplier-attempts" }, attempts.map(function (attempt, index) {
-                                      const item = asObject(attempt);
-                                      return h("small", { key: String(item.id || item.observedAt || index) }, [item.outcome, item.errorKind, item.httpStatus, item.observedAt == null ? null : connectionTime(item.observedAt), item.errorMessage].filter(function (value) { return value != null && String(value) !== ""; }).map(String).join(" · "));
-                                    }))
-                                  : null,
-                              ),
-                              h("div", { className: "hao-supplier-connection-actions" }, h(Status, { value: effectiveState, t: props.t }), h(Button, { kind: "quiet", disabled: connectionActionId === String(connection.id), onClick: function () { controlConnection(connection, actionEnabled); } }, connectionActionId === String(connection.id) ? props.t("suppliers.controlBusy") : actionLabel)),
-                            );
-                          }),
-                        )
-                      : h("span", { className: "hao-cell-empty" }, props.t("suppliers.noConnections")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.runtimeAccess")),
-                detailFacts.runtimeAccess.length
-                  ? h(
-                      "div",
-                      { className: "hao-agreement-list" },
-                      detailFacts.runtimeAccess.map(function (access) {
-                        const provider = access.profileRef || access.providerRef || "—";
-                        return h(
-                          "div",
-                          { className: "hao-agreement-row", key: access.id },
-                          h(
-                            "div",
-                            null,
-                            h("strong", null, (access.employeeName || "") + " · " + (access.runtimeKind || "")),
-                            h("small", null, props.t("suppliers.accessProvider") + ": " + provider + " · " + props.t("suppliers.accessModel") + ": " + (access.modelRef || "—")),
-                          ),
-                          h("span", { className: access.adapterKind === "NATIVE_CONFIG" ? "hao-badge hao-badge-good" : "hao-badge" }, access.adapterKind === "NATIVE_CONFIG" ? props.t("suppliers.nativeAccess") : props.t("suppliers.gatewayAccess")),
-                        );
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
-              ),
-              h(
-                "section",
-                { className: "hao-detail-section" },
-                h("h3", null, props.t("suppliers.agreements")),
-                detailFacts.agreements.length
-                  ? h(
-                      "div",
-                      { className: "hao-agreement-list" },
-                      detailFacts.agreements.map(function (agreement) {
-                        return h("div", { className: "hao-agreement-row", key: agreement.id }, h("div", null, h("strong", null, agreement.name), h("small", null, agreement.planName || props.t("suppliers.noPlan"))), h(Status, { value: agreement.lifecycle, t: props.t }));
-                      }),
-                    )
-                  : h("span", { className: "hao-cell-empty" }, props.t("common.noData")),
-              ),
-              h(
-                "div",
-                { className: "hao-detail-metrics" },
-                h("div", null, h("span", null, props.t("suppliers.channels")), h("strong", null, props.number(detailFacts.healthyChannels) + "/" + props.number(detailFacts.channels.length))),
-                h("div", null, h("span", null, props.t("suppliers.observed")), h("strong", null, props.number(detailFacts.observedRequests))),
-              ),
-            )
-          : null,
-      ),
-      h(
-        Modal,
-        {
-          open: addOpen,
-          onClose: function () { setAddOpen(false); },
-          labelledBy: "hao-supplier-add-title",
-          title: props.t("suppliers.addTitle"),
-          subtitle: props.t("suppliers.addSubtitle"),
-          closeLabel: props.t("suppliers.close"),
-          wide: true,
-          footer: models.length
-            ? h(
-                "div",
-                { className: "hao-onboarding-footer" },
-                h("span", null, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) })),
-                h(Button, { disabled: saving || !selectedModels.length, onClick: saveSupplier }, saving ? props.t("suppliers.savingSupplier") : props.t("suppliers.saveSupplier")),
-              )
-            : null,
-        },
-        h(
-          "div",
-          { className: "hao-onboarding" },
-          h(
-            "section",
-            { className: "hao-onboarding-step" },
-            h("h3", null, props.t("suppliers.chooseProvider")),
-            h(
-              "div",
-              { className: "hao-preset-grid" },
-              presets.map(function (preset) {
-                return h(
-                  "button",
-                  {
-                    className: "hao-preset-card",
-                    key: preset.id,
-                    type: "button",
-                    "aria-pressed": presetId === preset.id,
-                    onClick: function () { choosePreset(preset.id); },
-                  },
-                  h("span", { className: "hao-preset-mark", "aria-hidden": "true" }, preset.id === "custom" ? "+" : String(preset.name || "P")[0]),
-                  h("span", { className: "hao-preset-copy" }, h("strong", null, preset.id === "custom" ? props.t("suppliers.custom") : preset.name), h("small", null, preset.id === "custom" ? props.t("suppliers.customHint") : preset.supplierName || preset.name)),
-                  preset.configured ? h("span", { className: "hao-badge hao-badge-good" }, props.t("suppliers.configured")) : null,
-                );
-              }),
-            ),
-          ),
-          h(
-            "section",
-            { className: "hao-onboarding-step" },
-            h("h3", null, props.t("suppliers.credentials")),
-            h(
-              "div",
-              { className: "hao-onboarding-form" },
-              presetId === "custom"
-                ? h(
-                    React.Fragment,
-                    null,
-                    h("label", { className: "hao-field hao-field-wide" }, h("span", null, props.t("suppliers.baseUrl")), h("input", { type: "url", value: baseUrl, placeholder: "https://api.example.com/v1", onChange: function (event) { setBaseUrl(event.target.value); } })),
-                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.supplierName")), h("input", { type: "text", value: supplierName, placeholder: props.t("suppliers.supplierNameHint"), onChange: function (event) { setSupplierName(event.target.value); } })),
-                    h("label", { className: "hao-field" }, h("span", null, props.t("suppliers.website")), h("input", { type: "url", value: websiteUrl, placeholder: "https://example.com", onChange: function (event) { setWebsiteUrl(event.target.value); } })),
-                  )
-                : null,
-              h(
-                "label",
-                { className: "hao-field " + (presetId === "custom" ? "" : "hao-field-wide") },
-                h("span", null, props.t("suppliers.apiKey")),
-                h("input", { type: "password", value: apiKey, autoComplete: "off", placeholder: currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired"), onChange: function (event) { setApiKey(event.target.value); } }),
-                h("small", null, currentPreset && currentPreset.configured ? props.t("suppliers.apiKeyExisting") : props.t("suppliers.apiKeyRequired")),
-              ),
-              h("div", { className: "hao-discover-action" }, h(Button, { disabled: discovering || (presetId === "custom" && !baseUrl.trim()), onClick: discoverModels }, discovering ? props.t("suppliers.discovering") : props.t("suppliers.discover"))),
-            ),
-            h("p", { className: "hao-security-note" }, props.t("suppliers.security")),
-          ),
-          models.length
-            ? h(
-                "section",
-                { className: "hao-onboarding-step" },
-                h("div", { className: "hao-onboarding-step-head" }, h("div", null, h("h3", null, props.t("suppliers.selectModels")), h("p", null, props.t("suppliers.selectModelsHint"))), h("span", { className: "hao-count" }, props.t("suppliers.selectedCount", { count: props.number(selectedModels.length) }))),
-                h("input", { className: "hao-model-search", type: "search", value: modelQuery, placeholder: props.t("suppliers.modelSearch"), onChange: function (event) { setModelQuery(event.target.value); } }),
-                h(
-                  "div",
-                  { className: "hao-model-picker" },
-                  visibleModels.map(function (model) {
-                    const modelId = String(model.id);
-                    const checked = selectedModels.includes(modelId);
-                    return h(
-                      "label",
-                      { className: "hao-model-option", key: modelId },
-                      h("input", { type: "checkbox", checked: checked, onChange: function () { toggleModel(modelId); } }),
-                      h("span", { className: "hao-model-name" }, model.name || modelId),
-                      h(
-                        "span",
-                        { className: "hao-default-choice" },
-                        h("input", { type: "radio", name: "hao-default-employee", disabled: !checked, checked: defaultModel === modelId, onChange: function () { if (checked) setDefaultModel(modelId); } }),
-                        h("span", null, props.t("suppliers.preferred")),
-                      ),
-                    );
-                  }),
-                ),
-              )
-            : null,
-          formMessage ? h("div", { className: "hao-save-message", role: "status" }, formMessage) : null,
-        ),
-      ),
+        : null,
     );
   }
 
@@ -2419,6 +2254,7 @@
 
   function RuntimePolicy(props) {
     const initial = asObject(props.data.runtimePolicy);
+    const [executionMode, setExecutionMode] = React.useState(String(initial.executionMode || "v2"));
     const [mode, setMode] = React.useState(String(initial.mode || "prefer"));
     const [opencodePosition, setOpenCodePosition] = React.useState(
       String(initial.opencodePosition || "coding-executor"),
@@ -2430,11 +2266,12 @@
     const [message, setMessage] = React.useState("");
     React.useEffect(
       function () {
+        setExecutionMode(String(initial.executionMode || "v2"));
         setMode(String(initial.mode || "prefer"));
         setOpenCodePosition(String(initial.opencodePosition || "coding-executor"));
         setCodexPosition(String(initial.codexPosition || "codex-executor"));
       },
-      [initial.mode, initial.opencodePosition, initial.codexPosition],
+      [initial.executionMode, initial.mode, initial.opencodePosition, initial.codexPosition],
     );
 
     async function save() {
@@ -2445,6 +2282,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            execution_mode: executionMode,
             mode: mode,
             opencode_position: opencodePosition,
             codex_position: codexPosition,
@@ -2482,11 +2320,13 @@
         h(
           "div",
           { className: "hao-policy-form" },
-          h("label", null, h("span", null, props.t("policy.mode")), h("select", { value: mode, onChange: function (event) { setMode(event.target.value); } }, h("option", { value: "observe" }, props.t("policy.observe")), h("option", { value: "prefer" }, props.t("policy.prefer")), h("option", { value: "enforce" }, props.t("policy.enforce")))),
+          h("label", null, h("span", null, props.t("policy.executionMode")), h("select", { value: executionMode, onChange: function (event) { setExecutionMode(event.target.value); } }, h("option", { value: "v3" }, props.t("policy.executionV3")), h("option", { value: "v2" }, props.t("policy.executionV2")), h("option", { value: "disabled" }, props.t("policy.executionDisabled")))),
+          h("label", null, h("span", null, props.t("policy.mode")), h("select", { value: mode, onChange: function (event) { setMode(event.target.value); }, disabled: executionMode !== "v2" }, h("option", { value: "observe" }, props.t("policy.observe")), h("option", { value: "prefer" }, props.t("policy.prefer")), h("option", { value: "enforce" }, props.t("policy.enforce")))),
           h("label", null, h("span", null, props.t("policy.openCodePosition")), h("input", { value: opencodePosition, onChange: function (event) { setOpenCodePosition(event.target.value); } })),
           h("label", null, h("span", null, props.t("policy.codexPosition")), h("input", { value: codexPosition, onChange: function (event) { setCodexPosition(event.target.value); } })),
         ),
-        h("p", { className: "hao-form-help" }, props.t("policy.help")),
+        h("p", { className: "hao-form-help" }, props.t("policy.executionHelp")),
+        executionMode === "v2" ? h("p", { className: "hao-form-help" }, props.t("policy.help")) : null,
         message ? h("div", { className: "hao-save-message", role: "status" }, message) : null,
       ),
       h(
@@ -2524,7 +2364,301 @@
     );
   }
 
-  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
+  function Development(props) {
+    const [development, setDevelopment] = React.useState(null);
+    const [error, setError] = React.useState("");
+    const [loading, setLoading] = React.useState(true);
+
+    const load = React.useCallback(async function () {
+      try {
+        const value = await api("/development");
+        setDevelopment(value);
+        setError("");
+      } catch (cause) {
+        setError(String(cause));
+      } finally {
+        setLoading(false);
+      }
+    }, []);
+
+    React.useEffect(function () {
+      load();
+      const timer = window.setInterval(load, 10000);
+      return function () {
+        window.clearInterval(timer);
+      };
+    }, [load]);
+
+    if (!development) {
+      return h(
+        "div",
+        { className: "hao-section-stack" },
+        h(
+          "div",
+          { className: "hao-section-head" },
+          h("div", null, h("h1", null, props.t("development.title")), h("p", null, props.t("development.subtitle"))),
+        ),
+        error ? h(ErrorBanner, { title: props.t("development.loadError"), error: error }) : null,
+        h("div", { className: "hao-loading" }, props.t("development.loading")),
+      );
+    }
+
+    const summary = asObject(development.summary);
+    const usage = asObject(summary.usage);
+    const runtime = asObject(development.runtime);
+    const health = asObject(runtime.sourceHealth);
+    const providerSummary = asObject(asObject(development.providers).deployments);
+    const readiness = asObject(development.readiness);
+    const readinessGates = asObject(readiness.gates);
+    const policy = asObject(development.policy);
+    const concurrency = asObject(policy.concurrency || runtime.concurrency);
+    const active = asArray(development.active);
+    const history = asArray(development.history);
+    const logicalModels = asArray(runtime.logicalModels);
+    const enabledBackends = asArray(runtime.enabledBackends);
+    const phases = Object.entries(asObject(policy.phases));
+
+    function executionColumns() {
+      return [
+        {
+          key: "project",
+          label: props.t("development.project"),
+          render: function (item) {
+            return h(
+              "div",
+              { className: "hao-primary-cell" },
+              h("strong", null, item.projectKey || "—"),
+              h("small", { title: item.objectiveSummary || "" }, item.objectiveSummary || item.executionId || "—"),
+            );
+          },
+        },
+        {
+          key: "phase",
+          label: props.t("development.phase"),
+          render: function (item) {
+            return h("span", { className: "hao-mono" }, item.phase || "—");
+          },
+        },
+        {
+          key: "status",
+          label: props.t("development.status"),
+          render: function (item) {
+            return h(Status, { value: item.status, t: props.t });
+          },
+        },
+        {
+          key: "route",
+          label: props.t("development.route"),
+          render: function (item) {
+            const selection = asObject(item.selection);
+            const refs = asObject(item.refs);
+            const upstream = asObject(refs.upstream);
+            const observedRoute = asObject(upstream.route);
+            const physical = [observedRoute.model, observedRoute.provider].filter(Boolean).join(" · ");
+            return h(
+              "div",
+              { className: "hao-primary-cell hao-dev-route" },
+              h("strong", null, selection.modelClass || "—"),
+              h("small", null, [selection.backend, selection.transportMode].filter(Boolean).join(" · ") || "—"),
+              physical
+                ? h(
+                    "small",
+                    { className: "hao-dev-observed-route", title: observedRoute.deploymentId || physical },
+                    props.t("development.observedRoute") + ": " + physical,
+                  )
+                : null,
+            );
+          },
+        },
+        {
+          key: "elapsed",
+          label: props.t("development.elapsed"),
+          render: function (item) {
+            return h("span", { className: "hao-mono" }, executionDuration(item, props.locale));
+          },
+        },
+        {
+          key: "usage",
+          label: props.t("development.tokens"),
+          render: function (item) {
+            const itemUsage = asObject(item.usage);
+            if (!item.usage) return h("span", { className: "hao-cell-empty" }, "—");
+            return h(
+              "div",
+              { className: "hao-primary-cell" },
+              h("strong", null, props.compact(Number(itemUsage.input || 0) + Number(itemUsage.output || 0))),
+              h("small", null, props.money(itemUsage.costUsd || 0) + " · " + props.t("development.calls", { count: props.number(itemUsage.calls || 0) })),
+            );
+          },
+        },
+        {
+          key: "refs",
+          label: props.t("development.references"),
+          render: function (item) {
+            const refs = asObject(item.refs);
+            const values = [];
+            if (refs.openhandsConversationId) values.push("OH " + String(refs.openhandsConversationId).slice(0, 8));
+            if (refs.langfuseTraceId) values.push("LF " + String(refs.langfuseTraceId).slice(0, 8));
+            return h("span", { className: "hao-mono", title: values.join(" · ") }, values.join(" · ") || "—");
+          },
+        },
+      ];
+    }
+
+    return h(
+      "div",
+      { className: "hao-section-stack" },
+      h(
+        "div",
+        { className: "hao-section-head" },
+        h(
+          "div",
+          null,
+          h("h1", null, props.t("development.title")),
+          h("p", null, props.t("development.subtitle")),
+        ),
+        h(Button, { kind: "outline", onClick: load, disabled: loading }, loading ? props.t("shell.refreshing") : props.t("development.refresh")),
+      ),
+      error ? h(ErrorBanner, { title: props.t("development.loadError"), error: error }) : null,
+      h(
+        "div",
+        { className: "hao-metrics hao-dev-metrics" },
+        h(Metric, { label: props.t("development.activeMetric"), value: props.number(summary.active || 0), hint: String(asObject(summary.statuses).RUNNING || 0) + " running" }),
+        h(Metric, { label: props.t("development.waitingMetric"), value: props.number(summary.waiting || 0), hint: "PAUSED / WAITING" }),
+        h(Metric, { label: props.t("development.totalMetric"), value: props.number(summary.total || 0), hint: props.number(summary.history || 0) + " terminal" }),
+        h(Metric, { label: props.t("development.tokenMetric"), value: props.compact(Number(usage.input || 0) + Number(usage.output || 0)), hint: props.t("development.cache", { count: props.compact(usage.cachedInput || 0) }) }),
+        h(Metric, { label: props.t("development.costMetric"), value: props.money(usage.costUsd || 0), hint: props.t("development.calls", { count: props.number(usage.calls || 0) }) }),
+        h(Metric, { label: props.t("development.traceMetric"), value: Math.round(Number(summary.traceCoverage || 0) * 100) + "%", hint: props.t("development.traceCount", { count: props.number(usage.traces || 0) }) }),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.readiness"), subtitle: props.t("development.readinessSubtitle"), className: "hao-dev-readiness" },
+        asObject(development.readiness).unavailable
+          ? h(Notice, { tone: "warn" }, String(asObject(development.readiness).error || "Unavailable"))
+          : h(
+              "div",
+              { className: "hao-dev-readiness-grid" },
+              h(Metric, {
+                label: props.t("development.representative"),
+                value: props.number(asObject(readinessGates.representativeWorkflows).current || 0) + "/" + props.number(asObject(readinessGates.representativeWorkflows).required || 10),
+                hint: asObject(readinessGates.representativeWorkflows).pass ? props.t("development.gatePass") : props.t("development.gatePending"),
+              }),
+              h(Metric, { label: props.t("development.fixLoop"), value: h(Status, { value: asObject(readinessGates.fixLoop).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.fixLoop).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.fallback"), value: h(Status, { value: asObject(readinessGates.providerFallback).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.providerFallback).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.reconnect"), value: h(Status, { value: asObject(readinessGates.gatewayReconnect).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.gatewayReconnect).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.rollback"), value: h(Status, { value: asObject(readinessGates.rollback).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.rollback).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, {
+                label: props.t("development.observabilityGate"),
+                value: props.number(asObject(readinessGates.observability).verified || 0) + "/" + props.number(asObject(readinessGates.observability).required || 0),
+                hint: asObject(readinessGates.observability).pass ? props.t("development.gatePass") : props.t("development.gatePending"),
+              }),
+            ),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.active"), subtitle: props.t("development.activeSubtitle") },
+        h(DataTable, { columns: executionColumns(), rows: active, keyField: "executionId", empty: props.t("development.noActive") }),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.history"), subtitle: props.t("development.historySubtitle") },
+        h(DataTable, { columns: executionColumns(), rows: history.slice(0, 32), keyField: "executionId", empty: props.t("development.noHistory") }),
+      ),
+      h(
+        "div",
+        { className: "hao-dev-two-column" },
+        h(
+          Panel,
+          { title: props.t("development.routing"), subtitle: props.t("development.routingSubtitle"), className: "hao-dev-policy-panel" },
+          h(
+            "div",
+            { className: "hao-dev-policy-grid" },
+            phases.map(function (entry) {
+              const phase = entry[0];
+              const config = asObject(entry[1]);
+              return h(
+                "article",
+                { className: "hao-dev-policy-card", key: phase },
+                h("div", { className: "hao-dev-policy-phase" }, phase),
+                h("strong", null, config.model_class || "—"),
+                h("dl", null,
+                  h("div", null, h("dt", null, props.t("development.backends")), h("dd", null, asArray(config.backend_candidates).join(" → ") || "—")),
+                  h("div", null, h("dt", null, props.t("development.transports")), h("dd", null, asArray(config.transport_preference).join(" → ") || "—")),
+                  h("div", null, h("dt", null, props.t("development.workspace")), h("dd", null, config.workspace_mode || "—")),
+                  h("div", null, h("dt", null, props.t("development.session")), h("dd", null, config.session_policy || "—")),
+                ),
+              );
+            }),
+          ),
+        ),
+        h(
+          "div",
+          { className: "hao-section-stack hao-dev-side-stack" },
+          h(
+            Panel,
+            { title: props.t("development.runtime"), subtitle: props.t("development.runtimeSubtitle") },
+            asObject(development.runtime).unavailable
+              ? h(Notice, { tone: "warn", title: props.t("development.health") }, String(asObject(development.runtime).error || "Unavailable"))
+              : h(
+                  "div",
+                  { className: "hao-dev-runtime" },
+                  h(
+                    "div",
+                    { className: "hao-dev-health-row" },
+                    ["openhands", "litellm", "observability", "langfuse"].map(function (source) {
+                      return h("div", { className: "hao-dev-health-item", key: source }, h("span", null, source), h(Status, { value: health[source] || "UNKNOWN", t: props.t }));
+                    }),
+                  ),
+                  h("div", { className: "hao-dev-subhead" }, props.t("development.logicalModels")),
+                  h("div", { className: "hao-dev-chip-row" }, logicalModels.length ? logicalModels.map(function (model) { return h("span", { className: "hao-dev-chip hao-mono", key: model }, model); }) : h("span", { className: "hao-cell-empty" }, "—")),
+                  h("div", { className: "hao-dev-subhead" }, props.t("development.backends")),
+                  h("div", { className: "hao-dev-chip-row" }, enabledBackends.map(function (backend) { return h("span", { className: "hao-dev-chip hao-mono", key: backend }, backend); })),
+                ),
+          ),
+          h(
+            Panel,
+            { title: props.t("development.providers"), subtitle: props.t("development.runtimeSubtitle") },
+            asObject(development.providers).unavailable
+              ? h(Notice, { tone: "warn" }, String(asObject(development.providers).error || "Unavailable"))
+              : h(
+                  "div",
+                  { className: "hao-mini-metrics" },
+                  h(Metric, { label: props.t("development.connections", { count: props.number(providerSummary.count || 0) }), value: props.number(providerSummary.count || 0), hint: "LiteLLM DB" }),
+                  h(Metric, { label: props.t("development.available", { count: props.number(providerSummary.active || 0) }), value: props.number(providerSummary.active || 0), hint: "active deployments" }),
+                  h(Metric, { label: props.t("registry.paused"), value: props.number(providerSummary.paused || 0), hint: "blocked" }),
+                ),
+          ),
+          h(
+            Panel,
+            { title: props.t("development.concurrency"), subtitle: props.t("development.routingSubtitle") },
+            h(
+              "div",
+              { className: "hao-mini-metrics" },
+              h(Metric, { label: props.t("development.globalWriters"), value: props.number(concurrency.max_active_writers || 0), hint: "fail-closed admission" }),
+              h(Metric, { label: props.t("development.projectWriters"), value: props.number(concurrency.max_active_writers_per_project || 0), hint: "isolated workspaces" }),
+              h(Metric, { label: props.t("development.status"), value: h(Status, { value: health.openhands || "UNKNOWN", t: props.t }), hint: "writer lease authority" }),
+            ),
+          ),
+        ),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.usage"), subtitle: props.t("development.usageSubtitle") },
+        h(
+          "div",
+          { className: "hao-mini-metrics hao-dev-usage-metrics" },
+          h(Metric, { label: "Input", value: props.compact(usage.input || 0), hint: "tokens" }),
+          h(Metric, { label: "Output", value: props.compact(usage.output || 0), hint: "tokens" }),
+          h(Metric, { label: "Cache read", value: props.compact(usage.cachedInput || 0), hint: "tokens" }),
+          h(Metric, { label: "Reasoning", value: props.compact(usage.reasoningOutput || 0), hint: "tokens" }),
+          h(Metric, { label: "Calls", value: props.number(usage.calls || 0), hint: props.number(usage.executionsWithUsage || 0) + " executions" }),
+          h(Metric, { label: "Cost", value: props.money(usage.costUsd || 0), hint: props.t("development.traceCount", { count: props.number(usage.traces || 0) }) }),
+        ),
+      ),
+    );
+  }
+
+  const TAB_KEYS = ["overview", "development", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
 
   function OfficePage() {
     const i18n = useI18n();
@@ -2581,7 +2715,8 @@
 
     let content = null;
     if (data) {
-      if (tab === "organization") content = h(Organization, shared);
+      if (tab === "development") content = h(Development, shared);
+      else if (tab === "organization") content = h(Organization, shared);
       else if (tab === "workforce") content = h(Workforce, shared);
       else if (tab === "suppliers") content = h(Suppliers, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "operations") content = h(Operations, shared);

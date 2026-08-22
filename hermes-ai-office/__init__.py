@@ -20,12 +20,15 @@ from pathlib import Path
 import queue
 import re
 import shlex
+import shutil
+import subprocess
 import threading
 import tomllib
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from typing import Any
 
 _SCHEMA = "hermes.office.observer.v1"
@@ -43,6 +46,9 @@ _PROVIDER_CONNECTION_CACHE: dict[tuple[str, str], tuple[float, str]] = {}
 _API_SUCCESS_LAST_RECORDED: dict[str, float] = {}
 _PROVIDER_CACHE_TTL_SECONDS = 60.0
 _SUCCESS_EVIDENCE_MIN_INTERVAL_SECONDS = 60.0
+_PLACEMENT_RECONCILE_LOCK = threading.Lock()
+_PLACEMENT_RECONCILE_LAST = 0.0
+_PLACEMENT_RECONCILE_TTL_SECONDS = 60.0
 _CTX: Any = None
 _LITELLM_RUNTIME_PROVIDER = "hermes-office"
 _LITELLM_RUNTIME_BASE_URL = "http://127.0.0.1:4000/v1"
@@ -50,6 +56,39 @@ _LITELLM_RUNTIME_KEY_FILE = "/opt/data/secrets/litellm-runtime.key"
 _LITELLM_RUNTIME_KEY_ENV = "HERMES_LITELLM_RUNTIME_KEY"
 
 _CONTROL_PLANE_BASE = "http://127.0.0.1:8320"
+_SUPPLY_ORIGINS = {"OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"}
+_COMMERCIAL_TYPES = {"FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"}
+_ROUTING_POLICIES = {"AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"}
+_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
+_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+_V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
+_V3_DEFAULT_AWAIT = {
+    "INVESTIGATE_PLAN": True,
+    "IMPLEMENT": False,
+    "IMPLEMENT_FIX": False,
+    "VERIFY_REVIEW": True,
+    "FINALIZE": True,
+}
+_V3_DEFAULT_WAIT_SECONDS = {
+    "INVESTIGATE_PLAN": 240.0,
+    "IMPLEMENT": 0.0,
+    "IMPLEMENT_FIX": 0.0,
+    "VERIFY_REVIEW": 240.0,
+    "FINALIZE": 30.0,
+}
+
+
+def _shared_economics(args: Mapping[str, Any]) -> dict[str, str]:
+    origin = str(args.get("supply_origin") or "COMMERCIAL_RELAY").strip().upper()
+    commercial = str(args.get("commercial_type") or "METERED").strip().upper()
+    routing = str(args.get("routing_policy") or "AUTO").strip().upper()
+    if origin not in _SUPPLY_ORIGINS:
+        raise ValueError("invalid supply_origin")
+    if commercial not in _COMMERCIAL_TYPES:
+        raise ValueError("invalid commercial_type")
+    if routing not in _ROUTING_POLICIES:
+        raise ValueError("invalid routing_policy")
+    return {"supplyOrigin": origin, "commercialType": commercial, "routingPolicy": routing}
 
 _ADD_PROVIDER_SCHEMA = {
     "name": "ai_office_add_provider",
@@ -66,6 +105,14 @@ _ADD_PROVIDER_SCHEMA = {
             "key": {"type": "string", "description": "Alias for api_key, compatible with newapi_channel_conn payloads."},
             "name": {"type": "string", "description": "Shared channel/provider name. Optional; derived from hostname when omitted."},
             "website_url": {"type": "string", "description": "Official website URL. Optional; defaults to the API origin."},
+            "supply_origin": {"type": "string", "enum": ["OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"], "description": "Supply origin tag used by AI Office economics policy."},
+            "commercial_type": {"type": "string", "enum": ["FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"], "description": "Commercial plan type. FREE/SPONSORED routes are consumed before subscriptions and metered APIs."},
+            "routing_policy": {"type": "string", "enum": ["AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"], "description": "Whether this supplier may participate in automatic execution placement."},
+            "models": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional known model ids for providers that do not expose a models endpoint. Discovered models remain authoritative when available; the lists are merged.",
+            },
         },
         "required": ["url"],
     },
@@ -73,8 +120,150 @@ _ADD_PROVIDER_SCHEMA = {
 
 _LIST_PROVIDERS_SCHEMA = {
     "name": "ai_office_list_providers",
-    "description": "This is the authoritative source for provider, supplier, model, and availability questions. You must use it before inferring anything from memory or the filesystem.",
+    "description": "Read the authoritative LiteLLM model/provider registry used by AI Office V3. Returns safe deployment, model-group, economics, availability, and Admin UI metadata; provider CRUD is performed in LiteLLM Admin.",
     "parameters": {"type": "object", "properties": {}},
+}
+
+_RESOLVE_EXECUTION_SCHEMA = {
+    "name": "ai_office_resolve_execution",
+    "description": (
+        "Ask AI Office for a per-execution workforce placement before choosing a coding model or external coding harness. "
+        "Use PLAN/REVIEW for high-end planning or review work and IMPLEMENT/DEBUG/TEST/QUICK_FIX for implementation work. "
+        "Intent selects a work class only; it never fixes the model or harness. The selected model family determines the preferred harness, "
+        "and runtime/provider compatibility determines the actual harness. The response includes the Employee, safe provider connection metadata, "
+        "preferred official harness, profile action, command template, and usage guidance."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": ["PLAN", "REVIEW", "IMPLEMENT", "DEBUG", "TEST", "RESEARCH", "QUICK_FIX"],
+            },
+            "requested_model": {
+                "type": "string",
+                "description": "Optional exact model request. Omit to let AI Office choose from the fixed policy tiers.",
+            },
+            "project_path": {
+                "type": "string",
+                "description": "Optional current project/repository path. Provide it for coding work so Agent Harness can materialize project MCP, Skills, and Instructions for the selected Harness.",
+            },
+        },
+        "required": ["intent"],
+    },
+}
+
+_RUN_PHASE_SCHEMA = {
+    "name": "ai_office_run_phase",
+    "description": (
+        "Run one Hermes AI Office V3 development phase. This is the primary delegation tool for software-development work. "
+        "AI Office owns backend/model selection, OpenHands/OpenCode lifecycle, isolated workspaces, review snapshots, correlation, and usage. "
+        "Use previous_execution_id to hand off between phases instead of manually launching coding harnesses."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "phase": {
+                "type": "string",
+                "enum": ["INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"],
+            },
+            "objective": {"type": "string", "description": "Bounded objective for this phase."},
+            "project_key": {
+                "type": "string",
+                "description": "Stable project key. Optional when it can be derived from previous_execution_id, repository_path, or the active Hermes profile.",
+            },
+            "repository_path": {
+                "type": "string",
+                "description": "Repository path for the initial INVESTIGATE_PLAN or IMPLEMENT phase. Continuation phases derive the implementation workspace from previous_execution_id.",
+            },
+            "base_revision": {"type": "string", "description": "Optional Git revision for an initial repository snapshot."},
+            "previous_execution_id": {
+                "type": "string",
+                "description": "Causal parent execution. Use the plan for IMPLEMENT, the implementation/fix for VERIFY_REVIEW, the failed VERIFY_REVIEW for IMPLEMENT_FIX, and the approved VERIFY_REVIEW for FINALIZE.",
+            },
+            "previous_result": {
+                "type": "string",
+                "description": "Optional bounded previous semantic result. Omit to let the plugin fetch it from previous_execution_id.",
+            },
+            "acceptance_criteria": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Concrete verification criteria for the phase.",
+            },
+            "complexity_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "risk_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "quality_hint": {"type": "string", "enum": ["FAST", "STANDARD", "PREMIUM"]},
+            "budget_hint": {"type": "string", "enum": ["LOW", "NORMAL", "HIGH"]},
+            "parallelism": {"type": "integer", "minimum": 1, "maximum": 16},
+            "preferred_backend": {"type": "string", "description": "Optional explicit backend override; AI Office validates availability."},
+            "preferred_model_class": {"type": "string", "description": "Optional explicit logical model-class override."},
+            "transport_mode": {
+                "type": "string",
+                "enum": ["LITELLM_MANAGED", "NATIVE_SUBSCRIPTION", "INTERNAL"],
+            },
+            "await": {
+                "type": "boolean",
+                "description": "Wait for a terminal/attention state. Defaults true for investigate/review/finalize and false for implementation/fix.",
+            },
+            "wait_timeout_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 600,
+                "description": "Maximum plugin-side polling time when await=true. Execution continues durably if this expires.",
+            },
+        },
+        "required": ["phase", "objective"],
+    },
+}
+
+_GET_EXECUTION_SCHEMA = {
+    "name": "ai_office_get_execution",
+    "description": "Get authoritative status, result, usage, workspace, and backend metadata for a V3 development execution.",
+    "parameters": {
+        "type": "object",
+        "properties": {"execution_id": {"type": "string"}},
+        "required": ["execution_id"],
+    },
+}
+
+_CONTINUE_EXECUTION_SCHEMA = {
+    "name": "ai_office_continue_execution",
+    "description": (
+        "Continue the same PAUSED V3 execution with a bounded message. Use only for explicit recovery/resume of the same phase; "
+        "normal review corrections should start IMPLEMENT_FIX instead of reusing a reviewer conversation."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "execution_id": {"type": "string"},
+            "message": {"type": "string"},
+            "await": {"type": "boolean", "description": "Optionally wait for terminal/attention state after resuming."},
+            "wait_timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600},
+        },
+        "required": ["execution_id", "message"],
+    },
+}
+
+_CANCEL_EXECUTION_SCHEMA = {
+    "name": "ai_office_cancel_execution",
+    "description": "Cancel a running V3 development execution. Product status remains CANCELLED even when OpenHands uses pause as its transport primitive.",
+    "parameters": {
+        "type": "object",
+        "properties": {"execution_id": {"type": "string"}},
+        "required": ["execution_id"],
+    },
+}
+
+_LIST_ACTIVE_SCHEMA = {
+    "name": "ai_office_list_active",
+    "description": "List non-terminal V3 development executions, optionally scoped to one project key.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_key": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+    },
 }
 
 _SET_PROVIDER_STATE_SCHEMA = {
@@ -98,12 +287,27 @@ _PROVIDER_STATUS_RE = re.compile(
     r"可用|状态|健康|当前|现在|哪些|列表|拥挤|限流|不可用)",
     re.IGNORECASE,
 )
+_EXECUTION_TOPIC_RE = re.compile(
+    r"(?:implement|implementation|review|plan|planning|debug|test|fix|refactor|code|coding|"
+    r"实施|实现|审查|评审|规划|计划|调试|测试|修一下|修复|重构|编码|写代码)",
+    re.IGNORECASE,
+)
 
 _RUNTIME_COMMAND_RE = re.compile(
     r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|()]+\s+)*"
     r"(?:env\s+(?:[^\s;&|()]+\s+)*|nohup\s+|command\s+|timeout\s+[^\s;&|()]+\s+)?"
     r"(?:[^\s;&|()]*/)?(?P<runtime>opencode|codex)(?=[\s;&|()]|$)",
+    re.IGNORECASE,
+)
+_MANAGED_HARNESS_COMMAND_RE = re.compile(
+    r"(?:^|&&\s*|\|\|\s*|[;|()]\s*)"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=(?:\"[^\"]*\"|'[^']*'|[^\s;&|()]+)\s+)*"
+    r"(?:env\s+(?:[^\s;&|()]+\s+)*)?"
+    r"(?:[^\s;&|()]*/)?harnessctl\s+exec\s+"
+    r"(?:--project\s+[^\s;&|()]+\s+)?"
+    r"(?:--profile\s+[^\s;&|()]+\s+)?"
+    r"(?P<runtime>codex|dsh|claude|opencode)(?=[\s;&|()]|$)",
     re.IGNORECASE,
 )
 _MODEL_RE = re.compile(r"(?:^|\s)(?:-m|--model)(?:=|\s+)([^\s;&|]+)", re.IGNORECASE)
@@ -167,13 +371,115 @@ def _shared_credential_ref(provider_key: str) -> str:
     return (safe[:100] + "_API_KEY")[:120]
 
 
+def _global_hermes_home() -> Path:
+    try:
+        from hermes_constants import get_hermes_home, get_process_hermes_home
+
+        candidates = [Path(get_process_hermes_home()), Path(get_hermes_home())]
+    except Exception:
+        candidates = [Path(os.environ.get("HERMES_HOME", "/opt/data"))]
+    for candidate in candidates:
+        if candidate.parent.name == "profiles":
+            return candidate.parent.parent
+        parts = candidate.parts
+        if "profiles" in parts:
+            index = parts.index("profiles")
+            if index > 0:
+                return Path(*parts[:index])
+    return candidates[0]
+
+
+def _env_value_at_home(home: Path, reference: str) -> str:
+    name = str(reference or "").strip()
+    if not name:
+        return ""
+    try:
+        from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+        from hermes_cli import config as config_mod
+
+        token = set_hermes_home_override(home)
+        try:
+            return str((config_mod.load_env() or {}).get(name) or "").strip()
+        finally:
+            reset_hermes_home_override(token)
+    except Exception:
+        return ""
+
+
 def _save_shared_credential(reference: str, value: str) -> None:
     secret = str(value or "").strip()
     if not secret:
         raise ValueError("API key is required")
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
     from hermes_cli.credential_lifecycle import save_provider_env_credential
 
-    save_provider_env_credential(reference, secret)
+    token = set_hermes_home_override(_global_hermes_home())
+    try:
+        save_provider_env_credential(reference, secret)
+    finally:
+        reset_hermes_home_override(token)
+
+
+def _connection_source_profile(connection: dict[str, Any]) -> str:
+    direct = str(
+        connection.get("source_profile_id") or connection.get("sourceProfileId") or ""
+    ).strip()
+    if direct:
+        return direct
+    metadata = connection.get("metadata") if isinstance(connection.get("metadata"), dict) else {}
+    return str(
+        metadata.get("addedFromProfile") or metadata.get("discoveredFromProfile") or ""
+    ).strip()
+
+
+def _promote_global_connection_credential(connection: dict[str, Any]) -> bool:
+    reference = str(
+        connection.get("credential_ref") or connection.get("credentialRef") or ""
+    ).strip()
+    if not reference:
+        return True
+    global_home = _global_hermes_home()
+    if _env_value_at_home(global_home, reference):
+        return True
+    profile = _connection_source_profile(connection)
+    if not profile:
+        return False
+    profile_home = global_home / "profiles" / _safe_runtime_name(profile)
+    value = _env_value_at_home(profile_home, reference)
+    if not value:
+        return False
+    _save_shared_credential(reference, value)
+    return bool(_env_value_at_home(global_home, reference))
+
+
+def _provider_connection_credential_ready(
+    connection: dict[str, Any], profile_name: str
+) -> bool:
+    auth_kind = str(connection.get("auth_kind") or connection.get("authKind") or "NONE").upper()
+    scope = str(
+        connection.get("credential_scope") or connection.get("credentialScope") or "GLOBAL"
+    ).upper()
+    reference = str(
+        connection.get("credential_ref") or connection.get("credentialRef") or ""
+    ).strip()
+    source_profile = _connection_source_profile(connection)
+    if auth_kind == "NONE" or not reference:
+        return True
+    if scope == "OAUTH_PROFILE":
+        if source_profile and source_profile != profile_name:
+            return False
+        home = _global_hermes_home() / "profiles" / _safe_runtime_name(source_profile or profile_name)
+        return (home / "home" / ".codex" / "auth.json").is_file()
+    if scope == "PROFILE_LOCAL":
+        if source_profile and source_profile != profile_name:
+            return False
+        home = _global_hermes_home() / "profiles" / _safe_runtime_name(source_profile or profile_name)
+        return bool(_env_value_at_home(home, reference))
+    if scope == "GLOBAL":
+        if auth_kind == "API_KEY":
+            return _promote_global_connection_credential(connection)
+        return True
+    return False
 
 
 def _discover_shared_models(api_key: str, base_url: str) -> tuple[str, list[str]]:
@@ -197,6 +503,178 @@ def _discover_shared_models(api_key: str, base_url: str) -> tuple[str, list[str]
         if cleaned:
             return candidate, cleaned[:800]
     return normalized, []
+
+
+_POLICY_WORKFORCE_MODELS = {
+    "deepseek-v4-flash",
+    "glm-5.2",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+}
+_GPT_NON_AGENT_MARKERS = ("image", "audio", "realtime", "tts", "transcribe")
+
+
+def _is_gpt_execution_model(model: str) -> bool:
+    normalized = str(model or "").strip().lower()
+    return normalized.startswith("gpt-") and not any(
+        marker in normalized for marker in _GPT_NON_AGENT_MARKERS
+    )
+
+
+def _policy_workforce_models(models: list[str]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for model in models:
+        normalized = str(model or "").strip().lower()
+        supported = normalized in _POLICY_WORKFORCE_MODELS or _is_gpt_execution_model(normalized)
+        if not supported or normalized in seen:
+            continue
+        selected.append(str(model).strip())
+        seen.add(normalized)
+    return selected
+
+
+def _codex_protocol_compatible(protocol: str) -> bool:
+    normalized = str(protocol or "").strip().lower()
+    return any(token in normalized for token in ("responses", "codex", "chatgpt"))
+
+
+def _codex_transport_mode(protocol: str) -> str:
+    normalized = str(protocol or "").strip().lower()
+    if _codex_protocol_compatible(normalized):
+        return "NATIVE_RESPONSES"
+    if "chat" in normalized:
+        return "BRIDGED_CHAT"
+    return ""
+
+
+def _register_shared_policy_workforce(
+    *,
+    provider_key: str,
+    display_name: str,
+    website_url: str,
+    supplier_slug: str | None = None,
+    supplier_name: str | None = None,
+    base_url: str,
+    protocol: str,
+    credential_ref: str,
+    connection_id: str,
+    models: list[str],
+    supply_origin: str = "UNKNOWN",
+    commercial_type: str = "OTHER",
+    routing_policy: str = "AUTO",
+) -> list[dict[str, Any]]:
+    registrations: list[dict[str, Any]] = []
+    for model in _policy_workforce_models(models):
+        normalized = model.lower()
+        catalog_payload = {
+            "supplier": {
+                "slug": supplier_slug or provider_key,
+                "name": supplier_name or display_name,
+                "websiteUrl": website_url,
+                "sourceKind": "EXTERNAL",
+                "supplyOrigin": supply_origin,
+                "routingPolicy": routing_policy,
+            },
+            "supplierModel": {"key": model, "name": model},
+            "agreement": {
+                "externalAccountRef": f"provider-hub:{connection_id}",
+                "name": f"{display_name} shared connection",
+            },
+            "plan": {
+                "slug": "default",
+                "name": f"{display_name} access",
+                "commercialType": commercial_type,
+            },
+        }
+        catalog_seed = json.dumps(catalog_payload, sort_keys=True, ensure_ascii=False)
+        catalog = _control_plane_request(
+            "/api/v2/commands/supply-catalog/register",
+            method="POST",
+            payload=catalog_payload,
+            idempotency_key="provider-tool-workforce-v2-"
+            + hashlib.blake2b(catalog_seed.encode("utf-8"), digest_size=10).hexdigest(),
+        )
+        employee = catalog.get("employee") if isinstance(catalog.get("employee"), dict) else {}
+        employment = catalog.get("employment") if isinstance(catalog.get("employment"), dict) else {}
+        employment_id = str(employment.get("id") or "").strip()
+        if not employment_id:
+            continue
+
+        opencode_access = {
+            "runtimeKind": "OPENCODE",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": provider_key,
+            "modelRef": model,
+            "baseUrl": base_url,
+            "credentialRef": credential_ref,
+            "protocol": protocol,
+            "config": {
+                "managedProvider": True,
+                "package": "@ai-sdk/openai-compatible",
+                "providerHubConnectionId": connection_id,
+            },
+            "priority": 100,
+        }
+        access_seed = json.dumps(opencode_access, sort_keys=True, ensure_ascii=False)
+        opencode = _control_plane_request(
+            f"/api/v2/commands/employments/{urllib.parse.quote(employment_id, safe='')}/runtime-access",
+            method="POST",
+            payload=opencode_access,
+            idempotency_key="provider-tool-runtime-v1-"
+            + hashlib.blake2b(access_seed.encode("utf-8"), digest_size=10).hexdigest(),
+        )
+        accesses: list[dict[str, Any]] = [opencode]
+
+        codex_transport = _codex_transport_mode(protocol)
+        if _is_gpt_execution_model(normalized) and codex_transport:
+            digest = hashlib.blake2b(
+                f"{provider_key}|{base_url}".encode("utf-8"), digest_size=4
+            ).hexdigest()
+            codex_provider = f"hao-{provider_key}-{digest}"[:120]
+            profile_digest = hashlib.blake2b(
+                f"{provider_key}|{base_url}|{model}".encode("utf-8"), digest_size=5
+            ).hexdigest()
+            codex_access = {
+                "runtimeKind": "CODEX",
+                "adapterKind": "NATIVE_CONFIG",
+                "providerRef": codex_provider,
+                "modelRef": model,
+                "profileRef": f"hao-{provider_key[:40]}-{profile_digest}"[:120],
+                "baseUrl": base_url,
+                "credentialRef": credential_ref,
+                "protocol": protocol,
+                "config": {
+                    "wireApi": "responses",
+                    "transportMode": codex_transport,
+                    "bridgeKind": "CC_SWITCH_CODEX_CHAT" if codex_transport == "BRIDGED_CHAT" else None,
+                    "upstreamProtocol": protocol if codex_transport == "BRIDGED_CHAT" else None,
+                    "providerHubConnectionId": connection_id,
+                },
+                "priority": 120,
+            }
+            codex_seed = json.dumps(codex_access, sort_keys=True, ensure_ascii=False)
+            accesses.append(
+                _control_plane_request(
+                    f"/api/v2/commands/employments/{urllib.parse.quote(employment_id, safe='')}/runtime-access",
+                    method="POST",
+                    payload=codex_access,
+                    idempotency_key="provider-tool-codex-v2-"
+                    + hashlib.blake2b(codex_seed.encode("utf-8"), digest_size=10).hexdigest(),
+                )
+            )
+
+        registrations.append(
+            {
+                "model": model,
+                "employeeId": employee.get("id"),
+                "employeeName": employee.get("displayName"),
+                "employmentId": employment_id,
+                "runtimeAccessIds": [item.get("id") for item in accesses if isinstance(item, dict)],
+            }
+        )
+    return registrations
 
 
 def _save_shared_custom_provider(
@@ -228,6 +706,11 @@ def _save_shared_custom_provider(
 def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         raw_url = _normalize_shared_url(str(args.get("url") or ""))
+        if _is_official_deepseek_endpoint(raw_url):
+            raise ValueError(
+                "DeepSeek official API is reserved for Hermes brain configuration and cannot be added to AI Office workforce routing"
+            )
+        economics = _shared_economics(args)
         api_key = str(args.get("api_key") or args.get("key") or "").strip()
         if not api_key:
             raise ValueError("API key is required")
@@ -237,6 +720,12 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         credential_ref = _shared_credential_ref(provider_key)
         website_url = _shared_website_url(str(args.get("website_url") or ""), raw_url)
         selected_base_url, models = _discover_shared_models(api_key, raw_url)
+        declared_models = [
+            str(item).strip()
+            for item in (args.get("models") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+        models = sorted(set(models).union(declared_models))[:800]
         _save_shared_credential(credential_ref, api_key)
         _save_shared_custom_provider(
             provider_key, display_name, selected_base_url, credential_ref
@@ -252,6 +741,8 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             "name": display_name,
             "websiteUrl": website_url,
             "sourceKind": "EXTERNAL",
+            "supplyOrigin": economics["supplyOrigin"],
+            "routingPolicy": economics["routingPolicy"],
         }
         source_seed = json.dumps(source_payload, sort_keys=True, ensure_ascii=False)
         source = _control_plane_request(
@@ -278,6 +769,7 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             "metadata": {
                 "addedFromProfile": profile or None,
                 "managedBy": "hermes-ai-office",
+                "economics": economics,
             },
         }
         seed = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -287,6 +779,24 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
             payload=payload,
             idempotency_key="provider-tool-v1-"
             + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+        )
+        connection_id = str(connection.get("id") or "").strip()
+        workforce = (
+            _register_shared_policy_workforce(
+                provider_key=provider_key,
+                display_name=display_name,
+                website_url=website_url,
+                base_url=selected_base_url,
+                protocol="openai-chat-completions",
+                credential_ref=credential_ref,
+                connection_id=connection_id,
+                models=models,
+                supply_origin=economics["supplyOrigin"],
+                commercial_type=economics["commercialType"],
+                routing_policy=economics["routingPolicy"],
+            )
+            if connection_id
+            else []
         )
         return json.dumps(
             {
@@ -300,6 +810,8 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
                 "credentialRef": credential_ref,
                 "health": connection.get("health") or payload["health"],
                 "models": models,
+                "workforce": workforce,
+                "economics": economics,
                 "shared": True,
                 "message": (
                     "Added as a shared external supplier connection. Other profiles discover it through the common registry; "
@@ -317,48 +829,930 @@ def _add_shared_provider_tool(args: dict[str, Any], **_kwargs: Any) -> str:
 
 def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
     try:
-        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
-        items = []
-        for item in hub.get("items") or []:
-            if not isinstance(item, dict):
+        registry = _control_plane_request("/api/v3/development/model-registry", timeout=5.0)
+        deployments = (
+            registry.get("deployments", {}).get("items", [])
+            if isinstance(registry.get("deployments"), dict)
+            else []
+        )
+        by_provider: dict[str, dict[str, Any]] = {}
+        for raw in deployments:
+            if not isinstance(raw, dict):
                 continue
-            supplier = item.get("supplier") if isinstance(item.get("supplier"), dict) else {}
-            profiles = sorted(
+            provider_key = str(raw.get("providerKey") or "unclassified").strip() or "unclassified"
+            row = by_provider.setdefault(
+                provider_key,
                 {
-                    str(link.get("profile_id"))
-                    for link in (item.get("profileLinks") or [])
-                    if isinstance(link, dict) and link.get("profile_id")
+                    "providerKey": provider_key,
+                    "deployments": 0,
+                    "active": 0,
+                    "paused": 0,
+                    "modelGroups": set(),
+                    "physicalModels": set(),
+                    "commercialTypes": set(),
+                    "protocols": set(),
+                    "credentials": set(),
+                },
+            )
+            row["deployments"] += 1
+            if raw.get("blocked") is True:
+                row["paused"] += 1
+            else:
+                row["active"] += 1
+            for field, target in (
+                ("group", "modelGroups"),
+                ("model", "physicalModels"),
+                ("commercialType", "commercialTypes"),
+                ("protocol", "protocols"),
+                ("credential", "credentials"),
+            ):
+                value = str(raw.get(field) or "").strip()
+                if value:
+                    row[target].add(value)
+        providers = []
+        for provider_key in sorted(by_provider):
+            raw = by_provider[provider_key]
+            providers.append(
+                {
+                    **{k: v for k, v in raw.items() if not isinstance(v, set)},
+                    "modelGroups": sorted(raw["modelGroups"]),
+                    "physicalModels": sorted(raw["physicalModels"]),
+                    "commercialTypes": sorted(raw["commercialTypes"]),
+                    "protocols": sorted(raw["protocols"]),
+                    "credentials": sorted(raw["credentials"]),
                 }
             )
-            items.append(
-                {
-                    "name": item.get("display_name"),
-                    "providerKey": item.get("provider_key"),
-                    "baseUrl": item.get("base_url"),
-                    "websiteUrl": item.get("website_url"),
-                    "health": item.get("health"),
-                    "adminState": item.get("admin_state", item.get("adminState")),
-                    "availabilityState": item.get("availability_state", item.get("availabilityState")),
-                    "effectiveState": item.get("effective_state", item.get("effectiveState")),
-                    "routable": item.get("routable"),
-                    "retryable": item.get("retryable"),
-                    "consecutiveFailures": item.get("consecutive_failures", item.get("consecutiveFailures")),
-                    "totalSuccesses": item.get("total_successes", item.get("totalSuccesses")),
-                    "totalFailures": item.get("total_failures", item.get("totalFailures")),
-                    "lastSuccessAt": item.get("last_success_at", item.get("lastSuccessAt")),
-                    "lastFailureAt": item.get("last_failure_at", item.get("lastFailureAt")),
-                    "lastErrorKind": item.get("last_error_kind", item.get("lastErrorKind")),
-                    "lastErrorStatus": item.get("last_error_status", item.get("lastErrorStatus")),
-                    "lastErrorMessage": item.get("last_error_message", item.get("lastErrorMessage")),
-                    "retryAfterAt": item.get("retry_after_at", item.get("retryAfterAt")),
-                    "credentialScope": item.get("credential_scope"),
-                    "models": item.get("models") or [],
-                    "supplier": supplier.get("name"),
-                    "profiles": profiles,
-                }
-            )
+        deployment_summary = registry.get("deployments") if isinstance(registry.get("deployments"), dict) else {}
+        credential_summary = registry.get("credentials") if isinstance(registry.get("credentials"), dict) else {}
         return json.dumps(
-            {"ok": True, "summary": hub.get("summary") or {}, "items": items},
+            {
+                "ok": registry.get("health") == "OK",
+                "authority": "LITELLM",
+                "health": registry.get("health"),
+                "adminUrl": registry.get("adminUrl"),
+                "aliases": registry.get("aliases") or {},
+                "summary": {
+                    "credentials": credential_summary.get("count", 0),
+                    "deployments": deployment_summary.get("count", 0),
+                    "active": deployment_summary.get("active", 0),
+                    "paused": deployment_summary.get("paused", 0),
+                    "modelGroups": len(deployment_summary.get("groups") or {}),
+                    "providers": len(providers),
+                },
+                "providers": providers,
+                "modelGroups": sorted((deployment_summary.get("groups") or {}).keys()),
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "authority": "LITELLM", "error": type(exc).__name__, "message": str(exc)[:300]},
+            ensure_ascii=False,
+        )
+
+
+def _reconcile_policy_workforce_from_hub(force: bool = False) -> dict[str, int]:
+    global _PLACEMENT_RECONCILE_LAST
+    now = time.monotonic()
+    if not force and now - _PLACEMENT_RECONCILE_LAST < _PLACEMENT_RECONCILE_TTL_SECONDS:
+        return {"connections": 0, "models": 0}
+    with _PLACEMENT_RECONCILE_LOCK:
+        now = time.monotonic()
+        if not force and now - _PLACEMENT_RECONCILE_LAST < _PLACEMENT_RECONCILE_TTL_SECONDS:
+            return {"connections": 0, "models": 0}
+        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
+        workforce = _control_plane_request("/api/v2/projections/workforce", timeout=3.0)
+        supply = _control_plane_request("/api/v2/projections/supply", timeout=3.0)
+        existing: set[tuple[str, str]] = set()
+        employee_ids: dict[tuple[str, str], str] = {}
+        for employee in workforce.get("employees") or []:
+            if not isinstance(employee, dict):
+                continue
+            supplier = employee.get("supplier") if isinstance(employee.get("supplier"), dict) else {}
+            supplier_model = (
+                employee.get("supplierModel")
+                if isinstance(employee.get("supplierModel"), dict)
+                else {}
+            )
+            supplier_id = str(supplier.get("id") or "").strip()
+            model = str(supplier_model.get("key") or "").strip().lower()
+            current = int(employee.get("currentEmploymentCount") or 0)
+            if supplier_id and model and current > 0:
+                key = (supplier_id, model)
+                existing.add(key)
+                employee_ids[key] = str(employee.get("id") or "").strip()
+
+        supplier_economics: dict[str, dict[str, str]] = {}
+        bridge_ready_employee_ids: set[str] = set()
+        for supplier_projection in supply.get("suppliers") or []:
+            if isinstance(supplier_projection, dict):
+                sid = str(supplier_projection.get("id") or "").strip()
+                active_agreements = [
+                    agreement
+                    for agreement in (supplier_projection.get("agreements") or [])
+                    if isinstance(agreement, dict) and str(agreement.get("lifecycle") or "") == "ACTIVE"
+                ]
+                commercial_type = "OTHER"
+                for agreement in active_agreements:
+                    candidate_type = str(agreement.get("commercialType") or "OTHER").upper()
+                    if candidate_type != "OTHER":
+                        commercial_type = candidate_type
+                        break
+                if sid:
+                    supplier_economics[sid] = {
+                        "supplyOrigin": str(supplier_projection.get("supplyOrigin") or "UNKNOWN").upper(),
+                        "routingPolicy": str(supplier_projection.get("routingPolicy") or "AUTO").upper(),
+                        "commercialType": commercial_type,
+                    }
+        for supplier_projection in supply.get("suppliers") or []:
+            if not isinstance(supplier_projection, dict):
+                continue
+            for agreement in supplier_projection.get("agreements") or []:
+                if not isinstance(agreement, dict):
+                    continue
+                for employment in agreement.get("employments") or []:
+                    if not isinstance(employment, dict):
+                        continue
+                    employee_id = str(employment.get("employeeId") or "").strip()
+                    for access in employment.get("runtimeAccess") or []:
+                        if not isinstance(access, dict):
+                            continue
+                        config = access.get("config") if isinstance(access.get("config"), dict) else {}
+                        if (
+                            str(access.get("runtimeKind") or "").upper() == "CODEX"
+                            and str(access.get("lifecycle") or "ACTIVE").upper() == "ACTIVE"
+                            and str(config.get("wireApi") or "").lower() == "responses"
+                            and str(config.get("transportMode") or "").upper() == "BRIDGED_CHAT"
+                            and str(config.get("bridgeKind") or "").upper() == "CC_SWITCH_CODEX_CHAT"
+                            and employee_id
+                        ):
+                            bridge_ready_employee_ids.add(employee_id)
+
+        reconciled_connections = 0
+        reconciled_models = 0
+        for connection in hub.get("items") or []:
+            if not isinstance(connection, dict):
+                continue
+            if _brain_only_provider_connection(connection):
+                continue
+            auth_kind = str(connection.get("auth_kind") or connection.get("authKind") or "").upper()
+            admin_state = str(
+                connection.get("admin_state") or connection.get("adminState") or "ENABLED"
+            ).upper()
+            if auth_kind != "API_KEY" or admin_state == "DISABLED":
+                continue
+            if not _provider_connection_credential_ready(connection, _active_profile_name()):
+                continue
+            supplier = connection.get("supplier") if isinstance(connection.get("supplier"), dict) else {}
+            supplier_id = str(supplier.get("id") or connection.get("supplier_id") or "").strip()
+            supplier_slug = str(supplier.get("slug") or "").strip()
+            supplier_name = str(supplier.get("name") or "").strip()
+            provider_key = str(connection.get("provider_key") or connection.get("providerKey") or "").strip()
+            display_name = str(connection.get("display_name") or connection.get("displayName") or provider_key).strip()
+            base_url = str(connection.get("base_url") or connection.get("baseUrl") or "").strip()
+            credential_ref = str(
+                connection.get("credential_ref") or connection.get("credentialRef") or ""
+            ).strip()
+            connection_id = str(connection.get("id") or "").strip()
+            website_url = str(
+                connection.get("website_url")
+                or connection.get("websiteUrl")
+                or supplier.get("websiteUrl")
+                or ""
+            ).strip()
+            models = _policy_workforce_models(
+                [str(item) for item in (connection.get("models") or []) if str(item).strip()]
+            )
+            protocol = str(connection.get("protocol") or "openai-chat-completions")
+            transport_mode = _codex_transport_mode(protocol)
+            to_reconcile: list[str] = []
+            for model in models:
+                key = (supplier_id, model.lower())
+                is_missing = not supplier_id or key not in existing
+                employee_id = employee_ids.get(key, "")
+                needs_bridge_upgrade = (
+                    _is_gpt_execution_model(model)
+                    and transport_mode == "BRIDGED_CHAT"
+                    and employee_id not in bridge_ready_employee_ids
+                )
+                if is_missing or needs_bridge_upgrade:
+                    to_reconcile.append(model)
+            if (
+                not to_reconcile
+                or not provider_key
+                or not connection_id
+                or not base_url
+                or not credential_ref
+            ):
+                continue
+            try:
+                economics = supplier_economics.get(
+                    supplier_id,
+                    {"supplyOrigin": "UNKNOWN", "commercialType": "OTHER", "routingPolicy": "AUTO"},
+                )
+                registrations = _register_shared_policy_workforce(
+                    provider_key=provider_key,
+                    display_name=display_name,
+                    website_url=website_url,
+                    supplier_slug=supplier_slug or provider_key,
+                    supplier_name=supplier_name or display_name,
+                    base_url=base_url,
+                    protocol=protocol,
+                    credential_ref=credential_ref,
+                    connection_id=connection_id,
+                    models=to_reconcile,
+                    supply_origin=economics["supplyOrigin"],
+                    commercial_type=economics["commercialType"],
+                    routing_policy=economics["routingPolicy"],
+                )
+            except Exception:
+                continue
+            if registrations:
+                reconciled_connections += 1
+                reconciled_models += len(registrations)
+                for registration in registrations:
+                    model = str(registration.get("model") or "").lower()
+                    if supplier_id and model:
+                        key = (supplier_id, model)
+                        existing.add(key)
+                        employee_id = str(registration.get("employeeId") or "").strip()
+                        if employee_id:
+                            employee_ids[key] = employee_id
+                            if transport_mode == "BRIDGED_CHAT" and _is_gpt_execution_model(model):
+                                bridge_ready_employee_ids.add(employee_id)
+        _PLACEMENT_RECONCILE_LAST = time.monotonic()
+        return {"connections": reconciled_connections, "models": reconciled_models}
+
+
+def _is_official_deepseek_endpoint(value: Any) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        host = str(urllib.parse.urlparse(raw).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "api.deepseek.com"
+
+
+def _brain_only_provider_connection(connection: dict[str, Any]) -> bool:
+    provider_key = str(
+        connection.get("provider_key") or connection.get("providerKey") or ""
+    ).strip().lower()
+    base_url = str(connection.get("base_url") or connection.get("baseUrl") or "").strip()
+    return provider_key == "deepseek" or _is_official_deepseek_endpoint(base_url)
+
+
+def _available_execution_provider_ids(profile_name: str) -> list[str]:
+    hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=3.0)
+    ready: list[str] = []
+    for connection in hub.get("items") or []:
+        if not isinstance(connection, dict):
+            continue
+        if _brain_only_provider_connection(connection):
+            continue
+        connection_id = str(connection.get("id") or "").strip()
+        admin_state = str(
+            connection.get("admin_state") or connection.get("adminState") or "ENABLED"
+        ).upper()
+        routable = connection.get("routable")
+        if not connection_id or admin_state == "DISABLED" or routable is False:
+            continue
+        if not _provider_connection_credential_ready(connection, profile_name):
+            continue
+        ready.append(connection_id)
+    return ready
+
+
+def _runtime_binary(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    for candidate in (
+        Path("/opt/data/runtime/npm/bin") / name,
+        Path("/home/ubuntu/.npm-global/bin") / name,
+        Path("/usr/local/bin") / name,
+    ):
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def _execution_runtime_inventory() -> list[dict[str, str]]:
+    runtimes: list[dict[str, str]] = []
+    for kind, binary in (
+        ("CLAUDE_CODE", "claude"),
+        ("CODEX", "codex"),
+        ("DSH", "dsh"),
+        ("OPENCODE", "opencode"),
+    ):
+        path = _runtime_binary(binary)
+        if path:
+            runtimes.append({"kind": kind, "path": path, "mode": "HEADLESS"})
+    # ZCode is currently a desktop ADE. Do not advertise it as a Hermes-headless
+    # runtime until an explicit automation contract is available and enabled.
+    if os.environ.get("HERMES_AI_OFFICE_ENABLE_ZCODE_AUTOMATION") == "1":
+        path = _runtime_binary("zcode")
+        if path:
+            runtimes.append({"kind": "ZCODE", "path": path, "mode": "DESKTOP"})
+    return runtimes
+
+
+def _agent_harnessctl_path() -> str:
+    configured = str(os.environ.get("HERMES_AI_OFFICE_HARNESSCTL") or "").strip()
+    candidates = [
+        configured,
+        "/home/ubuntu/projects/agent-harness/bin/harnessctl",
+        "/opt/data/runtime/agent-harness/bin/harnessctl",
+        str(Path.home() / ".local" / "share" / "agent-harness" / "current" / "bin" / "harnessctl"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(candidate)
+        try:
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path)
+        except OSError:
+            continue
+    return ""
+
+
+def _execution_project_path(args: dict[str, Any] | None = None) -> str:
+    requested = str((args or {}).get("project_path") or "").strip()
+    candidates: list[Path] = []
+    if requested:
+        candidates.append(Path(requested).expanduser())
+    configured = str(os.environ.get("HERMES_AI_OFFICE_PROJECT_ROOT") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    profile = _active_profile_name()
+    if profile and profile not in {"default", "main"}:
+        candidates.append(Path("/home/ubuntu/projects") / _safe_runtime_name(profile))
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            current = resolved if resolved.is_dir() else resolved.parent
+            for root in (current, *current.parents):
+                if (root / ".git").exists():
+                    return str(root)
+        except OSError:
+            continue
+    return ""
+
+
+def _prepare_agent_harness_environment(
+    project_path: str,
+    host: str,
+    route_config: str = "",
+) -> dict[str, Any]:
+    harnessctl = _agent_harnessctl_path()
+    if not harnessctl:
+        raise RuntimeError("Agent Harness controller is not available")
+    if not project_path:
+        raise RuntimeError("Agent Harness project path is not available")
+    profile_home = _active_runtime_hermes_home() / "home"
+    profile_home.mkdir(parents=True, exist_ok=True)
+    _adopt_active_runtime_owner(profile_home)
+    env = os.environ.copy()
+    env["HOME"] = str(profile_home)
+    command = [harnessctl, "prepare", project_path, "--host", host]
+    if route_config:
+        command.extend(["--route-config", route_config])
+    command.append("--json")
+    process = subprocess.run(
+        command,
+        env=env,
+        cwd=project_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "Agent Harness prepare failed").strip()
+        raise RuntimeError(detail[:500])
+    try:
+        payload = json.loads(process.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Agent Harness returned invalid JSON") from exc
+    environment = payload.get("environment") if isinstance(payload, dict) else None
+    admission = payload.get("admission") if isinstance(payload, dict) else None
+    if not isinstance(environment, dict):
+        raise RuntimeError("Agent Harness prepare did not return an environment")
+    if not isinstance(admission, dict):
+        raise RuntimeError("Agent Harness prepare did not return an admission decision")
+    return {
+        "controller": harnessctl,
+        "profileHome": str(profile_home),
+        "projectRoot": str(environment.get("projectRoot") or project_path),
+        "capabilityHash": str(environment.get("capabilityHash") or ""),
+        "environmentId": str(environment.get("environmentId") or ""),
+        "environmentRoot": str(environment.get("root") or ""),
+        "admission": admission,
+    }
+
+
+def _safe_runtime_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "").strip()).strip("-")
+    return cleaned[:100] or "runtime"
+
+
+def _write_runtime_text(path: Path, content: str) -> str:
+    previous = None
+    try:
+        previous = path.read_text(encoding="utf-8") if path.exists() else None
+    except OSError:
+        previous = None
+    if previous == content:
+        _adopt_active_runtime_owner(path)
+        return "REUSE_EXISTING"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _adopt_active_runtime_owner(path.parent)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    try:
+        os.chmod(temporary, 0o600)
+        _adopt_active_runtime_owner(temporary)
+    except OSError:
+        pass
+    os.replace(temporary, path)
+    _adopt_active_runtime_owner(path)
+    return "CREATE_MANAGED"
+
+
+def _execution_selected(result: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    selected = result.get("selected")
+    if not isinstance(selected, dict):
+        raise RuntimeError("AI Office did not select an execution employee")
+    runtime = selected.get("runtime")
+    if not isinstance(runtime, dict):
+        raise RuntimeError("AI Office selection is missing runtime guidance")
+    connection = selected.get("providerConnection")
+    if not isinstance(connection, dict):
+        raise RuntimeError("AI Office selection is missing provider connection metadata")
+    return selected, runtime, connection
+
+
+def _prepare_dsh_execution(
+    selected: dict[str, Any], runtime: dict[str, Any], connection: dict[str, Any]
+) -> None:
+    model = str(selected.get("model") or "").strip()
+    base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    connection_id = str(connection.get("id") or connection.get("providerKey") or "provider").strip()
+    executable = str(runtime.get("executable") or _runtime_binary("dsh") or "dsh").strip()
+    if not model or not base_url or not credential_ref:
+        raise RuntimeError("DSH selection is missing model, baseUrl, or credentialRef")
+    secret_file = _runtime_secret_file(credential_ref)
+    if not secret_file:
+        raise RuntimeError("DSH selected provider credential is not available")
+    root = _active_runtime_hermes_home()
+    digest = hashlib.blake2b(
+        f"{connection_id}|{base_url}|{model}|{credential_ref}".encode("utf-8"), digest_size=8
+    ).hexdigest()
+    patch = root / "runtime" / "dsh" / "ai-office" / (
+        f"{_safe_runtime_name(connection_id)}-{_safe_runtime_name(model)}-{digest}.patch.yml"
+    )
+    content = (
+        "- id: agent-default-model\n"
+        "  config:\n"
+        "    provider: deepseek-official\n"
+        f"    model: {json.dumps(model, ensure_ascii=False)}\n"
+        "- id: llm-deepseek\n"
+        "  config:\n"
+        f"    apiKeyEnv: {json.dumps(credential_ref)}\n"
+        f"    baseURL: {json.dumps(base_url)}\n"
+    )
+    action = _write_runtime_text(patch, content)
+    runtime.update(
+        {
+            "profileAction": action,
+            "profileReady": True,
+            "profileRef": "headless",
+            "managedProfilePath": str(patch),
+            "commandTemplate": (
+                f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+                f"{shlex.quote(executable)} --profile headless --patch {shlex.quote(str(patch))} <task>"
+            ),
+        }
+    )
+
+
+def _prepare_codex_execution(
+    selected: dict[str, Any], runtime: dict[str, Any], connection: dict[str, Any]
+) -> None:
+    model = str(selected.get("model") or "").strip()
+    provider_key = str(connection.get("providerKey") or "provider").strip()
+    base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    protocol = str(connection.get("protocol") or "openai-chat-completions").strip()
+    auth_kind = str(connection.get("authKind") or "API_KEY").strip().upper()
+    provider_ref = str(runtime.get("providerRef") or "").strip()
+    profile_ref = str(runtime.get("profileRef") or "").strip()
+    executable = str(runtime.get("executable") or _runtime_binary("codex") or "codex").strip()
+    if auth_kind == "OAUTH":
+        if not runtime.get("accessProfileId") or not profile_ref or not provider_ref:
+            raise RuntimeError("Codex OAuth selection requires an existing profile access")
+        if not _codex_profile_exists(profile_ref, provider_ref, model):
+            raise RuntimeError("Codex OAuth profile file is not ready")
+        runtime.update(
+            {
+                "profileAction": "REUSE_EXISTING",
+                "profileReady": True,
+                "commandTemplate": f"{shlex.quote(executable)} --profile {shlex.quote(profile_ref)} exec <task>",
+            }
+        )
+        return
+    transport_mode = str(runtime.get("transportMode") or _codex_transport_mode(protocol)).strip().upper()
+    if transport_mode == "BRIDGED_CHAT":
+        bridge_kind = str(runtime.get("bridgeKind") or "").strip().upper()
+        if "chat" not in protocol.lower() or bridge_kind != "CC_SWITCH_CODEX_CHAT":
+            raise RuntimeError("Codex bridged route is missing a valid Chat Completions bridge contract")
+        if not provider_ref or not profile_ref or not model or not base_url or not credential_ref:
+            raise RuntimeError("Codex bridged route is missing provider, profile, model, baseUrl, or credentialRef")
+        secret_file = _runtime_secret_file(credential_ref)
+        if not secret_file:
+            raise RuntimeError("Codex bridged provider credential is not available")
+        route_seed = f"{provider_ref}|{profile_ref}|{model}|{base_url}|{credential_ref}"
+        route_digest = hashlib.blake2b(route_seed.encode("utf-8"), digest_size=8).hexdigest()
+        route_path = (
+            _active_runtime_hermes_home()
+            / "runtime"
+            / "agent-harness"
+            / "routes"
+            / f"codex-{_safe_runtime_name(provider_ref)}-{route_digest}.json"
+        )
+        _write_json_atomic(
+            route_path,
+            {
+                "version": 1,
+                "transportMode": "BRIDGED_CHAT",
+                "bridgeKind": "CC_SWITCH_CODEX_CHAT",
+                "providerRef": provider_ref,
+                "profileRef": profile_ref,
+                "model": model,
+                "upstreamModel": model,
+                "upstreamBaseUrl": base_url,
+                "upstreamProtocol": protocol,
+                "credentialRef": credential_ref,
+                "providerHubConnectionId": str(connection.get("id") or ""),
+            },
+        )
+        runtime.update(
+            {
+                "profileAction": "REUSE_EXISTING" if runtime.get("accessProfileId") else "CREATE_MANAGED",
+                "profileReady": True,
+                "profileRef": profile_ref,
+                "providerRef": provider_ref,
+                "bridgeRouteConfig": str(route_path),
+                "commandTemplate": (
+                    f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+                    f"{shlex.quote(executable)} --profile {shlex.quote(profile_ref)} exec <task>"
+                ),
+            }
+        )
+        return
+    if not _codex_protocol_compatible(protocol):
+        raise RuntimeError(f"Codex does not support selected provider protocol natively: {protocol or 'unknown'}")
+    if not provider_ref:
+        provider_ref = (
+            "hao-"
+            + _safe_runtime_name(provider_key)
+            + "-"
+            + hashlib.blake2b(base_url.encode("utf-8"), digest_size=4).hexdigest()
+        )[:120]
+    if not profile_ref:
+        profile_ref = (
+            "hao-"
+            + _safe_runtime_name(provider_key)[:40]
+            + "-"
+            + hashlib.blake2b(f"{base_url}|{model}".encode("utf-8"), digest_size=5).hexdigest()
+        )[:120]
+    profile_existed = _codex_profile_exists(profile_ref, provider_ref, model)
+    synthetic = {
+        "selectedModel": model,
+        "selectedProfile": profile_ref,
+        "selectedAccess": {
+            "id": runtime.get("accessProfileId") or "execution-resolve-managed",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": provider_ref,
+            "baseUrl": base_url or None,
+            "credentialRef": credential_ref or None,
+            "protocol": protocol,
+            "config": {"wireApi": "responses", "transportMode": "NATIVE_RESPONSES"},
+        },
+    }
+    if not _ensure_codex_native_access(synthetic):
+        raise RuntimeError("Codex profile could not be prepared for the selected provider")
+    prefix = ""
+    if credential_ref:
+        secret_file = _runtime_secret_file(credential_ref)
+        if not secret_file:
+            raise RuntimeError("Codex selected provider credential is not available")
+        prefix = f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+    runtime.update(
+        {
+            "profileAction": "REUSE_EXISTING" if profile_existed else "CREATE_MANAGED",
+            "profileReady": True,
+            "profileRef": profile_ref,
+            "providerRef": provider_ref,
+            "commandTemplate": f"{prefix}{shlex.quote(executable)} --profile {shlex.quote(profile_ref)} exec <task>",
+        }
+    )
+
+
+def _opencode_provider_model_exists(provider_ref: str, model_ref: str) -> bool:
+    for home in _runtime_homes():
+        path = home / ".config" / "opencode" / "opencode.json"
+        if not path.exists():
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        providers = value.get("provider") if isinstance(value, dict) else None
+        provider = providers.get(provider_ref) if isinstance(providers, dict) else None
+        models = provider.get("models") if isinstance(provider, dict) else None
+        if isinstance(models, dict) and model_ref in models:
+            return True
+    return False
+
+
+def _prepare_opencode_execution(
+    selected: dict[str, Any], runtime: dict[str, Any], connection: dict[str, Any]
+) -> None:
+    model = str(selected.get("model") or "").strip()
+    provider_ref = str(runtime.get("providerRef") or connection.get("providerKey") or "").strip()
+    base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    protocol = str(connection.get("protocol") or "openai-chat-completions").strip()
+    if not provider_ref or not model:
+        raise RuntimeError("OpenCode selection is missing provider or model")
+    profile_existed = _opencode_provider_model_exists(provider_ref, model)
+    synthetic = {
+        "selectedModel": f"{provider_ref}/{model}",
+        "selectedAccess": {
+            "id": runtime.get("accessProfileId") or "execution-resolve-managed",
+            "adapterKind": "NATIVE_CONFIG",
+            "providerRef": provider_ref,
+            "baseUrl": base_url or None,
+            "credentialRef": credential_ref or None,
+            "protocol": protocol,
+            "config": {
+                "managedProvider": True,
+                "package": "@ai-sdk/openai-compatible",
+            },
+        },
+    }
+    if not _ensure_opencode_native_access(synthetic):
+        raise RuntimeError("OpenCode provider profile could not be prepared")
+    executable = str(runtime.get("executable") or _runtime_binary("opencode") or "opencode").strip()
+    runtime.update(
+        {
+            "profileAction": "REUSE_EXISTING" if profile_existed else "CREATE_MANAGED",
+            "profileReady": True,
+            "providerRef": provider_ref,
+            "commandTemplate": (
+                f"{shlex.quote(executable)} run --model {shlex.quote(provider_ref + '/' + model)} <task>"
+            ),
+        }
+    )
+
+
+def _prepare_claude_execution(
+    selected: dict[str, Any], runtime: dict[str, Any], connection: dict[str, Any]
+) -> None:
+    base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    executable = str(runtime.get("executable") or _runtime_binary("claude") or "claude").strip()
+    if not credential_ref:
+        raise RuntimeError("Claude Code selection is missing credentialRef")
+    secret_file = _runtime_secret_file(credential_ref)
+    if not secret_file:
+        raise RuntimeError("Claude Code selected provider credential is not available")
+    auth_env = "ANTHROPIC_AUTH_TOKEN" if "AUTH_TOKEN" in credential_ref.upper() else "ANTHROPIC_API_KEY"
+    prefixes = [f'{auth_env}="$(cat {shlex.quote(secret_file)})"']
+    if base_url:
+        prefixes.append(f"ANTHROPIC_BASE_URL={shlex.quote(base_url)}")
+    runtime.update(
+        {
+            "profileAction": "REUSE_EXISTING" if runtime.get("accessProfileId") else "CREATE_MANAGED",
+            "profileReady": True,
+            "commandTemplate": " ".join(prefixes)
+            + f" {shlex.quote(executable)} <task>",
+        }
+    )
+
+
+def _apply_agent_harness_launch(
+    selected: dict[str, Any],
+    runtime: dict[str, Any],
+    connection: dict[str, Any],
+    environment: dict[str, Any],
+) -> None:
+    selected_harness = str(runtime.get("selectedHarness") or "").strip().upper()
+    host = {
+        "CODEX": "codex",
+        "CLAUDE_CODE": "claude",
+        "DSH": "dsh",
+        "OPENCODE": "opencode",
+    }.get(selected_harness)
+    if not host:
+        return
+    controller = str(environment["controller"])
+    profile_home = str(environment["profileHome"])
+    project_root = str(environment["projectRoot"])
+    route_option = ""
+    if selected_harness == "CODEX":
+        route_config = str(runtime.get("bridgeRouteConfig") or "").strip()
+        if route_config:
+            route_option = f"--route-config {shlex.quote(route_config)} "
+    base = (
+        f"HOME={shlex.quote(profile_home)} {shlex.quote(controller)} exec "
+        f"--project {shlex.quote(project_root)} {route_option}{host} -- "
+    )
+    prefix = ""
+    args = ""
+    credential_ref = str(connection.get("credentialRef") or "").strip()
+    auth_kind = str(connection.get("authKind") or "API_KEY").strip().upper()
+    if selected_harness == "DSH":
+        provider_patch = str(runtime.get("managedProfilePath") or "").strip()
+        secret_file = _runtime_secret_file(credential_ref) if credential_ref else None
+        if not provider_patch or not credential_ref or not secret_file:
+            raise RuntimeError("DSH provider overlay is not ready for Agent Harness")
+        prefix = f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+        args = f"--patch {shlex.quote(provider_patch)} <task>"
+    elif selected_harness == "CODEX":
+        profile_ref = str(runtime.get("profileRef") or "").strip()
+        if not profile_ref:
+            raise RuntimeError("Codex profile is not ready for Agent Harness")
+        if credential_ref and auth_kind != "OAUTH":
+            secret_file = _runtime_secret_file(credential_ref)
+            if not secret_file:
+                raise RuntimeError("Codex provider credential is not ready for Agent Harness")
+            prefix = f'{credential_ref}="$(cat {shlex.quote(secret_file)})" '
+        args = f"--profile {shlex.quote(profile_ref)} exec <task>"
+    elif selected_harness == "OPENCODE":
+        model = str(selected.get("model") or "").strip()
+        provider_ref = str(runtime.get("providerRef") or connection.get("providerKey") or "").strip()
+        if not model or not provider_ref:
+            raise RuntimeError("OpenCode provider/model is not ready for Agent Harness")
+        args = f"run --model {shlex.quote(provider_ref + '/' + model)} <task>"
+    elif selected_harness == "CLAUDE_CODE":
+        secret_file = _runtime_secret_file(credential_ref) if credential_ref else None
+        if not credential_ref or not secret_file:
+            raise RuntimeError("Claude Code provider credential is not ready for Agent Harness")
+        auth_env = "ANTHROPIC_AUTH_TOKEN" if "AUTH_TOKEN" in credential_ref.upper() else "ANTHROPIC_API_KEY"
+        parts = [f'{auth_env}="$(cat {shlex.quote(secret_file)})"']
+        base_url = str(connection.get("baseUrl") or "").strip().rstrip("/")
+        if base_url:
+            parts.append(f"ANTHROPIC_BASE_URL={shlex.quote(base_url)}")
+        prefix = " ".join(parts) + " "
+        args = "<task>"
+    runtime.update(
+        {
+            "capabilityPlane": "AGENT_HARNESS_V1",
+            "capabilityPlaneStatus": "READY",
+            "capabilityHash": environment.get("capabilityHash"),
+            "capabilityEnvironmentId": environment.get("environmentId"),
+            "capabilityEnvironmentRoot": environment.get("environmentRoot"),
+            "projectRoot": project_root,
+            "launchContract": "HARNESSCTL_EXEC",
+            "commandTemplate": prefix + base + args,
+        }
+    )
+
+
+def _prepare_execution_result(result: dict[str, Any], project_path: str = "") -> dict[str, Any]:
+    if str(result.get("status") or "") != "SELECTED":
+        return result
+    selected, runtime, connection = _execution_selected(result)
+    harness = str(runtime.get("selectedHarness") or "").strip().upper()
+    if harness == "DSH":
+        _prepare_dsh_execution(selected, runtime, connection)
+    elif harness == "CODEX":
+        _prepare_codex_execution(selected, runtime, connection)
+    elif harness == "OPENCODE":
+        _prepare_opencode_execution(selected, runtime, connection)
+    elif harness == "CLAUDE_CODE":
+        _prepare_claude_execution(selected, runtime, connection)
+    if harness in {"DSH", "CODEX", "OPENCODE", "CLAUDE_CODE"}:
+        if not project_path:
+            runtime.update(
+                {
+                    "capabilityPlane": "AGENT_HARNESS_V1",
+                    "capabilityPlaneStatus": "PROJECT_REQUIRED",
+                    "profileReady": False,
+                    "launchContract": "BLOCKED_UNTIL_PROJECT_RESOLVED",
+                }
+            )
+            runtime.pop("commandTemplate", None)
+            selected["guidance"] = (
+                str(selected.get("guidance") or "").strip()
+                + " A repository path is required before launch so Agent Harness can materialize project MCP, Skills, and Instructions. Resolve this execution again with project_path."
+            ).strip()
+            return result
+        host = {
+            "CODEX": "codex",
+            "CLAUDE_CODE": "claude",
+            "DSH": "dsh",
+            "OPENCODE": "opencode",
+        }[harness]
+        route_config = str(runtime.get("bridgeRouteConfig") or "").strip()
+        environment = _prepare_agent_harness_environment(
+            project_path,
+            host,
+            route_config=route_config,
+        )
+        admission = environment.get("admission") if isinstance(environment.get("admission"), dict) else {}
+        if str(admission.get("status") or "") != "READY":
+            runtime.update(
+                {
+                    "capabilityPlane": "AGENT_HARNESS_V1",
+                    "capabilityPlaneStatus": "BLOCKED",
+                    "capabilityHash": environment.get("capabilityHash"),
+                    "capabilityEnvironmentId": environment.get("environmentId"),
+                    "capabilityEnvironmentRoot": environment.get("environmentRoot"),
+                    "capabilityBlockers": admission.get("blockers") or [],
+                    "profileReady": False,
+                    "projectRoot": environment.get("projectRoot"),
+                    "launchContract": "BLOCKED_CAPABILITY_ADMISSION",
+                }
+            )
+            runtime.pop("commandTemplate", None)
+            selected["guidance"] = (
+                str(selected.get("guidance") or "").strip()
+                + " Agent Harness materialized the project environment but blocked launch because required capabilities are not ready. Inspect capabilityBlockers; do not bypass the admission decision with a direct Harness launch."
+            ).strip()
+            return result
+        _apply_agent_harness_launch(selected, runtime, connection, environment)
+    selected["guidance"] = (
+        str(selected.get("guidance") or "").strip()
+        + " AI Office prepared provider access and Agent Harness prepared the project capability environment. Use commandTemplate as the per-execution launch contract and replace only <task>."
+    ).strip()
+    return result
+
+
+def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_mode = _execution_mode()
+        if execution_mode == "DISABLED":
+            raise RuntimeError(
+                f"AI Office execution delegation is disabled for profile {_active_profile_name()}"
+            )
+        if execution_mode != "V2":
+            raise RuntimeError(
+                "ai_office_resolve_execution is a V2 rollback-only path; use ai_office_run_phase in V3"
+            )
+        intent = str(args.get("intent") or "").strip().upper()
+        allowed = {"PLAN", "REVIEW", "IMPLEMENT", "DEBUG", "TEST", "RESEARCH", "QUICK_FIX"}
+        if intent not in allowed:
+            raise ValueError("intent must be PLAN, REVIEW, IMPLEMENT, DEBUG, TEST, RESEARCH, or QUICK_FIX")
+        profile = "default"
+        if _CTX is not None:
+            try:
+                profile = str(getattr(_CTX, "profile_name", "") or "default")[:120]
+            except Exception:
+                profile = "default"
+        try:
+            reconciliation = _reconcile_policy_workforce_from_hub()
+        except Exception:
+            reconciliation = {"connections": 0, "models": 0}
+        try:
+            available_connections = _available_execution_provider_ids(profile)
+        except Exception:
+            available_connections = []
+        project_path = _execution_project_path(args)
+        payload: dict[str, Any] = {
+            "intent": intent,
+            "availableRuntimes": _execution_runtime_inventory(),
+            "availableProviderConnectionIds": available_connections,
+            "at": int(time.time() * 1000),
+            "timezone": "Asia/Shanghai",
+            "metadata": {
+                "profileName": profile,
+                "source": "hermes-ai-office-tool",
+                "projectRoot": project_path or None,
+            },
+        }
+        requested_model = str(args.get("requested_model") or "").strip()
+        if requested_model:
+            payload["requestedModel"] = requested_model[:240]
+        result = _control_plane_request(
+            "/api/v2/commands/execution/resolve",
+            method="POST",
+            payload=payload,
+            timeout=3.0,
+        )
+        prepared = _prepare_execution_result(result, project_path=project_path)
+        return json.dumps(
+            {"ok": True, "workforceReconciliation": reconciliation, **prepared},
             ensure_ascii=False,
         )
     except Exception as exc:
@@ -366,6 +1760,323 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
             {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
             ensure_ascii=False,
         )
+
+
+def _v3_execution_path(execution_id: str, suffix: str = "") -> str:
+    value = str(execution_id or "").strip()
+    if not value:
+        raise ValueError("execution_id is required")
+    quoted = urllib.parse.quote(value, safe="")
+    base = f"/api/v3/development/executions/{quoted}"
+    return base + suffix
+
+
+def _v3_execution_snapshot(execution_id: str) -> dict[str, Any]:
+    return _control_plane_request(_v3_execution_path(execution_id), timeout=4.0)
+
+
+def _v3_text_list(value: Any, *, limit: int = 24, item_limit: int = 1200) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value[:limit]:
+        text = str(item or "").strip()
+        if text:
+            result.append(text[:item_limit])
+    return result
+
+
+def _v3_project_key(
+    args: Mapping[str, Any], previous: Mapping[str, Any] | None = None
+) -> str:
+    explicit = str(args.get("project_key") or "").strip()
+    if explicit:
+        return explicit[:160]
+    if previous:
+        inherited = str(previous.get("projectKey") or "").strip()
+        if inherited:
+            return inherited[:160]
+    repository = str(args.get("repository_path") or "").strip().rstrip("/")
+    if repository:
+        name = Path(repository).name.strip()
+        if name:
+            return name[:160]
+    return _active_profile_name() or "default"
+
+
+def _v3_idempotency_key(
+    phase: str,
+    payload: Mapping[str, Any],
+    kwargs: Mapping[str, Any],
+) -> str:
+    call_id = str(kwargs.get("tool_call_id") or "").strip()
+    seed: dict[str, Any] = {
+        "phase": phase,
+        "profile": _active_profile_name(),
+        "session": _session_id(dict(kwargs)),
+        "turn": str(kwargs.get("turn_id") or kwargs.get("parent_turn_id") or ""),
+        "call": call_id,
+    }
+    if not call_id:
+        # Canonical request hashing gives replay safety even if a Hermes runtime does not
+        # expose a tool_call_id. Long semantic text is hashed, never placed in the key.
+        seed["request"] = payload
+    digest = hashlib.blake2b(
+        json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        digest_size=16,
+    ).hexdigest()
+    return f"hermes-v3-{phase.lower()}-{digest}"
+
+
+def _v3_wait_for_execution(
+    snapshot: dict[str, Any], *, wait: bool, timeout_seconds: float
+) -> tuple[dict[str, Any], bool]:
+    if not wait:
+        return snapshot, False
+    execution_id = str(snapshot.get("executionId") or "").strip()
+    if not execution_id:
+        raise RuntimeError("V3 execution response did not include executionId")
+    status = str(snapshot.get("status") or "UNKNOWN").upper()
+    if status in _V3_TERMINAL_STATUSES or status in _V3_ATTENTION_STATUSES:
+        return snapshot, False
+    timeout_seconds = max(0.0, min(float(timeout_seconds), 600.0))
+    deadline = time.monotonic() + timeout_seconds
+    if timeout_seconds <= 0:
+        return snapshot, True
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        time.sleep(min(2.0, remaining))
+        snapshot = _v3_execution_snapshot(execution_id)
+        status = str(snapshot.get("status") or "UNKNOWN").upper()
+        if status in _V3_TERMINAL_STATUSES or status in _V3_ATTENTION_STATUSES:
+            return snapshot, False
+    return snapshot, True
+
+
+def _run_development_phase_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        execution_mode = _execution_mode()
+        if execution_mode != "V3":
+            raise RuntimeError(
+                f"AI Office V3 phase execution is disabled for profile {_active_profile_name()} "
+                f"(execution_mode={execution_mode.lower()})"
+            )
+        phase = str(args.get("phase") or "").strip().upper()
+        if phase not in _V3_PHASES:
+            raise ValueError("phase must be INVESTIGATE_PLAN, IMPLEMENT, IMPLEMENT_FIX, VERIFY_REVIEW, or FINALIZE")
+        objective = str(args.get("objective") or "").strip()
+        if not objective:
+            raise ValueError("objective is required")
+        objective = objective[:20_000]
+
+        previous_execution_id = str(args.get("previous_execution_id") or "").strip()
+        previous: dict[str, Any] | None = None
+        if previous_execution_id:
+            previous = _v3_execution_snapshot(previous_execution_id)
+
+        project_key = _v3_project_key(args, previous)
+        repository_path = str(args.get("repository_path") or "").strip()
+        if phase in {"INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
+            raise ValueError("repository_path is required for INVESTIGATE_PLAN and IMPLEMENT")
+
+        previous_result = str(args.get("previous_result") or "").strip()
+        if not previous_result and previous:
+            result = previous.get("result") if isinstance(previous.get("result"), dict) else {}
+            previous_result = str(result.get("finalText") or "").strip()
+        previous_result = previous_result[:30_000]
+
+        context: dict[str, Any] = {}
+        if previous_execution_id:
+            context["previousExecutionId"] = previous_execution_id
+        if previous_result:
+            context["previousResult"] = previous_result
+        acceptance = _v3_text_list(args.get("acceptance_criteria"))
+        if acceptance:
+            context["acceptanceCriteria"] = acceptance
+
+        hints: dict[str, Any] = {}
+        for arg_name, wire_name, allowed in (
+            ("complexity_hint", "complexity", {"LOW", "MEDIUM", "HIGH"}),
+            ("risk_hint", "risk", {"LOW", "MEDIUM", "HIGH"}),
+            ("quality_hint", "quality", {"FAST", "STANDARD", "PREMIUM"}),
+            ("budget_hint", "budget", {"LOW", "NORMAL", "HIGH"}),
+        ):
+            raw = str(args.get(arg_name) or "").strip().upper()
+            if raw:
+                if raw not in allowed:
+                    raise ValueError(f"invalid {arg_name}")
+                hints[wire_name] = raw
+        if args.get("parallelism") is not None:
+            parallelism = int(args.get("parallelism"))
+            if parallelism < 1 or parallelism > 16:
+                raise ValueError("parallelism must be between 1 and 16")
+            hints["parallelism"] = parallelism
+
+        override: dict[str, Any] = {}
+        preferred_backend = str(args.get("preferred_backend") or "").strip()
+        preferred_model_class = str(args.get("preferred_model_class") or "").strip()
+        transport_mode = str(args.get("transport_mode") or "").strip().upper()
+        if preferred_backend:
+            override["backend"] = preferred_backend[:160]
+        if preferred_model_class:
+            override["modelClass"] = preferred_model_class[:160]
+        if transport_mode:
+            if transport_mode not in {"LITELLM_MANAGED", "NATIVE_SUBSCRIPTION", "INTERNAL"}:
+                raise ValueError("invalid transport_mode")
+            override["transportMode"] = transport_mode
+
+        base_revision = str(args.get("base_revision") or "").strip()
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "objective": objective,
+            "projectKey": project_key,
+            "repository": {
+                "path": repository_path,
+                **({"baseRevision": base_revision[:240]} if base_revision else {}),
+            },
+            "hermes": {
+                "profile": _active_profile_name(),
+                "sessionId": _session_id(kwargs),
+                "turnId": str(kwargs.get("turn_id") or kwargs.get("parent_turn_id") or ""),
+            },
+            # Keep the POST short and durable. Synchronous semantics, when requested,
+            # are implemented by bounded GET polling below.
+            "await": False,
+        }
+        if context:
+            payload["context"] = context
+        if hints:
+            payload["hints"] = hints
+        if override:
+            payload["override"] = override
+
+        requested_wait = args.get("await")
+        wait = _V3_DEFAULT_AWAIT[phase] if requested_wait is None else bool(requested_wait)
+        raw_wait_timeout = args.get("wait_timeout_seconds")
+        wait_timeout = (
+            _V3_DEFAULT_WAIT_SECONDS[phase]
+            if raw_wait_timeout is None
+            else max(0.0, min(float(raw_wait_timeout), 600.0))
+        )
+        idempotency_key = _v3_idempotency_key(phase, payload, kwargs)
+        snapshot = _control_plane_request(
+            "/api/v3/development/executions",
+            method="POST",
+            payload=payload,
+            idempotency_key=idempotency_key,
+            timeout=8.0,
+        )
+        snapshot, await_timed_out = _v3_wait_for_execution(
+            snapshot,
+            wait=wait,
+            timeout_seconds=wait_timeout,
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "awaitRequested": wait,
+                "awaitTimedOut": await_timed_out,
+                **snapshot,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _get_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        snapshot = _v3_execution_snapshot(execution_id)
+        return json.dumps({"ok": True, **snapshot}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _continue_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not message:
+            raise ValueError("message is required")
+        snapshot = _control_plane_request(
+            _v3_execution_path(execution_id, "/messages"),
+            method="POST",
+            payload={"message": message[:20_000]},
+            timeout=8.0,
+        )
+        wait = bool(args.get("await", False))
+        timeout_seconds = max(
+            0.0,
+            min(float(args.get("wait_timeout_seconds") or 0.0), 600.0),
+        )
+        snapshot, await_timed_out = _v3_wait_for_execution(
+            snapshot,
+            wait=wait,
+            timeout_seconds=timeout_seconds,
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "awaitRequested": wait,
+                "awaitTimedOut": await_timed_out,
+                **snapshot,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _cancel_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        snapshot = _control_plane_request(
+            _v3_execution_path(execution_id, "/cancel"), method="POST", timeout=6.0
+        )
+        return json.dumps({"ok": True, **snapshot}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _list_active_development_executions_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        limit = int(args.get("limit") or 40)
+        limit = max(1, min(limit, 100))
+        project_key = str(args.get("project_key") or "").strip()
+        query = {"limit": str(limit)}
+        if project_key:
+            query["projectKey"] = project_key[:160]
+        result = _control_plane_request(
+            "/api/v3/development/executions?" + urllib.parse.urlencode(query), timeout=4.0
+        )
+        items = [item for item in (result.get("items") or []) if isinstance(item, dict)]
+        active = [
+            item
+            for item in items
+            if str(item.get("status") or "UNKNOWN").upper() not in _V3_TERMINAL_STATUSES
+        ]
+        return json.dumps(
+            {"ok": True, "count": len(active), "items": active}, ensure_ascii=False
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
 
 def _set_provider_state_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
@@ -410,7 +2121,18 @@ def _correlation_key(tool_name: str, kwargs: dict[str, Any]) -> str:
     )
 
 
+def _detect_managed_harness_runtime(command: str) -> str | None:
+    match = _MANAGED_HARNESS_COMMAND_RE.search(command or "")
+    if not match:
+        return None
+    runtime = match.group("runtime").lower()
+    return "claude" if runtime == "claude" else runtime
+
+
 def _detect_runtime(command: str) -> str | None:
+    managed = _detect_managed_harness_runtime(command)
+    if managed:
+        return managed
     match = _RUNTIME_COMMAND_RE.search(command or "")
     return match.group("runtime").lower() if match else None
 
@@ -450,6 +2172,13 @@ def _config(key: str, default: Any) -> Any:
 def _policy_mode() -> str:
     mode = str(_config("runtime_policy.mode", "prefer") or "prefer").strip().upper()
     return mode if mode in {"OBSERVE", "PREFER", "ENFORCE"} else "PREFER"
+
+
+def _execution_mode() -> str:
+    # Migration-safe: an existing installation without the new setting keeps the
+    # legacy V2 placement path until that profile is explicitly opted into V3.
+    mode = str(_config("execution_mode", "v2") or "v2").strip().upper()
+    return mode if mode in {"V2", "V3", "DISABLED"} else "V2"
 
 
 def _position_hint(runtime: str) -> str:
@@ -592,34 +2321,41 @@ def _resolve_runtime_policy(
         return None
 
 
-def _runtime_homes() -> list[Path]:
-    root = Path(os.environ.get("HERMES_HOME", "/opt/data"))
-    homes = [root / "home"]
-    ctx = _CTX
-    profile = ""
-    if ctx is not None:
-        try:
-            profile = str(ctx.profile_name or "").strip()
-        except Exception:
-            profile = ""
+def _active_runtime_hermes_home() -> Path:
+    root = _global_hermes_home()
+    profile = _active_profile_name()
     if profile and profile not in {"default", "main"}:
-        homes.append(root / "profiles" / profile / "home")
-    unique: list[Path] = []
-    for home in homes:
-        if home not in unique:
-            unique.append(home)
-    return unique
+        return root / "profiles" / _safe_runtime_name(profile)
+    return root
+
+
+def _adopt_active_runtime_owner(path: Path) -> None:
+    """Keep root-run maintenance replays from creating runtime files unreadable by Hermes."""
+    if os.geteuid() != 0:
+        return
+    try:
+        owner = _active_runtime_hermes_home().stat()
+        os.chown(path, owner.st_uid, owner.st_gid)
+    except OSError:
+        pass
+
+
+def _runtime_homes() -> list[Path]:
+    return [_active_runtime_hermes_home() / "home"]
 
 
 def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    _adopt_active_runtime_owner(path.parent)
     temporary = path.with_name(path.name + ".hermes-office.tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
         os.chmod(temporary, 0o600)
+        _adopt_active_runtime_owner(temporary)
     except OSError:
         pass
     os.replace(temporary, path)
+    _adopt_active_runtime_owner(path)
 
 
 def _credential_value(reference: str) -> str:
@@ -639,6 +2375,9 @@ def _credential_value(reference: str) -> str:
                 return str(value).strip()
     except Exception:
         pass
+    global_value = _env_value_at_home(_global_hermes_home(), name)
+    if global_value:
+        return global_value
     return str(os.environ.get(name) or "").strip()
 
 
@@ -646,16 +2385,19 @@ def _runtime_secret_file(reference: str) -> str | None:
     value = _credential_value(reference)
     if not value:
         return None
-    root = Path(os.environ.get("HERMES_HOME", "/opt/data")) / "secrets" / "hermes-ai-office"
+    root = _active_runtime_hermes_home() / "secrets" / "hermes-ai-office"
     digest = hashlib.blake2b(reference.encode("utf-8"), digest_size=8).hexdigest()
     path = root / f"credential-{digest}.key"
     try:
         root.mkdir(parents=True, exist_ok=True)
+        _adopt_active_runtime_owner(root)
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(value, encoding="utf-8")
         os.chmod(temporary, 0o600)
+        _adopt_active_runtime_owner(temporary)
         os.replace(temporary, path)
         os.chmod(path, 0o600)
+        _adopt_active_runtime_owner(path)
         return str(path)
     except OSError:
         return None
@@ -788,6 +2530,65 @@ def _existing_codex_provider(provider_ref: str) -> dict[str, str]:
     return {}
 
 
+def _codex_profile_path(home: Path, profile_ref: str) -> Path:
+    safe = _safe_runtime_name(profile_ref)
+    if safe != profile_ref:
+        raise ValueError("Codex profile name is not filesystem-safe")
+    return home / ".codex" / f"{safe}.config.toml"
+
+
+def _codex_profile_exists(profile_ref: str, provider_ref: str, model: str) -> bool:
+    for home in _runtime_homes():
+        try:
+            path = _codex_profile_path(home, profile_ref)
+            if not path.exists():
+                continue
+            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, tomllib.TOMLDecodeError):
+            continue
+        if (
+            str(parsed.get("model_provider") or "").strip() == provider_ref
+            and str(parsed.get("model") or "").strip() == model
+        ):
+            return True
+    return False
+
+
+def _write_codex_profile(home: Path, profile_ref: str, provider_ref: str, model: str) -> bool:
+    try:
+        path = _codex_profile_path(home, profile_ref)
+        if path.exists():
+            current = path.read_text(encoding="utf-8")
+            try:
+                parsed = tomllib.loads(current)
+            except tomllib.TOMLDecodeError:
+                return False
+            if (
+                str(parsed.get("model_provider") or "").strip() == provider_ref
+                and str(parsed.get("model") or "").strip() == model
+            ):
+                _adopt_active_runtime_owner(path)
+                return True
+            if "# HERMES AI OFFICE MANAGED PROFILE" not in current:
+                return False
+        content = (
+            "# HERMES AI OFFICE MANAGED PROFILE\n"
+            f"model_provider = {_toml_string(provider_ref)}\n"
+            f"model = {_toml_string(model)}\n"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _adopt_active_runtime_owner(path.parent)
+        temporary = path.with_name(path.name + ".hermes-office.tmp")
+        temporary.write_text(content, encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        _adopt_active_runtime_owner(temporary)
+        os.replace(temporary, path)
+        _adopt_active_runtime_owner(path)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
     access = _selected_access(decision)
     provider_ref = str(access.get("providerRef") or "").strip()
@@ -828,18 +2629,15 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
     if credential_ref:
         provider_lines.append(f"env_key = {_toml_string(credential_ref)}")
     provider_lines.append(f"wire_api = {_toml_string(wire_api)}")
-    profile_lines = [
-        f"[profiles.{_toml_string(profile_ref)}]",
-        f"model_provider = {_toml_string(provider_ref)}",
-        f"model = {_toml_string(model)}",
-    ]
-
     for home in _runtime_homes():
         path = home / ".codex" / "config.toml"
         try:
             current = path.read_text(encoding="utf-8") if path.exists() else ""
             without_managed_provider = _remove_managed_toml_block(
                 current, "PROVIDER", provider_ref
+            )
+            without_managed_provider = _remove_managed_toml_block(
+                without_managed_provider, "PROFILE", profile_ref
             )
             try:
                 parsed = tomllib.loads(without_managed_provider) if without_managed_provider.strip() else {}
@@ -858,18 +2656,20 @@ def _ensure_codex_native_access(decision: dict[str, Any]) -> bool:
                     provider_ref,
                     "\n".join(provider_lines),
                 )
-            updated = _replace_managed_toml_block(
-                updated, "PROFILE", profile_ref, "\n".join(profile_lines)
-            )
             try:
                 tomllib.loads(updated)
             except tomllib.TOMLDecodeError:
                 return False
             path.parent.mkdir(parents=True, exist_ok=True)
+            _adopt_active_runtime_owner(path.parent)
             temporary = path.with_name(path.name + ".hermes-office.tmp")
             temporary.write_text(updated, encoding="utf-8")
             os.chmod(temporary, 0o600)
+            _adopt_active_runtime_owner(temporary)
             os.replace(temporary, path)
+            _adopt_active_runtime_owner(path)
+            if not _write_codex_profile(home, profile_ref, provider_ref, model):
+                return False
         except OSError:
             return False
     return credential_ready
@@ -936,7 +2736,8 @@ def _ensure_opencode_gateway_model(model: str) -> bool:
 
 
 def _ensure_codex_gateway_profile() -> bool:
-    managed = """# BEGIN HERMES AI OFFICE GATEWAY\n[model_providers.hermes-office]\nname = \"Hermes AI Office\"\nbase_url = \"http://127.0.0.1:4000/v1\"\nenv_key = \"HERMES_LITELLM_RUNTIME_KEY\"\nwire_api = \"responses\"\n\n[profiles.hermes-office]\nmodel_provider = \"hermes-office\"\n# END HERMES AI OFFICE GATEWAY\n"""
+    managed = """# BEGIN HERMES AI OFFICE GATEWAY\n[model_providers.hermes-office]\nname = \"Hermes AI Office\"\nbase_url = \"http://127.0.0.1:4000/v1\"\nenv_key = \"HERMES_LITELLM_RUNTIME_KEY\"\nwire_api = \"responses\"\n# END HERMES AI OFFICE GATEWAY\n"""
+    profile = """# HERMES AI OFFICE MANAGED PROFILE\nmodel_provider = \"hermes-office\"\n"""
     pattern = re.compile(
         r"(?ms)^# BEGIN HERMES AI OFFICE GATEWAY\n.*?^# END HERMES AI OFFICE GATEWAY\n?"
     )
@@ -953,9 +2754,20 @@ def _ensure_codex_gateway_profile() -> bool:
             temporary.write_text(updated, encoding="utf-8")
             try:
                 os.chmod(temporary, 0o600)
+                _adopt_active_runtime_owner(temporary)
             except OSError:
                 pass
             os.replace(temporary, path)
+            _adopt_active_runtime_owner(path)
+            profile_path = path.parent / "hermes-office.config.toml"
+            profile_temporary = profile_path.with_name(
+                profile_path.name + ".hermes-office.tmp"
+            )
+            profile_temporary.write_text(profile, encoding="utf-8")
+            os.chmod(profile_temporary, 0o600)
+            _adopt_active_runtime_owner(profile_temporary)
+            os.replace(profile_temporary, profile_path)
+            _adopt_active_runtime_owner(profile_path)
         except OSError:
             return False
     return True
@@ -1061,14 +2873,44 @@ def _on_pre_tool_call(
 ) -> dict[str, Any] | None:
     if tool_name != "terminal":
         return None
+    if _execution_mode() != "V2":
+        # V3 owns its own backend/model/workspace selection. Re-running legacy
+        # terminal staffing here would create a second routing authority.
+        return None
     args = dict(args or {})
     command = str(args.get("command") or "")
-    runtime = _detect_runtime(command)
+    managed_runtime = _detect_managed_harness_runtime(command)
+    runtime = managed_runtime or _detect_runtime(command)
     if not runtime:
         return None
 
-    decision = _resolve_runtime_policy(runtime, command, args, kwargs)
     mode = _policy_mode()
+    if managed_runtime:
+        base = _base_event(kwargs)
+        key = _correlation_key(tool_name, kwargs)
+        pending = {
+            **base,
+            "correlationId": key,
+            "runtime": managed_runtime,
+            "cwd": str(args.get("workdir") or args.get("cwd") or ""),
+            "model": str(_model_from_command(command) or ""),
+            "command": _command_summary(command, managed_runtime),
+            "background": bool(args.get("background")),
+            "pty": bool(args.get("pty")),
+            "policyMode": mode,
+            "policyStatus": "PRE_RESOLVED_CAPABILITY_PLANE",
+            "runtimeLaunchDecisionId": "",
+            "positionId": "",
+            "employeeId": "",
+            "employmentId": "",
+            "providerHubConnectionId": "",
+        }
+        with _PENDING_LOCK:
+            _PENDING[key] = pending
+        _enqueue({"event": "runtime_spawn_requested", **pending})
+        return None
+
+    decision = _resolve_runtime_policy(runtime, command, args, kwargs)
     base = _base_event(kwargs)
     key = _correlation_key(tool_name, kwargs)
     selected = decision or {}
@@ -1170,6 +3012,10 @@ def _terminal_outcome(status: str, parsed: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {"outcome": outcome}
     if error_kind:
         result["errorKind"] = error_kind
+    if error_kind == "QUOTA":
+        reset_after_seconds = _quota_reset_after_seconds(safe)
+        if reset_after_seconds is not None:
+            result["resetAfterSeconds"] = reset_after_seconds
     if match:
         result["httpStatus"] = int(match.group(1))
     if safe and error_kind:
@@ -1287,6 +3133,118 @@ def _safe_provider_error_text(*values: Any) -> str:
     return text[:160]
 
 
+def _quota_reset_after_seconds(value: Any) -> int | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    match = re.search(
+        r"\bresets?\s+in\s+(\d+(?:\.\d+)?)\s*(seconds?|minutes?|hours?|days?)\b",
+        text,
+    )
+    if not match:
+        return None
+    amount = float(match.group(1))
+    unit = match.group(2)
+    multiplier = 1
+    if unit.startswith("minute"):
+        multiplier = 60
+    elif unit.startswith("hour"):
+        multiplier = 60 * 60
+    elif unit.startswith("day"):
+        multiplier = 24 * 60 * 60
+    seconds = int(amount * multiplier)
+    return max(1, seconds)
+
+
+def _record_capacity_exhaustion_for_connection(
+    connection_id: str,
+    classification: dict[str, Any],
+    kwargs: dict[str, Any],
+) -> None:
+    if str(classification.get("errorKind") or "").upper() != "QUOTA":
+        return
+    try:
+        hub = _control_plane_request("/api/v2/projections/provider-hub", timeout=1.5)
+        connection = next(
+            (
+                item
+                for item in (hub.get("items") or [])
+                if isinstance(item, dict) and str(item.get("id") or "") == connection_id
+            ),
+            None,
+        )
+        if not connection:
+            return
+        supplier = connection.get("supplier") if isinstance(connection.get("supplier"), dict) else {}
+        supplier_id = str(
+            connection.get("supplier_id") or supplier.get("id") or ""
+        ).strip()
+        if not supplier_id:
+            return
+        supply = _control_plane_request("/api/v2/projections/supply", timeout=1.5)
+        supplier_row = next(
+            (
+                item
+                for item in (supply.get("suppliers") or [])
+                if isinstance(item, dict) and str(item.get("id") or "") == supplier_id
+            ),
+            None,
+        )
+        if not supplier_row:
+            return
+        reset_after = classification.get("resetAfterSeconds")
+        try:
+            reset_after_seconds = int(reset_after) if reset_after is not None else None
+        except (TypeError, ValueError):
+            reset_after_seconds = None
+        reset_at = (
+            int(time.time() * 1000) + max(1, reset_after_seconds) * 1000
+            if reset_after_seconds is not None
+            else None
+        )
+        provider = str(kwargs.get("provider") or connection.get("provider_key") or "")[:120]
+        model = str(kwargs.get("model") or "")[:240]
+        for agreement in supplier_row.get("agreements") or []:
+            if not isinstance(agreement, dict):
+                continue
+            if str(agreement.get("lifecycle") or "").upper() != "ACTIVE":
+                continue
+            agreement_id = str(agreement.get("id") or "").strip()
+            if not agreement_id:
+                continue
+            payload: dict[str, Any] = {
+                "supplyAgreementId": agreement_id,
+                "name": "Observed quota availability",
+                "dimension": "CUSTOM",
+                "remaining": 0,
+                "unit": "quota",
+                "source": "HERMES_LLM_API_QUOTA",
+                "metadata": {
+                    "provider": provider,
+                    "model": model,
+                    "providerConnectionId": connection_id,
+                    "evidence": "QUOTA_ERROR",
+                },
+            }
+            if reset_at is not None:
+                payload["resetAt"] = reset_at
+                payload["resetPolicy"] = {
+                    "kind": "OBSERVED_RESET_AFTER",
+                    "seconds": reset_after_seconds,
+                }
+            seed = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+            _control_plane_request(
+                "/api/v2/commands/capacity-pools/upsert",
+                method="POST",
+                payload=payload,
+                idempotency_key="provider-quota-capacity-v1-"
+                + hashlib.blake2b(seed.encode("utf-8"), digest_size=10).hexdigest(),
+                timeout=1.5,
+            )
+    except Exception:
+        return
+
+
 def _api_error_outcome(**kwargs: Any) -> dict[str, Any] | None:
     raw_status = kwargs.get("status_code")
     try:
@@ -1369,6 +3327,10 @@ def _api_error_outcome(**kwargs: Any) -> dict[str, Any] | None:
         return None
 
     result: dict[str, Any] = {"outcome": outcome, "errorKind": kind}
+    if kind == "QUOTA":
+        reset_after_seconds = _quota_reset_after_seconds(safe)
+        if reset_after_seconds is not None:
+            result["resetAfterSeconds"] = reset_after_seconds
     if status is not None and 400 <= status <= 599:
         result["httpStatus"] = status
     if safe:
@@ -1431,6 +3393,8 @@ def _record_api_provider_attempt(
             idempotency_key=_api_attempt_idempotency_key(event_kind, connection_id, kwargs),
             timeout=1.5,
         )
+        if classification.get("errorKind") == "QUOTA":
+            _record_capacity_exhaustion_for_connection(connection_id, classification, kwargs)
     except Exception:
         if classification.get("outcome") == "SUCCESS":
             with _API_TELEMETRY_LOCK:
@@ -1438,12 +3402,19 @@ def _record_api_provider_attempt(
 
 
 def _on_post_api_request(**kwargs: Any) -> None:
+    # Provider Hub telemetry is retained strictly for the explicit V2 rollback lane.
+    # V3 provider health/routing/spend authority belongs to LiteLLM and must not be
+    # shadow-written into a second registry.
+    if _execution_mode() != "V2":
+        return
     _record_api_provider_attempt(
         {"outcome": "SUCCESS"}, event_kind="success", kwargs=kwargs
     )
 
 
 def _on_api_request_error(**kwargs: Any) -> None:
+    if _execution_mode() != "V2":
+        return
     classification = _api_error_outcome(**kwargs)
     if classification is None:
         return
@@ -1460,56 +3431,85 @@ def _needs_ai_office_authority(user_message: Any) -> bool:
 
 
 def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
-    """Inject current AI Office authority into relevant turns.
-
-    This hook is turn-scoped so long-lived profile sessions created before the
-    plugin was installed still receive the current authority contract.
-    """
-    if not _needs_ai_office_authority(user_message):
+    """Inject AI Office authority and placement guidance into relevant turns."""
+    text = str(user_message or "").strip()
+    provider_authority = _needs_ai_office_authority(text)
+    execution_placement = bool(text and _EXECUTION_TOPIC_RE.search(text))
+    if not provider_authority and not execution_placement:
         return None
+
+    sections: list[str] = []
+    if execution_placement:
+        execution_mode = _execution_mode()
+        if execution_mode == "V3":
+            sections.append(
+                "For delegated software-development work, AI Office V3 is the primary execution authority for this profile. "
+                "Call ai_office_run_phase instead of choosing a provider, model, OpenCode/Codex/Claude harness, or launching a coding terminal command yourself. "
+                "Choose only the semantic development phase: INVESTIGATE_PLAN for repository investigation plus planning, IMPLEMENT for implementation in an isolated writable branch, IMPLEMENT_FIX for a focused correction after review, VERIFY_REVIEW for an independent fresh read-only review, and FINALIZE only after an approved review. "
+                "Pass repository_path only for an initial INVESTIGATE_PLAN or IMPLEMENT. For handoff IDs, VERIFY_REVIEW must point to the implementation/fix being reviewed, IMPLEMENT_FIX must point to the failed VERIFY_REVIEW that contains the findings, and FINALIZE must point to the approved VERIFY_REVIEW. AI Office follows the causal chain to resolve the correct implementation workspace and semantic evidence. "
+                "When IMPLEMENT follows INVESTIGATE_PLAN, pass both repository_path and previous_execution_id so the implementation receives the approved plan without trusting conversational memory. "
+                "Implementation phases are asynchronous by default; preserve the returned executionId and use ai_office_get_execution or ai_office_list_active to recover status in later turns. If the same execution is explicitly PAUSED and should resume the same phase, use ai_office_continue_execution; do not use it to replace the normal IMPLEMENT_FIX or fresh VERIFY_REVIEW handoff. "
+                "Do not encode permanent mappings such as IMPLEMENT=OpenCode/DeepSeek or REVIEW=Codex/GPT. Backend, logical model class, transport, workspace isolation, failover, usage accounting, and OpenHands lifecycle are AI Office policy decisions per execution. "
+                "If the user explicitly requests a backend/model class/transport, pass it as an ai_office_run_phase override and let AI Office validate compatibility. "
+                "ai_office_resolve_execution remains a legacy compatibility tool for an explicitly requested direct-harness flow; do not use it for the normal V3 development workflow."
+            )
+        elif execution_mode == "V2":
+            sections.append(
+                "AI Office legacy V2 execution placement is active for this profile. "
+                "Do not call ai_office_run_phase. Call ai_office_resolve_execution for PLAN/REVIEW/IMPLEMENT/DEBUG/TEST/QUICK_FIX as appropriate, then follow the returned launch contract. "
+                "This profile is intentionally on the rollback path; do not persist a V3-only routing rule."
+            )
+        else:
+            sections.append(
+                "AI Office execution delegation is disabled for this profile. "
+                "Do not call ai_office_run_phase or ai_office_resolve_execution for software-development execution. "
+                "LiteLLM registry/dashboard capabilities may still be queried, but AI Office must not choose or launch a coding worker."
+            )
+
+    if not provider_authority:
+        return {"context": "\n\n".join(sections)}
 
     header = (
         "Hermes AI Office is an internal control-plane/dashboard capability, "
         "not an upstream model provider. Do not search the filesystem or the "
         "Hermes built-in provider catalog to decide whether AI Office exists. "
-        "For current provider/model/supplier availability, use the native "
+        "For current provider/model availability, use the native "
         "ai_office_list_providers tool first (use tool_search for 'ai_office' "
         "if the tool is deferred). Memory and local config are fallback "
         "troubleshooting evidence only."
     )
+    sections.append(header)
     try:
-        hub = _control_plane_request("/api/v2/projections/provider-hub-summary", timeout=2.0)
-        summary = hub.get("summary") if isinstance(hub.get("summary"), dict) else {}
-        items = hub.get("items") if isinstance(hub.get("items"), list) else []
-        facts: list[str] = []
-        for raw in items[:20]:
+        hub = _control_plane_request("/api/v3/development/model-registry", timeout=3.0)
+        deployments = hub.get("deployments") if isinstance(hub.get("deployments"), dict) else {}
+        items = deployments.get("items") if isinstance(deployments.get("items"), list) else []
+        provider_counts: dict[str, dict[str, int]] = {}
+        for raw in items:
             if not isinstance(raw, dict):
                 continue
-            name = str(raw.get("displayName") or raw.get("providerKey") or "provider").strip()
-            state = str(raw.get("effectiveState") or raw.get("health") or "UNKNOWN").strip()
-            if raw.get("routable") is True:
-                routable = "yes"
-            elif raw.get("routable") is False:
-                routable = "no"
-            else:
-                routable = "unknown"
-            facts.append(f"- {name}: {state}; routable={routable}")
+            key = str(raw.get("providerKey") or "unclassified")
+            row = provider_counts.setdefault(key, {"active": 0, "paused": 0})
+            row["paused" if raw.get("blocked") is True else "active"] += 1
+        facts = [
+            f"- {name}: active={counts['active']}; paused={counts['paused']}"
+            for name, counts in sorted(provider_counts.items())[:20]
+        ]
         counts = (
-            f"connections={summary.get('connections', '?')}, "
-            f"available={summary.get('available', '?')}, "
-            f"congested={summary.get('congested', '?')}, "
-            f"unavailable={summary.get('unavailable', '?')}, "
-            f"disabled={summary.get('disabled', '?')}"
+            f"credentials={hub.get('credentials', {}).get('count', '?') if isinstance(hub.get('credentials'), dict) else '?'}, "
+            f"deployments={deployments.get('count', '?')}, "
+            f"active={deployments.get('active', '?')}, "
+            f"paused={deployments.get('paused', '?')}"
         )
-        snapshot = "AI Office Provider Hub turn snapshot: " + counts
+        snapshot = "LiteLLM model/provider registry turn snapshot: " + counts
         if facts:
             snapshot += "\n" + "\n".join(facts)
-        return {"context": header + "\n\n" + snapshot}
+        sections.append(snapshot)
+        return {"context": "\n\n".join(sections)}
     except Exception:
-        return {
-            "context": header
-            + "\n\nAI Office Provider Hub is currently unreachable. State that explicitly before any stale/local fallback."
-        }
+        sections.append(
+            "LiteLLM model/provider registry is currently unreachable. State that explicitly before any stale/local fallback."
+        )
+        return {"context": "\n\n".join(sections)}
 
 
 def _on_post_tool_call(
@@ -1566,11 +3566,22 @@ def _on_post_tool_call(
     if should_record:
         if pending.get("providerHubConnectionId"):
             try:
+                connection_id = str(pending.get("providerHubConnectionId"))
                 _control_plane_request(
-                    f"/api/v2/commands/provider-connections/{urllib.parse.quote(str(pending.get('providerHubConnectionId')), safe='')}/attempts",
+                    f"/api/v2/commands/provider-connections/{urllib.parse.quote(connection_id, safe='')}/attempts",
                     method="POST",
                     payload=classification,
                 )
+                if classification.get("errorKind") == "QUOTA":
+                    _record_capacity_exhaustion_for_connection(
+                        connection_id,
+                        classification,
+                        {
+                            "provider": "",
+                            "model": pending.get("model") or "",
+                            "profile": _active_profile_name(),
+                        },
+                    )
             except Exception:
                 pass
 
@@ -1580,28 +3591,60 @@ def register(ctx: Any) -> None:
     _CTX = ctx
     _ensure_worker()
     ctx.register_tool(
-        name="ai_office_add_provider",
-        toolset="ai_office",
-        schema=_ADD_PROVIDER_SCHEMA,
-        handler=_add_shared_provider_tool,
-        description=_ADD_PROVIDER_SCHEMA["description"],
-        emoji="🔌",
-    )
-    ctx.register_tool(
-        name="ai_office_set_provider_state",
-        toolset="ai_office",
-        schema=_SET_PROVIDER_STATE_SCHEMA,
-        handler=_set_provider_state_tool,
-        description=_SET_PROVIDER_STATE_SCHEMA["description"],
-        emoji="🔧",
-    )
-    ctx.register_tool(
         name="ai_office_list_providers",
         toolset="ai_office",
         schema=_LIST_PROVIDERS_SCHEMA,
         handler=_list_shared_providers_tool,
         description=_LIST_PROVIDERS_SCHEMA["description"],
         emoji="📡",
+    )
+    ctx.register_tool(
+        name="ai_office_run_phase",
+        toolset="ai_office",
+        schema=_RUN_PHASE_SCHEMA,
+        handler=_run_development_phase_tool,
+        description=_RUN_PHASE_SCHEMA["description"],
+        emoji="🚀",
+    )
+    ctx.register_tool(
+        name="ai_office_get_execution",
+        toolset="ai_office",
+        schema=_GET_EXECUTION_SCHEMA,
+        handler=_get_development_execution_tool,
+        description=_GET_EXECUTION_SCHEMA["description"],
+        emoji="🔎",
+    )
+    ctx.register_tool(
+        name="ai_office_continue_execution",
+        toolset="ai_office",
+        schema=_CONTINUE_EXECUTION_SCHEMA,
+        handler=_continue_development_execution_tool,
+        description=_CONTINUE_EXECUTION_SCHEMA["description"],
+        emoji="▶️",
+    )
+    ctx.register_tool(
+        name="ai_office_cancel_execution",
+        toolset="ai_office",
+        schema=_CANCEL_EXECUTION_SCHEMA,
+        handler=_cancel_development_execution_tool,
+        description=_CANCEL_EXECUTION_SCHEMA["description"],
+        emoji="⛔",
+    )
+    ctx.register_tool(
+        name="ai_office_list_active",
+        toolset="ai_office",
+        schema=_LIST_ACTIVE_SCHEMA,
+        handler=_list_active_development_executions_tool,
+        description=_LIST_ACTIVE_SCHEMA["description"],
+        emoji="📋",
+    )
+    ctx.register_tool(
+        name="ai_office_resolve_execution",
+        toolset="ai_office",
+        schema=_RESOLVE_EXECUTION_SCHEMA,
+        handler=_resolve_execution_tool,
+        description=_RESOLVE_EXECUTION_SCHEMA["description"],
+        emoji="🧭",
     )
     ctx.register_hook("subagent_start", _on_subagent_start)
     ctx.register_hook("subagent_stop", _on_subagent_stop)

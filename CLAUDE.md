@@ -626,3 +626,27 @@ Supporting: `wall-tile-editor.html` (wall sprite editing), `jsonl-viewer.html` (
 - npm package: `pixel-agents` (CLI bin: `pixel-agents`)
 - GitHub: `https://github.com/pixel-agents-hq/pixel-agents`
 - License: MIT
+
+## Oracle2 Hermes deployment safety
+
+The production `hermes-personal` container multiplexes multiple long-running
+Hermes profiles. Never recreate or restart that container merely to deploy an
+AI Office plugin/dashboard change; doing so interrupts unrelated turns such as
+MemoFlow.
+
+Use the host-safe deployer instead:
+
+```bash
+sudo /usr/local/sbin/hermes-ai-office-deploy --deploy
+```
+
+Dashboard-only changes hot-sync with no Gateway restart. Runtime plugin changes
+are staged while Hermes is busy and are activated only after the deployer has
+acquired Hermes' native drain and confirmed there is no active work; activation
+uses the native Gateway restart path without recreating the container.
+
+`docker compose up -d --force-recreate hermes`, `docker restart
+hermes-personal`, and equivalent container replacement are reserved for actual
+image/environment/volume/Compose changes. Before such explicit maintenance,
+run `sudo /usr/local/sbin/hermes-ai-office-deploy --guard-only` and do not
+proceed if it reports active work.

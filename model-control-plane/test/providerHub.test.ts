@@ -5,6 +5,8 @@ import { openDb } from '../src/db.mjs';
 import { runV2Migrations } from '../src/v2/migrations.js';
 import { ProviderHubRepository } from '../src/v2/providerHub.js';
 import { V2Repository } from '../src/v2/repository.js';
+import { RuntimeAccessRepository } from '../src/v2/runtimeAccess.js';
+import { SupplyRepository } from '../src/v2/supply.js';
 
 test('provider hub shares safe connection metadata across profiles without secrets', () => {
   const db = openDb(':memory:');
@@ -109,6 +111,74 @@ test('promoting a profile-local connection to global retires the duplicate and p
     db.prepare('SELECT lifecycle FROM v2_provider_connections WHERE id=?').get(local.id).lifecycle,
     'RETIRED',
   );
+});
+
+test('operator can edit and retire a provider connection without deleting history', () => {
+  const db = openDb(':memory:');
+  runV2Migrations(db);
+  const domain = new V2Repository(db);
+  const hub = new ProviderHubRepository(domain);
+  const supply = new SupplyRepository(domain);
+  const runtimeAccess = new RuntimeAccessRepository(domain);
+  const catalog = supply.registerCatalogEntry({
+    supplier: { slug: 'relay', name: 'Relay' },
+    supplierModel: { key: 'gpt-5.5', name: 'GPT-5.5' },
+    agreement: { externalAccountRef: 'relay-account', name: 'Relay account' },
+  });
+  const connection = hub.upsertConnection({
+    providerKey: 'relay',
+    displayName: 'Relay old',
+    baseUrl: 'https://relay.example/v1',
+    websiteUrl: 'https://relay.example',
+    protocol: 'openai-chat-completions',
+    supplierId: String((catalog.supplier as Record<string, unknown>).id),
+    credentialRef: 'RELAY_API_KEY',
+    credentialScope: 'GLOBAL',
+    sourceKind: 'TEST',
+    models: ['gpt-5.5'],
+  });
+  hub.linkProfile({
+    connectionId: String(connection.id),
+    profileId: 'memoflow',
+    runtimeKind: 'CODEX',
+    providerRef: 'relay',
+    modelRef: 'gpt-5.5',
+    sourceKind: 'TEST',
+  });
+  const access = runtimeAccess.upsert({
+    employmentId: String((catalog.employment as Record<string, unknown>).id),
+    runtimeKind: 'CODEX',
+    providerRef: 'relay',
+    modelRef: 'gpt-5.5',
+    profileRef: 'relay-gpt-5-5',
+    baseUrl: 'https://relay.example/v1',
+    credentialRef: 'RELAY_API_KEY',
+    protocol: 'openai-chat-completions',
+    config: { providerHubConnectionId: String(connection.id) },
+  });
+
+  const updated = hub.updateConnection(String(connection.id), {
+    displayName: 'Relay new',
+    baseUrl: 'https://relay.example/api/v1/',
+    websiteUrl: 'https://relay.example/docs/',
+    protocol: 'openai-responses',
+    models: ['gpt-5.5', 'gpt-5.6-sol'],
+  });
+  assert.equal(updated.display_name, 'Relay new');
+  assert.equal(updated.base_url, 'https://relay.example/api/v1');
+  assert.equal(updated.website_url, 'https://relay.example/docs');
+  assert.equal(updated.protocol, 'openai-responses');
+  assert.deepEqual(updated.models, ['gpt-5.5', 'gpt-5.6-sol']);
+  assert.equal(runtimeAccess.get(String(access.id))?.baseUrl, 'https://relay.example/api/v1');
+  assert.equal(runtimeAccess.get(String(access.id))?.protocol, 'openai-responses');
+
+  const retired = hub.retireConnection(String(connection.id), 'OPERATOR_REMOVED');
+  assert.equal(retired.lifecycle, 'RETIRED');
+  assert.equal(retired.adminState, 'DISABLED');
+  assert.equal(hub.listConnections().length, 0);
+  assert.equal(hub.listProfileLinks().length, 0);
+  assert.equal(hub.getConnection(String(connection.id))?.lifecycle, 'RETIRED');
+  assert.equal(runtimeAccess.get(String(access.id))?.lifecycle, 'RETIRED');
 });
 
 test('operational attempt evidence transitions availability state and manages failure streaks', () => {

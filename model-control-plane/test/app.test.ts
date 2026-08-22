@@ -32,6 +32,7 @@ test('typed app factory exposes V2 only and retires public V1 routes', async () 
       status: 'ok',
       service: 'hermes-model-control-plane',
       apiVersion: 2,
+      v3Enabled: false,
       db: ':memory:',
     });
 
@@ -317,6 +318,131 @@ test('supplier retirement preserves history and removes the supplier from curren
       )?.lifecycle,
       'RETIRED',
     );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('operator force retirement closes active relationships and retires supplier provider connections', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+
+  try {
+    const seeded = runtime.v2.bootstrapReference({
+      supplierSlug: 'operator-removable',
+      supplierName: 'Operator Removable',
+      supplierModelKey: 'model-a',
+      supplierModelName: 'Model A',
+      agreementRef: 'operator-removable-primary',
+      agreementName: 'Operator Removable / Primary',
+      gatewaySlug: 'litellm-reference',
+      gatewayKind: 'LITELLM',
+      gatewayName: 'LiteLLM Reference Gateway',
+      workScopeSlug: 'development',
+      workScopeName: 'Development',
+      positionSlug: 'coding-review',
+      positionName: 'Coding Reviewer',
+      positionKind: 'REVIEWER',
+      runtimeKind: 'CODEX',
+      protocol: 'openai-responses',
+    });
+    const connection = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v2/commands/provider-connections/upsert',
+      headers: { 'idempotency-key': 'operator-removable-provider' },
+      payload: {
+        providerKey: 'operator-removable',
+        displayName: 'Operator Removable',
+        supplierId: seeded.supplierId,
+        baseUrl: 'https://relay.example/v1',
+        protocol: 'openai-responses',
+        credentialRef: 'REMOVABLE_API_KEY',
+        credentialScope: 'GLOBAL',
+        sourceKind: 'TEST',
+        models: ['model-a'],
+      },
+    });
+    assert.equal(connection.statusCode, 200);
+
+    const retired = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/retire`,
+      headers: { 'idempotency-key': 'operator-removable-force-retire' },
+      payload: { reason: 'OPERATOR_REMOVED', force: true },
+    });
+    assert.equal(retired.statusCode, 200);
+    assert.equal(retired.json().lifecycle, 'RETIRED');
+    assert.equal(runtime.v2.getAppointment(seeded.appointmentId)?.status, 'ENDED');
+    assert.equal(runtime.v2.getEmployment(seeded.employmentId)?.status, 'ENDED');
+
+    const supplyProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/supply',
+    });
+    assert.equal(supplyProjection.json().summary.suppliers, 0);
+    const providerProjection = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v2/projections/provider-hub',
+    });
+    assert.equal(providerProjection.json().summary.connections, 0);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('supplier economics command persists orthogonal tags and assigns commercial plan to active agreements', async () => {
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    cpa: emptyCpa,
+    cpaUsage: emptyUsage,
+    initialSync: false,
+  });
+  try {
+    const seeded = runtime.v2.bootstrapReference({
+      supplierSlug: 'community-free',
+      supplierName: 'Community Free',
+      supplierModelKey: 'gpt-5.6-sol',
+      supplierModelName: 'GPT-5.6 Sol',
+      agreementRef: 'community-free-current',
+      agreementName: 'Community Free / Current',
+      gatewaySlug: 'litellm-reference',
+      gatewayKind: 'LITELLM',
+      gatewayName: 'LiteLLM Reference Gateway',
+      workScopeSlug: 'development',
+      workScopeName: 'Development',
+      positionSlug: 'review',
+      positionName: 'Reviewer',
+      positionKind: 'REVIEWER',
+      runtimeKind: 'CODEX',
+      protocol: 'openai-responses',
+    });
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v2/commands/suppliers/${seeded.supplierId}/economics`,
+      headers: { 'idempotency-key': 'community-free-economics' },
+      payload: {
+        supplyOrigin: 'COMMUNITY_RELAY',
+        routingPolicy: 'AUTO',
+        commercialType: 'SPONSORED',
+        planSlug: 'free',
+        planName: 'Community sponsored access',
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    const supply = await runtime.app.inject({ method: 'GET', url: '/api/v2/projections/supply' });
+    const supplier = supply
+      .json()
+      .suppliers.find((item: Record<string, unknown>) => item.id === seeded.supplierId);
+    assert.equal(supplier.supplyOrigin, 'COMMUNITY_RELAY');
+    assert.equal(supplier.routingPolicy, 'AUTO');
+    assert.equal(supplier.plans[0].commercialType, 'SPONSORED');
+    assert.equal(supplier.agreements[0].commercialType, 'SPONSORED');
   } finally {
     await runtime.app.close();
   }

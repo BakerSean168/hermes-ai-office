@@ -89,7 +89,7 @@ export async function selectCarpetPickTool(frame: Frame): Promise<void> {
   await frame.locator('button[title*="Pick carpet"]').click();
 }
 
-/** Select the Areas tool (button is gated on workspaceFolders > 0 → multi-root). */
+/** Select the Areas tool when the current layout/session makes Areas authoring available. */
 export async function selectAreaTool(frame: Frame): Promise<void> {
   await frame.locator('button[title*="Define folder-bound areas"]').click();
 }

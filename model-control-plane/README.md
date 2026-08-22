@@ -1,6 +1,8 @@
 # Hermes AI Workforce Control Plane
 
-The Model Control Plane is the V2 business authority for the Hermes AI company. The authoritative domain model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md), with deployed engineering status in [`../docs/implementation-v2/IMPLEMENTATION-STATUS.md`](../docs/implementation-v2/IMPLEMENTATION-STATUS.md).
+The service now hosts two deliberately separated planes: the retained V2 workforce/business domain and the production V3 development execution facade. The authoritative V2 domain model is [`../docs/DOMAIN-MODEL-V2.md`](../docs/DOMAIN-MODEL-V2.md); V3 execution policy is documented under [`../docs/implementation-v3-open-source-stack/`](../docs/implementation-v3-open-source-stack/).
+
+For current AI Office V3, **LiteLLM is the single runtime authority for provider credentials, model deployments, routing, health, and spend**. The legacy V2 Provider Hub remains in SQLite only for rollback/forensic compatibility and migration evidence; the AI Office dashboard and V3 execution path do not use it for provider management.
 
 ## Responsibilities
 
@@ -23,23 +25,19 @@ Employment = one concrete commercial access period
 
 Runtime model hints never create Employee identity. Gateway health changes routability, not durable workforce identity.
 
-## Runtime access and gateway boundary
+## Runtime provider and gateway boundary
 
-External coding Agents use a first-class `RuntimeAccessProfile` attached to Employment. New supplier onboarding creates native OpenCode/Codex access profiles by default; the plugin materializes each selected access into the official Agent's own configuration contract.
+V3 coding Agents consume stable logical model classes through LiteLLM. Provider credentials live in LiteLLM Credential Store, model deployments live in its PostgreSQL-backed registry, and routing/fallback/health/spend are owned there. AI Office exposes a secret-free read-only projection at `GET /api/v3/development/model-registry`; mutations belong to LiteLLM Admin/API.
 
-CPA and LiteLLM remain optional infrastructure adapters. CPA is useful for account pools, route/health/quota/usage evidence and can itself be the endpoint for an Employment. LiteLLM remains available for protocol/gateway compatibility or historical routes, but is not a mandatory traffic hop.
+The control plane never echoes provider credential values. Its V3 registry adapter reads only safe names, deployment metadata, blocked state, order, aliases, and selected economics/protocol annotations. OpenHands/OpenCode workers receive only the scoped LiteLLM runtime key, never the LiteLLM master credential.
 
-The MCP never persists provider credential material in the workforce database. `RuntimeAccessProfile.credentialRef` is only a credential-slot name. Gateway provisioning is retained as an optional internal adapter path and must not become the default supplier onboarding flow.
+Native subscription transports that are not representable as an API-key provider remain execution-host capabilities rather than LiteLLM provider records. They do not make Provider Hub a second provider authority.
 
-Gateway discovery records technical evidence only. Commercial Supplier/SupplierModel/Agreement identity is created through explicit V2 catalog registration, never inferred solely from a Channel name. Unclassified routes remain visible in the Supply projection until an operator supplies business identity.
-
-CPA operational changes such as adding a channel, changing a secret, enabling/disabling a route, quarantine, or manual alias surgery belong to `gatewayctl` / the dedicated model-gateway management workflow. They are intentionally not exposed through Pixel Office.
-
-The durable CPA gateway id remains `cpa-compat` for existing V2 binding continuity. The name is an external reference, not a V1 Worker compatibility model.
+The older V2 workforce model (`Supplier`, `SupplierModel`, `Employment`, `RuntimeAccessProfile`, Provider Hub) is retained for business history and emergency rollback compatibility. New V3 provider/model administration must not be added there. CPA remains a compatibility/account-pool adapter for legacy V2 evidence; it is not the V3 model-provider control plane.
 
 ## API
 
-The public control-plane surface is V2 only.
+The service exposes the retained V2 domain surface plus the V3 development facade. Current provider/model runtime authority is visible through V3.
 
 Primary reads include:
 
@@ -58,6 +56,7 @@ Primary reads include:
 - `GET /api/v2/channels`
 - `GET /api/v2/runtime-sessions`
 - `GET /api/v2/runtime-access-profiles`
+- `POST /api/v2/commands/execution/resolve` — per-execution intent-to-Employee placement; intent selects the work class, the chosen model family selects the preferred harness, and current compatibility selects the actual harness
 - `GET /api/v2/incidents`
 - `GET /api/v2/events` (SSE)
 
@@ -112,10 +111,12 @@ The AI Workforce panel therefore shows durable Employees, current Appointments/w
 
 ## Deployment
 
-Production on oracle2 uses `deploy/hermes-model-control-plane.service`, binds to `127.0.0.1:8320`, and stores SQLite state at:
+Production on oracle2 uses `deploy/hermes-model-control-plane.service` plus `deploy/hermes-model-control-plane.service.d/v3-production.conf`, binds to `127.0.0.1:8320`, and stores retained V2 SQLite state at:
 
 ```text
 /srv/hermes-personal/data/model-control-plane/control-plane.sqlite
 ```
 
-The release process performs a SQLite online backup before a control-plane cutover, rebuilds MCP/Office artifacts, restarts services, then verifies V2 health, Hermes execution sync, workforce identity counts, retired-route 404s, SQLite integrity and foreign keys.
+The canonical checkout is `/home/ubuntu/projects/pixel-agents`. Install/update the systemd definition with `sudo ./model-control-plane/deploy/install-oracle2-systemd.sh`; the script restarts only the model control plane, not the Hermes Gateway. Host-specific metadata such as the tailnet-only LiteLLM Admin URL is loaded from the root-owned `/srv/hermes-personal/secrets/model-control-plane-v3.env` file and projected read-only to AI Office. Use `deploy/model-control-plane-v3.env.example` as the public template.
+
+A release rebuilds the control-plane artifact, restarts only `hermes-model-control-plane`, then verifies V2 health, V3 health, `GET /api/v3/development/model-registry`, LiteLLM health, Hermes execution sync, SQLite integrity, and foreign keys.

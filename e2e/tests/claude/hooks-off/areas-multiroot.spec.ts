@@ -1,4 +1,6 @@
 import type { Frame, Page } from '@playwright/test';
+import fs from 'fs';
+import path from 'path';
 
 import { expect, test } from '../../../fixtures/pixel-agents';
 import {
@@ -15,14 +17,14 @@ import {
   type TestHooksWindow,
 } from '../../../helpers/editor';
 import { addAgentForFolder } from '../../../helpers/internal-agent';
-import { buildSeedConfig } from '../../../helpers/layout-seed';
+import { buildSeedConfig, SEED_LAYOUT_REVISION } from '../../../helpers/layout-seed';
 import { getPixelAgentsFrame, openPixelAgentsPanel } from '../../../helpers/webview';
 
 /**
- * Multi-root e2e coverage for Areas — the lane where the Areas editor + the
- * folder→area→seat-preference loop are reachable (the Areas button and the
- * folder-mapping panel are gated on workspaceFolders > 1; agents only get a
- * folderName in a multi-root workspace — adapters/vscode/agentManager.ts).
+ * Multi-root e2e coverage for Areas — the lane where folder→area→seat-preference
+ * can distinguish multiple workspace identities. Areas authoring itself is also
+ * available in a single-root workspace; multi-root is required here because agents
+ * only get distinct folderName values from the folder picker.
  *
  * The fixture opens a generated multi-root workspace with folders "alpha" and
  * "beta" (see e2e/helpers/launch.ts). The bundled default layout (which has
@@ -35,12 +37,32 @@ import { getPixelAgentsFrame, openPixelAgentsPanel } from '../../../helpers/webv
 const ALPHA = 'alpha';
 const BETA = 'beta';
 
+// The current bundled default-layout-2 pre-zones nearly every seat as P1..P7.
+// That makes an *unmapped* folder legitimately fall through Stage 3 (any seat),
+// where it may randomly land in Engineering and turn the negative assertion into
+// a flaky test. default-layout-1 still has real chairs/desks but no pre-existing
+// Areas, so painting three seats leaves deterministic unzoned capacity for beta.
+const seatPreferenceLayout = {
+  ...JSON.parse(
+    fs.readFileSync(
+      path.resolve(__dirname, '../../../../webview-ui/public/assets/default-layout-1.json'),
+      'utf8',
+    ),
+  ),
+  layoutRevision: SEED_LAYOUT_REVISION,
+};
+
 /** Enter the Areas editor and add + select an area in one go. */
 async function startArea(frame: Frame, label: string): Promise<void> {
   await enterEditMode(frame);
   await selectAreaTool(frame);
   await addArea(frame, label);
   await selectArea(frame, label);
+}
+
+/** Scope actions to one named Area card instead of whichever default card renders first. */
+function areaCard(frame: Frame, label: string) {
+  return frame.locator(`span[title^="${label} —"]`).first().locator('..').locator('..');
 }
 
 test.describe('Areas (multi-root)', () => {
@@ -95,7 +117,7 @@ test.describe('Areas (multi-root)', () => {
 
     // Remove it via the card's × button.
     narrator.step('removing "Design" with its card\'s × button');
-    await frame.locator('button[title="Remove area"]').first().click();
+    await areaCard(frame, 'Design').locator('button[title="Remove area"]').click();
     await frame.waitForFunction(
       () =>
         !((window as TestHooksWindow).__pixelAgentsTestHooks?.getAreas?.() ?? []).some(
@@ -119,8 +141,9 @@ test.describe('Areas (multi-root)', () => {
 
     // Open the area card's "Add folder…" menu and map the alpha folder.
     narrator.step('opening Engineering\'s "Map a folder…" menu and picking alpha');
-    await frame.locator('button[title*="Map a folder"]').first().click();
-    await frame.getByText(ALPHA, { exact: true }).click();
+    const engineeringCard = areaCard(frame, 'Engineering');
+    await engineeringCard.locator('button[title*="Map a folder"]').click();
+    await engineeringCard.getByText(ALPHA, { exact: true }).click();
 
     await frame.waitForFunction(
       (folder) => {
@@ -140,7 +163,10 @@ test.describe('Areas (multi-root)', () => {
    * pets persistence test uses). areaMappings is seeded so Stage 1 has labels.
    */
   test.describe('seat preference (alpha → Engineering)', () => {
-    test.use({ seedConfig: buildSeedConfig({ areaMappings: { [ALPHA]: ['Engineering'] } }) });
+    test.use({
+      seedConfig: buildSeedConfig({ areaMappings: { [ALPHA]: ['Engineering'] } }),
+      seedLayout: seatPreferenceLayout,
+    });
 
     /** Add "Engineering", paint it over some real (free) seats, and save. */
     async function paintAndSaveEngineering(frame: Frame): Promise<void> {

@@ -31,8 +31,8 @@ bash start.sh
 
 看板已通过 Tailscale Serve 暴露(tailnet only):
 
-- https://oracle.taile92a8e.ts.net:8787/ (页面)
-- 代理链路:ts.net:8787 → 127.0.0.1:8787 → dashboard API (9119)
+- `https://<tailnet-host>:8787/` (页面)
+- 代理链路:`<tailnet-host>:8787` → 127.0.0.1:8787 → dashboard API (9119)
 
 注意:看板进程 (server.py) 需保持运行;机器重启后需重新 `bash start.sh`。
 Serve 规则本身由 tailscaled 持久保存。

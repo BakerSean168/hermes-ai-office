@@ -1,6 +1,7 @@
 import type { GatewayProtocol } from '../gateway/ports.js';
 import { newId } from './ids.js';
 import type { V2Repository, V2Row } from './repository.js';
+import type { CommercialType, RoutingPolicy, SupplyOrigin } from './supplyEconomics.js';
 
 type JsonRecord = Record<string, unknown>;
 
@@ -58,12 +59,16 @@ export class SupplyRepository {
     name: string;
     websiteUrl?: string;
     sourceKind?: 'EXTERNAL' | 'INTERNAL';
+    supplyOrigin?: SupplyOrigin;
+    routingPolicy?: RoutingPolicy;
   }): V2Row {
     return this.#domain.getOrCreateSupplier(
       input.slug.trim(),
       input.name.trim(),
       input.websiteUrl,
       input.sourceKind ?? 'EXTERNAL',
+      input.supplyOrigin,
+      input.routingPolicy,
     );
   }
 
@@ -74,7 +79,15 @@ export class SupplyRepository {
     return this.#domain.setSupplierStaffingPreferences({ supplierId, ...input });
   }
 
-  updateSupplierProfile(supplierId: string, input: { name: string; websiteUrl?: string }): V2Row {
+  updateSupplierProfile(
+    supplierId: string,
+    input: {
+      name: string;
+      websiteUrl?: string;
+      supplyOrigin?: SupplyOrigin;
+      routingPolicy?: RoutingPolicy;
+    },
+  ): V2Row {
     const name = input.name.trim();
     if (!name) throw new Error('SUPPLIER_NAME_REQUIRED');
     const existing = row(
@@ -83,20 +96,42 @@ export class SupplyRepository {
     if (!existing) throw new Error('SUPPLIER_NOT_FOUND');
     const previousName = String(existing.name);
     const websiteUrl = input.websiteUrl?.trim().replace(/\/$/, '') || null;
+    const supplyOrigin = input.supplyOrigin?.trim().toUpperCase() as SupplyOrigin | undefined;
+    const routingPolicy = input.routingPolicy?.trim().toUpperCase() as RoutingPolicy | undefined;
+    if (
+      supplyOrigin &&
+      ![
+        'OFFICIAL',
+        'COMMERCIAL_RELAY',
+        'COMMUNITY_RELAY',
+        'EVENT_GRANT',
+        'PERSONAL_HOSTED',
+        'INTERNAL_POOL',
+        'UNKNOWN',
+      ].includes(supplyOrigin)
+    )
+      throw new Error('SUPPLIER_ORIGIN_INVALID');
+    if (routingPolicy && !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy))
+      throw new Error('SUPPLIER_ROUTING_POLICY_INVALID');
     if (websiteUrl && !/^https?:\/\//i.test(websiteUrl))
       throw new Error('SUPPLIER_WEBSITE_URL_INVALID');
     if (
       previousName === name &&
-      String(existing.website_url ?? '') === String(websiteUrl ?? existing.website_url ?? '')
+      String(existing.website_url ?? '') === String(websiteUrl ?? existing.website_url ?? '') &&
+      (!supplyOrigin || String(existing.supply_origin ?? 'UNKNOWN') === supplyOrigin) &&
+      (!routingPolicy || String(existing.routing_policy ?? 'AUTO') === routingPolicy)
     )
       return existing;
     const timestamp = now();
     return this.#domain.transaction(() => {
       this.#domain.db
         .prepare(
-          'UPDATE v2_suppliers SET name=?,website_url=COALESCE(?,website_url),updated_at=? WHERE id=?',
+          `UPDATE v2_suppliers
+           SET name=?,website_url=COALESCE(?,website_url),
+               supply_origin=COALESCE(?,supply_origin),routing_policy=COALESCE(?,routing_policy),updated_at=?
+           WHERE id=?`,
         )
-        .run(name, websiteUrl, timestamp, supplierId);
+        .run(name, websiteUrl, supplyOrigin ?? null, routingPolicy ?? null, timestamp, supplierId);
 
       const employees = rows(
         this.#domain.db
@@ -128,6 +163,144 @@ export class SupplyRepository {
         payload: { previousName, name, websiteUrl },
       });
       return row(this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId))!;
+    });
+  }
+
+  openRelationshipsForSupplier(supplierId: string): {
+    employmentIds: string[];
+    appointmentIds: string[];
+  } {
+    const supplier = row(
+      this.#domain.db.prepare('SELECT id FROM v2_suppliers WHERE id=?').get(supplierId),
+    );
+    if (!supplier) throw new Error('SUPPLIER_NOT_FOUND');
+    const employmentIds = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT em.id FROM v2_employments em
+           JOIN v2_employees e ON e.id=em.employee_id
+           WHERE e.supplier_id=?
+             AND em.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+             AND em.effective_to IS NULL
+           ORDER BY em.id`,
+        )
+        .all(supplierId),
+    ).map((item) => String(item.id));
+    const appointmentIds = rows(
+      this.#domain.db
+        .prepare(
+          `SELECT a.id FROM v2_appointments a
+           JOIN v2_employees e ON e.id=a.employee_id
+           WHERE e.supplier_id=?
+             AND a.status IN ('SCHEDULED','CURRENT','SUSPENDED')
+             AND a.effective_to IS NULL
+           ORDER BY a.id`,
+        )
+        .all(supplierId),
+    ).map((item) => String(item.id));
+    return { employmentIds, appointmentIds };
+  }
+
+  updateSupplierEconomics(
+    supplierId: string,
+    input: {
+      supplyOrigin: SupplyOrigin;
+      routingPolicy: RoutingPolicy;
+      commercialType: CommercialType;
+      planSlug?: string;
+      planName?: string;
+      planTerms?: JsonRecord;
+    },
+  ): V2Row {
+    const existing = row(
+      this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId),
+    );
+    if (!existing) throw new Error('SUPPLIER_NOT_FOUND');
+    const supplyOrigin = input.supplyOrigin.trim().toUpperCase() as SupplyOrigin;
+    const routingPolicy = input.routingPolicy.trim().toUpperCase() as RoutingPolicy;
+    const commercialType = input.commercialType.trim().toUpperCase() as CommercialType;
+    if (
+      ![
+        'OFFICIAL',
+        'COMMERCIAL_RELAY',
+        'COMMUNITY_RELAY',
+        'EVENT_GRANT',
+        'PERSONAL_HOSTED',
+        'INTERNAL_POOL',
+        'UNKNOWN',
+      ].includes(supplyOrigin)
+    )
+      throw new Error('SUPPLIER_ORIGIN_INVALID');
+    if (!['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy))
+      throw new Error('SUPPLIER_ROUTING_POLICY_INVALID');
+    if (
+      !['FREE', 'SUBSCRIPTION', 'PREPAID', 'METERED', 'SPONSORED', 'OTHER'].includes(commercialType)
+    )
+      throw new Error('PLAN_COMMERCIAL_TYPE_INVALID');
+
+    const timestamp = now();
+    return this.#domain.transaction(() => {
+      this.#domain.db
+        .prepare('UPDATE v2_suppliers SET supply_origin=?,routing_policy=?,updated_at=? WHERE id=?')
+        .run(supplyOrigin, routingPolicy, timestamp, supplierId);
+      const agreements = this.listSupplyAgreements(supplierId).filter(
+        (agreement) => String(agreement.lifecycle) === 'ACTIVE',
+      );
+      const plans = this.listPlans(supplierId).filter(
+        (plan) => String(plan.lifecycle) === 'ACTIVE',
+      );
+      const currentPlan =
+        agreements
+          .map((agreement) =>
+            plans.find((plan) => String(plan.id) === String(agreement.planId ?? '')),
+          )
+          .find(Boolean) ??
+        plans[0] ??
+        null;
+      const planSlug = input.planSlug?.trim() || String(currentPlan?.slug ?? 'default');
+      const planName =
+        input.planName?.trim() || String(currentPlan?.name ?? `${String(existing.name)} access`);
+      const planTerms =
+        input.planTerms ??
+        (currentPlan?.terms && typeof currentPlan.terms === 'object'
+          ? (currentPlan.terms as JsonRecord)
+          : undefined);
+      let plan = this.getOrCreatePlan({
+        supplierId,
+        slug: planSlug,
+        name: planName,
+        commercialType,
+        terms: planTerms,
+      });
+      if (
+        String(plan.name) !== planName ||
+        String(plan.commercialType ?? plan.commercial_type ?? 'OTHER') !== commercialType ||
+        JSON.stringify(plan.terms ?? {}) !== JSON.stringify(planTerms ?? {})
+      ) {
+        this.#domain.db
+          .prepare(
+            'UPDATE v2_plans SET name=?,commercial_type=?,terms_json=?,updated_at=? WHERE id=?',
+          )
+          .run(planName, commercialType, encode(planTerms), timestamp, String(plan.id));
+        plan =
+          this.listPlans(supplierId).find((item) => String(item.id) === String(plan.id)) ?? plan;
+      }
+      for (const agreement of agreements) {
+        this.assignPlanToAgreement(String(agreement.id), String(plan.id));
+      }
+      this.#domain.emit({
+        type: 'supplier.economics.updated',
+        entityType: 'Supplier',
+        entityId: supplierId,
+        payload: { supplyOrigin, routingPolicy, commercialType, planId: plan.id },
+      });
+      return {
+        supplier: row(
+          this.#domain.db.prepare('SELECT * FROM v2_suppliers WHERE id=?').get(supplierId),
+        ),
+        plan: this.listPlans(supplierId).find((item) => item.id === plan.id) ?? plan,
+        agreements: this.listSupplyAgreements(supplierId),
+      };
     });
   }
 
@@ -244,6 +417,22 @@ export class SupplyRepository {
         )
         .run(timestamp, supplierId);
       this.#domain.db
+        .prepare(
+          `UPDATE v2_profile_provider_links
+           SET state='INACTIVE',updated_at=?
+           WHERE connection_id IN (
+             SELECT id FROM v2_provider_connections WHERE supplier_id=?
+           ) AND state='ACTIVE'`,
+        )
+        .run(timestamp, supplierId);
+      this.#domain.db
+        .prepare(
+          `UPDATE v2_provider_connections
+           SET lifecycle='RETIRED',admin_state='DISABLED',health='UNAVAILABLE',operator_note=?,operator_updated_at=?,updated_at=?
+           WHERE supplier_id=? AND lifecycle!='RETIRED'`,
+        )
+        .run(reason, timestamp, timestamp, supplierId);
+      this.#domain.db
         .prepare("UPDATE v2_suppliers SET lifecycle='RETIRED',updated_at=? WHERE id=?")
         .run(timestamp, supplierId);
 
@@ -261,7 +450,7 @@ export class SupplyRepository {
     supplierId: string;
     slug: string;
     name: string;
-    commercialType?: 'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER';
+    commercialType?: CommercialType;
     terms?: JsonRecord;
   }): V2Row {
     const existing = row(
@@ -276,7 +465,7 @@ export class SupplyRepository {
       this.#domain.db
         .prepare(
           `INSERT INTO v2_plans(id,supplier_id,slug,name,commercial_type,terms_json,lifecycle,created_at,updated_at)
-           VALUES(?,?,?,?,?,?,?, ?,?)`,
+           VALUES(?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -514,7 +703,8 @@ export class SupplyRepository {
     return rows(
       this.#domain.db
         .prepare(
-          `SELECT a.*,s.slug supplier_slug,s.name supplier_name,p.slug plan_slug,p.name plan_name
+          `SELECT a.*,s.slug supplier_slug,s.name supplier_name,p.slug plan_slug,p.name plan_name,
+                  p.commercial_type,p.terms_json plan_terms_json
            FROM v2_supply_agreements a
            JOIN v2_suppliers s ON s.id=a.supplier_id
            LEFT JOIN v2_plans p ON p.id=a.plan_id
@@ -529,6 +719,8 @@ export class SupplyRepository {
       planId: value.plan_id,
       planSlug: value.plan_slug,
       planName: value.plan_name,
+      commercialType: value.commercial_type ?? 'OTHER',
+      planTerms: decode<JsonRecord>(value.plan_terms_json, {}),
       name: value.name,
       externalAccountRef: value.external_account_ref,
       lifecycle: value.lifecycle,
@@ -755,13 +947,16 @@ export class SupplyRepository {
       name: string;
       websiteUrl?: string;
       sourceKind?: 'EXTERNAL' | 'INTERNAL';
+      supplyOrigin?: SupplyOrigin;
+      routingPolicy?: RoutingPolicy;
     };
     supplierModel: { key: string; name: string };
     agreement: { externalAccountRef: string; name: string };
     plan?: {
       slug: string;
       name: string;
-      commercialType?: 'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER';
+      commercialType?: CommercialType;
+      terms?: JsonRecord;
     };
     gatewayRoute?: {
       gatewaySlug: string;
@@ -776,6 +971,8 @@ export class SupplyRepository {
         input.supplier.name,
         input.supplier.websiteUrl,
         input.supplier.sourceKind ?? 'EXTERNAL',
+        input.supplier.supplyOrigin,
+        input.supplier.routingPolicy,
       );
       const supplierModel = this.#domain.getOrCreateSupplierModel({
         supplierId: String(supplier.id),
@@ -804,6 +1001,7 @@ export class SupplyRepository {
           slug: input.plan.slug,
           name: input.plan.name,
           commercialType: input.plan.commercialType,
+          terms: input.plan.terms,
         });
         this.assignPlanToAgreement(String(agreement.id), String(plan.id));
       }
@@ -895,7 +1093,7 @@ export class SupplyRepository {
     const suppliers = rows(
       this.#domain.db
         .prepare(
-          `SELECT id,slug,name,website_url,source_kind,lifecycle,metadata_json,created_at,updated_at
+          `SELECT id,slug,name,website_url,source_kind,supply_origin,routing_policy,lifecycle,metadata_json,created_at,updated_at
            FROM v2_suppliers WHERE lifecycle='ACTIVE' ORDER BY name`,
         )
         .all(),
@@ -905,6 +1103,8 @@ export class SupplyRepository {
       name: value.name,
       websiteUrl: value.website_url ?? null,
       sourceKind: value.source_kind ?? 'EXTERNAL',
+      supplyOrigin: value.supply_origin ?? 'UNKNOWN',
+      routingPolicy: value.routing_policy ?? 'AUTO',
       lifecycle: value.lifecycle,
       metadata: decode<JsonRecord>(value.metadata_json, {}),
       createdAt: value.created_at,

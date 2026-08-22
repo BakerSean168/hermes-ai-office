@@ -5,6 +5,11 @@ import type { GatewayDiscoveryService } from './discovery.js';
 import type { GatewayProvisioningService } from './gatewayProvisioning.js';
 import type { HermesExecutionSyncService, HermesOrgSnapshotInput } from './execution.js';
 import type { FinanceRepository } from './finance.js';
+import type {
+  ExecutionHarness,
+  ExecutionIntent,
+  ExecutionPolicyService,
+} from './executionPolicy.js';
 import {
   IdempotencyConflictError,
   IdempotencyInProgressError,
@@ -57,6 +62,7 @@ export function registerV2Routes(
     maintenance?: MaintenanceService;
     idempotencyService?: IdempotencyService;
     runtimePolicy?: RuntimePolicyService;
+    executionPolicy?: ExecutionPolicyService;
     runtimeAccess?: RuntimeAccessRepository;
     providerHub?: ProviderHubRepository;
     personalChannels?: PersonalChannelProjectionService;
@@ -206,6 +212,73 @@ export function registerV2Routes(
         }
       },
     }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/profile',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.profile.update',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.providerHub.updateConnection(request.params.connectionId, {
+              displayName: body.displayName == null ? undefined : String(body.displayName),
+              baseUrl: body.baseUrl == null ? undefined : String(body.baseUrl),
+              websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
+              protocol: body.protocol == null ? undefined : String(body.protocol),
+              models: Array.isArray(body.models) ? body.models.map(String) : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_UPDATE_FAILED';
+            reply.code(
+              code.endsWith('_NOT_FOUND')
+                ? 404
+                : code.endsWith('_REQUIRED') || code.endsWith('_INVALID')
+                  ? 400
+                  : code.endsWith('_CONFLICT')
+                    ? 409
+                    : 422,
+            );
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { connectionId: string } }>(
+    '/api/v2/commands/provider-connections/:connectionId/retire',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'provider-connection.retire',
+        operation: () => {
+          if (!services.providerHub) {
+            reply.code(503);
+            return { error: { code: 'PROVIDER_HUB_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          try {
+            return services.providerHub.retireConnection(
+              request.params.connectionId,
+              body.reason ? String(body.reason) : 'OPERATOR_RETIRED',
+            );
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'PROVIDER_CONNECTION_RETIRE_FAILED';
+            reply.code(code.endsWith('_NOT_FOUND') ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
   );
 
   app.post<{ Params: { connectionId: string } }>(
@@ -1628,6 +1701,64 @@ export function registerV2Routes(
     }),
   );
 
+  app.post('/api/v2/commands/execution/resolve', async (request, reply) =>
+    runCommand({
+      request,
+      reply,
+      commandType: 'execution.resolve',
+      operation: () => {
+        if (!services.executionPolicy) {
+          reply.code(503);
+          return { error: { code: 'EXECUTION_POLICY_SERVICE_UNAVAILABLE' } };
+        }
+        const body = (request.body ?? {}) as Record<string, unknown>;
+        const intent = String(body.intent ?? '').toUpperCase();
+        if (
+          !['PLAN', 'REVIEW', 'IMPLEMENT', 'DEBUG', 'TEST', 'RESEARCH', 'QUICK_FIX'].includes(
+            intent,
+          )
+        ) {
+          reply.code(400);
+          return { error: { code: 'EXECUTION_INTENT_INVALID' } };
+        }
+        const runtimeKinds = new Set(['CLAUDE_CODE', 'CODEX', 'DSH', 'ZCODE', 'OPENCODE']);
+        const availableRuntimes = Array.isArray(body.availableRuntimes)
+          ? body.availableRuntimes
+              .filter(
+                (item): item is Record<string, unknown> =>
+                  Boolean(item) && typeof item === 'object' && !Array.isArray(item),
+              )
+              .map((item) => ({
+                kind: String(item.kind ?? '').toUpperCase() as ExecutionHarness,
+                path: item.path == null ? undefined : String(item.path),
+                mode: item.mode == null ? undefined : String(item.mode),
+              }))
+              .filter((item) => runtimeKinds.has(item.kind))
+          : undefined;
+        try {
+          return services.executionPolicy.resolve({
+            intent: intent as ExecutionIntent,
+            requestedModel: body.requestedModel ? String(body.requestedModel) : undefined,
+            availableRuntimes,
+            availableProviderConnectionIds: Array.isArray(body.availableProviderConnectionIds)
+              ? body.availableProviderConnectionIds.map(String)
+              : undefined,
+            at: body.at == null ? undefined : Number(body.at),
+            timezone: body.timezone ? String(body.timezone) : undefined,
+            metadata:
+              body.metadata && typeof body.metadata === 'object' && !Array.isArray(body.metadata)
+                ? (body.metadata as Record<string, unknown>)
+                : undefined,
+          });
+        } catch (error) {
+          const code = error instanceof Error ? error.message : 'EXECUTION_RESOLVE_FAILED';
+          reply.code(code.endsWith('_INVALID') ? 400 : 422);
+          return { error: { code } };
+        }
+      },
+    }),
+  );
+
   app.post('/api/v2/commands/workforce-sources/upsert', async (request, reply) =>
     runCommand({
       request,
@@ -1640,15 +1771,41 @@ export function registerV2Routes(
         }
         const body = (request.body ?? {}) as Record<string, unknown>;
         const sourceKind = String(body.sourceKind ?? 'EXTERNAL').toUpperCase();
+        const supplyOrigin = String(body.supplyOrigin ?? 'UNKNOWN').toUpperCase();
+        const routingPolicy = String(body.routingPolicy ?? 'AUTO').toUpperCase();
         if (!body.slug || !body.name || !['EXTERNAL', 'INTERNAL'].includes(sourceKind)) {
           reply.code(400);
           return { error: { code: 'WORKFORCE_SOURCE_IDENTITY_REQUIRED' } };
+        }
+        if (
+          ![
+            'OFFICIAL',
+            'COMMERCIAL_RELAY',
+            'COMMUNITY_RELAY',
+            'EVENT_GRANT',
+            'PERSONAL_HOSTED',
+            'INTERNAL_POOL',
+            'UNKNOWN',
+          ].includes(supplyOrigin) ||
+          !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy)
+        ) {
+          reply.code(400);
+          return { error: { code: 'WORKFORCE_SOURCE_ECONOMICS_INVALID' } };
         }
         return services.supply.upsertSource({
           slug: String(body.slug),
           name: String(body.name),
           websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
           sourceKind: sourceKind as 'EXTERNAL' | 'INTERNAL',
+          supplyOrigin: supplyOrigin as
+            | 'OFFICIAL'
+            | 'COMMERCIAL_RELAY'
+            | 'COMMUNITY_RELAY'
+            | 'EVENT_GRANT'
+            | 'PERSONAL_HOSTED'
+            | 'INTERNAL_POOL'
+            | 'UNKNOWN',
+          routingPolicy: routingPolicy as 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED',
         });
       },
     }),
@@ -1675,9 +1832,91 @@ export function registerV2Routes(
             return services.supply.updateSupplierProfile(request.params.supplierId, {
               name: String(body.name),
               websiteUrl: body.websiteUrl == null ? undefined : String(body.websiteUrl),
+              supplyOrigin:
+                body.supplyOrigin == null
+                  ? undefined
+                  : (String(body.supplyOrigin).toUpperCase() as
+                      | 'OFFICIAL'
+                      | 'COMMERCIAL_RELAY'
+                      | 'COMMUNITY_RELAY'
+                      | 'EVENT_GRANT'
+                      | 'PERSONAL_HOSTED'
+                      | 'INTERNAL_POOL'
+                      | 'UNKNOWN'),
+              routingPolicy:
+                body.routingPolicy == null
+                  ? undefined
+                  : (String(body.routingPolicy).toUpperCase() as
+                      'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED'),
             });
           } catch (error) {
             const code = error instanceof Error ? error.message : 'SUPPLIER_PROFILE_UPDATE_FAILED';
+            reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
+            return { error: { code } };
+          }
+        },
+      }),
+  );
+
+  app.post<{ Params: { supplierId: string } }>(
+    '/api/v2/commands/suppliers/:supplierId/economics',
+    async (request, reply) =>
+      runCommand({
+        request,
+        reply,
+        commandType: 'supplier.economics.update',
+        operation: () => {
+          if (!services.supply) {
+            reply.code(503);
+            return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
+          }
+          const body = (request.body ?? {}) as Record<string, unknown>;
+          const supplyOrigin = String(body.supplyOrigin ?? '').toUpperCase();
+          const routingPolicy = String(body.routingPolicy ?? '').toUpperCase();
+          const commercialType = String(body.commercialType ?? '').toUpperCase();
+          if (
+            ![
+              'OFFICIAL',
+              'COMMERCIAL_RELAY',
+              'COMMUNITY_RELAY',
+              'EVENT_GRANT',
+              'PERSONAL_HOSTED',
+              'INTERNAL_POOL',
+              'UNKNOWN',
+            ].includes(supplyOrigin) ||
+            !['AUTO', 'MANUAL_ONLY', 'BRAIN_ONLY', 'DISABLED'].includes(routingPolicy) ||
+            !['FREE', 'SUBSCRIPTION', 'PREPAID', 'METERED', 'SPONSORED', 'OTHER'].includes(
+              commercialType,
+            )
+          ) {
+            reply.code(400);
+            return { error: { code: 'SUPPLIER_ECONOMICS_INVALID' } };
+          }
+          try {
+            return services.supply.updateSupplierEconomics(request.params.supplierId, {
+              supplyOrigin: supplyOrigin as
+                | 'OFFICIAL'
+                | 'COMMERCIAL_RELAY'
+                | 'COMMUNITY_RELAY'
+                | 'EVENT_GRANT'
+                | 'PERSONAL_HOSTED'
+                | 'INTERNAL_POOL'
+                | 'UNKNOWN',
+              routingPolicy: routingPolicy as 'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED',
+              commercialType: commercialType as
+                'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER',
+              planSlug: body.planSlug == null ? undefined : String(body.planSlug),
+              planName: body.planName == null ? undefined : String(body.planName),
+              planTerms:
+                body.planTerms &&
+                typeof body.planTerms === 'object' &&
+                !Array.isArray(body.planTerms)
+                  ? (body.planTerms as Record<string, unknown>)
+                  : undefined,
+            });
+          } catch (error) {
+            const code =
+              error instanceof Error ? error.message : 'SUPPLIER_ECONOMICS_UPDATE_FAILED';
             reply.code(code === 'SUPPLIER_NOT_FOUND' ? 404 : 422);
             return { error: { code } };
           }
@@ -1692,13 +1931,33 @@ export function registerV2Routes(
         request,
         reply,
         commandType: 'supplier.retire',
-        operation: () => {
+        operation: async () => {
           if (!services.supply) {
             reply.code(503);
             return { error: { code: 'SUPPLY_SERVICE_UNAVAILABLE' } };
           }
           const body = (request.body ?? {}) as Record<string, unknown>;
           try {
+            const force = body.force === true;
+            if (force) {
+              if (!services.lifecycleService) {
+                reply.code(503);
+                return { error: { code: 'LIFECYCLE_SERVICE_UNAVAILABLE' } };
+              }
+              const relationships = services.supply.openRelationshipsForSupplier(
+                request.params.supplierId,
+              );
+              for (const appointmentId of relationships.appointmentIds) {
+                await services.lifecycleService.endAppointment(appointmentId, {
+                  reason: body.reason ? String(body.reason) : 'SUPPLIER_RETIRED',
+                });
+              }
+              for (const employmentId of relationships.employmentIds) {
+                await services.lifecycleService.endEmployment(employmentId, {
+                  reason: body.reason ? String(body.reason) : 'SUPPLIER_RETIRED',
+                });
+              }
+            }
             return services.supply.retireSupplier(
               request.params.supplierId,
               body.reason ? String(body.reason) : 'OPERATOR_RETIRED',
@@ -1805,6 +2064,22 @@ export function registerV2Routes(
                 supplier.sourceKind == null
                   ? undefined
                   : (String(supplier.sourceKind).toUpperCase() as 'EXTERNAL' | 'INTERNAL'),
+              supplyOrigin:
+                supplier.supplyOrigin == null
+                  ? undefined
+                  : (String(supplier.supplyOrigin).toUpperCase() as
+                      | 'OFFICIAL'
+                      | 'COMMERCIAL_RELAY'
+                      | 'COMMUNITY_RELAY'
+                      | 'EVENT_GRANT'
+                      | 'PERSONAL_HOSTED'
+                      | 'INTERNAL_POOL'
+                      | 'UNKNOWN'),
+              routingPolicy:
+                supplier.routingPolicy == null
+                  ? undefined
+                  : (String(supplier.routingPolicy).toUpperCase() as
+                      'AUTO' | 'MANUAL_ONLY' | 'BRAIN_ONLY' | 'DISABLED'),
             },
             supplierModel: { key: String(supplierModel.key), name: String(supplierModel.name) },
             agreement: {
@@ -1819,6 +2094,10 @@ export function registerV2Routes(
                     ? (String(plan.commercialType) as
                         'FREE' | 'SUBSCRIPTION' | 'PREPAID' | 'METERED' | 'SPONSORED' | 'OTHER')
                     : undefined,
+                  terms:
+                    plan.terms && typeof plan.terms === 'object' && !Array.isArray(plan.terms)
+                      ? (plan.terms as Record<string, unknown>)
+                      : undefined,
                 }
               : undefined,
             runtimeSelectors:

@@ -13,11 +13,30 @@ import {
 import { EnvFileBearerTokenProvider, LiteLlmGateway } from './gateway/liteLlm.js';
 import { GatewayRegistry } from './gateway/registry.js';
 import { registerV2Routes } from './v2/api.js';
+import { registerV3Routes } from './v3/api.js';
+import { ExecutionLinkRepository } from './v3/correlation.js';
+import {
+  LiteLlmModelGateway,
+  LiteLlmModelRegistry,
+  LiteLlmSpendObservability,
+} from './v3/adapters/liteLlm.js';
+import { EnvFileValueProvider, OpenHandsExecutionHost } from './v3/adapters/openHands.js';
+import type {
+  ExecutionHostPort,
+  ModelGatewayPort,
+  ModelRegistryPort,
+  ObservabilityPort,
+} from './v3/ports.js';
+import { DevelopmentPolicy } from './v3/policy.js';
+import { DevelopmentExecutionService } from './v3/service.js';
+import { loadV3ReadinessEvidence } from './v3/readiness.js';
+import { WorkspaceProvisioner, type WorkspaceProvisioningPort } from './v3/workspace.js';
 import { DispatchService } from './v2/dispatch.js';
 import { GatewayDiscoveryService } from './v2/discovery.js';
 import { GatewayProvisioningService } from './v2/gatewayProvisioning.js';
 import { HermesExecutionSyncService } from './v2/execution.js';
 import { FinanceRepository } from './v2/finance.js';
+import { ExecutionPolicyService } from './v2/executionPolicy.js';
 import { IdempotencyService } from './v2/idempotency.js';
 import { IncidentProjectionService } from './v2/incidents.js';
 import { InvocationService } from './v2/invocation.js';
@@ -57,12 +76,21 @@ export interface BuildControlPlaneOptions {
   cpaUsage?: CpaUsagePort;
   initialSync?: boolean;
   gateways?: GatewayRegistry;
+  v3Enabled?: boolean;
+  v3Policy?: DevelopmentPolicy;
+  v3ExecutionHost?: ExecutionHostPort;
+  v3ModelGateway?: ModelGatewayPort;
+  v3ModelRegistry?: ModelRegistryPort;
+  v3Observability?: ObservabilityPort;
+  v3Workspace?: WorkspaceProvisioningPort;
+  v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
 export interface ControlPlaneRuntime {
   app: FastifyInstance;
   v2: V2Repository;
   gateways: GatewayRegistry;
+  v3?: DevelopmentExecutionService;
   dbFile: string;
   host: string;
   port: number;
@@ -102,6 +130,7 @@ export async function buildControlPlane(
   const runtimeAccess = new RuntimeAccessRepository(v2);
   const providerHub = new ProviderHubRepository(v2);
   const runtimePolicy = new RuntimePolicyService(v2, supply, staffing, runtimeAccess, providerHub);
+  const executionPolicy = new ExecutionPolicyService(v2, runtimeAccess, providerHub);
   const invocationService = new InvocationService(v2, gateways);
   const lifecycleService = new WorkforceLifecycleService(v2, dispatchService);
   const idempotencyService = new IdempotencyService(db, {
@@ -200,16 +229,110 @@ export async function buildControlPlane(
     maintenance,
     idempotencyService,
     runtimePolicy,
+    executionPolicy,
     runtimeAccess,
     providerHub,
     personalChannels,
     internalWorkforce,
   });
 
+  const v3Enabled = options.v3Enabled ?? env.MODEL_CP_V3_ENABLED === '1';
+  let v3: DevelopmentExecutionService | undefined;
+  if (v3Enabled) {
+    const policy =
+      options.v3Policy ??
+      DevelopmentPolicy.fromFile(
+        env.MODEL_CP_V3_POLICY_FILE ?? path.resolve(here, '../config/development-policy.yaml'),
+      );
+    const openHandsEnv =
+      env.MODEL_CP_V3_OPENHANDS_ENV_FILE ?? '/srv/hermes-personal/secrets/openhands-v3.env';
+    const v3Secrets = new EnvFileValueProvider(openHandsEnv);
+    const executionHost =
+      options.v3ExecutionHost ??
+      new OpenHandsExecutionHost({
+        baseUrl: env.MODEL_CP_V3_OPENHANDS_URL ?? 'http://127.0.0.1:18000',
+        secrets: v3Secrets,
+        policy,
+      });
+    const modelGateway =
+      options.v3ModelGateway ??
+      new LiteLlmModelGateway({
+        baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
+        secrets: v3Secrets,
+      });
+    const adminSecrets = new EnvFileValueProvider(
+      env.MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE ??
+        env.LITELLM_ENV_FILE ??
+        '/srv/hermes-personal/secrets/litellm.env',
+    );
+    const modelRegistry =
+      options.v3ModelRegistry ??
+      new LiteLlmModelRegistry({
+        baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
+        secrets: adminSecrets,
+        keyName: env.MODEL_CP_V3_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+        adminUrl: env.MODEL_CP_V3_LITELLM_ADMIN_URL,
+      });
+    const observability =
+      options.v3Observability ??
+      (env.MODEL_CP_V3_LITELLM_OBSERVABILITY === '1'
+        ? new LiteLlmSpendObservability({
+            baseUrl: env.MODEL_CP_V3_LITELLM_URL ?? 'http://127.0.0.1:4000',
+            secrets: adminSecrets,
+            keyName: env.MODEL_CP_V3_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+            lookbackDays: Number(env.MODEL_CP_V3_LITELLM_OBSERVABILITY_LOOKBACK_DAYS ?? 30),
+          })
+        : undefined);
+    const repositoryRoots = (env.MODEL_CP_V3_REPOSITORY_ROOTS ?? '/home/ubuntu/projects,/opt/data')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const workspace =
+      options.v3Workspace ??
+      new WorkspaceProvisioner({
+        hostRoot: env.MODEL_CP_V3_WORKSPACE_ROOT ?? '/opt/data/hermes-ai-office-v3/workspaces',
+        executionRoot: env.MODEL_CP_V3_OPENHANDS_WORKSPACE_ROOT ?? '/workspace',
+        allowedRepositoryRoots: repositoryRoots,
+        executionOwner: {
+          uid: Number(env.MODEL_CP_V3_OPENHANDS_UID ?? 10001),
+          gid: Number(env.MODEL_CP_V3_OPENHANDS_GID ?? 10001),
+        },
+      });
+    const configuredBackends = new Set(
+      (env.MODEL_CP_V3_ENABLED_BACKENDS ?? 'openhands-builtin')
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean),
+    );
+    const backendAvailability =
+      options.v3BackendAvailability ??
+      Object.fromEntries(
+        Object.entries(policy.config.backends).map(([name, backend]) => [
+          name,
+          backend.kind === 'internal' || configuredBackends.has(name),
+        ]),
+      );
+    v3 = new DevelopmentExecutionService({
+      policy,
+      links: new ExecutionLinkRepository(db),
+      host: executionHost,
+      workspace,
+      gateway: modelGateway,
+      observability,
+      backendAvailability,
+    });
+    const readinessEvidence = loadV3ReadinessEvidence(
+      env.MODEL_CP_V3_READINESS_EVIDENCE_FILE ??
+        path.resolve(here, '../config/v3-readiness-evidence.yaml'),
+    );
+    registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry);
+  }
+
   app.get('/api/health', async () => ({
     status: 'ok',
     service: 'hermes-model-control-plane',
     apiVersion: 2,
+    v3Enabled,
     db: dbFile,
   }));
 
@@ -341,6 +464,7 @@ export async function buildControlPlane(
     app,
     v2,
     gateways,
+    v3,
     dbFile,
     host,
     port,

@@ -50,6 +50,12 @@ jobs:
         id: install_dependencies
         run: npm ci
 
+      - name: Public Repository Safety
+        id: public_safety
+        if: always() && steps.install_dependencies.outcome == 'success'
+        run: npm run check:public-safety
+        continue-on-error: true
+
       # --- Protocol spec checks (blocking) ---
 
       - name: Validate AsyncAPI spec
@@ -86,6 +92,12 @@ jobs:
         id: type_check
         if: always() && steps.install_dependencies.outcome == 'success'
         run: npm run check-types
+        continue-on-error: true
+
+      - name: E2E Harness Unit Tests
+        id: e2e_harness_test
+        if: always() && steps.install_dependencies.outcome == 'success'
+        run: npm run test:e2e-harness
         continue-on-error: true
 
       - name: Lint
@@ -168,7 +180,9 @@ jobs:
           CHECKOUT: ${{ steps.checkout.outcome }}
           SETUP_NODE: ${{ steps.setup_node.outcome }}
           INSTALL_DEPENDENCIES: ${{ steps.install_dependencies.outcome }}
+          PUBLIC_SAFETY: ${{ steps.public_safety.outcome }}
           TYPE_CHECK: ${{ steps.type_check.outcome }}
+          E2E_HARNESS_TEST: ${{ steps.e2e_harness_test.outcome }}
           LINT: ${{ steps.lint.outcome }}
           WEBVIEW_TEST: ${{ steps.webview_test.outcome }}
           FORMAT_CHECK: ${{ steps.format_check.outcome }}
@@ -192,7 +206,9 @@ jobs:
             echo "| Checkout | $(status "$CHECKOUT") |"
             echo "| Setup Node | $(status "$SETUP_NODE") |"
             echo "| Install dependencies | $(status "$INSTALL_DEPENDENCIES") |"
+            echo "| **Public repository safety** | $(status "$PUBLIC_SAFETY") |"
             echo "| **Type check** | $(status "$TYPE_CHECK") |"
+            echo "| **E2E harness unit tests** | $(status "$E2E_HARNESS_TEST") |"
             echo "| **Lint** | $(status "$LINT") |"
             echo "| **Webview tests** | $(status "$WEBVIEW_TEST") |"
             echo "| **Format check** | $(status "$FORMAT_CHECK") |"
@@ -211,7 +227,9 @@ jobs:
           CHECKOUT: ${{ steps.checkout.outcome }}
           SETUP_NODE: ${{ steps.setup_node.outcome }}
           INSTALL_DEPENDENCIES: ${{ steps.install_dependencies.outcome }}
+          PUBLIC_SAFETY: ${{ steps.public_safety.outcome }}
           TYPE_CHECK: ${{ steps.type_check.outcome }}
+          E2E_HARNESS_TEST: ${{ steps.e2e_harness_test.outcome }}
           LINT: ${{ steps.lint.outcome }}
           WEBVIEW_TEST: ${{ steps.webview_test.outcome }}
           FORMAT_CHECK: ${{ steps.format_check.outcome }}
@@ -220,8 +238,8 @@ jobs:
           SERVER_TEST: ${{ steps.server_test.outcome }}
         run: |
           failed=0
-          for step in CHECKOUT SETUP_NODE INSTALL_DEPENDENCIES \
-                      TYPE_CHECK LINT \
+          for step in CHECKOUT SETUP_NODE INSTALL_DEPENDENCIES PUBLIC_SAFETY \
+                      TYPE_CHECK E2E_HARNESS_TEST LINT \
                       WEBVIEW_TEST FORMAT_CHECK BUILD NPM_PACKAGE SERVER_TEST; do
             val=$(printenv "$step" 2>/dev/null || echo "skipped")
             if [ "$val" != "success" ]; then

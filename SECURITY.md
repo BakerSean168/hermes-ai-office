@@ -8,7 +8,7 @@
 
 ## Reporting a Vulnerability
 
-Please report security vulnerabilities through [GitHub's private vulnerability reporting](https://github.com/pixel-agents-hq/pixel-agents/security/advisories/new).
+Please report security vulnerabilities through [GitHub's private vulnerability reporting](https://github.com/BakerSean168/hermes-ai-office/security/advisories/new) for this repository. Issues that affect the upstream Pixel Agents project should also be reported to the upstream maintainers.
 
 **Do not open a public issue for security vulnerabilities.**
 

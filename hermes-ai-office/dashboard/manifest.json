@@ -1,9 +1,9 @@
 {
   "name": "hermes-ai-office",
   "label": "AI Office",
-  "description": "Organization, workforce suppliers, native Agent access, and employee-aware runtime staffing.",
+  "description": "AI Office V3 development control plane with a read-only LiteLLM runtime registry.",
   "icon": "Building2",
-  "version": "0.11.1",
+  "version": "0.20.0",
   "tab": {
     "path": "/office",
     "position": "after:kanban"

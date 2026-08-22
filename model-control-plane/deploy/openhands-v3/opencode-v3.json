@@ -1,0 +1,46 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "litellm-v3/implementation-efficient",
+  "provider": {
+    "litellm-v3": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Hermes AI Office V3 / LiteLLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:4000/v1",
+        "apiKey": "{env:LITELLM_V3_KEY}"
+      },
+      "models": {
+        "implementation-efficient": {
+          "name": "Implementation Efficient",
+          "limit": {
+            "context": 128000,
+            "output": 16384
+          },
+          "options": {
+            "user": "{env:HERMES_V3_EXECUTION_ID}"
+          }
+        },
+        "planning-premium": {
+          "name": "Planning Premium",
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          },
+          "options": {
+            "user": "{env:HERMES_V3_EXECUTION_ID}"
+          }
+        },
+        "review-premium": {
+          "name": "Review Premium",
+          "limit": {
+            "context": 200000,
+            "output": 32768
+          },
+          "options": {
+            "user": "{env:HERMES_V3_EXECUTION_ID}"
+          }
+        }
+      }
+    }
+  }
+}
