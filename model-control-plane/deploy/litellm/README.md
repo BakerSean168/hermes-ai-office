@@ -47,6 +47,10 @@ The migration preserves:
 - protocol and supply-origin metadata;
 - commercial type and economics-derived `order`;
 - qualified primary/fallback order for validated V3 routes;
+- deployment-level economics overrides when one credential exposes both free and paid
+  model codes (for example DeepSeek V4 Flash FREE -> SUBSCRIPTION -> METERED);
+- canonical API-root corrections for legacy rows whose historical URL is no longer a
+  valid OpenAI-compatible endpoint;
 - paused/active state translated to LiteLLM `blocked` state.
 
 ## Bootstrap / upgrade
