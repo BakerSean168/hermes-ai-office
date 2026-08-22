@@ -1,5 +1,5 @@
 [Unit]
-Description=Hermes Model Control Plane
+Description=Hermes AI Office V3 Control Plane
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
@@ -8,33 +8,18 @@ Requires=docker.service
 Type=simple
 WorkingDirectory=/home/ubuntu/projects/pixel-agents
 ExecStart=/opt/node-v24.18.0-linux-arm64/bin/node model-control-plane/dist/main.js
-Environment=NODE_ENV=production
 ExecStartPre=/usr/bin/test -f /home/ubuntu/projects/pixel-agents/model-control-plane/dist/main.js
+Environment=NODE_ENV=production
 Environment=MODEL_CP_HOST=127.0.0.1
 Environment=MODEL_CP_PORT=8320
 Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
-Environment=MODEL_CP_CPA_SUDO=0
-Environment=MODEL_CP_USAGE_RANGE=30d
-Environment=MODEL_CP_HEALTH_CHECK_INTERVAL_MS=1800000
-Environment=MODEL_CP_V2_LITELLM=1
-Environment=MODEL_CP_V2_DISCOVERY=1
-Environment=MODEL_CP_V2_DISCOVERY_INTERVAL_MS=60000
-Environment=MODEL_CP_V2_USAGE_RECONCILIATION=1
-Environment=MODEL_CP_V2_USAGE_RECONCILIATION_INTERVAL_MS=300000
-Environment=CPA_GATEWAY_ID=cpa-compat
-Environment=LITELLM_GATEWAY_ID=litellm-reference
-Environment=LITELLM_BASE_URL=http://127.0.0.1:4000
-Environment=LITELLM_ENV_FILE=/srv/hermes-personal/secrets/litellm.env
-Environment=GATEWAYCTL=/usr/local/sbin/gatewayctl
-Environment=CPA_BASE_URL=http://127.0.0.1:8317
-Environment=CPA_MANAGEMENT_KEY_FILE=/opt/cpa/.mgmt_password
 Restart=always
 RestartSec=3
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=/srv/hermes-personal/data/model-control-plane /opt/cpa/state /opt/cpa/backups/gatewayctl
+ReadWritePaths=/srv/hermes-personal/data/model-control-plane /opt/data/hermes-ai-office-v3/workspaces
 
 [Install]
 WantedBy=multi-user.target

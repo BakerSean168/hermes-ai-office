@@ -115,6 +115,30 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
       provider: 'openai',
       deploymentId: 'deployment-new',
     });
+    assert.deepEqual(summary.routeUsage, [
+      {
+        model: 'openai/deepseek-v4-flash-free',
+        provider: 'openai',
+        deploymentId: 'deployment-new',
+        input: 120,
+        output: 20,
+        cachedInput: 80,
+        reasoningOutput: 5,
+        costUsd: 0.03,
+        calls: 1,
+      },
+      {
+        model: 'openai/deepseek-v4-flash-free',
+        provider: 'openai',
+        deploymentId: 'deployment-old',
+        input: 100,
+        output: 10,
+        cachedInput: 50,
+        reasoningOutput: 2,
+        costUsd: 0.02,
+        calls: 1,
+      },
+    ]);
     const executionQuery = seen.find((url) => url.searchParams.get('end_user') === 'exec_obs_1');
     assert.ok(executionQuery);
     assert.equal(executionQuery.searchParams.get('page'), '1');

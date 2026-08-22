@@ -78,18 +78,15 @@ const gateway: ModelGatewayPort = {
   },
 };
 
-test('V3 API provides an idempotent thin execution facade without changing V2', async () => {
+test('V3 API provides an idempotent production execution facade', async () => {
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
-      'codex-acp': false,
       'opencode-acp': false,
     },
   });
@@ -144,9 +141,8 @@ test('V3 API provides an idempotent thin execution facade without changing V2', 
     assert.equal(completed.json().usage.input, 100);
     assert.equal(completed.json().timing.durationMs, 5_000);
 
-    const v2Health = await runtime.app.inject({ method: 'GET', url: '/api/v2/health' });
-    assert.equal(v2Health.statusCode, 200);
-    assert.equal(v2Health.json().apiVersion, 2);
+    const legacyHealth = await runtime.app.inject({ method: 'GET', url: '/api/v2/health' });
+    assert.equal(legacyHealth.statusCode, 404);
   } finally {
     await runtime.app.close();
   }
@@ -156,14 +152,11 @@ test('V3 review prompt preserves read-only evidence and directs write-requiring 
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
-      'codex-acp': false,
       'opencode-acp': false,
     },
   });
@@ -221,14 +214,11 @@ test('V3 cancel keeps product status CANCELLED when OpenHands pause is the trans
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
-      'codex-acp': false,
       'opencode-acp': false,
     },
   });
@@ -296,15 +286,12 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
   };
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: reuseWorkspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
 
@@ -371,7 +358,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
       /first non-empty line of the final result MUST be exactly PASS or FAIL/,
     );
 
-    host.finalText = 'BLOCKED: focused review finding';
+    host.finalText = 'FAIL\nfocused review finding';
     host.status = 'SUCCEEDED';
     await runtime.app.inject({
       method: 'GET',
@@ -385,7 +372,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
       method: 'GET',
       url: `/api/v3/development/executions/${blockingReviewId}`,
     });
-    assert.match(rereadBlockingReview.json().result.finalText, /^BLOCKED:/);
+    assert.match(rereadBlockingReview.json().result.finalText, /^FAIL/);
 
     const fix = await runtime.app.inject({
       method: 'POST',
@@ -406,7 +393,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
     const fixBody = fix.json();
     assert.equal(fixBody.result.workspaceRef, implementationWorkspace);
     assert.equal(host.createdRepositories.at(-1), implementationWorkspace);
-    assert.match(host.createdObjectives.at(-1) ?? '', /BLOCKED: focused review finding/);
+    assert.match(host.createdObjectives.at(-1) ?? '', /FAIL\nfocused review finding/);
     assert.equal(
       provisions.length,
       2,
@@ -524,15 +511,12 @@ test('V3 FINALIZE is deterministic, internal, idempotent, and does not launch an
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
 
@@ -691,40 +675,6 @@ test('V3 FINALIZE is deterministic, internal, idempotent, and does not launch an
     });
     assert.equal(unknownFinalize.statusCode, 422);
     assert.equal(unknownFinalize.json().error.code, 'PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
-
-    host.status = 'RUNNING';
-    const historicalApprovedReview = await runtime.app.inject({
-      method: 'POST',
-      url: '/api/v3/development/executions',
-      headers: { 'idempotency-key': 'v3-finalize-historical-approved-review' },
-      payload: {
-        phase: 'VERIFY_REVIEW',
-        objective: 'Exercise historical APPROVED compatibility.',
-        projectKey: 'memo-flow',
-        context: { previousExecutionId: implementationId },
-        await: false,
-      },
-    });
-    const historicalApprovedReviewId = historicalApprovedReview.json().executionId;
-    host.finalText = 'APPROVED: historical reviewer found no blocking issue';
-    host.status = 'SUCCEEDED';
-    await runtime.app.inject({
-      method: 'GET',
-      url: `/api/v3/development/executions/${historicalApprovedReviewId}`,
-    });
-    const historicalFinalize = await runtime.app.inject({
-      method: 'POST',
-      url: '/api/v3/development/executions',
-      headers: { 'idempotency-key': 'v3-finalize-historical-approved' },
-      payload: {
-        phase: 'FINALIZE',
-        objective: 'Historical explicit approvals remain finalizable.',
-        projectKey: 'memo-flow',
-        context: { previousExecutionId: historicalApprovedReviewId },
-      },
-    });
-    assert.equal(historicalFinalize.statusCode, 201);
-    assert.match(historicalFinalize.json().result.finalText, /APPROVED: historical reviewer/);
   } finally {
     await runtime.app.close();
   }
@@ -734,15 +684,12 @@ test('V3 continuation phases derive their workspace from causal previousExecutio
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -780,7 +727,7 @@ test('V3 continuation phases derive their workspace from causal previousExecutio
     });
     assert.equal(review.statusCode, 201);
     const reviewId = review.json().executionId;
-    host.finalText = 'BLOCKED: review finding';
+    host.finalText = 'FAIL\nreview finding';
     host.status = 'SUCCEEDED';
     await runtime.app.inject({ method: 'GET', url: `/api/v3/development/executions/${reviewId}` });
 
@@ -797,7 +744,7 @@ test('V3 continuation phases derive their workspace from causal previousExecutio
       },
     });
     assert.equal(fix.statusCode, 201);
-    assert.match(host.createdObjectives.at(-1) ?? '', /BLOCKED: review finding/);
+    assert.match(host.createdObjectives.at(-1) ?? '', /FAIL\nreview finding/);
   } finally {
     await runtime.app.close();
   }
@@ -807,15 +754,12 @@ test('V3 API preserves Hermes execution hints as auditable policy evidence', asy
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -854,15 +798,12 @@ test('V3 execution list exposes public status semantics without correlation inte
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -879,11 +820,29 @@ test('V3 execution list exposes public status semantics without correlation inte
       },
     });
     assert.equal(started.statusCode, 201);
+    const firstExecutionId = started.json().executionId;
+    const second = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'v3-list-public-shape-2' },
+      payload: {
+        phase: 'IMPLEMENT',
+        objective: 'Second list projection probe.',
+        projectKey: 'memo-flow',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    assert.equal(second.statusCode, 201);
+    const secondExecutionId = second.json().executionId;
+
     const listed = await runtime.app.inject({
       method: 'GET',
-      url: '/api/v3/development/executions?projectKey=memo-flow&limit=10',
+      url: '/api/v3/development/executions?projectKey=memo-flow&limit=1&offset=0',
     });
     assert.equal(listed.statusCode, 200);
+    assert.equal(listed.json().items.length, 1);
+    assert.equal(listed.json().items[0].executionId, secondExecutionId);
     const item = listed.json().items[0];
     assert.equal(item.status, 'RUNNING');
     assert.equal(item.projectKey, 'memo-flow');
@@ -891,6 +850,14 @@ test('V3 execution list exposes public status semantics without correlation inte
     assert.equal(item.selection.backend, 'opencode-acp');
     assert.equal('statusCache' in item, false);
     assert.equal('idempotencyKey' in item, false);
+
+    const nextPage = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v3/development/executions?projectKey=memo-flow&limit=1&offset=1',
+    });
+    assert.equal(nextPage.statusCode, 200);
+    assert.equal(nextPage.json().items.length, 1);
+    assert.equal(nextPage.json().items[0].executionId, firstExecutionId);
   } finally {
     await runtime.app.close();
   }
@@ -900,15 +867,12 @@ test('V3 writer admission allows two isolated writers per project and rejects th
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -944,15 +908,12 @@ test('V3 writer admission enforces the global active writer cap across projects'
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -995,15 +956,12 @@ test('V3 IMPLEMENT_FIX enforces a single writer lease for the implementation wor
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -1042,7 +1000,7 @@ test('V3 IMPLEMENT_FIX enforces a single writer lease for the implementation wor
     });
     const reviewId = review.json().executionId;
     host.status = 'SUCCEEDED';
-    host.finalText = 'BLOCKED: lease finding';
+    host.finalText = 'FAIL\nlease finding';
     await runtime.app.inject({ method: 'GET', url: `/api/v3/development/executions/${reviewId}` });
 
     host.status = 'RUNNING';
@@ -1054,7 +1012,7 @@ test('V3 IMPLEMENT_FIX enforces a single writer lease for the implementation wor
         phase: 'IMPLEMENT_FIX',
         objective: 'Apply the first focused fix.',
         projectKey: 'lease-project',
-        context: { previousExecutionId: reviewId, previousResult: 'BLOCKED: lease finding' },
+        context: { previousExecutionId: reviewId, previousResult: 'FAIL\nlease finding' },
         await: false,
       },
     });
@@ -1069,7 +1027,7 @@ test('V3 IMPLEMENT_FIX enforces a single writer lease for the implementation wor
         phase: 'IMPLEMENT_FIX',
         objective: 'Competing fix must not share the mutable tree.',
         projectKey: 'lease-project',
-        context: { previousExecutionId: reviewId, previousResult: 'BLOCKED: lease finding' },
+        context: { previousExecutionId: reviewId, previousResult: 'FAIL\nlease finding' },
         await: false,
       },
     });
@@ -1085,15 +1043,12 @@ test('V3 execution list reconciles non-terminal cached state from the execution 
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -1128,15 +1083,12 @@ test('V3 continue resumes only a PAUSED execution through the existing OpenHands
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
-      'codex-acp': false,
     },
   });
   try {
@@ -1186,14 +1138,11 @@ test('V3 runtime summary exposes only safe execution-plane health and logical mo
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
-      'codex-acp': false,
       'opencode-acp': false,
     },
   });
@@ -1232,14 +1181,11 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
   const host = new FakeHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    initialSync: false,
-    v3Enabled: true,
     v3ExecutionHost: host,
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
       'openhands-builtin': true,
-      'codex-acp': false,
       'opencode-acp': false,
     },
   });
@@ -1252,12 +1198,12 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
     const body = response.json();
     assert.equal(body.status, 'NOT_READY');
     assert.equal(body.ready, false);
-    assert.equal(body.gates.representativeWorkflows.current, 1);
+    assert.equal(body.gates.representativeWorkflows.current, 2);
     assert.equal(body.gates.representativeWorkflows.required, 10);
     assert.equal(body.gates.representativeWorkflows.pass, false);
     assert.equal(body.gates.providerFallback.pass, true);
     assert.equal(body.gates.gatewayReconnect.pass, true);
-    assert.equal(body.gates.rollback.pass, true);
+    assert.equal(body.gates.reviewVerdict.pass, true);
     assert.equal(body.gates.fixLoop.pass, false);
     assert.match(body.unknownMetrics.representativeHumanCorrectionRate, /^UNKNOWN:/);
     assert.match(body.unknownMetrics.maintenanceComplexity, /^UNKNOWN:/);

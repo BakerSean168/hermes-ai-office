@@ -55,7 +55,7 @@ export function registerV3Routes(
     status: 'ok',
     service: 'hermes-ai-office-v3',
     apiVersion: 3,
-    mode: 'shadow',
+    mode: 'production',
   }));
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
@@ -275,6 +275,8 @@ export function registerV3Routes(
       items: await service.list({
         projectKey: typeof query.projectKey === 'string' ? query.projectKey : undefined,
         limit: query.limit == null ? undefined : Number(query.limit),
+        offset: query.offset == null ? undefined : Number(query.offset),
+        hydrate: query.hydrate === '1' || query.hydrate === 'true',
       }),
     };
   });

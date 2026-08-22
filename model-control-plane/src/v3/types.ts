@@ -8,7 +8,7 @@ export const DEVELOPMENT_PHASES = [
 
 export type DevelopmentPhase = (typeof DEVELOPMENT_PHASES)[number];
 
-export const TRANSPORT_MODES = ['LITELLM_MANAGED', 'NATIVE_SUBSCRIPTION', 'INTERNAL'] as const;
+export const TRANSPORT_MODES = ['LITELLM_MANAGED', 'INTERNAL'] as const;
 export type TransportMode = (typeof TRANSPORT_MODES)[number];
 
 export type SessionPolicy = 'fresh' | 'resume_preferred' | 'fresh_required';
@@ -100,6 +100,18 @@ export interface UsageSummary {
   calls?: number;
 }
 
+export interface RouteUsageSummary {
+  model?: string;
+  provider?: string;
+  deploymentId?: string;
+  input: number;
+  output: number;
+  cachedInput?: number;
+  reasoningOutput?: number;
+  costUsd: number;
+  calls: number;
+}
+
 export interface ExecutionTiming {
   startedAt?: string;
   endedAt?: string;
@@ -161,8 +173,12 @@ export interface ExecutionLinkRecord {
   sourceRevision?: string;
   previousExecutionId?: string;
   resultText?: string;
+  observedUsage?: UsageSummary;
+  observedRoutes?: RouteUsageSummary[];
   selectionReasons: string[];
   statusCache: ExecutionStatus;
   createdAt: number;
   updatedAt: number;
+  startedAt?: number;
+  endedAt?: number;
 }

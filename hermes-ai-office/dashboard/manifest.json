@@ -1,13 +1,10 @@
 {
   "name": "hermes-ai-office",
   "label": "AI Office",
-  "description": "AI Office V3 development control plane with a read-only LiteLLM runtime registry.",
-  "icon": "Building2",
-  "version": "0.20.0",
-  "tab": {
-    "path": "/office",
-    "position": "after:kanban"
-  },
+  "description": "Execution console for Hermes development tasks, OpenHands lifecycle, and LiteLLM usage analytics.",
+  "icon": "Activity",
+  "version": "1.0.0",
+  "tab": {"path": "/office", "position": "after:kanban"},
   "entry": "dist/index.js",
   "css": "dist/style.css",
   "api": "plugin_api.py"

@@ -479,7 +479,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             ...(record.hermesTurnId ? { hermes_turn_id: record.hermesTurnId } : {}),
           },
         });
-        record = this.#links.attachOpenHands(record.executionId, created.conversationId);
+        const hostStartedAt = created.startedAt ? Date.parse(created.startedAt) : Number.NaN;
+        record = this.#links.attachOpenHands(
+          record.executionId,
+          created.conversationId,
+          Number.isFinite(hostStartedAt) ? hostStartedAt : undefined,
+        );
       } catch (error) {
         this.#links.updateStatus(record.executionId, 'FAILED');
         throw error;
@@ -519,7 +524,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     const preserveCancelled =
       record.statusCache === 'CANCELLED' && hostSnapshot?.status === 'PAUSED';
     if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveCancelled) {
-      record = this.#links.updateStatus(record.executionId, hostSnapshot.status);
+      const observedAt = hostSnapshot.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
+      record = this.#links.updateStatus(
+        record.executionId,
+        hostSnapshot.status,
+        Number.isFinite(observedAt) ? observedAt : undefined,
+      );
     }
     const effectiveStatus = preserveCancelled
       ? 'CANCELLED'
@@ -529,10 +539,16 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       record = this.#links.attachResultText(record.executionId, hostFinalText);
     }
     const observed = await this.#observability.getExecutionSummary(executionId);
+    if (observed.usage || observed.routeUsage) {
+      record = this.#links.attachObservation(executionId, observed.usage, observed.routeUsage);
+    }
     if (observed.traceId && observed.traceId !== record.langfuseTraceId) {
       record = this.#links.attachLangfuse(executionId, observed.traceId);
     }
     const ended = TERMINAL.has(effectiveStatus);
+    const durableUsage = observed.usage ?? record.observedUsage ?? hostSnapshot?.usage ?? null;
+    const durableRoutes = observed.routeUsage ?? record.observedRoutes ?? [];
+    const lastObservedRoute = observed.lastObservedRoute ?? durableRoutes[0];
     return {
       executionId: record.executionId,
       projectKey: record.projectKey,
@@ -549,27 +565,27 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             }
           : null,
       timing: (() => {
-        const startedAt = hostSnapshot?.startedAt ?? new Date(record.createdAt).toISOString();
+        const startedAt = new Date(record.startedAt ?? record.createdAt).toISOString();
         const endedAt = ended
-          ? (hostSnapshot?.updatedAt ?? new Date(record.updatedAt).toISOString())
+          ? new Date(record.endedAt ?? record.updatedAt).toISOString()
           : undefined;
-        const hostStart = hostSnapshot?.startedAt ? Date.parse(hostSnapshot.startedAt) : Number.NaN;
-        const hostEnd = hostSnapshot?.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
         const durationMs = ended
-          ? Number.isFinite(hostStart) && Number.isFinite(hostEnd) && hostEnd >= hostStart
-            ? hostEnd - hostStart
-            : Math.max(0, record.updatedAt - record.createdAt)
+          ? Math.max(
+              0,
+              (record.endedAt ?? record.updatedAt) - (record.startedAt ?? record.createdAt),
+            )
           : undefined;
         return { startedAt, endedAt, durationMs };
       })(),
-      usage: observed.usage ?? hostSnapshot?.usage ?? null,
+      usage: durableUsage,
       refs: {
         openhandsConversationId: record.openhandsConversationId,
         langfuseTraceId: record.langfuseTraceId ?? observed.traceId,
         upstream: {
           openhands: hostSnapshot?.upstream,
           gateway: gatewaySummary.upstream,
-          route: observed.lastObservedRoute,
+          route: lastObservedRoute,
+          routeUsage: durableRoutes,
         },
       },
       sourceHealth: {
@@ -620,11 +636,16 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.get(executionId);
   }
 
-  async list(input: { projectKey?: string; limit?: number } = {}) {
+  async list(
+    input: { projectKey?: string; limit?: number; offset?: number; hydrate?: boolean } = {},
+  ) {
     const records = this.#links.list(input);
     const items = [];
     for (const record of records) {
-      if (!TERMINAL.has(record.statusCache) && record.openhandsConversationId) {
+      if (
+        record.openhandsConversationId &&
+        (!TERMINAL.has(record.statusCache) || (input.hydrate === true && !record.observedUsage))
+      ) {
         try {
           const snapshot = await this.get(record.executionId);
           if (snapshot) {
@@ -643,6 +664,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
               timing: snapshot.timing,
               usage: snapshot.usage,
               sourceHealth: snapshot.sourceHealth,
+              refs: snapshot.refs,
             });
             continue;
           }
@@ -661,6 +683,24 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         previousExecutionId: record.previousExecutionId ?? null,
         createdAt: new Date(record.createdAt).toISOString(),
         updatedAt: new Date(record.updatedAt).toISOString(),
+        timing: {
+          startedAt: new Date(record.startedAt ?? record.createdAt).toISOString(),
+          ...(record.endedAt
+            ? {
+                endedAt: new Date(record.endedAt).toISOString(),
+                durationMs: Math.max(0, record.endedAt - (record.startedAt ?? record.createdAt)),
+              }
+            : {}),
+        },
+        usage: record.observedUsage ?? null,
+        refs: {
+          openhandsConversationId: record.openhandsConversationId,
+          langfuseTraceId: record.langfuseTraceId,
+          upstream: {
+            route: record.observedRoutes?.[0],
+            routeUsage: record.observedRoutes ?? [],
+          },
+        },
       });
     }
     return items;

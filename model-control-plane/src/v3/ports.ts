@@ -3,6 +3,7 @@ import type {
   DevelopmentPhase,
   ExecutionSelection,
   ExecutionStatus,
+  RouteUsageSummary,
   SourceHealthState,
   UsageSummary,
 } from './types.js';
@@ -94,6 +95,7 @@ export interface ObservabilityExecutionSummary {
     provider?: string;
     deploymentId?: string;
   };
+  routeUsage?: RouteUsageSummary[];
 }
 
 export interface ObservabilityPort {

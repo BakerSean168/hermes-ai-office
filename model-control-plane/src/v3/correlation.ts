@@ -7,7 +7,11 @@ import type {
   ExecutionSelection,
   ExecutionStatus,
   HermesExecutionContext,
+  RouteUsageSummary,
+  UsageSummary,
 } from './types.js';
+
+const TERMINAL_STATUSES = new Set<ExecutionStatus>(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
 interface ExecutionLinkRow {
   execution_id: string;
@@ -30,10 +34,14 @@ interface ExecutionLinkRow {
   source_revision: string | null;
   previous_execution_id: string | null;
   result_text: string | null;
+  usage_json: string | null;
+  observed_routes_json: string | null;
   selection_reasons_json: string | null;
   status_cache: string;
   created_at: number;
   updated_at: number;
+  started_at: number | null;
+  ended_at: number | null;
 }
 
 export function ensureV3Schema(db: DatabaseSync): void {
@@ -59,10 +67,14 @@ export function ensureV3Schema(db: DatabaseSync): void {
       source_revision TEXT,
       previous_execution_id TEXT,
       result_text TEXT,
+      usage_json TEXT,
+      observed_routes_json TEXT,
       selection_reasons_json TEXT,
       status_cache TEXT NOT NULL,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      started_at INTEGER,
+      ended_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_v3_execution_links_project_created
       ON v3_execution_links(project_key, created_at DESC);
@@ -86,6 +98,23 @@ export function ensureV3Schema(db: DatabaseSync): void {
   if (!columns.has('selection_reasons_json')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN selection_reasons_json TEXT');
   }
+  if (!columns.has('usage_json')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN usage_json TEXT');
+  }
+  if (!columns.has('observed_routes_json')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN observed_routes_json TEXT');
+  }
+  if (!columns.has('started_at')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN started_at INTEGER');
+  }
+  if (!columns.has('ended_at')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN ended_at INTEGER');
+  }
+  db.exec('UPDATE v3_execution_links SET started_at=created_at WHERE started_at IS NULL');
+  db.exec(`UPDATE v3_execution_links
+             SET ended_at=updated_at
+           WHERE ended_at IS NULL
+             AND status_cache IN ('SUCCEEDED','FAILED','STUCK','CANCELLED')`);
 }
 
 function selectionReasons(value: string | null): string[] {
@@ -100,6 +129,15 @@ function selectionReasons(value: string | null): string[] {
     return reasons.length > 0 ? reasons : ['execution-link:persisted'];
   } catch {
     return ['execution-link:persisted'];
+  }
+}
+
+function parsedJson<T>(value: string | null): T | undefined {
+  if (!value) return undefined;
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return undefined;
   }
 }
 
@@ -125,10 +163,14 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     sourceRevision: row.source_revision ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
     resultText: row.result_text ?? undefined,
+    observedUsage: parsedJson<UsageSummary>(row.usage_json),
+    observedRoutes: parsedJson<RouteUsageSummary[]>(row.observed_routes_json),
     selectionReasons: selectionReasons(row.selection_reasons_json),
     statusCache: row.status_cache as ExecutionStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    startedAt: row.started_at ?? row.created_at,
+    endedAt: row.ended_at ?? undefined,
   };
 }
 
@@ -227,24 +269,41 @@ export class ExecutionLinkRepository {
     return record;
   }
 
-  attachOpenHands(executionId: string, conversationId: string): ExecutionLinkRecord {
+  attachOpenHands(
+    executionId: string,
+    conversationId: string,
+    startedAt?: number,
+  ): ExecutionLinkRecord {
     const now = Date.now();
     this.#db
       .prepare(
         `UPDATE v3_execution_links
-           SET openhands_conversation_id=?, status_cache='RUNNING', updated_at=?
+           SET openhands_conversation_id=?, status_cache='RUNNING',
+               started_at=COALESCE(?,started_at,created_at), updated_at=?
          WHERE execution_id=?`,
       )
-      .run(conversationId, now, executionId);
+      .run(conversationId, startedAt ?? null, now, executionId);
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;
   }
 
-  updateStatus(executionId: string, status: ExecutionStatus): ExecutionLinkRecord {
+  updateStatus(
+    executionId: string,
+    status: ExecutionStatus,
+    observedAt?: number,
+  ): ExecutionLinkRecord {
+    const now = Date.now();
+    const endedAt = TERMINAL_STATUSES.has(status) ? (observedAt ?? now) : null;
     this.#db
-      .prepare('UPDATE v3_execution_links SET status_cache=?,updated_at=? WHERE execution_id=?')
-      .run(status, Date.now(), executionId);
+      .prepare(
+        `UPDATE v3_execution_links
+            SET status_cache=?,
+                ended_at=CASE WHEN ? IS NOT NULL AND ended_at IS NULL THEN ? ELSE ended_at END,
+                updated_at=?
+          WHERE execution_id=?`,
+      )
+      .run(status, endedAt, endedAt, now, executionId);
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;
@@ -264,12 +323,40 @@ export class ExecutionLinkRepository {
   }
 
   completeInternal(executionId: string, resultText: string): ExecutionLinkRecord {
+    const now = Date.now();
     this.#db
       .prepare(
         `UPDATE v3_execution_links
-           SET result_text=?,status_cache='SUCCEEDED',updated_at=? WHERE execution_id=?`,
+           SET result_text=?,status_cache='SUCCEEDED',
+               started_at=COALESCE(started_at,created_at),
+               ended_at=COALESCE(ended_at,?),updated_at=?
+         WHERE execution_id=?`,
       )
-      .run(resultText, Date.now(), executionId);
+      .run(resultText, now, now, executionId);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
+  attachObservation(
+    executionId: string,
+    usage: UsageSummary | null | undefined,
+    routes: RouteUsageSummary[] | null | undefined,
+  ): ExecutionLinkRecord {
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET usage_json=COALESCE(?,usage_json),
+                observed_routes_json=COALESCE(?,observed_routes_json),
+                updated_at=?
+          WHERE execution_id=?`,
+      )
+      .run(
+        usage ? JSON.stringify(usage) : null,
+        routes ? JSON.stringify(routes) : null,
+        Date.now(),
+        executionId,
+      );
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;
@@ -298,17 +385,20 @@ export class ExecutionLinkRepository {
     return rows.map(rowToRecord);
   }
 
-  list(input: { projectKey?: string; limit?: number } = {}): ExecutionLinkRecord[] {
-    const limit = Math.min(500, Math.max(1, input.limit ?? 50));
+  list(
+    input: { projectKey?: string; limit?: number; offset?: number } = {},
+  ): ExecutionLinkRecord[] {
+    const limit = Math.min(5000, Math.max(1, input.limit ?? 100));
+    const offset = Math.max(0, input.offset ?? 0);
     const rows = input.projectKey
       ? (this.#db
           .prepare(
-            'SELECT * FROM v3_execution_links WHERE project_key=? ORDER BY created_at DESC LIMIT ?',
+            'SELECT * FROM v3_execution_links WHERE project_key=? ORDER BY created_at DESC LIMIT ? OFFSET ?',
           )
-          .all(input.projectKey, limit) as unknown as ExecutionLinkRow[])
+          .all(input.projectKey, limit, offset) as unknown as ExecutionLinkRow[])
       : (this.#db
-          .prepare('SELECT * FROM v3_execution_links ORDER BY created_at DESC LIMIT ?')
-          .all(limit) as unknown as ExecutionLinkRow[]);
+          .prepare('SELECT * FROM v3_execution_links ORDER BY created_at DESC LIMIT ? OFFSET ?')
+          .all(limit, offset) as unknown as ExecutionLinkRow[]);
     return rows.map(rowToRecord);
   }
 }
