@@ -250,6 +250,19 @@ export class ExecutionLinkRepository {
     return record;
   }
 
+  attachResultText(executionId: string, resultText: string): ExecutionLinkRecord {
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+           SET result_text=?,updated_at=?
+         WHERE execution_id=? AND result_text IS NULL`,
+      )
+      .run(resultText, Date.now(), executionId);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
   completeInternal(executionId: string, resultText: string): ExecutionLinkRecord {
     this.#db
       .prepare(

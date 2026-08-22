@@ -224,13 +224,17 @@ unnecessary scope expansion
 
 ### Output
 
+The first non-empty line is a deterministic control-plane contract:
+
 ```text
 PASS
 or
-FAIL + concrete findings + required fixes
+FAIL
 ```
 
-Hermes, not AI Office, decides whether findings warrant `IMPLEMENT_FIX`, user escalation, or finalization.
+A `FAIL` result then lists concrete findings and required fixes below the verdict line. Historical explicit verdicts such as `APPROVED:` and `BLOCKED:` remain readable for existing execution evidence, but new reviews must emit exact `PASS` or `FAIL` on the first non-empty line.
+
+AI Office persists the first observed terminal review result as durable execution evidence. Later host snapshots and caller-supplied `previousResult` text cannot rewrite that verdict. The control plane allows `FINALIZE` only after an approved review, allows `IMPLEMENT_FIX` only after a blocking review, and fails closed when the review verdict is missing or ambiguous. Hermes still decides whether a blocking finding should be fixed, escalated to the user, or abandoned; it cannot bypass the review gate by selecting an invalid next phase.
 
 ## 8. IMPLEMENT_FIX
 
@@ -238,13 +242,15 @@ A fix execution receives only the verified review findings plus the original imp
 
 Default behavior:
 
+- is admitted only from a completed review with a deterministic blocking verdict;
+- receives the control plane's durable review evidence rather than trusting caller-supplied review text;
 - may continue the implementation conversation when context reuse is clearly beneficial;
 - must remain in the same isolated branch/workspace unless a new branch is intentionally created;
 - after changes, always return to a **fresh** VERIFY_REVIEW execution.
 
 ## 9. FINALIZE
 
-Usually no external agent is needed.
+Usually no external agent is needed. The deterministic finalizer first verifies that the causally linked `VERIFY_REVIEW` execution completed successfully and carries an approved verdict. Blocking or ambiguous review evidence is rejected before finalization.
 
 Hermes should summarize:
 
