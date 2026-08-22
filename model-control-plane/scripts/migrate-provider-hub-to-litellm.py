@@ -29,6 +29,13 @@ CREDENTIAL_REF_OVERRIDES = {
     "wechat-miniapp-glm": "WECHAT_MINIAPP_FREE_API_KEY",
 }
 
+# Historical Provider Hub rows are retained as migration evidence and are no longer
+# edited in place. Correct known OpenAI-compatible API roots at the migration boundary
+# so a rerun cannot reintroduce an obsolete endpoint into LiteLLM Credential Store.
+BASE_URL_OVERRIDES = {
+    "worldclaw": "https://worldclawpro.ai/v1",
+}
+
 # Public model groups are the stable LiteLLM API surface. Physical model names may
 # differ by provider while still offering the same capability.
 PUBLIC_MODEL_ALIASES = {
@@ -43,6 +50,17 @@ QUALIFIED_ORDER = {
     ("forapi-4sapi-org-gpt-5-6", "gpt-5.6-sol"): 2,
     ("teamorouter-gpt-5-6", "deepseek-v4-flash-free"): 1,
     ("opencode-go", "deepseek-v4-flash"): 2,
+    ("teamorouter-gpt-5-6", "deepseek-v4-flash"): 40,
+}
+
+# Commercial semantics may differ per physical model even when deployments share one
+# provider credential. Teamorouter exposes a free model code and a paid model code for
+# the same DeepSeek V4 Flash capability, so model-level economics must override the
+# legacy connection-level OTHER tag. This produces the intended FREE -> SUBSCRIPTION
+# -> METERED order without duplicating credentials or inventing another router.
+QUALIFIED_COMMERCIAL_TYPE = {
+    ("teamorouter-gpt-5-6", "deepseek-v4-flash-free"): "FREE",
+    ("teamorouter-gpt-5-6", "deepseek-v4-flash"): "METERED",
 }
 
 ECONOMIC_ORDER = {
@@ -180,6 +198,16 @@ def is_qualified(connection: LegacyConnection, model: str) -> bool:
     return (connection.provider_key, model) in QUALIFIED_ORDER
 
 
+def commercial_type_for(connection: LegacyConnection, model: str) -> str | None:
+    return QUALIFIED_COMMERCIAL_TYPE.get(
+        (connection.provider_key, model), connection.commercial_type
+    )
+
+
+def base_url_for(connection: LegacyConnection) -> str | None:
+    return BASE_URL_OVERRIDES.get(connection.provider_key, connection.base_url)
+
+
 def should_be_active(connection: LegacyConnection, model: str) -> bool:
     if is_qualified(connection, model):
         return True
@@ -234,11 +262,12 @@ def model_payload(connection: LegacyConnection, model: str) -> dict[str, Any]:
     public_model = public_model_name(model)
     physical_model = physical_model_name(connection, model)
     order = order_for(connection, model)
+    commercial_type = commercial_type_for(connection, model)
     tags = [
         "ai-office",
         f"provider:{connection.provider_key}",
         f"protocol:{connection.protocol}",
-        f"commercial:{(connection.commercial_type or 'UNKNOWN').lower()}",
+        f"commercial:{(commercial_type or 'UNKNOWN').lower()}",
         f"origin:{(connection.supply_origin or 'UNKNOWN').lower()}",
     ]
     params: dict[str, Any] = {
@@ -261,7 +290,7 @@ def model_payload(connection: LegacyConnection, model: str) -> dict[str, Any]:
         "supplier_slug": connection.supplier_slug,
         "supplier_name": connection.supplier_name,
         "supply_origin": connection.supply_origin,
-        "commercial_type": connection.commercial_type,
+        "commercial_type": commercial_type,
         "routing_policy": connection.routing_policy,
         "legacy_availability": connection.availability,
         "legacy_admin_state": connection.admin_state,
@@ -287,8 +316,9 @@ def credential_payload(connection: LegacyConnection) -> dict[str, Any]:
     if not secret:
         raise RuntimeError(f"{connection.provider_key}: credential env {ref} is not available")
     values: dict[str, Any] = {"api_key": secret}
-    if connection.base_url:
-        values["api_base"] = connection.base_url
+    api_base = base_url_for(connection)
+    if api_base:
+        values["api_base"] = api_base
     return {
         "credential_name": connection.credential_name,
         "credential_info": {

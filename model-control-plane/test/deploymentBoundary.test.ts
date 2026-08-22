@@ -83,6 +83,12 @@ test('Provider Hub migration preserves qualified fallback and economics order in
   assert.match(migration, /\("forapi-4sapi-org-gpt-5-6", "gpt-5\.6-sol"\): 2/);
   assert.match(migration, /\("teamorouter-gpt-5-6", "deepseek-v4-flash-free"\): 1/);
   assert.match(migration, /\("opencode-go", "deepseek-v4-flash"\): 2/);
+  assert.match(migration, /\("teamorouter-gpt-5-6", "deepseek-v4-flash"\): 40/);
+  assert.match(migration, /\("teamorouter-gpt-5-6", "deepseek-v4-flash-free"\): "FREE"/);
+  assert.match(migration, /\("teamorouter-gpt-5-6", "deepseek-v4-flash"\): "METERED"/);
+  assert.match(migration, /"worldclaw": "https:\/\/worldclawpro\.ai\/v1"/);
+  assert.match(migration, /commercial_type_for\(connection, model\)/);
+  assert.match(migration, /base_url_for\(connection\)/);
   assert.match(migration, /"FREE": 20/);
   assert.match(migration, /"SPONSORED": 20/);
   assert.match(migration, /"SUBSCRIPTION": 30/);
