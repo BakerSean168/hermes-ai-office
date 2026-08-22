@@ -32,6 +32,7 @@ test('typed app factory exposes V2 only and retires public V1 routes', async () 
       status: 'ok',
       service: 'hermes-model-control-plane',
       apiVersion: 2,
+      v3Enabled: false,
       db: ':memory:',
     });
 

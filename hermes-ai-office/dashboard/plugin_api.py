@@ -91,6 +91,7 @@ def _economics_choice(
 
 
 class RuntimePolicySettings(BaseModel):
+    execution_mode: str = "v2"
     mode: str = "prefer"
     opencode_position: str = "coding-executor"
     codex_position: str = "codex-executor"
@@ -1181,10 +1182,14 @@ def _runtime_policy_settings() -> Dict[str, str]:
     runtime = runtime if isinstance(runtime, Mapping) else {}
     positions = runtime.get("positions")
     positions = positions if isinstance(positions, Mapping) else {}
+    execution_mode = str(settings.get("execution_mode") or "v2").strip().lower()
+    if execution_mode not in {"v2", "v3", "disabled"}:
+        execution_mode = "v2"
     mode = str(runtime.get("mode") or "prefer").strip().lower()
     if mode not in {"observe", "prefer", "enforce"}:
         mode = "prefer"
     return {
+        "executionMode": execution_mode,
         "mode": mode,
         "opencodePosition": str(positions.get("opencode") or "coding-executor"),
         "codexPosition": str(positions.get("codex") or "codex-executor"),
@@ -1194,6 +1199,9 @@ def _runtime_policy_settings() -> Dict[str, str]:
 def _save_runtime_policy(value: RuntimePolicySettings) -> Dict[str, str]:
     if config_mod is None:
         raise RuntimeError("Hermes config service unavailable")
+    execution_mode = value.execution_mode.strip().lower()
+    if execution_mode not in {"v2", "v3", "disabled"}:
+        raise ValueError("execution mode must be v2, v3, or disabled")
     mode = value.mode.strip().lower()
     if mode not in {"observe", "prefer", "enforce"}:
         raise ValueError("runtime policy mode must be observe, prefer, or enforce")
@@ -1202,6 +1210,7 @@ def _save_runtime_policy(value: RuntimePolicySettings) -> Dict[str, str]:
             "entries": {
                 _PLUGIN_ID: {
                     "settings": {
+                        "execution_mode": execution_mode,
                         "runtime_policy": {
                             "mode": mode,
                             "positions": {
@@ -1264,6 +1273,105 @@ async def overview() -> Dict[str, Any]:
         }
     )
     return values
+
+
+_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+
+
+def _v3_usage_totals(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    totals: Dict[str, Any] = {
+        "input": 0,
+        "output": 0,
+        "cachedInput": 0,
+        "cacheWrite": 0,
+        "reasoningOutput": 0,
+        "costUsd": 0.0,
+        "calls": 0,
+        "executionsWithUsage": 0,
+        "traces": 0,
+    }
+    for item in items:
+        usage = item.get("usage") if isinstance(item.get("usage"), Mapping) else None
+        if usage:
+            totals["executionsWithUsage"] += 1
+            for key in ("input", "output", "cachedInput", "cacheWrite", "reasoningOutput", "calls"):
+                try:
+                    totals[key] += int(usage.get(key) or 0)
+                except (TypeError, ValueError):
+                    pass
+            try:
+                totals["costUsd"] += float(usage.get("costUsd") or 0.0)
+            except (TypeError, ValueError):
+                pass
+        refs = item.get("refs") if isinstance(item.get("refs"), Mapping) else {}
+        if refs.get("langfuseTraceId"):
+            totals["traces"] += 1
+    totals["costUsd"] = round(float(totals["costUsd"]), 6)
+    return totals
+
+
+async def _v3_execution_detail(item: Mapping[str, Any]) -> Dict[str, Any]:
+    execution_id = str(item.get("executionId") or "").strip()
+    if not execution_id:
+        return dict(item)
+    try:
+        return await asyncio.to_thread(
+            _fetch_json, f"/api/v3/development/executions/{urllib.parse.quote(execution_id, safe='')}", timeout=2.0
+        )
+    except Exception:
+        return dict(item)
+
+
+@router.get("/development")
+async def development(limit: int = 80, detail_limit: int = 24) -> Dict[str, Any]:
+    safe_limit = min(200, max(10, int(limit)))
+    safe_detail_limit = min(50, max(0, int(detail_limit)))
+    runtime_value, policy_value, readiness_value, execution_value, provider_value = await asyncio.gather(
+        _partial("runtime", "/api/v3/development/runtime-summary"),
+        _partial("policy", "/api/v3/development/policy"),
+        _partial("readiness", "/api/v3/development/readiness"),
+        _partial("executions", f"/api/v3/development/executions?limit={safe_limit}"),
+        _partial("providers", "/api/v2/projections/provider-hub-summary"),
+    )
+    values = dict((runtime_value, policy_value, readiness_value, execution_value, provider_value))
+    raw_items = values.get("executions", {}).get("items", []) if isinstance(values.get("executions"), Mapping) else []
+    items = [dict(item) for item in raw_items if isinstance(item, Mapping)]
+    active = [item for item in items if str(item.get("status") or "UNKNOWN").upper() not in _V3_TERMINAL_STATUSES]
+    terminal = [item for item in items if str(item.get("status") or "UNKNOWN").upper() in _V3_TERMINAL_STATUSES]
+
+    detail_targets = active + terminal[:safe_detail_limit]
+    detailed = await asyncio.gather(*(_v3_execution_detail(item) for item in detail_targets)) if detail_targets else []
+    detail_by_id = {str(item.get("executionId") or ""): item for item in detailed if isinstance(item, Mapping)}
+    active = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in active]
+    history = [dict(detail_by_id.get(str(item.get("executionId") or ""), item)) for item in terminal]
+    observed = active + history[:safe_detail_limit]
+    usage = _v3_usage_totals(observed)
+    statuses: Dict[str, int] = {}
+    for item in items:
+        status = str(item.get("status") or "UNKNOWN").upper()
+        statuses[status] = statuses.get(status, 0) + 1
+    trace_base = max(1, len(observed))
+    summary = {
+        "total": len(items),
+        "active": len(active),
+        "history": len(history),
+        "waiting": statuses.get("PAUSED", 0) + statuses.get("WAITING_FOR_CONFIRMATION", 0),
+        "failed": statuses.get("FAILED", 0) + statuses.get("STUCK", 0),
+        "statuses": statuses,
+        "usage": usage,
+        "traceCoverage": usage["traces"] / trace_base if observed else 0.0,
+    }
+    return {
+        "projectionVersion": 1,
+        "generatedAt": int(time.time() * 1000),
+        "runtime": values.get("runtime", {}),
+        "policy": values.get("policy", {}),
+        "readiness": values.get("readiness", {}),
+        "providers": values.get("providers", {}),
+        "active": active,
+        "history": history,
+        "summary": summary,
+    }
 
 
 @router.get("/workforce")

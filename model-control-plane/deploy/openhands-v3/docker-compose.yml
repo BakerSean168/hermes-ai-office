@@ -1,0 +1,41 @@
+name: hermes-openhands-v3
+
+services:
+  agent-server:
+    image: hermes-openhands-agent-server:1.39.1-source-arm64
+    container_name: hermes-openhands-v3
+    platform: linux/arm64
+    network_mode: host
+    command:
+      - --host
+      - 127.0.0.1
+      - --port
+      - '18000'
+    env_file:
+      - ${HERMES_OPENHANDS_ENV_FILE:-/srv/hermes-personal/secrets/openhands-v3.env}
+    environment:
+      OPENHANDS_SUPPRESS_BANNER: '1'
+      LOG_JSON: 'true'
+      OH_ENABLE_VNC: '0'
+      OH_ENABLE_VSCODE: '0'
+      OH_PRELOAD_TOOLS: '1'
+      OPENCODE_CONFIG: /etc/hermes-ai-office-v3/opencode.json
+    volumes:
+      - /opt/data/hermes-ai-office-v3/workspaces:/workspace
+      - /opt/data/hermes-ai-office-v3/openhands:/openhands-state
+      - ./opencode-v3.json:/etc/hermes-ai-office-v3/opencode.json:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:18000/docs', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 12
+      start_period: 30s

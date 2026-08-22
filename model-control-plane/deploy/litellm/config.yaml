@@ -1,8 +1,97 @@
-model_list: []
+model_list:
+  # V3 logical capability classes. Physical provider choice stays below this boundary.
+  # Premium classes use LiteLLM's native deployment `order`: the lowest healthy
+  # order is selected first; a retryable failure/cooldown advances to the next
+  # order without changing the logical model visible to OpenHands/Hermes.
+  - model_name: planning-premium
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_base: https://api.teamorouter.com/v1
+      api_key: os.environ/TEAMOROUTER_GPT_5_6_API_KEY
+      use_chat_completions_api: true
+      order: 1
+      timeout: 120
+      max_retries: 1
+    model_info:
+      metadata:
+        owner: hermes-ai-office-v3
+        source: teamorouter
+        phase_class: planning-premium
+        route_role: primary
+        eligibility: full-agent-tool-loop-probed
+
+  - model_name: planning-premium
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_base: https://4sapi.org/v1
+      api_key: os.environ/FORAPI_4SAPI_ORG_GPT_5_6_API_KEY
+      use_chat_completions_api: true
+      order: 2
+      timeout: 120
+      max_retries: 1
+    model_info:
+      metadata:
+        owner: hermes-ai-office-v3
+        source: forapi-4sapi-org
+        phase_class: planning-premium
+        route_role: fallback
+        eligibility: direct-chat-probed
+
+  - model_name: review-premium
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_base: https://api.teamorouter.com/v1
+      api_key: os.environ/TEAMOROUTER_GPT_5_6_API_KEY
+      use_chat_completions_api: true
+      order: 1
+      timeout: 120
+      max_retries: 1
+    model_info:
+      metadata:
+        owner: hermes-ai-office-v3
+        source: teamorouter
+        phase_class: review-premium
+        route_role: primary
+
+  - model_name: review-premium
+    litellm_params:
+      model: openai/gpt-5.6-sol
+      api_base: https://4sapi.org/v1
+      api_key: os.environ/FORAPI_4SAPI_ORG_GPT_5_6_API_KEY
+      use_chat_completions_api: true
+      order: 2
+      timeout: 120
+      max_retries: 1
+    model_info:
+      metadata:
+        owner: hermes-ai-office-v3
+        source: forapi-4sapi-org
+        phase_class: review-premium
+        route_role: fallback
+        eligibility: direct-chat-probed
+
+  - model_name: implementation-efficient
+    litellm_params:
+      model: openai/deepseek-v4-flash-free
+      api_base: https://api.teamorouter.com/v1
+      api_key: os.environ/TEAMOROUTER_GPT_5_6_API_KEY
+      order: 1
+      timeout: 120
+      max_retries: 1
+    model_info:
+      metadata:
+        owner: hermes-ai-office-v3
+        source: teamorouter
+        phase_class: implementation-efficient
+        route_role: primary
+        eligibility: full-agent-tool-loop-probed
 
 router_settings:
+  # `simple-shuffle` applies only within the currently eligible order level.
+  # With one deployment at each premium order, this is deterministic primary -> fallback.
   routing_strategy: simple-shuffle
   num_retries: 1
+  max_fallbacks: 2
   allowed_fails: 1
   cooldown_time: 30
 

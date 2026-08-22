@@ -24,6 +24,7 @@ class FakeConfig:
                 "entries": {
                     "hermes-ai-office": {
                         "settings": {
+                            "execution_mode": "v2",
                             "runtime_policy": {
                                 "mode": "prefer",
                                 "positions": {
@@ -45,8 +46,11 @@ class FakeConfig:
         if "custom_providers" in partial:
             self.value["custom_providers"] = partial["custom_providers"]
         if "plugins" in partial:
-            runtime = partial["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"]
-            self.value["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"] = runtime
+            settings = partial["plugins"]["entries"]["hermes-ai-office"]["settings"]
+            if "execution_mode" in settings:
+                self.value["plugins"]["entries"]["hermes-ai-office"]["settings"]["execution_mode"] = settings["execution_mode"]
+            if "runtime_policy" in settings:
+                self.value["plugins"]["entries"]["hermes-ai-office"]["settings"]["runtime_policy"] = settings["runtime_policy"]
 
 
 class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
@@ -89,6 +93,79 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["workforce"]["ok"])
         self.assertTrue(result["incidents"]["unavailable"])
         self.assertIn("incident projection unavailable", result["incidents"]["error"])
+
+    async def test_development_projection_composes_v3_runtime_history_usage_and_provider_health(self) -> None:
+        payloads = {
+            "/api/v3/development/runtime-summary": {
+                "sourceHealth": {"openhands": "OK", "litellm": "OK", "langfuse": "UNCONFIGURED"},
+                "logicalModels": ["implementation-efficient", "review-premium"],
+                "enabledBackends": ["opencode-acp", "openhands-builtin"],
+                "concurrency": {"max_active_writers": 4, "max_active_writers_per_project": 2},
+            },
+            "/api/v3/development/policy": {"version": 1, "phases": {"IMPLEMENT": {"model_class": "implementation-efficient"}}},
+            "/api/v3/development/readiness": {
+                "status": "NOT_READY",
+                "ready": False,
+                "gates": {
+                    "representativeWorkflows": {"pass": False, "current": 1, "required": 10},
+                    "providerFallback": {"pass": True},
+                    "gatewayReconnect": {"pass": True},
+                    "rollback": {"pass": True},
+                    "fixLoop": {"pass": False},
+                    "observability": {"pass": True, "verified": 3, "required": 3},
+                },
+            },
+            "/api/v3/development/executions?limit=80": {
+                "items": [
+                    {"executionId": "exec-run", "projectKey": "body", "phase": "IMPLEMENT", "status": "RUNNING"},
+                    {"executionId": "exec-done", "projectKey": "body", "phase": "VERIFY_REVIEW", "status": "SUCCEEDED"},
+                ]
+            },
+            "/api/v2/projections/provider-hub-summary": {"summary": {"connections": 3, "available": 2, "congested": 1}},
+            "/api/v3/development/executions/exec-run": {
+                "executionId": "exec-run", "projectKey": "body", "phase": "IMPLEMENT", "status": "RUNNING",
+                "usage": {"input": 100, "output": 10, "cachedInput": 40, "costUsd": 0.1, "calls": 2},
+                "refs": {"openhandsConversationId": "conv-run"},
+            },
+            "/api/v3/development/executions/exec-done": {
+                "executionId": "exec-done", "projectKey": "body", "phase": "VERIFY_REVIEW", "status": "SUCCEEDED",
+                "usage": {"input": 200, "output": 20, "costUsd": 0.2, "calls": 3},
+                "refs": {"langfuseTraceId": "trace-done"},
+            },
+        }
+
+        def fetch(path: str, **_kwargs):
+            return payloads[path]
+
+        with mock.patch.object(api, "_fetch_json", side_effect=fetch):
+            result = await api.development()
+        self.assertEqual(result["projectionVersion"], 1)
+        self.assertEqual([item["executionId"] for item in result["active"]], ["exec-run"])
+        self.assertEqual([item["executionId"] for item in result["history"]], ["exec-done"])
+        self.assertEqual(result["summary"]["usage"]["input"], 300)
+        self.assertEqual(result["summary"]["usage"]["output"], 30)
+        self.assertEqual(result["summary"]["usage"]["calls"], 5)
+        self.assertAlmostEqual(result["summary"]["usage"]["costUsd"], 0.3)
+        self.assertEqual(result["summary"]["usage"]["traces"], 1)
+        self.assertEqual(result["runtime"]["logicalModels"][0], "implementation-efficient")
+        self.assertEqual(result["readiness"]["status"], "NOT_READY")
+        self.assertFalse(result["readiness"]["gates"]["representativeWorkflows"]["pass"])
+        self.assertEqual(result["providers"]["summary"]["available"], 2)
+
+    async def test_development_projection_degrades_partially_without_hiding_execution_history(self) -> None:
+        def fetch(path: str, **_kwargs):
+            if path == "/api/v3/development/runtime-summary":
+                raise RuntimeError("runtime unavailable")
+            if path == "/api/v3/development/executions?limit=80":
+                return {"items": [{"executionId": "exec-old", "projectKey": "p", "phase": "FINALIZE", "status": "SUCCEEDED"}]}
+            if path == "/api/v3/development/executions/exec-old":
+                return {"executionId": "exec-old", "projectKey": "p", "phase": "FINALIZE", "status": "SUCCEEDED"}
+            return {"ok": True}
+
+        with mock.patch.object(api, "_fetch_json", side_effect=fetch):
+            result = await api.development()
+        self.assertTrue(result["runtime"]["unavailable"])
+        self.assertEqual(result["history"][0]["executionId"], "exec-old")
 
     async def test_provider_hub_control_forwards_enabled_and_reason(self) -> None:
         with mock.patch.object(api, "_post_json", return_value={"ok": True}) as post:
@@ -352,15 +429,18 @@ class DashboardApiTest(unittest.IsolatedAsyncioTestCase):
         fake = FakeConfig()
         with mock.patch.object(api, "config_mod", fake):
             before = await api.get_runtime_policy()
+            self.assertEqual(before["executionMode"], "v2")
             self.assertEqual(before["mode"], "prefer")
             result = await api.set_runtime_policy(
                 api.RuntimePolicySettings(
+                    execution_mode="v3",
                     mode="enforce",
                     opencode_position="review-executor",
                     codex_position="codex-reviewer",
                 )
             )
             self.assertTrue(result["ok"])
+            self.assertEqual(result["runtimePolicy"]["executionMode"], "v3")
             self.assertEqual(result["runtimePolicy"]["mode"], "enforce")
             self.assertEqual(result["runtimePolicy"]["opencodePosition"], "review-executor")
             self.assertEqual(result["runtimePolicy"]["codexPosition"], "codex-reviewer")
@@ -700,6 +780,34 @@ class DashboardBundleContractTest(unittest.TestCase):
         self.assertIn('190px max-content;', css)
         self.assertIn('.hao-modal-backdrop {', css)
         self.assertIn('.hao-model-picker {', css)
+
+    def test_development_tab_exposes_v3_execution_policy_health_and_usage(self) -> None:
+        source = (DASHBOARD / "dist" / "index.js").read_text(encoding="utf-8")
+        css = (DASHBOARD / "dist" / "style.css").read_text(encoding="utf-8")
+        self.assertIn('"overview", "development", "organization"', source)
+        self.assertIn('function Development(props)', source)
+        self.assertIn('api("/development")', source)
+        self.assertIn('policy.executionV3', source)
+        self.assertIn('execution_mode: executionMode', source)
+        self.assertIn('props.t("development.active")', source)
+        self.assertIn('props.t("development.history")', source)
+        self.assertIn('props.t("development.readiness")', source)
+        self.assertIn('readinessGates.providerFallback', source)
+        self.assertIn('readinessGates.gatewayReconnect', source)
+        self.assertIn('props.t("development.routing")', source)
+        self.assertIn('runtime.logicalModels', source)
+        self.assertIn('policy.phases', source)
+        self.assertIn('item.usage', source)
+        self.assertIn('upstream.route', source)
+        self.assertIn('development.observedRoute', source)
+        self.assertIn('["openhands", "litellm", "observability", "langfuse"]', source)
+        self.assertIn('refs.openhandsConversationId', source)
+        self.assertIn('refs.langfuseTraceId', source)
+        self.assertIn('className: "hao-dev-policy-grid"', source)
+        self.assertIn('.hao-dev-two-column {', css)
+        self.assertIn('.hao-dev-policy-grid {', css)
+        self.assertIn('.hao-dev-health-row {', css)
+        self.assertIn('"tabs.development": "开发控制"', source)
 
     def test_active_tab_keeps_an_explicit_readable_label(self) -> None:
         css = (DASHBOARD / "dist" / "style.css").read_text()

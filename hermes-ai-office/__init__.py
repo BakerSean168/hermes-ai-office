@@ -28,6 +28,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from typing import Any
 
 _SCHEMA = "hermes.office.observer.v1"
@@ -58,6 +59,23 @@ _CONTROL_PLANE_BASE = "http://127.0.0.1:8320"
 _SUPPLY_ORIGINS = {"OFFICIAL", "COMMERCIAL_RELAY", "COMMUNITY_RELAY", "EVENT_GRANT", "PERSONAL_HOSTED", "INTERNAL_POOL", "UNKNOWN"}
 _COMMERCIAL_TYPES = {"FREE", "SPONSORED", "SUBSCRIPTION", "PREPAID", "METERED", "OTHER"}
 _ROUTING_POLICIES = {"AUTO", "MANUAL_ONLY", "BRAIN_ONLY", "DISABLED"}
+_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
+_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+_V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
+_V3_DEFAULT_AWAIT = {
+    "INVESTIGATE_PLAN": True,
+    "IMPLEMENT": False,
+    "IMPLEMENT_FIX": False,
+    "VERIFY_REVIEW": True,
+    "FINALIZE": True,
+}
+_V3_DEFAULT_WAIT_SECONDS = {
+    "INVESTIGATE_PLAN": 240.0,
+    "IMPLEMENT": 0.0,
+    "IMPLEMENT_FIX": 0.0,
+    "VERIFY_REVIEW": 240.0,
+    "FINALIZE": 30.0,
+}
 
 
 def _shared_economics(args: Mapping[str, Any]) -> dict[str, str]:
@@ -132,6 +150,119 @@ _RESOLVE_EXECUTION_SCHEMA = {
             },
         },
         "required": ["intent"],
+    },
+}
+
+_RUN_PHASE_SCHEMA = {
+    "name": "ai_office_run_phase",
+    "description": (
+        "Run one Hermes AI Office V3 development phase. This is the primary delegation tool for software-development work. "
+        "AI Office owns backend/model selection, OpenHands/OpenCode lifecycle, isolated workspaces, review snapshots, correlation, and usage. "
+        "Use previous_execution_id to hand off between phases instead of manually launching coding harnesses."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "phase": {
+                "type": "string",
+                "enum": ["INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"],
+            },
+            "objective": {"type": "string", "description": "Bounded objective for this phase."},
+            "project_key": {
+                "type": "string",
+                "description": "Stable project key. Optional when it can be derived from previous_execution_id, repository_path, or the active Hermes profile.",
+            },
+            "repository_path": {
+                "type": "string",
+                "description": "Repository path for the initial INVESTIGATE_PLAN or IMPLEMENT phase. Continuation phases derive the implementation workspace from previous_execution_id.",
+            },
+            "base_revision": {"type": "string", "description": "Optional Git revision for an initial repository snapshot."},
+            "previous_execution_id": {
+                "type": "string",
+                "description": "Causal parent execution. Use the plan for IMPLEMENT, the implementation/fix for VERIFY_REVIEW, the failed VERIFY_REVIEW for IMPLEMENT_FIX, and the approved VERIFY_REVIEW for FINALIZE.",
+            },
+            "previous_result": {
+                "type": "string",
+                "description": "Optional bounded previous semantic result. Omit to let the plugin fetch it from previous_execution_id.",
+            },
+            "acceptance_criteria": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Concrete verification criteria for the phase.",
+            },
+            "complexity_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "risk_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
+            "quality_hint": {"type": "string", "enum": ["FAST", "STANDARD", "PREMIUM"]},
+            "budget_hint": {"type": "string", "enum": ["LOW", "NORMAL", "HIGH"]},
+            "parallelism": {"type": "integer", "minimum": 1, "maximum": 16},
+            "preferred_backend": {"type": "string", "description": "Optional explicit backend override; AI Office validates availability."},
+            "preferred_model_class": {"type": "string", "description": "Optional explicit logical model-class override."},
+            "transport_mode": {
+                "type": "string",
+                "enum": ["LITELLM_MANAGED", "NATIVE_SUBSCRIPTION", "INTERNAL"],
+            },
+            "await": {
+                "type": "boolean",
+                "description": "Wait for a terminal/attention state. Defaults true for investigate/review/finalize and false for implementation/fix.",
+            },
+            "wait_timeout_seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 600,
+                "description": "Maximum plugin-side polling time when await=true. Execution continues durably if this expires.",
+            },
+        },
+        "required": ["phase", "objective"],
+    },
+}
+
+_GET_EXECUTION_SCHEMA = {
+    "name": "ai_office_get_execution",
+    "description": "Get authoritative status, result, usage, workspace, and backend metadata for a V3 development execution.",
+    "parameters": {
+        "type": "object",
+        "properties": {"execution_id": {"type": "string"}},
+        "required": ["execution_id"],
+    },
+}
+
+_CONTINUE_EXECUTION_SCHEMA = {
+    "name": "ai_office_continue_execution",
+    "description": (
+        "Continue the same PAUSED V3 execution with a bounded message. Use only for explicit recovery/resume of the same phase; "
+        "normal review corrections should start IMPLEMENT_FIX instead of reusing a reviewer conversation."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "execution_id": {"type": "string"},
+            "message": {"type": "string"},
+            "await": {"type": "boolean", "description": "Optionally wait for terminal/attention state after resuming."},
+            "wait_timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600},
+        },
+        "required": ["execution_id", "message"],
+    },
+}
+
+_CANCEL_EXECUTION_SCHEMA = {
+    "name": "ai_office_cancel_execution",
+    "description": "Cancel a running V3 development execution. Product status remains CANCELLED even when OpenHands uses pause as its transport primitive.",
+    "parameters": {
+        "type": "object",
+        "properties": {"execution_id": {"type": "string"}},
+        "required": ["execution_id"],
+    },
+}
+
+_LIST_ACTIVE_SCHEMA = {
+    "name": "ai_office_list_active",
+    "description": "List non-terminal V3 development executions, optionally scoped to one project key.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_key": {"type": "string"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
     },
 }
 
@@ -1584,6 +1715,10 @@ def _prepare_execution_result(result: dict[str, Any], project_path: str = "") ->
 
 def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
+        if _execution_mode() == "DISABLED":
+            raise RuntimeError(
+                f"AI Office execution delegation is disabled for profile {_active_profile_name()}"
+            )
         intent = str(args.get("intent") or "").strip().upper()
         allowed = {"PLAN", "REVIEW", "IMPLEMENT", "DEBUG", "TEST", "RESEARCH", "QUICK_FIX"}
         if intent not in allowed:
@@ -1632,6 +1767,322 @@ def _resolve_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     except Exception as exc:
         return json.dumps(
             {"ok": False, "error": type(exc).__name__, "message": str(exc)[:300]},
+            ensure_ascii=False,
+        )
+
+
+def _v3_execution_path(execution_id: str, suffix: str = "") -> str:
+    value = str(execution_id or "").strip()
+    if not value:
+        raise ValueError("execution_id is required")
+    quoted = urllib.parse.quote(value, safe="")
+    base = f"/api/v3/development/executions/{quoted}"
+    return base + suffix
+
+
+def _v3_execution_snapshot(execution_id: str) -> dict[str, Any]:
+    return _control_plane_request(_v3_execution_path(execution_id), timeout=4.0)
+
+
+def _v3_text_list(value: Any, *, limit: int = 24, item_limit: int = 1200) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value[:limit]:
+        text = str(item or "").strip()
+        if text:
+            result.append(text[:item_limit])
+    return result
+
+
+def _v3_project_key(
+    args: Mapping[str, Any], previous: Mapping[str, Any] | None = None
+) -> str:
+    explicit = str(args.get("project_key") or "").strip()
+    if explicit:
+        return explicit[:160]
+    if previous:
+        inherited = str(previous.get("projectKey") or "").strip()
+        if inherited:
+            return inherited[:160]
+    repository = str(args.get("repository_path") or "").strip().rstrip("/")
+    if repository:
+        name = Path(repository).name.strip()
+        if name:
+            return name[:160]
+    return _active_profile_name() or "default"
+
+
+def _v3_idempotency_key(
+    phase: str,
+    payload: Mapping[str, Any],
+    kwargs: Mapping[str, Any],
+) -> str:
+    call_id = str(kwargs.get("tool_call_id") or "").strip()
+    seed: dict[str, Any] = {
+        "phase": phase,
+        "profile": _active_profile_name(),
+        "session": _session_id(dict(kwargs)),
+        "turn": str(kwargs.get("turn_id") or kwargs.get("parent_turn_id") or ""),
+        "call": call_id,
+    }
+    if not call_id:
+        # Canonical request hashing gives replay safety even if a Hermes runtime does not
+        # expose a tool_call_id. Long semantic text is hashed, never placed in the key.
+        seed["request"] = payload
+    digest = hashlib.blake2b(
+        json.dumps(seed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        digest_size=16,
+    ).hexdigest()
+    return f"hermes-v3-{phase.lower()}-{digest}"
+
+
+def _v3_wait_for_execution(
+    snapshot: dict[str, Any], *, wait: bool, timeout_seconds: float
+) -> tuple[dict[str, Any], bool]:
+    if not wait:
+        return snapshot, False
+    execution_id = str(snapshot.get("executionId") or "").strip()
+    if not execution_id:
+        raise RuntimeError("V3 execution response did not include executionId")
+    status = str(snapshot.get("status") or "UNKNOWN").upper()
+    if status in _V3_TERMINAL_STATUSES or status in _V3_ATTENTION_STATUSES:
+        return snapshot, False
+    timeout_seconds = max(0.0, min(float(timeout_seconds), 600.0))
+    deadline = time.monotonic() + timeout_seconds
+    if timeout_seconds <= 0:
+        return snapshot, True
+    while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
+        time.sleep(min(2.0, remaining))
+        snapshot = _v3_execution_snapshot(execution_id)
+        status = str(snapshot.get("status") or "UNKNOWN").upper()
+        if status in _V3_TERMINAL_STATUSES or status in _V3_ATTENTION_STATUSES:
+            return snapshot, False
+    return snapshot, True
+
+
+def _run_development_phase_tool(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        execution_mode = _execution_mode()
+        if execution_mode != "V3":
+            raise RuntimeError(
+                f"AI Office V3 phase execution is disabled for profile {_active_profile_name()} "
+                f"(execution_mode={execution_mode.lower()})"
+            )
+        phase = str(args.get("phase") or "").strip().upper()
+        if phase not in _V3_PHASES:
+            raise ValueError("phase must be INVESTIGATE_PLAN, IMPLEMENT, IMPLEMENT_FIX, VERIFY_REVIEW, or FINALIZE")
+        objective = str(args.get("objective") or "").strip()
+        if not objective:
+            raise ValueError("objective is required")
+        objective = objective[:20_000]
+
+        previous_execution_id = str(args.get("previous_execution_id") or "").strip()
+        previous: dict[str, Any] | None = None
+        if previous_execution_id:
+            previous = _v3_execution_snapshot(previous_execution_id)
+
+        project_key = _v3_project_key(args, previous)
+        repository_path = str(args.get("repository_path") or "").strip()
+        if phase in {"INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
+            raise ValueError("repository_path is required for INVESTIGATE_PLAN and IMPLEMENT")
+
+        previous_result = str(args.get("previous_result") or "").strip()
+        if not previous_result and previous:
+            result = previous.get("result") if isinstance(previous.get("result"), dict) else {}
+            previous_result = str(result.get("finalText") or "").strip()
+        previous_result = previous_result[:30_000]
+
+        context: dict[str, Any] = {}
+        if previous_execution_id:
+            context["previousExecutionId"] = previous_execution_id
+        if previous_result:
+            context["previousResult"] = previous_result
+        acceptance = _v3_text_list(args.get("acceptance_criteria"))
+        if acceptance:
+            context["acceptanceCriteria"] = acceptance
+
+        hints: dict[str, Any] = {}
+        for arg_name, wire_name, allowed in (
+            ("complexity_hint", "complexity", {"LOW", "MEDIUM", "HIGH"}),
+            ("risk_hint", "risk", {"LOW", "MEDIUM", "HIGH"}),
+            ("quality_hint", "quality", {"FAST", "STANDARD", "PREMIUM"}),
+            ("budget_hint", "budget", {"LOW", "NORMAL", "HIGH"}),
+        ):
+            raw = str(args.get(arg_name) or "").strip().upper()
+            if raw:
+                if raw not in allowed:
+                    raise ValueError(f"invalid {arg_name}")
+                hints[wire_name] = raw
+        if args.get("parallelism") is not None:
+            parallelism = int(args.get("parallelism"))
+            if parallelism < 1 or parallelism > 16:
+                raise ValueError("parallelism must be between 1 and 16")
+            hints["parallelism"] = parallelism
+
+        override: dict[str, Any] = {}
+        preferred_backend = str(args.get("preferred_backend") or "").strip()
+        preferred_model_class = str(args.get("preferred_model_class") or "").strip()
+        transport_mode = str(args.get("transport_mode") or "").strip().upper()
+        if preferred_backend:
+            override["backend"] = preferred_backend[:160]
+        if preferred_model_class:
+            override["modelClass"] = preferred_model_class[:160]
+        if transport_mode:
+            if transport_mode not in {"LITELLM_MANAGED", "NATIVE_SUBSCRIPTION", "INTERNAL"}:
+                raise ValueError("invalid transport_mode")
+            override["transportMode"] = transport_mode
+
+        base_revision = str(args.get("base_revision") or "").strip()
+        payload: dict[str, Any] = {
+            "phase": phase,
+            "objective": objective,
+            "projectKey": project_key,
+            "repository": {
+                "path": repository_path,
+                **({"baseRevision": base_revision[:240]} if base_revision else {}),
+            },
+            "hermes": {
+                "profile": _active_profile_name(),
+                "sessionId": _session_id(kwargs),
+                "turnId": str(kwargs.get("turn_id") or kwargs.get("parent_turn_id") or ""),
+            },
+            # Keep the POST short and durable. Synchronous semantics, when requested,
+            # are implemented by bounded GET polling below.
+            "await": False,
+        }
+        if context:
+            payload["context"] = context
+        if hints:
+            payload["hints"] = hints
+        if override:
+            payload["override"] = override
+
+        requested_wait = args.get("await")
+        wait = _V3_DEFAULT_AWAIT[phase] if requested_wait is None else bool(requested_wait)
+        raw_wait_timeout = args.get("wait_timeout_seconds")
+        wait_timeout = (
+            _V3_DEFAULT_WAIT_SECONDS[phase]
+            if raw_wait_timeout is None
+            else max(0.0, min(float(raw_wait_timeout), 600.0))
+        )
+        idempotency_key = _v3_idempotency_key(phase, payload, kwargs)
+        snapshot = _control_plane_request(
+            "/api/v3/development/executions",
+            method="POST",
+            payload=payload,
+            idempotency_key=idempotency_key,
+            timeout=8.0,
+        )
+        snapshot, await_timed_out = _v3_wait_for_execution(
+            snapshot,
+            wait=wait,
+            timeout_seconds=wait_timeout,
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "awaitRequested": wait,
+                "awaitTimedOut": await_timed_out,
+                **snapshot,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _get_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        snapshot = _v3_execution_snapshot(execution_id)
+        return json.dumps({"ok": True, **snapshot}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _continue_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        message = str(args.get("message") or "").strip()
+        if not message:
+            raise ValueError("message is required")
+        snapshot = _control_plane_request(
+            _v3_execution_path(execution_id, "/messages"),
+            method="POST",
+            payload={"message": message[:20_000]},
+            timeout=8.0,
+        )
+        wait = bool(args.get("await", False))
+        timeout_seconds = max(
+            0.0,
+            min(float(args.get("wait_timeout_seconds") or 0.0), 600.0),
+        )
+        snapshot, await_timed_out = _v3_wait_for_execution(
+            snapshot,
+            wait=wait,
+            timeout_seconds=timeout_seconds,
+        )
+        return json.dumps(
+            {
+                "ok": True,
+                "awaitRequested": wait,
+                "awaitTimedOut": await_timed_out,
+                **snapshot,
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _cancel_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        execution_id = str(args.get("execution_id") or "").strip()
+        snapshot = _control_plane_request(
+            _v3_execution_path(execution_id, "/cancel"), method="POST", timeout=6.0
+        )
+        return json.dumps({"ok": True, **snapshot}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
+            ensure_ascii=False,
+        )
+
+
+def _list_active_development_executions_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        limit = int(args.get("limit") or 40)
+        limit = max(1, min(limit, 100))
+        project_key = str(args.get("project_key") or "").strip()
+        query = {"limit": str(limit)}
+        if project_key:
+            query["projectKey"] = project_key[:160]
+        result = _control_plane_request(
+            "/api/v3/development/executions?" + urllib.parse.urlencode(query), timeout=4.0
+        )
+        items = [item for item in (result.get("items") or []) if isinstance(item, dict)]
+        active = [
+            item
+            for item in items
+            if str(item.get("status") or "UNKNOWN").upper() not in _V3_TERMINAL_STATUSES
+        ]
+        return json.dumps(
+            {"ok": True, "count": len(active), "items": active}, ensure_ascii=False
+        )
+    except Exception as exc:
+        return json.dumps(
+            {"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]},
             ensure_ascii=False,
         )
 
@@ -1730,6 +2181,13 @@ def _config(key: str, default: Any) -> Any:
 def _policy_mode() -> str:
     mode = str(_config("runtime_policy.mode", "prefer") or "prefer").strip().upper()
     return mode if mode in {"OBSERVE", "PREFER", "ENFORCE"} else "PREFER"
+
+
+def _execution_mode() -> str:
+    # Migration-safe: an existing installation without the new setting keeps the
+    # legacy V2 placement path until that profile is explicitly opted into V3.
+    mode = str(_config("execution_mode", "v2") or "v2").strip().upper()
+    return mode if mode in {"V2", "V3", "DISABLED"} else "V2"
 
 
 def _position_hint(runtime: str) -> str:
@@ -2424,6 +2882,10 @@ def _on_pre_tool_call(
 ) -> dict[str, Any] | None:
     if tool_name != "terminal":
         return None
+    if _execution_mode() != "V2":
+        # V3 owns its own backend/model/workspace selection. Re-running legacy
+        # terminal staffing here would create a second routing authority.
+        return None
     args = dict(args or {})
     command = str(args.get("command") or "")
     managed_runtime = _detect_managed_harness_runtime(command)
@@ -2980,17 +3442,31 @@ def _on_pre_llm_call(user_message: Any = "", **_: Any) -> dict[str, str] | None:
 
     sections: list[str] = []
     if execution_placement:
-        sections.append(
-            "When this task may use an external coding Agent/harness, do not choose the model, provider, or harness from memory. "
-            "Call ai_office_resolve_execution before launching Claude Code, Codex, DSH, OpenCode, or another coding Agent; when working in a repository, pass its current project_path so Agent Harness can materialize project MCP, Skills, and Instructions. "
-            "Use PLAN/REVIEW for high-end planning or review and IMPLEMENT/DEBUG/TEST/QUICK_FIX for implementation work. "
-            "Intent selects the work class only; never infer a fixed mapping such as IMPLEMENT=DSH or REVIEW=CODEX. "
-            "The returned model family determines the preferred harness, while current runtime/provider compatibility determines the selected harness. "
-            "Treat every selection as per-execution and do not store a selected model or harness as a permanent Job Type mapping or memory rule. "
-            "Follow the returned Employee, provider connection, preferred official harness, selected harness, capabilityPlaneStatus, profileAction, commandTemplate, and guidance. Never bypass PROJECT_REQUIRED or BLOCKED capabilityPlaneStatus with a direct Harness launch. "
-            "Interpret officialHarnessAvailable as legacy per-route usability, not as proof that the runtime binary or auth is missing. Use officialHarnessRuntimeAvailable to judge whether the official runtime is installed and officialHarnessUsableForSelectedRoute to judge whether the selected provider route can use it. "
-            "If the official harness is not usable for the selected route, use only the fallback returned by AI Office."
-        )
+        execution_mode = _execution_mode()
+        if execution_mode == "V3":
+            sections.append(
+                "For delegated software-development work, AI Office V3 is the primary execution authority for this profile. "
+                "Call ai_office_run_phase instead of choosing a provider, model, OpenCode/Codex/Claude harness, or launching a coding terminal command yourself. "
+                "Choose only the semantic development phase: INVESTIGATE_PLAN for repository investigation plus planning, IMPLEMENT for implementation in an isolated writable branch, IMPLEMENT_FIX for a focused correction after review, VERIFY_REVIEW for an independent fresh read-only review, and FINALIZE only after an approved review. "
+                "Pass repository_path only for an initial INVESTIGATE_PLAN or IMPLEMENT. For handoff IDs, VERIFY_REVIEW must point to the implementation/fix being reviewed, IMPLEMENT_FIX must point to the failed VERIFY_REVIEW that contains the findings, and FINALIZE must point to the approved VERIFY_REVIEW. AI Office follows the causal chain to resolve the correct implementation workspace and semantic evidence. "
+                "When IMPLEMENT follows INVESTIGATE_PLAN, pass both repository_path and previous_execution_id so the implementation receives the approved plan without trusting conversational memory. "
+                "Implementation phases are asynchronous by default; preserve the returned executionId and use ai_office_get_execution or ai_office_list_active to recover status in later turns. If the same execution is explicitly PAUSED and should resume the same phase, use ai_office_continue_execution; do not use it to replace the normal IMPLEMENT_FIX or fresh VERIFY_REVIEW handoff. "
+                "Do not encode permanent mappings such as IMPLEMENT=OpenCode/DeepSeek or REVIEW=Codex/GPT. Backend, logical model class, transport, workspace isolation, failover, usage accounting, and OpenHands lifecycle are AI Office policy decisions per execution. "
+                "If the user explicitly requests a backend/model class/transport, pass it as an ai_office_run_phase override and let AI Office validate compatibility. "
+                "ai_office_resolve_execution remains a legacy compatibility tool for an explicitly requested direct-harness flow; do not use it for the normal V3 development workflow."
+            )
+        elif execution_mode == "V2":
+            sections.append(
+                "AI Office legacy V2 execution placement is active for this profile. "
+                "Do not call ai_office_run_phase. Call ai_office_resolve_execution for PLAN/REVIEW/IMPLEMENT/DEBUG/TEST/QUICK_FIX as appropriate, then follow the returned launch contract. "
+                "This profile is intentionally on the rollback path; do not persist a V3-only routing rule."
+            )
+        else:
+            sections.append(
+                "AI Office execution delegation is disabled for this profile. "
+                "Do not call ai_office_run_phase or ai_office_resolve_execution for software-development execution. "
+                "Provider Hub/dashboard capabilities may still be queried, but AI Office must not choose or launch a coding worker."
+            )
 
     if not provider_authority:
         return {"context": "\n\n".join(sections)}
@@ -3142,6 +3618,46 @@ def register(ctx: Any) -> None:
         handler=_list_shared_providers_tool,
         description=_LIST_PROVIDERS_SCHEMA["description"],
         emoji="📡",
+    )
+    ctx.register_tool(
+        name="ai_office_run_phase",
+        toolset="ai_office",
+        schema=_RUN_PHASE_SCHEMA,
+        handler=_run_development_phase_tool,
+        description=_RUN_PHASE_SCHEMA["description"],
+        emoji="🚀",
+    )
+    ctx.register_tool(
+        name="ai_office_get_execution",
+        toolset="ai_office",
+        schema=_GET_EXECUTION_SCHEMA,
+        handler=_get_development_execution_tool,
+        description=_GET_EXECUTION_SCHEMA["description"],
+        emoji="🔎",
+    )
+    ctx.register_tool(
+        name="ai_office_continue_execution",
+        toolset="ai_office",
+        schema=_CONTINUE_EXECUTION_SCHEMA,
+        handler=_continue_development_execution_tool,
+        description=_CONTINUE_EXECUTION_SCHEMA["description"],
+        emoji="▶️",
+    )
+    ctx.register_tool(
+        name="ai_office_cancel_execution",
+        toolset="ai_office",
+        schema=_CANCEL_EXECUTION_SCHEMA,
+        handler=_cancel_development_execution_tool,
+        description=_CANCEL_EXECUTION_SCHEMA["description"],
+        emoji="⛔",
+    )
+    ctx.register_tool(
+        name="ai_office_list_active",
+        toolset="ai_office",
+        schema=_LIST_ACTIVE_SCHEMA,
+        handler=_list_active_development_executions_tool,
+        description=_LIST_ACTIVE_SCHEMA["description"],
+        emoji="📋",
     )
     ctx.register_tool(
         name="ai_office_resolve_execution",

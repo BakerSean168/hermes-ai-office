@@ -78,6 +78,65 @@
       "tabs.operations": "Operations",
       "tabs.policy": "Runtime policy",
       "tabs.incidents": "Incidents",
+      "tabs.development": "Development",
+      "development.title": "Development control",
+      "development.readiness": "Cutover readiness",
+      "development.readinessSubtitle": "Qualification gates derived from V3 facts plus explicit verification evidence; probes never count as representative work.",
+      "development.representative": "Representative workflows",
+      "development.fixLoop": "Fix loop",
+      "development.fallback": "Provider fallback",
+      "development.reconnect": "Gateway reconnect",
+      "development.rollback": "Rollback",
+      "development.observabilityGate": "Observability",
+      "development.gatePass": "Verified",
+      "development.gatePending": "Pending",
+      "development.subtitle": "Live V3 execution state, routing policy, provider health, and observed usage without a duplicate orchestration ledger.",
+      "development.active": "Active work",
+      "development.activeSubtitle": "Authoritative execution state reconciled from OpenHands",
+      "development.history": "Recent history",
+      "development.historySubtitle": "Recent terminal executions with usage and trace evidence when available",
+      "development.routing": "V3 routing policy",
+      "development.routingSubtitle": "Phase policy chooses logical model class, backend candidates, transport, and workspace isolation",
+      "development.runtime": "Runtime & providers",
+      "development.runtimeSubtitle": "Execution-plane source health and Provider Hub availability",
+      "development.usage": "Usage & trace summary",
+      "development.usageSubtitle": "Observed usage across active work and recent detailed history",
+      "development.noActive": "No V3 execution is active right now.",
+      "development.noHistory": "No terminal V3 execution has been recorded yet.",
+      "development.project": "Project / objective",
+      "development.phase": "Phase",
+      "development.status": "Status",
+      "development.route": "Route",
+      "development.observedRoute": "Observed",
+      "development.elapsed": "Elapsed",
+      "development.tokens": "Usage",
+      "development.references": "References",
+      "development.backends": "Backends",
+      "development.transports": "Transport",
+      "development.workspace": "Workspace",
+      "development.session": "Session",
+      "development.logicalModels": "Logical models",
+      "development.providers": "Provider Hub",
+      "development.health": "Source health",
+      "development.concurrency": "Writer concurrency",
+      "development.globalWriters": "Global writers",
+      "development.projectWriters": "Per-project writers",
+      "development.activeMetric": "Active executions",
+      "development.waitingMetric": "Waiting / paused",
+      "development.totalMetric": "Recent executions",
+      "development.tokenMetric": "Observed tokens",
+      "development.costMetric": "Observed cost",
+      "development.traceMetric": "Trace coverage",
+      "development.available": "{count} available",
+      "development.congested": "{count} congested",
+      "development.unavailable": "{count} unavailable",
+      "development.connections": "{count} connections",
+      "development.calls": "{count} model calls",
+      "development.cache": "{count} cached input",
+      "development.traceCount": "{count} linked traces",
+      "development.refresh": "Refresh V3",
+      "development.loading": "Loading V3 development state…",
+      "development.loadError": "Development state could not refresh",
       "common.search": "Search",
       "common.all": "All",
       "common.noData": "No data",
@@ -333,12 +392,18 @@
       "operations.noRuntimes": "No active runtimes",
       "policy.title": "OpenCode / Codex staffing policy",
       "policy.subtitle": "Hermes resolves an appointed employee before launching the external runtime",
-      "policy.mode": "Mode",
+      "policy.executionMode": "Execution mode",
+      "policy.executionV3": "V3 — phase delegation through OpenHands",
+      "policy.executionV2": "V2 — legacy direct-harness placement",
+      "policy.executionDisabled": "Disabled — no AI Office execution routing",
+      "policy.mode": "Legacy terminal hook mode",
       "policy.openCodePosition": "OpenCode position slug",
       "policy.codexPosition": "Codex position slug",
       "policy.observe": "Observe — record only",
       "policy.prefer": "Prefer — inject selected employee, fail open",
       "policy.enforce": "Enforce — require an eligible employee",
+      "policy.executionHelp": "V3 and V2 are mutually exclusive routing authorities. Changing mode affects new development work; existing V3 executions remain queryable/cancellable for safe recovery.",
+      "policy.executionHelp": "V3 与 V2 是互斥的路由权威。切换只影响新的开发任务；已有 V3 execution 仍可查询、取消和恢复，便于安全回滚。",
       "policy.help":
         "PREFER preserves an unmatched explicit model. ENFORCE may replace it or block the launch. Raw prompts never enter the policy service.",
       "policy.saved": "Runtime policy saved. New Hermes tool calls use it immediately.",
@@ -374,6 +439,16 @@
       "status.DEFAULTED": "Default staffing",
       "status.DEFAULT_MODEL": "Default model",
       "status.RUNNING": "Running",
+      "status.STARTING": "Starting",
+      "status.PAUSED": "Paused",
+      "status.WAITING_FOR_CONFIRMATION": "Waiting",
+      "status.SUCCEEDED": "Succeeded",
+      "status.FAILED": "Failed",
+      "status.STUCK": "Stuck",
+      "status.CANCELLED": "Cancelled",
+      "status.OK": "OK",
+      "status.UNCONFIGURED": "Not configured",
+      "status.NOT_READY": "Not ready",
       "status.CODING": "Coding",
       "status.REVIEWING": "Reviewing",
       "status.PREFER": "Prefer",
@@ -410,6 +485,73 @@
       "tabs.operations": "运营",
       "tabs.policy": "运行时策略",
       "tabs.incidents": "事件",
+    "tabs.development": "開發控制",
+    "development.title": "開發控制",
+    "development.subtitle": "統一查看 V3 執行狀態、路由策略、Provider 健康度與真實用量，不維護第二套編排狀態。",
+    "development.active": "正在執行",
+    "development.history": "最近歷史",
+    "development.routing": "V3 路由策略",
+    "development.runtime": "執行環境與 Provider",
+    "development.usage": "用量與 Trace",
+      "tabs.development": "开发控制",
+      "development.title": "开发控制",
+      "development.readiness": "切换就绪度",
+      "development.readinessSubtitle": "由 V3 事实与显式验证证据派生的资格门槛；探针数量不会冒充代表性真实任务。",
+      "development.representative": "代表性工作流",
+      "development.fixLoop": "修复闭环",
+      "development.fallback": "Provider Fallback",
+      "development.reconnect": "Gateway 重连",
+      "development.rollback": "回滚",
+      "development.observabilityGate": "可观测性",
+      "development.gatePass": "已验证",
+      "development.gatePending": "待完成",
+      "development.subtitle": "统一查看 V3 执行状态、路由策略、Provider 健康度和真实用量，不再维护第二套编排状态。",
+      "development.active": "正在执行",
+      "development.activeSubtitle": "从 OpenHands 权威状态实时对账后的执行列表",
+      "development.history": "最近历史",
+      "development.historySubtitle": "最近已结束的执行；有数据时展示用量与 Trace 证据",
+      "development.routing": "V3 路由策略",
+      "development.routingSubtitle": "按阶段选择逻辑模型类、Backend 候选、传输方式与工作区隔离策略",
+      "development.runtime": "运行时与 Provider",
+      "development.runtimeSubtitle": "执行平面健康状态与 Provider Hub 可用性",
+      "development.usage": "用量与 Trace",
+      "development.usageSubtitle": "正在执行与最近详细历史中的可观测用量汇总",
+      "development.noActive": "当前没有正在运行的 V3 执行。",
+      "development.noHistory": "还没有已结束的 V3 执行记录。",
+      "development.project": "项目 / 目标",
+      "development.phase": "阶段",
+      "development.status": "状态",
+      "development.route": "路由",
+      "development.observedRoute": "已观测",
+      "development.elapsed": "耗时",
+      "development.tokens": "用量",
+      "development.references": "引用",
+      "development.backends": "Backend",
+      "development.transports": "传输",
+      "development.workspace": "工作区",
+      "development.session": "会话",
+      "development.logicalModels": "逻辑模型",
+      "development.providers": "Provider Hub",
+      "development.health": "源健康度",
+      "development.concurrency": "写入并发",
+      "development.globalWriters": "全局 writer",
+      "development.projectWriters": "单项目 writer",
+      "development.activeMetric": "活跃执行",
+      "development.waitingMetric": "等待 / 暂停",
+      "development.totalMetric": "最近执行",
+      "development.tokenMetric": "已观测 Token",
+      "development.costMetric": "已观测成本",
+      "development.traceMetric": "Trace 覆盖率",
+      "development.available": "{count} 可用",
+      "development.congested": "{count} 拥挤",
+      "development.unavailable": "{count} 不可用",
+      "development.connections": "{count} 条连接",
+      "development.calls": "{count} 次模型调用",
+      "development.cache": "{count} 缓存输入",
+      "development.traceCount": "{count} 条 Trace",
+      "development.refresh": "刷新 V3",
+      "development.loading": "正在加载 V3 开发状态…",
+      "development.loadError": "开发状态刷新失败",
       "common.search": "搜索",
       "common.all": "全部",
       "common.noData": "暂无数据",
@@ -664,7 +806,11 @@
       "operations.noRuntimes": "暂无活跃运行时",
       "policy.title": "OpenCode / Codex 员工调度策略",
       "policy.subtitle": "Hermes 在启动外部运行时前，先解析已任命的员工",
-      "policy.mode": "模式",
+      "policy.executionMode": "执行模式",
+      "policy.executionV3": "V3 — 通过 OpenHands 按阶段委派",
+      "policy.executionV2": "V2 — 旧版直接 Harness 调度",
+      "policy.executionDisabled": "禁用 — AI Office 不参与开发执行",
+      "policy.mode": "旧版 Terminal Hook 模式",
       "policy.openCodePosition": "OpenCode 岗位标识",
       "policy.codexPosition": "Codex 岗位标识",
       "policy.observe": "观察 — 只记录，不改写",
@@ -705,6 +851,16 @@
       "status.DEFAULTED": "默认指派",
       "status.DEFAULT_MODEL": "默认模型",
       "status.RUNNING": "运行中",
+      "status.STARTING": "启动中",
+      "status.PAUSED": "已暂停",
+      "status.WAITING_FOR_CONFIRMATION": "等待确认",
+      "status.SUCCEEDED": "已成功",
+      "status.FAILED": "失败",
+      "status.STUCK": "卡住",
+      "status.CANCELLED": "已取消",
+      "status.OK": "正常",
+      "status.UNCONFIGURED": "未配置",
+      "status.NOT_READY": "尚未就绪",
       "status.CODING": "编码中",
       "status.REVIEWING": "审查中",
       "status.PREFER": "优先",
@@ -829,6 +985,26 @@
     return Math.floor(seconds / 86400) + "d ago";
   }
 
+  function durationLabel(milliseconds, locale) {
+    const ms = Math.max(0, Number(milliseconds || 0));
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return seconds + "s";
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return minutes + "m " + (seconds % 60) + "s";
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return hours + "h " + (minutes % 60) + "m";
+    const days = Math.floor(hours / 24);
+    return days + (locale === "zh" || locale === "zh-hant" ? "天 " : "d ") + (hours % 24) + "h";
+  }
+
+  function executionDuration(item, locale) {
+    const timing = asObject(item && item.timing);
+    if (Number(timing.durationMs || 0) > 0) return durationLabel(timing.durationMs, locale);
+    const started = Date.parse(String(timing.startedAt || item.createdAt || ""));
+    if (!Number.isFinite(started)) return "—";
+    return durationLabel(Date.now() - started, locale);
+  }
+
   function signalTotal(usage) {
     const value = asObject(usage);
     return (
@@ -852,6 +1028,8 @@
         "CURRENT",
         "STAFFED",
         "RUNNING",
+        "SUCCEEDED",
+        "OK",
         "CODING",
         "REVIEWING",
         "APPOINTED",
@@ -860,11 +1038,11 @@
     ) {
       return "good";
     }
-    if (["DEGRADED", "WARNING", "SCHEDULED", "PREFER", "UNRESOLVED", "DEFAULT_MODEL"].includes(normalized)) {
+    if (["DEGRADED", "WARNING", "SCHEDULED", "PREFER", "UNRESOLVED", "DEFAULT_MODEL", "STARTING", "PAUSED", "WAITING_FOR_CONFIRMATION", "UNCONFIGURED"].includes(normalized)) {
       return "warn";
     }
     if (
-      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "UNAVAILABLE", "DORMANT", "UNFILLED"].includes(
+      ["ERROR", "CRITICAL", "BLOCKED", "UNHEALTHY", "UNAVAILABLE", "DORMANT", "UNFILLED", "FAILED", "STUCK"].includes(
         normalized,
       )
     ) {
@@ -2850,6 +3028,7 @@
 
   function RuntimePolicy(props) {
     const initial = asObject(props.data.runtimePolicy);
+    const [executionMode, setExecutionMode] = React.useState(String(initial.executionMode || "v2"));
     const [mode, setMode] = React.useState(String(initial.mode || "prefer"));
     const [opencodePosition, setOpenCodePosition] = React.useState(
       String(initial.opencodePosition || "coding-executor"),
@@ -2861,11 +3040,12 @@
     const [message, setMessage] = React.useState("");
     React.useEffect(
       function () {
+        setExecutionMode(String(initial.executionMode || "v2"));
         setMode(String(initial.mode || "prefer"));
         setOpenCodePosition(String(initial.opencodePosition || "coding-executor"));
         setCodexPosition(String(initial.codexPosition || "codex-executor"));
       },
-      [initial.mode, initial.opencodePosition, initial.codexPosition],
+      [initial.executionMode, initial.mode, initial.opencodePosition, initial.codexPosition],
     );
 
     async function save() {
@@ -2876,6 +3056,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
+            execution_mode: executionMode,
             mode: mode,
             opencode_position: opencodePosition,
             codex_position: codexPosition,
@@ -2913,11 +3094,13 @@
         h(
           "div",
           { className: "hao-policy-form" },
-          h("label", null, h("span", null, props.t("policy.mode")), h("select", { value: mode, onChange: function (event) { setMode(event.target.value); } }, h("option", { value: "observe" }, props.t("policy.observe")), h("option", { value: "prefer" }, props.t("policy.prefer")), h("option", { value: "enforce" }, props.t("policy.enforce")))),
+          h("label", null, h("span", null, props.t("policy.executionMode")), h("select", { value: executionMode, onChange: function (event) { setExecutionMode(event.target.value); } }, h("option", { value: "v3" }, props.t("policy.executionV3")), h("option", { value: "v2" }, props.t("policy.executionV2")), h("option", { value: "disabled" }, props.t("policy.executionDisabled")))),
+          h("label", null, h("span", null, props.t("policy.mode")), h("select", { value: mode, onChange: function (event) { setMode(event.target.value); }, disabled: executionMode !== "v2" }, h("option", { value: "observe" }, props.t("policy.observe")), h("option", { value: "prefer" }, props.t("policy.prefer")), h("option", { value: "enforce" }, props.t("policy.enforce")))),
           h("label", null, h("span", null, props.t("policy.openCodePosition")), h("input", { value: opencodePosition, onChange: function (event) { setOpenCodePosition(event.target.value); } })),
           h("label", null, h("span", null, props.t("policy.codexPosition")), h("input", { value: codexPosition, onChange: function (event) { setCodexPosition(event.target.value); } })),
         ),
-        h("p", { className: "hao-form-help" }, props.t("policy.help")),
+        h("p", { className: "hao-form-help" }, props.t("policy.executionHelp")),
+        executionMode === "v2" ? h("p", { className: "hao-form-help" }, props.t("policy.help")) : null,
         message ? h("div", { className: "hao-save-message", role: "status" }, message) : null,
       ),
       h(
@@ -2955,7 +3138,301 @@
     );
   }
 
-  const TAB_KEYS = ["overview", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
+  function Development(props) {
+    const [development, setDevelopment] = React.useState(null);
+    const [error, setError] = React.useState("");
+    const [loading, setLoading] = React.useState(true);
+
+    const load = React.useCallback(async function () {
+      try {
+        const value = await api("/development");
+        setDevelopment(value);
+        setError("");
+      } catch (cause) {
+        setError(String(cause));
+      } finally {
+        setLoading(false);
+      }
+    }, []);
+
+    React.useEffect(function () {
+      load();
+      const timer = window.setInterval(load, 10000);
+      return function () {
+        window.clearInterval(timer);
+      };
+    }, [load]);
+
+    if (!development) {
+      return h(
+        "div",
+        { className: "hao-section-stack" },
+        h(
+          "div",
+          { className: "hao-section-head" },
+          h("div", null, h("h1", null, props.t("development.title")), h("p", null, props.t("development.subtitle"))),
+        ),
+        error ? h(ErrorBanner, { title: props.t("development.loadError"), error: error }) : null,
+        h("div", { className: "hao-loading" }, props.t("development.loading")),
+      );
+    }
+
+    const summary = asObject(development.summary);
+    const usage = asObject(summary.usage);
+    const runtime = asObject(development.runtime);
+    const health = asObject(runtime.sourceHealth);
+    const providerSummary = asObject(asObject(development.providers).summary);
+    const readiness = asObject(development.readiness);
+    const readinessGates = asObject(readiness.gates);
+    const policy = asObject(development.policy);
+    const concurrency = asObject(policy.concurrency || runtime.concurrency);
+    const active = asArray(development.active);
+    const history = asArray(development.history);
+    const logicalModels = asArray(runtime.logicalModels);
+    const enabledBackends = asArray(runtime.enabledBackends);
+    const phases = Object.entries(asObject(policy.phases));
+
+    function executionColumns() {
+      return [
+        {
+          key: "project",
+          label: props.t("development.project"),
+          render: function (item) {
+            return h(
+              "div",
+              { className: "hao-primary-cell" },
+              h("strong", null, item.projectKey || "—"),
+              h("small", { title: item.objectiveSummary || "" }, item.objectiveSummary || item.executionId || "—"),
+            );
+          },
+        },
+        {
+          key: "phase",
+          label: props.t("development.phase"),
+          render: function (item) {
+            return h("span", { className: "hao-mono" }, item.phase || "—");
+          },
+        },
+        {
+          key: "status",
+          label: props.t("development.status"),
+          render: function (item) {
+            return h(Status, { value: item.status, t: props.t });
+          },
+        },
+        {
+          key: "route",
+          label: props.t("development.route"),
+          render: function (item) {
+            const selection = asObject(item.selection);
+            const refs = asObject(item.refs);
+            const upstream = asObject(refs.upstream);
+            const observedRoute = asObject(upstream.route);
+            const physical = [observedRoute.model, observedRoute.provider].filter(Boolean).join(" · ");
+            return h(
+              "div",
+              { className: "hao-primary-cell hao-dev-route" },
+              h("strong", null, selection.modelClass || "—"),
+              h("small", null, [selection.backend, selection.transportMode].filter(Boolean).join(" · ") || "—"),
+              physical
+                ? h(
+                    "small",
+                    { className: "hao-dev-observed-route", title: observedRoute.deploymentId || physical },
+                    props.t("development.observedRoute") + ": " + physical,
+                  )
+                : null,
+            );
+          },
+        },
+        {
+          key: "elapsed",
+          label: props.t("development.elapsed"),
+          render: function (item) {
+            return h("span", { className: "hao-mono" }, executionDuration(item, props.locale));
+          },
+        },
+        {
+          key: "usage",
+          label: props.t("development.tokens"),
+          render: function (item) {
+            const itemUsage = asObject(item.usage);
+            if (!item.usage) return h("span", { className: "hao-cell-empty" }, "—");
+            return h(
+              "div",
+              { className: "hao-primary-cell" },
+              h("strong", null, props.compact(Number(itemUsage.input || 0) + Number(itemUsage.output || 0))),
+              h("small", null, props.money(itemUsage.costUsd || 0) + " · " + props.t("development.calls", { count: props.number(itemUsage.calls || 0) })),
+            );
+          },
+        },
+        {
+          key: "refs",
+          label: props.t("development.references"),
+          render: function (item) {
+            const refs = asObject(item.refs);
+            const values = [];
+            if (refs.openhandsConversationId) values.push("OH " + String(refs.openhandsConversationId).slice(0, 8));
+            if (refs.langfuseTraceId) values.push("LF " + String(refs.langfuseTraceId).slice(0, 8));
+            return h("span", { className: "hao-mono", title: values.join(" · ") }, values.join(" · ") || "—");
+          },
+        },
+      ];
+    }
+
+    return h(
+      "div",
+      { className: "hao-section-stack" },
+      h(
+        "div",
+        { className: "hao-section-head" },
+        h(
+          "div",
+          null,
+          h("h1", null, props.t("development.title")),
+          h("p", null, props.t("development.subtitle")),
+        ),
+        h(Button, { kind: "outline", onClick: load, disabled: loading }, loading ? props.t("shell.refreshing") : props.t("development.refresh")),
+      ),
+      error ? h(ErrorBanner, { title: props.t("development.loadError"), error: error }) : null,
+      h(
+        "div",
+        { className: "hao-metrics hao-dev-metrics" },
+        h(Metric, { label: props.t("development.activeMetric"), value: props.number(summary.active || 0), hint: String(asObject(summary.statuses).RUNNING || 0) + " running" }),
+        h(Metric, { label: props.t("development.waitingMetric"), value: props.number(summary.waiting || 0), hint: "PAUSED / WAITING" }),
+        h(Metric, { label: props.t("development.totalMetric"), value: props.number(summary.total || 0), hint: props.number(summary.history || 0) + " terminal" }),
+        h(Metric, { label: props.t("development.tokenMetric"), value: props.compact(Number(usage.input || 0) + Number(usage.output || 0)), hint: props.t("development.cache", { count: props.compact(usage.cachedInput || 0) }) }),
+        h(Metric, { label: props.t("development.costMetric"), value: props.money(usage.costUsd || 0), hint: props.t("development.calls", { count: props.number(usage.calls || 0) }) }),
+        h(Metric, { label: props.t("development.traceMetric"), value: Math.round(Number(summary.traceCoverage || 0) * 100) + "%", hint: props.t("development.traceCount", { count: props.number(usage.traces || 0) }) }),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.readiness"), subtitle: props.t("development.readinessSubtitle"), className: "hao-dev-readiness" },
+        asObject(development.readiness).unavailable
+          ? h(Notice, { tone: "warn" }, String(asObject(development.readiness).error || "Unavailable"))
+          : h(
+              "div",
+              { className: "hao-dev-readiness-grid" },
+              h(Metric, {
+                label: props.t("development.representative"),
+                value: props.number(asObject(readinessGates.representativeWorkflows).current || 0) + "/" + props.number(asObject(readinessGates.representativeWorkflows).required || 10),
+                hint: asObject(readinessGates.representativeWorkflows).pass ? props.t("development.gatePass") : props.t("development.gatePending"),
+              }),
+              h(Metric, { label: props.t("development.fixLoop"), value: h(Status, { value: asObject(readinessGates.fixLoop).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.fixLoop).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.fallback"), value: h(Status, { value: asObject(readinessGates.providerFallback).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.providerFallback).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.reconnect"), value: h(Status, { value: asObject(readinessGates.gatewayReconnect).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.gatewayReconnect).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, { label: props.t("development.rollback"), value: h(Status, { value: asObject(readinessGates.rollback).pass ? "READY" : "NOT_READY", t: props.t }), hint: asObject(readinessGates.rollback).pass ? props.t("development.gatePass") : props.t("development.gatePending") }),
+              h(Metric, {
+                label: props.t("development.observabilityGate"),
+                value: props.number(asObject(readinessGates.observability).verified || 0) + "/" + props.number(asObject(readinessGates.observability).required || 0),
+                hint: asObject(readinessGates.observability).pass ? props.t("development.gatePass") : props.t("development.gatePending"),
+              }),
+            ),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.active"), subtitle: props.t("development.activeSubtitle") },
+        h(DataTable, { columns: executionColumns(), rows: active, keyField: "executionId", empty: props.t("development.noActive") }),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.history"), subtitle: props.t("development.historySubtitle") },
+        h(DataTable, { columns: executionColumns(), rows: history.slice(0, 32), keyField: "executionId", empty: props.t("development.noHistory") }),
+      ),
+      h(
+        "div",
+        { className: "hao-dev-two-column" },
+        h(
+          Panel,
+          { title: props.t("development.routing"), subtitle: props.t("development.routingSubtitle"), className: "hao-dev-policy-panel" },
+          h(
+            "div",
+            { className: "hao-dev-policy-grid" },
+            phases.map(function (entry) {
+              const phase = entry[0];
+              const config = asObject(entry[1]);
+              return h(
+                "article",
+                { className: "hao-dev-policy-card", key: phase },
+                h("div", { className: "hao-dev-policy-phase" }, phase),
+                h("strong", null, config.model_class || "—"),
+                h("dl", null,
+                  h("div", null, h("dt", null, props.t("development.backends")), h("dd", null, asArray(config.backend_candidates).join(" → ") || "—")),
+                  h("div", null, h("dt", null, props.t("development.transports")), h("dd", null, asArray(config.transport_preference).join(" → ") || "—")),
+                  h("div", null, h("dt", null, props.t("development.workspace")), h("dd", null, config.workspace_mode || "—")),
+                  h("div", null, h("dt", null, props.t("development.session")), h("dd", null, config.session_policy || "—")),
+                ),
+              );
+            }),
+          ),
+        ),
+        h(
+          "div",
+          { className: "hao-section-stack hao-dev-side-stack" },
+          h(
+            Panel,
+            { title: props.t("development.runtime"), subtitle: props.t("development.runtimeSubtitle") },
+            asObject(development.runtime).unavailable
+              ? h(Notice, { tone: "warn", title: props.t("development.health") }, String(asObject(development.runtime).error || "Unavailable"))
+              : h(
+                  "div",
+                  { className: "hao-dev-runtime" },
+                  h(
+                    "div",
+                    { className: "hao-dev-health-row" },
+                    ["openhands", "litellm", "observability", "langfuse"].map(function (source) {
+                      return h("div", { className: "hao-dev-health-item", key: source }, h("span", null, source), h(Status, { value: health[source] || "UNKNOWN", t: props.t }));
+                    }),
+                  ),
+                  h("div", { className: "hao-dev-subhead" }, props.t("development.logicalModels")),
+                  h("div", { className: "hao-dev-chip-row" }, logicalModels.length ? logicalModels.map(function (model) { return h("span", { className: "hao-dev-chip hao-mono", key: model }, model); }) : h("span", { className: "hao-cell-empty" }, "—")),
+                  h("div", { className: "hao-dev-subhead" }, props.t("development.backends")),
+                  h("div", { className: "hao-dev-chip-row" }, enabledBackends.map(function (backend) { return h("span", { className: "hao-dev-chip hao-mono", key: backend }, backend); })),
+                ),
+          ),
+          h(
+            Panel,
+            { title: props.t("development.providers"), subtitle: props.t("development.runtimeSubtitle") },
+            asObject(development.providers).unavailable
+              ? h(Notice, { tone: "warn" }, String(asObject(development.providers).error || "Unavailable"))
+              : h(
+                  "div",
+                  { className: "hao-mini-metrics" },
+                  h(Metric, { label: props.t("development.connections", { count: props.number(providerSummary.connections || 0) }), value: props.number(providerSummary.connections || 0), hint: "ProviderConnection" }),
+                  h(Metric, { label: props.t("development.available", { count: props.number(providerSummary.available || 0) }), value: props.number(providerSummary.available || 0), hint: props.t("status.READY") }),
+                  h(Metric, { label: props.t("development.congested", { count: props.number(providerSummary.congested || 0) }), value: props.number(providerSummary.congested || 0), hint: props.t("development.unavailable", { count: props.number(providerSummary.unavailable || 0) }) }),
+                ),
+          ),
+          h(
+            Panel,
+            { title: props.t("development.concurrency"), subtitle: props.t("development.routingSubtitle") },
+            h(
+              "div",
+              { className: "hao-mini-metrics" },
+              h(Metric, { label: props.t("development.globalWriters"), value: props.number(concurrency.max_active_writers || 0), hint: "fail-closed admission" }),
+              h(Metric, { label: props.t("development.projectWriters"), value: props.number(concurrency.max_active_writers_per_project || 0), hint: "isolated workspaces" }),
+              h(Metric, { label: props.t("development.status"), value: h(Status, { value: health.openhands || "UNKNOWN", t: props.t }), hint: "writer lease authority" }),
+            ),
+          ),
+        ),
+      ),
+      h(
+        Panel,
+        { title: props.t("development.usage"), subtitle: props.t("development.usageSubtitle") },
+        h(
+          "div",
+          { className: "hao-mini-metrics hao-dev-usage-metrics" },
+          h(Metric, { label: "Input", value: props.compact(usage.input || 0), hint: "tokens" }),
+          h(Metric, { label: "Output", value: props.compact(usage.output || 0), hint: "tokens" }),
+          h(Metric, { label: "Cache read", value: props.compact(usage.cachedInput || 0), hint: "tokens" }),
+          h(Metric, { label: "Reasoning", value: props.compact(usage.reasoningOutput || 0), hint: "tokens" }),
+          h(Metric, { label: "Calls", value: props.number(usage.calls || 0), hint: props.number(usage.executionsWithUsage || 0) + " executions" }),
+          h(Metric, { label: "Cost", value: props.money(usage.costUsd || 0), hint: props.t("development.traceCount", { count: props.number(usage.traces || 0) }) }),
+        ),
+      ),
+    );
+  }
+
+  const TAB_KEYS = ["overview", "development", "organization", "workforce", "suppliers", "operations", "policy", "incidents"];
 
   function OfficePage() {
     const i18n = useI18n();
@@ -3012,7 +3489,8 @@
 
     let content = null;
     if (data) {
-      if (tab === "organization") content = h(Organization, shared);
+      if (tab === "development") content = h(Development, shared);
+      else if (tab === "organization") content = h(Organization, shared);
       else if (tab === "workforce") content = h(Workforce, shared);
       else if (tab === "suppliers") content = h(Suppliers, Object.assign({}, shared, { onRefresh: load }));
       else if (tab === "operations") content = h(Operations, shared);

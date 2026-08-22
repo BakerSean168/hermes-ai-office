@@ -4,11 +4,12 @@ set -euo pipefail
 # Safe deployment path for the Hermes AI Office plugin on oracle2.
 #
 # Invariants:
-#   * Dashboard-only changes never restart the gateway.
+#   * Static dashboard assets hot-sync without restarting any service.
+#   * Dashboard Python API changes restart only the supervised Dashboard process.
 #   * Runtime plugin changes are staged while a turn is active.
 #   * Runtime activation uses Hermes' own drain + restart API, never
 #     `docker compose ... --force-recreate hermes`.
-#   * The dashboard stays up while the gateway is reloaded.
+#   * Dashboard lifecycle changes never restart the Gateway.
 
 MODE="${1:---deploy}"
 SOURCE="${AI_OFFICE_SOURCE:-/home/ubuntu/projects/pixel-agents/hermes-ai-office}"
@@ -187,8 +188,14 @@ def non_runtime(path: str) -> bool:
 
 runtime = any(not non_runtime(p) for p in changed)
 dashboard = any(p.startswith("dashboard/") for p in changed)
+dashboard_backend = any(
+    p == "dashboard/plugin_api.py" or p == "dashboard/manifest.json"
+    for p in changed
+)
 if runtime:
     kind = "runtime"
+elif dashboard_backend:
+    kind = "dashboard_backend"
 elif dashboard:
     kind = "dashboard"
 elif changed:
@@ -220,6 +227,32 @@ rescan_dashboard() {
   else
     log "WARNING: dashboard rescan failed; files are synced but the manifest cache may refresh later" >&2
   fi
+}
+
+dashboard_pid() {
+  docker exec "$CONTAINER" sh -lc 'ps -eo pid,args | awk '"'"'/[h]ermes dashboard --host/{print $1; exit}'"'"'' 2>/dev/null
+}
+
+restart_dashboard_supervised() {
+  local old_pid new_pid gateway_before gateway_after deadline
+  old_pid="$(dashboard_pid || true)"
+  gateway_before="$(status_json 2>/dev/null | status_field gateway_pid || true)"
+
+  docker exec "$CONTAINER" /command/s6-svc -r /run/service/dashboard >/dev/null
+  deadline=$((SECONDS + 30))
+  while (( SECONDS <= deadline )); do
+    new_pid="$(dashboard_pid || true)"
+    if [[ -n "$new_pid" && "$new_pid" != "$old_pid" ]] && status_json >/dev/null 2>&1; then
+      gateway_after="$(status_json | status_field gateway_pid)"
+      if [[ -n "$gateway_before" && "$gateway_after" != "$gateway_before" ]]; then
+        fail "dashboard restart unexpectedly changed gateway pid ${gateway_before} -> ${gateway_after}"
+      fi
+      log "dashboard backend restarted under s6 without gateway restart: pid ${old_pid:-unknown} -> ${new_pid}"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "dashboard backend did not return healthy after supervised restart"
 }
 
 sync_profile_links() {
@@ -370,6 +403,12 @@ apply_pending_runtime() {
   done
   [[ "$state" == "running" ]] || fail "gateway did not return to running state after drain cancel"
 
+  # A runtime-class staged tree may also contain Dashboard Python/manifest
+  # changes. Reload only the supervised Dashboard process after the Gateway is
+  # healthy; the helper asserts that this step cannot change Gateway PID.
+  restart_dashboard_supervised
+  rescan_dashboard
+
   rm -f "$PENDING"
   log "runtime deployment activated safely"
 }
@@ -404,7 +443,15 @@ case "$MODE" in
         chown -R "${LIVE_UID}:${LIVE_GID}" "$LIVE"
         sync_profile_links
         rescan_dashboard
-        log "$kind deployment completed without gateway restart"
+        log "$kind deployment completed without service restart"
+        ;;
+      dashboard_backend)
+        sync_tree "$SOURCE" "$LIVE"
+        chown -R "${LIVE_UID}:${LIVE_GID}" "$LIVE"
+        sync_profile_links
+        restart_dashboard_supervised
+        rescan_dashboard
+        log "dashboard backend deployment completed without gateway restart"
         ;;
       runtime)
         stage_runtime

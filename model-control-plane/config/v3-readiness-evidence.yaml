@@ -1,0 +1,73 @@
+version: 1
+recorded_at: '2026-08-22T05:22:00Z'
+
+representative_workflows:
+  required: 10
+  verified:
+    - key: blank-screen-startup
+      project_key: blank-screen-probe
+      description: End-to-end startup white-screen implementation with independent review and deterministic finalize.
+      execution_ids:
+        - exec_6c5af7af-a517-4be3-84a5-ee5f1b20d372
+        - exec_b04e8dac-0f68-4521-b682-270721507590
+        - exec_acc68997-3692-4e53-b88e-27a7a9088bc5
+
+observability_execution_ids:
+  - exec_bcc256ad-ca17-441b-bc9e-83821568098c
+  - exec_6016ebe8-5fd0-4194-8f04-47739f7dd374
+  - exec_e450c740-af93-4d34-8d15-1aeb76f59be3
+
+provider_fallback:
+  verified: true
+  kind: litellm_order_fallback
+  logical_model: p9-fallback-probe
+  probe_end_user: p9-fallback-exec-1787374641
+  primary: injected connection failure
+  fallback: forapi-4sapi-org/gpt-5.6-sol
+  attempted_fallbacks: 1
+  correlation_preserved: true
+
+gateway_reconnect:
+  verified: true
+  execution_id: exec_e450c740-af93-4d34-8d15-1aeb76f59be3
+  gateway_pid_before: 47776
+  gateway_pid_after: 48493
+  worker_survived: true
+  source_checkout_clean: true
+
+rollback:
+  verified: true
+  profile: default
+  sequence:
+    - v3
+    - v2
+    - v3
+  v3_start_blocked_in_v2: true
+  legacy_resolve_available_in_v2: true
+  v3_authority_restored: true
+
+workspace_isolation:
+  verified: true
+  review_snapshot_read_only: true
+  implementation_source_checkout_clean: true
+  single_writer_lease_tested: true
+
+operator_recovery:
+  verified: true
+  execution_id_recovery_without_db_edit: true
+  controls:
+    - get
+    - list
+    - continue_paused
+    - cancel
+
+fix_loop:
+  verified: true
+  implementation_execution_id: exec_1130fab5-6493-4ffa-8faf-c7bbaaf83fe8
+  blocking_review_execution_id: exec_95df8a63-328b-44f9-87a2-81d0a344f44e
+  fix_execution_id: exec_f7d8516c-8f25-4481-86c8-c629f85ec0b7
+  final_review_execution_id: exec_61d3b1b0-0d1f-464d-ad79-f5ce07ff4daf
+  source_checkout_clean: true
+  seeded_defect: parity.is_even was changed only in the isolated implementation workspace to return True unconditionally.
+  blocking_evidence: reviewer independently ran six tests and observed three odd-number failures.
+  final_evidence: fresh reviewer independently ran six tests and returned APPROVED.

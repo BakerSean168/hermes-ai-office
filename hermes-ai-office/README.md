@@ -12,49 +12,148 @@ Employee       = Supplier x SupplierModel
 RuntimeSession = Hermes / OpenCode / Codex technical execution
 ```
 
-When Hermes is about to launch `opencode` or `codex` through the `terminal` tool,
-the plugin asks the local AI Workforce Domain Service which appointed Employee
-should fill the configured runtime Position. In `prefer` or `enforce` mode it can
-inject the selected native runtime model:
+For normal software-development delegation, Hermes now calls the V3 phase tool
+instead of launching a coding harness directly:
 
 ```text
-opencode run ...
-  -> opencode run --model opencode-go/deepseek-v4-flash ...
-
-codex exec ...
-  -> codex --model gpt-5.6-sol --profile anyrouter exec ...
+Hermes Brain
+  -> ai_office_run_phase(INVESTIGATE_PLAN | IMPLEMENT | IMPLEMENT_FIX | VERIFY_REVIEW | FINALIZE)
+  -> AI Office V3 control plane
+  -> OpenHands execution lifecycle
+  -> OpenCode / other approved ACP backend
+  -> LiteLLM logical model class
 ```
 
+Hermes chooses the semantic phase and objective only. AI Office owns backend/model
+selection, workspace isolation, fresh review snapshots, lifecycle correlation,
+usage evidence, and deterministic finalization. The older terminal staffing hook
+and `ai_office_resolve_execution` remain available for explicitly requested legacy
+direct-harness flows during migration.
+
 Raw prompts, raw tool results, and provider credentials are never sent to the
-policy service or dashboard.
+dashboard. V3 forwards only the bounded phase objective/context required for the
+selected development execution.
 
 ## Included surfaces
 
 - Hermes dashboard tab: Overview, Organization, Workforce, Suppliers, Operations,
   Runtime Policy, and Incidents.
-- `pre_tool_call` runtime staffing policy for OpenCode and Codex.
+- `ai_office_run_phase` V3 development delegation plus execution get/cancel/list tools.
+- `pre_tool_call` legacy runtime staffing policy for direct OpenCode/Codex launches.
 - `post_tool_call` runtime launch telemetry.
 - `subagent_start` / `subagent_stop` lineage telemetry.
 - Namespaced Hermes plugin settings for `observe`, `prefer`, or `enforce` mode.
 - Local-only dashboard backend proxy to the AI Workforce Domain Service.
 
-## Execution placement
+## V3 development execution
 
-Hermes can ask AI Office for an execution worker before choosing a coding harness:
+The primary development tool is:
 
 ```text
-ai_office_resolve_execution(intent=IMPLEMENT|DEBUG|TEST|QUICK_FIX|PLAN|REVIEW|RESEARCH)
+ai_office_run_phase(
+  phase=INVESTIGATE_PLAN|IMPLEMENT|IMPLEMENT_FIX|VERIFY_REVIEW|FINALIZE,
+  objective=...,
+  repository_path=...,        # initial investigate/implement only
+  previous_execution_id=...,  # phase handoff
+)
 ```
 
-The policy is deliberately small and opinionated. `PLAN`, `REVIEW`, and `RESEARCH` select from the premium roster (current Claude Opus/Sonnet and GPT-5.6 Sol/Terra-class workers). Implementation intents select from GPT-5.6 Luna, DeepSeek V4 Flash, or GLM-5.2 workers. Intent determines only the work class; it never implies a fixed model or coding harness. The implementation roster uses a neutral model baseline so provider availability, reusable runtime access, official-harness compatibility, and explicit commercial rules can decide each execution. Provider availability and credential scope remain hard routing gates rather than prompt hints.
+The standard flow is:
 
-Harness preference follows the selected model family: Claude -> Claude Code, GPT -> Codex, DeepSeek -> DSH, and GLM -> ZCode when an explicitly enabled ZCode runtime is available. Otherwise AI Office returns the supported fallback, normally OpenCode. Existing native profiles are reused; missing API-key profiles are materialized from safe ProviderConnection metadata. The response contains only a credential reference, never credential material.
+```text
+INVESTIGATE_PLAN
+  -> IMPLEMENT
+  -> VERIFY_REVIEW
+      -> IMPLEMENT_FIX -> VERIFY_REVIEW  # only when review finds a real defect
+  -> FINALIZE
+```
 
-DeepSeek V4 Flash has one time-sensitive commercial rule: Asia/Shanghai 09:00-18:00 applies a peak-price penalty only to OpenCode Go and the DeepSeek official API. Third-party commercial or sponsored relay connections are not time-priced by this policy. This is evaluated at decision time; no cron job mutates the active model.
+`INVESTIGATE_PLAN` keeps repository investigation and planning in one OpenHands
+conversation so model context/prompt-cache reuse is preserved. `IMPLEMENT` uses an
+isolated writable Git branch and is asynchronous by default. `VERIFY_REVIEW`
+freezes the implementation's complete Git-visible working tree into an independent,
+physically read-only snapshot; build/test commands that need writes run in a
+disposable `/tmp` copy. `IMPLEMENT_FIX` takes the **failed review execution** as its
+causal parent, follows that review back to the implementation it inspected, and reuses
+the exact implementation working tree/branch in a fresh execution conversation. This
+keeps both the reviewer findings and mutable-workspace lineage explicit. `FINALIZE`
+takes the approved review execution as its parent; it is deterministic control-plane
+work and consumes no LLM tokens.
 
-Before placement, AI Office reconciles only the fixed policy roster from Provider Hub into Employee/Employment records. Providers that do not expose a models endpoint may supply an explicit model list when they are added. This keeps large upstream catalogs out of the workforce model while allowing known endpoints such as limited contest/free APIs to participate.
+The plugin always creates V3 executions with a short `await=false` HTTP request. If
+the caller requests synchronous semantics, the plugin waits using bounded short GET
+polls. If the wait budget expires the execution remains durable and recoverable by
+ID; it is not cancelled.
 
-A selected execution response includes the Employee, Employment, safe ProviderConnection metadata, preferred/selected harness, profile action, launch template, reasons, `decisionScope=PER_EXECUTION`, and a short usage instruction. Hermes should treat the returned command template as the launch contract and replace only the task placeholder. It must not generalize one selected model or harness into a permanent mapping such as `IMPLEMENT=DSH` or `REVIEW=CODEX`, and must not store such a mapping as a memory rule.
+Related tools:
+
+```text
+ai_office_get_execution(execution_id=...)
+ai_office_continue_execution(execution_id=..., message=...)  # PAUSED same-phase recovery only
+ai_office_cancel_execution(execution_id=...)
+ai_office_list_active(project_key=...)
+```
+
+Hermes profile/session/turn metadata and an idempotency key derived from the tool
+call are added automatically. Handoff IDs are causal, not generic workspace pointers:
+`VERIFY_REVIEW` points to the implementation/fix being reviewed; `IMPLEMENT_FIX`
+points to the failed review; `FINALIZE` points to the approved review. Project identity
+and previous semantic results are resolved automatically, so the Brain does not need
+to copy workspace paths or large prior outputs through the prompt.
+
+Backend/model/transport overrides are optional requests, not bypasses. AI Office
+validates them against current policy and availability. Do not persist fixed rules
+such as `IMPLEMENT=OpenCode/DeepSeek` or `REVIEW=Codex/GPT`; placement is per
+execution.
+
+### Profile execution mode and rollback
+
+Each enabled Hermes profile has one execution authority:
+
+```text
+plugins.entries.hermes-ai-office.settings.execution_mode = v3 | v2 | disabled
+```
+
+- `v3` — `ai_office_run_phase` is the normal development path and the legacy terminal staffing hook is bypassed;
+- `v2` — new V3 phase starts are rejected and legacy `ai_office_resolve_execution` / direct-harness placement is the rollback path;
+- `disabled` — AI Office does not route software-development execution.
+
+Existing V3 execution IDs remain get/list/continue/cancel capable after a mode change so
+a rollback cannot orphan already-running work. The migration-safe default for an
+installation without this setting is `v2`; V3 must be explicitly opted in.
+
+On current oracle2, default, BodySense, Digital Biome, and Orchestrator are explicitly
+`v3`. MemoFlow remains intentionally opted out with `.ai-office-disabled`; the deploy
+sync helper preserves that marker and does not silently re-enable the plugin.
+
+### Exact managed-lane observability
+
+Managed OpenHands requests carry the V3 execution ID in the standard
+OpenAI-compatible `user` field. LiteLLM persists it as spend-log `end_user`, allowing
+AI Office to query exact per-execution token/cache/reasoning/cost facts plus the
+observed physical model, provider, and deployment ID. Old executions without this
+correlation stay unlinked rather than being matched by timestamp.
+
+LiteLLM spend observability and Langfuse are separate health sources. Current oracle2
+uses the former and reports Langfuse as `UNCONFIGURED`; the root-only LiteLLM admin
+credential used for spend reads is never injected into OpenHands/OpenCode workers.
+
+### Cutover readiness
+
+`GET /api/v3/development/readiness` and the Development dashboard expose explicit
+qualification gates. As of 2026-08-22, provider fallback, Gateway reconnect, V3/V2
+rollback, workspace isolation, recovery controls, exact observability, and a real
+seeded-defect fix loop are verified. Overall status remains `NOT_READY` because only
+**1/10 representative real development workflows** are registered. Probe executions
+and intentional failure injections do not count toward that gate.
+
+### Legacy direct-harness placement
+
+`ai_office_resolve_execution(intent=...)` and the terminal staffing hook remain for
+legacy or explicitly requested direct-harness flows. They are not the normal V3
+development path. Provider Hub economics, credential-scope gates, model-family
+harness compatibility, and runtime telemetry continue to support those flows while
+V3 migration proceeds.
 
 ## Runtime policy modes
 

@@ -590,6 +590,11 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             {
                 "ai_office_add_provider",
                 "ai_office_list_providers",
+                "ai_office_run_phase",
+                "ai_office_get_execution",
+                "ai_office_continue_execution",
+                "ai_office_cancel_execution",
+                "ai_office_list_active",
                 "ai_office_resolve_execution",
                 "ai_office_set_provider_state",
             },
@@ -954,6 +959,256 @@ class HermesAiOfficePluginTest(unittest.TestCase):
             )
         request.assert_not_called()
 
+    def test_v3_run_phase_creates_async_implementation_with_hermes_correlation(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        started = {
+            "executionId": "exec-v3-1",
+            "projectKey": "memoflow",
+            "phase": "IMPLEMENT",
+            "status": "RUNNING",
+            "selection": {"backend": "opencode-acp", "modelClass": "implementation-efficient"},
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=started) as request:
+            result = json.loads(
+                plugin._run_development_phase_tool(
+                    {
+                        "phase": "IMPLEMENT",
+                        "objective": "Implement the approved refactor.",
+                        "repository_path": "/home/ubuntu/projects/memoflow",
+                    },
+                    session_id="session-1",
+                    turn_id="turn-1",
+                    tool_call_id="call-1",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["awaitRequested"])
+        self.assertFalse(result["awaitTimedOut"])
+        self.assertEqual(result["executionId"], "exec-v3-1")
+        request.assert_called_once()
+        call = request.call_args
+        self.assertEqual(call.args[0], "/api/v3/development/executions")
+        self.assertEqual(call.kwargs["method"], "POST")
+        self.assertTrue(call.kwargs["idempotency_key"].startswith("hermes-v3-implement-"))
+        payload = call.kwargs["payload"]
+        self.assertEqual(payload["projectKey"], "memoflow")
+        self.assertEqual(payload["repository"]["path"], "/home/ubuntu/projects/memoflow")
+        self.assertFalse(payload["await"])
+        self.assertEqual(payload["hermes"], {"profile": "coder", "sessionId": "session-1", "turnId": "turn-1"})
+
+    def test_v3_run_phase_inherits_project_and_result_from_previous_execution(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        previous = {
+            "executionId": "exec-impl",
+            "projectKey": "memoflow",
+            "phase": "IMPLEMENT",
+            "status": "SUCCEEDED",
+            "result": {"finalText": "Implemented and verified."},
+        }
+        review = {
+            "executionId": "exec-review",
+            "projectKey": "memoflow",
+            "phase": "VERIFY_REVIEW",
+            "status": "SUCCEEDED",
+            "result": {"finalText": "APPROVED"},
+        }
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=[previous, review]) as request:
+            result = json.loads(
+                plugin._run_development_phase_tool(
+                    {
+                        "phase": "VERIFY_REVIEW",
+                        "objective": "Review independently.",
+                        "previous_execution_id": "exec-impl",
+                    },
+                    session_id="s-review",
+                    turn_id="t-review",
+                    tool_call_id="call-review",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["awaitRequested"])
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].args[0], "/api/v3/development/executions/exec-impl")
+        payload = request.call_args_list[1].kwargs["payload"]
+        self.assertEqual(payload["projectKey"], "memoflow")
+        self.assertEqual(payload["repository"]["path"], "")
+        self.assertEqual(payload["context"]["previousExecutionId"], "exec-impl")
+        self.assertEqual(payload["context"]["previousResult"], "Implemented and verified.")
+
+    def test_v3_implement_fix_uses_failed_review_as_causal_parent(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        failed_review = {
+            "executionId": "exec-review-failed",
+            "projectKey": "memoflow",
+            "phase": "VERIFY_REVIEW",
+            "status": "SUCCEEDED",
+            "result": {"finalText": "BLOCKED: odd numbers are incorrectly reported as even."},
+        }
+        started_fix = {
+            "executionId": "exec-fix",
+            "projectKey": "memoflow",
+            "phase": "IMPLEMENT_FIX",
+            "status": "RUNNING",
+        }
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=[failed_review, started_fix]) as request:
+            result = json.loads(
+                plugin._run_development_phase_tool(
+                    {
+                        "phase": "IMPLEMENT_FIX",
+                        "objective": "Address only the review finding.",
+                        "previous_execution_id": "exec-review-failed",
+                    },
+                    session_id="s-fix",
+                    turn_id="t-fix",
+                    tool_call_id="call-fix",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["executionId"], "exec-fix")
+        self.assertEqual(request.call_args_list[0].args[0], "/api/v3/development/executions/exec-review-failed")
+        payload = request.call_args_list[1].kwargs["payload"]
+        self.assertEqual(payload["projectKey"], "memoflow")
+        self.assertEqual(payload["context"]["previousExecutionId"], "exec-review-failed")
+        self.assertEqual(
+            payload["context"]["previousResult"],
+            "BLOCKED: odd numbers are incorrectly reported as even.",
+        )
+        self.assertEqual(payload["repository"]["path"], "")
+
+    def test_v3_run_phase_waits_by_short_get_polling_not_long_post(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        started = {"executionId": "exec-plan", "projectKey": "p", "phase": "INVESTIGATE_PLAN", "status": "RUNNING"}
+        finished = {"executionId": "exec-plan", "projectKey": "p", "phase": "INVESTIGATE_PLAN", "status": "SUCCEEDED", "result": {"finalText": "plan"}}
+        with mock.patch.object(plugin, "_control_plane_request", side_effect=[started, finished]) as request, mock.patch.object(
+            plugin.time, "sleep", return_value=None
+        ):
+            result = json.loads(
+                plugin._run_development_phase_tool(
+                    {
+                        "phase": "INVESTIGATE_PLAN",
+                        "objective": "Investigate and plan.",
+                        "project_key": "p",
+                        "repository_path": "/repo",
+                        "await": True,
+                        "wait_timeout_seconds": 10,
+                    },
+                    tool_call_id="call-plan",
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertFalse(result["awaitTimedOut"])
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].kwargs["payload"]["await"], False)
+        self.assertEqual(request.call_args_list[0].kwargs["timeout"], 8.0)
+        self.assertEqual(request.call_args_list[1].args[0], "/api/v3/development/executions/exec-plan")
+        self.assertEqual(request.call_args_list[1].kwargs["timeout"], 4.0)
+
+    def test_v3_run_phase_serializes_hints_and_policy_overrides(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        started = {"executionId": "exec-hints", "projectKey": "p", "phase": "IMPLEMENT", "status": "RUNNING"}
+        with mock.patch.object(plugin, "_control_plane_request", return_value=started) as request:
+            result = json.loads(
+                plugin._run_development_phase_tool(
+                    {
+                        "phase": "IMPLEMENT",
+                        "objective": "Implement.",
+                        "project_key": "p",
+                        "repository_path": "/repo",
+                        "complexity_hint": "high",
+                        "risk_hint": "medium",
+                        "quality_hint": "premium",
+                        "budget_hint": "low",
+                        "parallelism": 3,
+                        "preferred_backend": "opencode-acp",
+                        "preferred_model_class": "implementation-efficient",
+                        "transport_mode": "litellm_managed",
+                    },
+                    tool_call_id="call-hints",
+                )
+            )
+        self.assertTrue(result["ok"])
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["hints"], {"complexity": "HIGH", "risk": "MEDIUM", "quality": "PREMIUM", "budget": "LOW", "parallelism": 3})
+        self.assertEqual(payload["override"], {"backend": "opencode-acp", "modelClass": "implementation-efficient", "transportMode": "LITELLM_MANAGED"})
+
+    def test_v3_execution_get_cancel_and_active_tools_are_thin_facades(self) -> None:
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            side_effect=[
+                {"executionId": "exec-1", "status": "RUNNING"},
+                {"executionId": "exec-1", "status": "CANCELLED"},
+                {
+                    "items": [
+                        {"executionId": "exec-1", "status": "CANCELLED"},
+                        {"executionId": "exec-2", "status": "RUNNING"},
+                        {"executionId": "exec-3", "status": "WAITING_FOR_CONFIRMATION"},
+                    ]
+                },
+            ],
+        ) as request:
+            got = json.loads(plugin._get_development_execution_tool({"execution_id": "exec-1"}))
+            cancelled = json.loads(plugin._cancel_development_execution_tool({"execution_id": "exec-1"}))
+            active = json.loads(plugin._list_active_development_executions_tool({"project_key": "memo flow", "limit": 20}))
+        self.assertTrue(got["ok"])
+        self.assertEqual(cancelled["status"], "CANCELLED")
+        self.assertEqual(active["count"], 2)
+        self.assertEqual([item["executionId"] for item in active["items"]], ["exec-2", "exec-3"])
+        self.assertEqual(request.call_args_list[0].args[0], "/api/v3/development/executions/exec-1")
+        self.assertEqual(request.call_args_list[1].args[0], "/api/v3/development/executions/exec-1/cancel")
+        self.assertEqual(request.call_args_list[1].kwargs["method"], "POST")
+        self.assertIn("projectKey=memo+flow", request.call_args_list[2].args[0])
+
+    def test_v3_continue_execution_resumes_paused_run_with_bounded_wait(self) -> None:
+        resumed = {"executionId": "exec-resume", "status": "RUNNING"}
+        finished = {"executionId": "exec-resume", "status": "SUCCEEDED", "result": {"finalText": "done"}}
+        long_message = "x" * 25000
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            side_effect=[resumed, finished],
+        ) as request, mock.patch.object(plugin.time, "sleep", return_value=None):
+            result = json.loads(
+                plugin._continue_development_execution_tool(
+                    {
+                        "execution_id": "exec-resume",
+                        "message": long_message,
+                        "await": True,
+                        "wait_timeout_seconds": 5,
+                    }
+                )
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "SUCCEEDED")
+        self.assertTrue(result["awaitRequested"])
+        self.assertFalse(result["awaitTimedOut"])
+        self.assertEqual(request.call_count, 2)
+        first = request.call_args_list[0]
+        self.assertEqual(first.args[0], "/api/v3/development/executions/exec-resume/messages")
+        self.assertEqual(first.kwargs["method"], "POST")
+        self.assertEqual(len(first.kwargs["payload"]["message"]), 20000)
+        self.assertEqual(first.kwargs["timeout"], 8.0)
+        self.assertEqual(request.call_args_list[1].args[0], "/api/v3/development/executions/exec-resume")
+
+    def test_v3_continue_execution_rejects_empty_message_before_network(self) -> None:
+        with mock.patch.object(plugin, "_control_plane_request") as request:
+            result = json.loads(
+                plugin._continue_development_execution_tool(
+                    {"execution_id": "exec-resume", "message": "   "}
+                )
+            )
+        self.assertFalse(result["ok"])
+        self.assertIn("message is required", result["message"])
+        request.assert_not_called()
+
+    def test_v3_initial_phase_requires_repository_but_continuation_does_not(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        missing = json.loads(plugin._run_development_phase_tool({"phase": "IMPLEMENT", "objective": "Implement."}, tool_call_id="missing-repo"))
+        self.assertFalse(missing["ok"])
+        self.assertIn("repository_path is required", missing["message"])
+
     def test_pre_llm_authority_context_recognizes_ai_office_and_current_provider_state(self) -> None:
         hub = {
             "summary": {"connections": 2, "available": 1, "congested": 1, "unavailable": 0, "disabled": 0},
@@ -973,20 +1228,74 @@ class HermesAiOfficePluginTest(unittest.TestCase):
         request.assert_called_once_with("/api/v2/projections/provider-hub-summary", timeout=2.0)
 
     def test_pre_llm_execution_context_requires_ai_office_placement_before_coding_harness(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
         with mock.patch.object(plugin, "_control_plane_request") as request:
             result = plugin._on_pre_llm_call(user_message="帮我修一下这个 CSS 布局")
         self.assertIsNotNone(result)
-        self.assertIn("ai_office_resolve_execution", result["context"])
-        self.assertIn("IMPLEMENT", result["context"])
-        self.assertIn("Intent selects the work class only", result["context"])
-        self.assertIn("IMPLEMENT=DSH", result["context"])
-        self.assertIn("REVIEW=CODEX", result["context"])
-        self.assertIn("per-execution", result["context"])
-        self.assertIn("permanent Job Type mapping", result["context"])
-        self.assertIn("officialHarnessRuntimeAvailable", result["context"])
-        self.assertIn("officialHarnessUsableForSelectedRoute", result["context"])
-        self.assertIn("Never bypass PROJECT_REQUIRED or BLOCKED", result["context"])
+        self.assertIn("ai_office_run_phase", result["context"])
+        self.assertIn("INVESTIGATE_PLAN", result["context"])
+        self.assertIn("IMPLEMENT_FIX", result["context"])
+        self.assertIn("VERIFY_REVIEW", result["context"])
+        self.assertIn("FINALIZE", result["context"])
+        self.assertIn("previous_execution_id", result["context"])
+        self.assertIn("IMPLEMENT_FIX must point to the failed VERIFY_REVIEW", result["context"])
+        self.assertIn("VERIFY_REVIEW must point to the implementation/fix", result["context"])
+        self.assertIn("FINALIZE must point to the approved VERIFY_REVIEW", result["context"])
+        self.assertIn("asynchronous by default", result["context"])
+        self.assertIn("ai_office_get_execution", result["context"])
+        self.assertIn("IMPLEMENT=OpenCode/DeepSeek", result["context"])
+        self.assertIn("REVIEW=Codex/GPT", result["context"])
+        self.assertIn("per execution", result["context"])
+        self.assertIn("legacy compatibility tool", result["context"])
         request.assert_not_called()
+
+    def test_execution_mode_is_real_routing_authority(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v3"})
+        with mock.patch.object(plugin, "_resolve_runtime_policy") as legacy_policy:
+            directive = plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "opencode run task"},
+                tool_call_id="v3-no-double-route",
+            )
+        self.assertIsNone(directive)
+        legacy_policy.assert_not_called()
+
+        plugin._CTX = FakeContext({"execution_mode": "v2"})
+        with mock.patch.object(plugin, "_control_plane_request") as request:
+            context = plugin._on_pre_llm_call(user_message="帮我实现这个功能")
+        self.assertIn("legacy V2 execution placement", context["context"])
+        self.assertIn("ai_office_resolve_execution", context["context"])
+        self.assertNotIn("primary execution authority", context["context"])
+        request.assert_not_called()
+
+        plugin._CTX = FakeContext({"execution_mode": "disabled"})
+        with mock.patch.object(plugin, "_control_plane_request") as request:
+            disabled = plugin._on_pre_llm_call(user_message="帮我实现这个功能")
+            start = json.loads(
+                plugin._run_development_phase_tool(
+                    {"phase": "IMPLEMENT", "objective": "Implement.", "repository_path": "/repo"},
+                    tool_call_id="disabled-start",
+                )
+            )
+        self.assertIn("execution delegation is disabled", disabled["context"])
+        self.assertFalse(start["ok"])
+        self.assertIn("execution_mode=disabled", start["message"])
+        request.assert_not_called()
+
+    def test_v3_start_is_blocked_on_v2_but_existing_execution_controls_remain_available(self) -> None:
+        plugin._CTX = FakeContext({"execution_mode": "v2"})
+        with mock.patch.object(plugin, "_control_plane_request", return_value={"executionId": "exec-old", "status": "RUNNING"}) as request:
+            start = json.loads(
+                plugin._run_development_phase_tool(
+                    {"phase": "IMPLEMENT", "objective": "Implement.", "repository_path": "/repo"},
+                    tool_call_id="v2-start",
+                )
+            )
+            existing = json.loads(plugin._get_development_execution_tool({"execution_id": "exec-old"}))
+        self.assertFalse(start["ok"])
+        self.assertIn("execution_mode=v2", start["message"])
+        self.assertTrue(existing["ok"])
+        request.assert_called_once_with("/api/v3/development/executions/exec-old", timeout=4.0)
 
     def test_pre_llm_authority_context_ignores_unrelated_turns(self) -> None:
         with mock.patch.object(plugin, "_control_plane_request") as request:

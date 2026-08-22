@@ -2677,3 +2677,183 @@
     justify-content: stretch;
   }
 }
+
+/* V3 development control */
+.hao-dev-metrics .hao-metric {
+  min-width: 0;
+}
+
+.hao-dev-two-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.hao-dev-side-stack {
+  min-width: 0;
+}
+
+.hao-dev-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.hao-dev-policy-card {
+  min-width: 0;
+  padding: 13px;
+  border: 1px solid var(--hao-border);
+  border-radius: 11px;
+  background: var(--hao-control-bg);
+}
+
+.hao-dev-policy-card > strong {
+  display: block;
+  margin: 7px 0 10px;
+  color: var(--hao-text) !important;
+  font-size: 13px;
+}
+
+.hao-dev-policy-phase {
+  color: var(--hao-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 780;
+  letter-spacing: 0.05em;
+}
+
+.hao-dev-policy-card dl,
+.hao-dev-policy-card dl > div {
+  margin: 0;
+}
+
+.hao-dev-policy-card dl {
+  display: grid;
+  gap: 8px;
+}
+
+.hao-dev-policy-card dl > div {
+  display: grid;
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.hao-dev-policy-card dt {
+  color: var(--hao-muted) !important;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.hao-dev-policy-card dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--hao-text-secondary) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.hao-dev-runtime {
+  display: grid;
+  gap: 12px;
+}
+
+.hao-dev-health-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.hao-dev-health-item {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid var(--hao-border);
+  border-radius: 9px;
+  background: var(--hao-control-bg);
+}
+
+.hao-dev-health-item > span:first-child {
+  color: var(--hao-muted) !important;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.hao-dev-subhead {
+  margin-bottom: -5px;
+  color: var(--hao-muted) !important;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.hao-dev-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hao-dev-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 25px;
+  padding: 4px 8px;
+  border: 1px solid var(--hao-border);
+  border-radius: 999px;
+  background: var(--hao-panel-soft);
+  color: var(--hao-text-secondary) !important;
+}
+
+.hao-dev-route {
+  min-width: 190px;
+}
+
+.hao-dev-observed-route {
+  color: var(--hao-accent) !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.hao-dev-usage-metrics {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+}
+
+@media (max-width: 1120px) {
+  .hao-dev-two-column {
+    grid-template-columns: 1fr;
+  }
+  .hao-dev-usage-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .hao-dev-policy-grid,
+  .hao-dev-health-row,
+  .hao-dev-usage-metrics {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hao-dev-readiness-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 1120px) {
+  .hao-dev-readiness-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .hao-dev-readiness-grid {
+    grid-template-columns: 1fr;
+  }
+}
