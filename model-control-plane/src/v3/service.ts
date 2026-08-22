@@ -14,6 +14,7 @@ import type {
   StartDevelopmentExecutionInput,
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
+import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const TERMINAL = new Set<ExecutionStatus>(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
@@ -60,6 +61,8 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
     ],
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
+      'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
+      'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
       'Do not classify read-only permission errors as implementation defects.',
       'If dependency installation, compilation, tests, or build outputs require writes, copy the complete review snapshot to a fresh temporary directory under /tmp, make only that disposable copy writable, run verification there, and discard it afterward.',
@@ -171,14 +174,21 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (review.phase !== 'VERIFY_REVIEW') {
       throw new Error('PREVIOUS_EXECUTION_NOT_REVIEW');
     }
-    let reviewResult = input.context?.previousResult?.trim() ?? '';
+    let reviewResult = review.resultText?.trim() ?? '';
     if (review.statusCache !== 'SUCCEEDED' || !reviewResult) {
       const reviewSnapshot = await this.get(reviewExecutionId);
       if (!reviewSnapshot || reviewSnapshot.status !== 'SUCCEEDED') {
         throw new Error('PREVIOUS_EXECUTION_NOT_FIXABLE');
       }
-      if (!reviewResult) reviewResult = reviewSnapshot.result?.finalText?.trim() ?? '';
+      reviewResult =
+        this.#links.get(reviewExecutionId)?.resultText?.trim() ||
+        reviewSnapshot.result?.finalText?.trim() ||
+        '';
     }
+    const verdict = reviewVerdict(reviewResult);
+    if (verdict === 'APPROVED') throw new Error('PREVIOUS_EXECUTION_REVIEW_ALREADY_APPROVED');
+    if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
+
     const implementationExecutionId = review.previousExecutionId?.trim();
     if (!implementationExecutionId) throw new Error('REVIEW_IMPLEMENTATION_LINK_MISSING');
     const implementation = this.#links.get(implementationExecutionId);
@@ -281,8 +291,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!previous || previous.status !== 'SUCCEEDED') {
       throw new Error('PREVIOUS_EXECUTION_NOT_FINALIZABLE');
     }
-    const evidence =
-      previous.result?.finalText?.trim() || input.context?.previousResult?.trim() || '';
+    const evidence = previous.result?.finalText?.trim() || '';
+    const verdict = reviewVerdict(evidence);
+    if (verdict === 'BLOCKING') throw new Error('PREVIOUS_EXECUTION_REVIEW_BLOCKING');
+    if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
+
     const finalText = [
       'FINALIZED',
       `Project: ${input.projectKey}`,
@@ -338,15 +351,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     let effectiveInput = input;
     if (!existing && input.phase === 'IMPLEMENT_FIX') {
       fixLineage = await this.#resolveFixLineage(input);
-      if (!input.context?.previousResult?.trim() && fixLineage.reviewResult) {
-        effectiveInput = {
-          ...input,
-          context: {
-            ...input.context,
-            previousResult: fixLineage.reviewResult,
-          },
-        };
-      }
+      effectiveInput = {
+        ...input,
+        context: {
+          ...input.context,
+          previousResult: fixLineage.reviewResult,
+        },
+      };
     }
 
     const selection = this.#policy.select(
@@ -513,6 +524,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     const effectiveStatus = preserveCancelled
       ? 'CANCELLED'
       : (hostSnapshot?.status ?? record.statusCache);
+    const hostFinalText = hostSnapshot?.finalText?.trim();
+    if (hostFinalText && TERMINAL.has(effectiveStatus) && !record.resultText) {
+      record = this.#links.attachResultText(record.executionId, hostFinalText);
+    }
     const observed = await this.#observability.getExecutionSummary(executionId);
     if (observed.traceId && observed.traceId !== record.langfuseTraceId) {
       record = this.#links.attachLangfuse(executionId, observed.traceId);
@@ -525,15 +540,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       objectiveSummary: record.objectiveSummary,
       status: effectiveStatus,
       selection: selectionFromRecord(record),
-      result: hostSnapshot
-        ? {
-            finalText: hostSnapshot.finalText ?? '',
-            workspaceRef: record.workspaceRef,
-            git: { branch: record.gitBranch ?? null },
-          }
-        : record.resultText
+      result:
+        record.resultText || hostSnapshot
           ? {
-              finalText: record.resultText,
+              finalText: record.resultText ?? hostSnapshot?.finalText ?? '',
               workspaceRef: record.workspaceRef,
               git: { branch: record.gitBranch ?? null },
             }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import { parse } from 'yaml';
 
+import { reviewVerdict } from './reviewVerdict.js';
 import type { DevelopmentExecutionService } from './service.js';
 import type { DevelopmentPhase, DevelopmentExecutionSnapshot } from './types.js';
 
@@ -116,8 +117,8 @@ async function fixLoopGate(
   }
   const blockingText = blockingSnapshot?.result?.finalText?.trim() ?? '';
   const finalText = finalSnapshot?.result?.finalText?.trim() ?? '';
-  const blockingFindingVerified = /^BLOCKED\b/i.test(blockingText);
-  const finalApprovalVerified = /^APPROVED\b/i.test(finalText);
+  const blockingFindingVerified = reviewVerdict(blockingText) === 'BLOCKING';
+  const finalApprovalVerified = reviewVerdict(finalText) === 'APPROVED';
   return {
     pass: structural && blockingFindingVerified && finalApprovalVerified,
     label: 'failed review -> IMPLEMENT_FIX -> fresh review pass',
