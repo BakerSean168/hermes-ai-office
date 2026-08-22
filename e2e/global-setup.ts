@@ -15,10 +15,54 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export function resolveVSCodeExecutablePath(
+  vscodePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string | null {
+  const requestedPath = vscodePath.trim();
+  if (!requestedPath) return null;
+  if (fs.existsSync(requestedPath)) return requestedPath;
+  if (platform !== 'darwin') return null;
+
+  // @vscode/test-electron <=2.5.2 hard-codes Contents/MacOS/Electron. VS Code
+  // 1.110+ renamed the macOS main binary to the bundle product name and later
+  // removed the compatibility symlink. Resolve the executable from the bundle
+  // instead of requiring Node 22 solely to consume @vscode/test-electron 3.x.
+  const macosDir = path.dirname(requestedPath);
+  const appPath = path.resolve(macosDir, '../..');
+  const infoPlistPath = path.join(appPath, 'Contents', 'Info.plist');
+
+  try {
+    const plist = fs.readFileSync(infoPlistPath, 'utf8');
+    const match = plist.match(/<key>CFBundleExecutable<\/key>\s*<string>([^<]+)<\/string>/);
+    if (match) {
+      const candidate = path.resolve(macosDir, match[1]);
+      if (candidate.startsWith(macosDir + path.sep) && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  } catch {
+    // Fall through to the bundle-directory fallback below.
+  }
+
+  try {
+    const regularFiles = fs
+      .readdirSync(macosDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile());
+    if (regularFiles.length === 1) {
+      return path.resolve(macosDir, regularFiles[0].name);
+    }
+  } catch {
+    // The archive is incomplete or not a normal macOS app bundle.
+  }
+
+  return null;
+}
+
 function readCachedVSCodePath(): string | null {
   try {
     const vscodePath = fs.readFileSync(VSCODE_PATH_FILE, 'utf8').trim();
-    return vscodePath && fs.existsSync(vscodePath) ? vscodePath : null;
+    return resolveVSCodeExecutablePath(vscodePath);
   } catch {
     return null;
   }
@@ -149,10 +193,20 @@ export default async function globalSetup(): Promise<void> {
         version: 'stable',
         cachePath: VSCODE_CACHE_DIR,
       });
-      console.log(`[e2e] VS Code executable: ${downloadedPath}`);
-      patchProductJsonForWindows(downloadedPath);
-      fs.writeFileSync(VSCODE_PATH_FILE, downloadedPath, 'utf8');
-      return downloadedPath;
+      const resolvedPath = resolveVSCodeExecutablePath(downloadedPath);
+      if (!resolvedPath) {
+        throw new Error(`VS Code executable is missing after download: ${downloadedPath}`);
+      }
+      if (resolvedPath !== downloadedPath) {
+        console.log(
+          `[e2e] VS Code executable path normalized: ${downloadedPath} -> ${resolvedPath}`,
+        );
+      } else {
+        console.log(`[e2e] VS Code executable: ${resolvedPath}`);
+      }
+      patchProductJsonForWindows(resolvedPath);
+      fs.writeFileSync(VSCODE_PATH_FILE, resolvedPath, 'utf8');
+      return resolvedPath;
     });
   } else {
     console.log(`[e2e] VS Code executable: ${vscodePath}`);

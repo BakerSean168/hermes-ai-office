@@ -10,13 +10,12 @@ import { buildSeedConfig, buildSeedLayout } from '../../../helpers/layout-seed';
 /**
  * Single-folder e2e coverage for Areas.
  *
- * The Areas EDITOR (paint tool, CRUD, folder mapping) is gated on
- * workspaceFolders > 0 (EditorToolbar.tsx) and the Show Areas settings toggle on
- * the same gate (App.tsx), so a single-folder window cannot reach them — those
- * are covered in areas-multiroot.spec.ts. What a single folder CAN verify:
+ * Areas authoring is available in a normal single-folder workspace. Folder mapping
+ * itself is exercised in areas-multiroot.spec.ts, where distinct folder identities
+ * are required for the seat-preference assertions. A single folder verifies:
  *   - seeded area data loads into OfficeState (areas + areaTiles round-trip), and
  *   - the seeded showAreas state drives the effective overlay gate, and
- *   - the Areas tool button is correctly hidden without workspace folders.
+ *   - the Areas tool remains reachable for ordinary single-root projects.
  * Area overlay/labels are canvas-only, so we assert state, not pixels (the same
  * tradeoff the pets fixture makes).
  */
@@ -68,15 +67,16 @@ test.describe('Areas (single-folder)', () => {
     });
   });
 
-  test('the Areas tool button is hidden without workspace folders @area:areas', async ({
+  test('the Areas tool button is available in a single-folder workspace @area:areas', async ({
     pixelAgents,
   }) => {
     const { frame, narrator } = pixelAgents;
-    narrator.step('opening the layout editor with no workspace folders configured');
+    narrator.step('opening the layout editor in a normal single-folder workspace');
     await enterEditMode(frame);
-    // Single-folder fixture sends no workspaceFolders → the Areas button is gated off.
-    await expect(frame.locator('button[title*="Define folder-bound areas"]')).toHaveCount(0);
-    narrator.check('no Areas tool button — the tool is gated on having folders to map');
+    // App.tsx deliberately decouples Areas authoring from multi-root workspaces:
+    // one real workspace folder is enough to make the editor available.
+    await expect(frame.locator('button[title*="Define folder-bound areas"]')).toHaveCount(1);
+    narrator.check('Areas authoring is available for a single-root project');
   });
 
   test.describe('seeded areas layout (positive gate)', () => {
