@@ -14,6 +14,7 @@ import type {
   StartDevelopmentExecutionInput,
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
+import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const TERMINAL = new Set<ExecutionStatus>(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
@@ -31,26 +32,6 @@ function sleep(ms: number): Promise<void> {
 
 function objectiveSummary(value: string): string {
   return value.replace(/\s+/g, ' ').trim().slice(0, 240);
-}
-
-type ReviewVerdict = 'APPROVED' | 'BLOCKING' | 'UNKNOWN';
-
-function reviewVerdict(value: string): ReviewVerdict {
-  const firstLine = value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  if (!firstLine) return 'UNKNOWN';
-
-  const [rawToken] = firstLine.split(':', 1);
-  const token =
-    rawToken
-      ?.trim()
-      .toUpperCase()
-      .replace(/[\s-]+/g, '_') ?? '';
-  if (token === 'PASS' || token === 'APPROVED') return 'APPROVED';
-  if (['FAIL', 'REJECTED', 'BLOCKED', 'CHANGES_REQUESTED'].includes(token)) return 'BLOCKING';
-  return 'UNKNOWN';
 }
 
 function phasePrompt(input: StartDevelopmentExecutionInput): string {
