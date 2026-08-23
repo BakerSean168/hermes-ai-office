@@ -161,8 +161,20 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.0.0")
+        self.assertEqual(manifest["version"], "1.0.1")
         self.assertIn("Execution console", manifest["description"])
+
+    def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:
+        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("const fetchJSON = SDK.fetchJSON", source)
+        self.assertIn("return fetchJSON(API_ROOT + path)", source)
+        self.assertNotIn('fetch(API_ROOT + path, { credentials: "same-origin" })', source)
+        self.assertIn('root.getPropertyValue("--background-base")', source)
+        self.assertIn('"data-theme-mode": themeMode', source)
+        self.assertIn('.hao-shell[data-theme-mode="light"]', styles)
+        self.assertIn("--hao-bg: #0f1115", styles)
+        self.assertIn("--hao-bg: #f6f7f9", styles)
 
 
 if __name__ == "__main__":
