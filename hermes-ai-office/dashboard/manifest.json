@@ -3,8 +3,11 @@
   "label": "AI Office",
   "description": "Execution console for Hermes development tasks, OpenHands lifecycle, and LiteLLM usage analytics.",
   "icon": "Activity",
-  "version": "1.0.0",
-  "tab": {"path": "/office", "position": "after:kanban"},
+  "version": "1.0.1",
+  "tab": {
+    "path": "/office",
+    "position": "after:kanban"
+  },
   "entry": "dist/index.js",
   "css": "dist/style.css",
   "api": "plugin_api.py"
