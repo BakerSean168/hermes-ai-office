@@ -26,7 +26,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ui
-    image: hermes-litellm-ui:1.92.2-midnight
+    image: hermes-litellm-ui:1.92.2-darkreader
     container_name: hermes-litellm
     platform: linux/arm64
     network_mode: host

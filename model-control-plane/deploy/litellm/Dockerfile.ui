@@ -1,9 +1,34 @@
-ARG LITELLM_BASE=ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
-FROM ${LITELLM_BASE}
+FROM node:22-alpine AS darkreader
+ARG DARKREADER_VERSION=4.9.128
+WORKDIR /tmp/darkreader
+RUN npm pack "darkreader@${DARKREADER_VERSION}" --silent > package-name.txt \
+    && tar -xzf "$(cat package-name.txt)" \
+    && test -f package/darkreader.js
 
-COPY ui/hermes-midnight.css /tmp/hermes-midnight.css
-RUN set -eu; \
-    target='/app/.venv/lib/python3.13/site-packages/litellm/proxy/_experimental/out/_next/static/chunks/075sund.-mh4~.css'; \
-    test -f "$target"; \
-    cat /tmp/hermes-midnight.css >> "$target"; \
-    rm -f /tmp/hermes-midnight.css
+FROM ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
+COPY --from=darkreader /tmp/darkreader/package/darkreader.js /tmp/darkreader.js
+RUN python - <<'PY'
+from pathlib import Path
+
+root = Path('/app/.venv/lib/python3.13/site-packages/litellm/proxy/_experimental/out')
+asset = root / '_next/static/chunks/darkreader.js'
+asset.write_bytes(Path('/tmp/darkreader.js').read_bytes())
+
+snippet = (
+    '<script src="/litellm-asset-prefix/_next/static/chunks/darkreader.js"></script>'
+    '<script>DarkReader.enable({brightness:100,contrast:90,sepia:10});</script>'
+)
+changed = 0
+for html in root.rglob('*.html'):
+    text = html.read_text(encoding='utf-8')
+    if 'DarkReader.enable(' in text:
+        continue
+    if '</head>' not in text:
+        continue
+    html.write_text(text.replace('</head>', snippet + '</head>', 1), encoding='utf-8')
+    changed += 1
+if changed == 0:
+    raise SystemExit('Dark Reader injection failed: no HTML files patched')
+print(f'Injected Dark Reader into {changed} HTML files')
+PY
+RUN rm -f /tmp/darkreader.js
