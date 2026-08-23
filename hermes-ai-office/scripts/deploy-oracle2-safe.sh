@@ -178,7 +178,7 @@ l = snapshot(live)
 changed = sorted(k for k in set(s) | set(l) if s.get(k) != l.get(k))
 
 def non_runtime(path: str) -> bool:
-    if path.startswith("dashboard/") or path.startswith("scripts/") or path.startswith("deploy/"):
+    if path.startswith("dashboard/") or path.startswith("contracts/") or path.startswith("scripts/") or path.startswith("deploy/"):
         return True
     if path in {"README.md", ".gitignore"}:
         return True
@@ -189,7 +189,7 @@ def non_runtime(path: str) -> bool:
 runtime = any(not non_runtime(p) for p in changed)
 dashboard = any(p.startswith("dashboard/") for p in changed)
 dashboard_backend = any(
-    p == "dashboard/plugin_api.py" or p == "dashboard/manifest.json"
+    p == "dashboard/plugin_api.py" or p == "dashboard/manifest.json" or p.startswith("contracts/")
     for p in changed
 )
 if runtime:

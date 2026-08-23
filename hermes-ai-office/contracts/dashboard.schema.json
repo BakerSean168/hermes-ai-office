@@ -1,0 +1,703 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hermes.local/contracts/ai-office/dashboard.schema.json",
+  "title": "Hermes AI Office Dashboard Contract",
+  "description": "Canonical backend-to-frontend DTO for the AI Office execution console. Producers and consumers must change together; field aliases and compatibility fallbacks are intentionally unsupported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "summary",
+    "active",
+    "history",
+    "analytics",
+    "runtime",
+    "readiness",
+    "registry"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 3
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "summary": {
+      "$ref": "#/$defs/Summary"
+    },
+    "active": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Execution"
+      }
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Execution"
+      }
+    },
+    "analytics": {
+      "$ref": "#/$defs/Analytics"
+    },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeSummary"
+    },
+    "readiness": {
+      "$ref": "#/$defs/Readiness"
+    },
+    "registry": {
+      "$ref": "#/$defs/Registry"
+    }
+  },
+  "$defs": {
+    "Usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input",
+        "output",
+        "cachedInput",
+        "reasoningOutput",
+        "calls",
+        "costUsd"
+      ],
+      "properties": {
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningOutput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "Route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deploymentId",
+        "providerKey",
+        "physicalModel",
+        "modelGroup",
+        "credential",
+        "commercialType",
+        "supplyOrigin",
+        "order"
+      ],
+      "properties": {
+        "deploymentId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "refs.upstream.route.deploymentId"
+        },
+        "providerKey": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "refs.upstream.route.providerKey"
+        },
+        "physicalModel": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "refs.upstream.route.model"
+        },
+        "modelGroup": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].group"
+        },
+        "credential": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].credential"
+        },
+        "commercialType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].commercialType"
+        },
+        "supplyOrigin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].supplyOrigin"
+        },
+        "order": {
+          "type": [
+            "integer",
+            "number",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].order"
+        }
+      }
+    },
+    "RouteUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "deploymentId",
+        "providerKey",
+        "physicalModel",
+        "modelGroup",
+        "credential",
+        "commercialType",
+        "supplyOrigin",
+        "order",
+        "input",
+        "output",
+        "cachedInput",
+        "reasoningOutput",
+        "calls",
+        "costUsd"
+      ],
+      "properties": {
+        "deploymentId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "refs.upstream.route.deploymentId"
+        },
+        "providerKey": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "refs.upstream.routeUsage[].providerKey"
+        },
+        "physicalModel": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "refs.upstream.route.model"
+        },
+        "modelGroup": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].group"
+        },
+        "credential": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].credential"
+        },
+        "commercialType": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].commercialType"
+        },
+        "supplyOrigin": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].supplyOrigin"
+        },
+        "order": {
+          "type": [
+            "integer",
+            "number",
+            "null"
+          ],
+          "x-control-plane-source": "model-registry.deployments[deploymentId].order"
+        },
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningOutput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "Execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executionId",
+        "projectKey",
+        "objective",
+        "phase",
+        "status",
+        "startedAt",
+        "endedAt",
+        "durationMs",
+        "logicalModel",
+        "backend",
+        "workspaceMode",
+        "previousExecutionId",
+        "usage",
+        "totalTokens",
+        "route",
+        "routeUsage",
+        "terminal"
+      ],
+      "properties": {
+        "executionId": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "executionId"
+        },
+        "projectKey": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "projectKey"
+        },
+        "objective": {
+          "type": "string",
+          "x-control-plane-source": "objectiveSummary"
+        },
+        "phase": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "phase"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "x-control-plane-source": "status"
+        },
+        "startedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "timing.startedAt"
+        },
+        "endedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "timing.endedAt"
+        },
+        "durationMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "x-control-plane-source": "timing.durationMs"
+        },
+        "logicalModel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "selection.modelClass"
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "selection.backend"
+        },
+        "workspaceMode": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "selection.workspaceMode"
+        },
+        "previousExecutionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-control-plane-source": "previousExecutionId"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage",
+          "x-control-plane-source": "usage"
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "x-derived": "usage.input + usage.output"
+        },
+        "route": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Route"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-control-plane-source": "refs.upstream.route"
+        },
+        "routeUsage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteUsage"
+          },
+          "x-control-plane-source": "refs.upstream.routeUsage"
+        },
+        "terminal": {
+          "type": "boolean",
+          "x-derived": "status in terminal-status-set"
+        }
+      }
+    },
+    "Summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totalExecutions",
+        "activeExecutions",
+        "terminalExecutions",
+        "succeeded",
+        "failed",
+        "successRate",
+        "totalDurationMs",
+        "totalTokens",
+        "input",
+        "output",
+        "cachedInput",
+        "reasoningOutput",
+        "calls",
+        "costUsd"
+      ],
+      "properties": {
+        "totalExecutions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "activeExecutions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "terminalExecutions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeeded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successRate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "totalDurationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningOutput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "AnalyticsRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "executions",
+        "succeeded",
+        "failed",
+        "successRate",
+        "totalTokens",
+        "input",
+        "output",
+        "cachedInput",
+        "reasoningOutput",
+        "calls",
+        "costUsd",
+        "durationMs"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "executions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "succeeded": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "successRate": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "output": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cachedInput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reasoningOutput": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "Analytics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "projects",
+        "phases",
+        "logicalModels",
+        "providers",
+        "physicalModels"
+      ],
+      "properties": {
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        },
+        "phases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        },
+        "logicalModels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        },
+        "physicalModels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        }
+      }
+    },
+    "RuntimeSummary": {
+      "type": "object",
+      "required": [
+        "sourceHealth"
+      ],
+      "properties": {
+        "sourceHealth": {
+          "type": "object",
+          "required": [
+            "openhands",
+            "litellm"
+          ],
+          "properties": {
+            "openhands": {
+              "type": "string"
+            },
+            "litellm": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "Readiness": {
+      "type": "object",
+      "required": [
+        "ready",
+        "gates"
+      ],
+      "properties": {
+        "ready": {
+          "type": "boolean"
+        },
+        "gates": {
+          "type": "object",
+          "required": [
+            "representativeWorkflows"
+          ],
+          "properties": {
+            "representativeWorkflows": {
+              "type": "object",
+              "required": [
+                "current",
+                "required"
+              ],
+              "properties": {
+                "current": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "required": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "Registry": {
+      "type": "object",
+      "required": [
+        "deployments"
+      ],
+      "properties": {
+        "adminUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "health": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "deployments": {
+          "type": "object",
+          "required": [
+            "active",
+            "paused",
+            "items"
+          ],
+          "properties": {
+            "active": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "paused": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "items": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

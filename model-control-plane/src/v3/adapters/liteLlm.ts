@@ -16,6 +16,12 @@ function asRecord(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
 }
 
+function normalizeApiBase(value: unknown): string {
+  return String(value ?? '')
+    .trim()
+    .replace(/\/+$/, '');
+}
+
 export class LiteLlmModelGateway implements ModelGatewayPort {
   readonly #baseUrl: string;
   readonly #secrets: EnvFileValueProvider;
@@ -66,6 +72,10 @@ export class LiteLlmModelRegistry implements ModelRegistryPort {
   readonly #secrets: EnvFileValueProvider;
   readonly #keyName: string;
   readonly #adminUrl?: string;
+  #providerRoutingIndexCache: {
+    at: number;
+    value: { byDeploymentId: Record<string, string>; byApiBase: Record<string, string> };
+  } | null = null;
 
   constructor(options: {
     baseUrl: string;
@@ -86,6 +96,57 @@ export class LiteLlmModelRegistry implements ModelRegistryPort {
     });
     if (!response.ok) throw new Error(`LITELLM_REGISTRY_HTTP_${response.status}`);
     return asRecord(await response.json());
+  }
+
+  async providerRoutingIndex(): Promise<{
+    byDeploymentId: Record<string, string>;
+    byApiBase: Record<string, string>;
+  }> {
+    const cached = this.#providerRoutingIndexCache;
+    if (cached && Date.now() - cached.at < 30_000) return cached.value;
+
+    const [credentialsPayload, modelsPayload] = await Promise.all([
+      this.#json('/credentials'),
+      this.#json('/model/info'),
+    ]);
+    const credentialRows = Array.isArray(credentialsPayload.credentials)
+      ? credentialsPayload.credentials.map(asRecord)
+      : [];
+    const apiBaseByCredential = new Map<string, string>();
+    for (const row of credentialRows) {
+      const name = String(row.credential_name ?? '').trim();
+      const values = asRecord(row.credential_values);
+      const apiBase = normalizeApiBase(values.api_base);
+      if (name && apiBase) apiBaseByCredential.set(name, apiBase);
+    }
+
+    const byDeploymentId: Record<string, string> = {};
+    const providerKeysByApiBase = new Map<string, Set<string>>();
+    const modelRows = Array.isArray(modelsPayload.data) ? modelsPayload.data.map(asRecord) : [];
+    for (const row of modelRows) {
+      const info = asRecord(row.model_info);
+      if (info.db_model !== true) continue;
+      const params = asRecord(row.litellm_params);
+      const metadata = asRecord(info.metadata);
+      const deploymentId = String(info.id ?? '').trim();
+      const providerKey = String(metadata.legacy_provider_key ?? '').trim();
+      if (!providerKey) continue;
+      if (deploymentId) byDeploymentId[deploymentId] = providerKey;
+      const credentialName = String(params.litellm_credential_name ?? '').trim();
+      const apiBase = credentialName ? apiBaseByCredential.get(credentialName) : undefined;
+      if (!apiBase) continue;
+      const keys = providerKeysByApiBase.get(apiBase) ?? new Set<string>();
+      keys.add(providerKey);
+      providerKeysByApiBase.set(apiBase, keys);
+    }
+
+    const byApiBase: Record<string, string> = {};
+    for (const [apiBase, providerKeys] of providerKeysByApiBase) {
+      if (providerKeys.size === 1) byApiBase[apiBase] = [...providerKeys][0]!;
+    }
+    const value = { byDeploymentId, byApiBase };
+    this.#providerRoutingIndexCache = { at: Date.now(), value };
+    return value;
   }
 
   async summary(): Promise<ModelRegistrySummary> {
@@ -221,7 +282,14 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
   readonly #lookbackDays: number;
   readonly #requestTimeoutMs: number;
   readonly #healthTtlMs: number;
+  readonly #modelRegistry?: ModelRegistryPort;
+  readonly #providerLookupTtlMs: number;
   #healthCache: { status: 'OK' | 'UNAVAILABLE'; at: number } | null = null;
+  #providerLookupCache: {
+    at: number;
+    byDeploymentId: Map<string, string>;
+    byApiBase: Map<string, string>;
+  } | null = null;
 
   constructor(options: {
     baseUrl: string;
@@ -230,6 +298,8 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
     lookbackDays?: number;
     requestTimeoutMs?: number;
     healthTtlMs?: number;
+    modelRegistry?: ModelRegistryPort;
+    providerLookupTtlMs?: number;
   }) {
     this.#baseUrl = options.baseUrl.replace(/\/$/, '');
     this.#secrets = options.secrets;
@@ -237,6 +307,46 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
     this.#lookbackDays = Math.min(365, Math.max(1, options.lookbackDays ?? 30));
     this.#requestTimeoutMs = Math.max(1_000, options.requestTimeoutMs ?? 10_000);
     this.#healthTtlMs = Math.max(1_000, options.healthTtlMs ?? 30_000);
+    this.#modelRegistry = options.modelRegistry;
+    this.#providerLookupTtlMs = Math.max(1_000, options.providerLookupTtlMs ?? 30_000);
+  }
+
+  async #providerLookup(): Promise<{
+    byDeploymentId: Map<string, string>;
+    byApiBase: Map<string, string>;
+  }> {
+    const cached = this.#providerLookupCache;
+    if (cached && Date.now() - cached.at < this.#providerLookupTtlMs) {
+      return { byDeploymentId: cached.byDeploymentId, byApiBase: cached.byApiBase };
+    }
+    const byDeploymentId = new Map<string, string>();
+    const byApiBase = new Map<string, string>();
+    if (this.#modelRegistry) {
+      try {
+        if (this.#modelRegistry.providerRoutingIndex) {
+          const index = await this.#modelRegistry.providerRoutingIndex();
+          for (const [deploymentId, providerKey] of Object.entries(index.byDeploymentId)) {
+            if (deploymentId && providerKey) byDeploymentId.set(deploymentId, providerKey);
+          }
+          for (const [apiBase, providerKey] of Object.entries(index.byApiBase)) {
+            const normalized = normalizeApiBase(apiBase);
+            if (normalized && providerKey) byApiBase.set(normalized, providerKey);
+          }
+        } else {
+          const registry = await this.#modelRegistry.summary();
+          if (registry.health === 'OK') {
+            for (const deployment of registry.deployments.items) {
+              const providerKey = deployment.providerKey?.trim();
+              if (providerKey) byDeploymentId.set(deployment.id, providerKey);
+            }
+          }
+        }
+      } catch {
+        // Spend/usage remains available even if registry metadata is temporarily unavailable.
+      }
+    }
+    this.#providerLookupCache = { at: Date.now(), byDeploymentId, byApiBase };
+    return { byDeploymentId, byApiBase };
   }
 
   #dateWindow(): { startDate: string; endDate: string } {
@@ -315,12 +425,15 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
       let reasoningOutput = 0;
       let costUsd = 0;
       let calls = 0;
+      const providerLookup = await this.#providerLookup();
       const routeTotals = new Map<
         string,
         {
           model?: string;
           provider?: string;
+          providerKey?: string;
           deploymentId?: string;
+          apiBase?: string;
           input: number;
           output: number;
           cachedInput: number;
@@ -342,11 +455,17 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
         const model = String(row.model ?? '').trim();
         const provider = String(row.custom_llm_provider ?? row.provider ?? '').trim();
         const deploymentId = String(row.model_id ?? '').trim();
-        const routeKey = `${deploymentId}\u0000${provider}\u0000${model}`;
+        const apiBase = normalizeApiBase(row.api_base);
+        const providerKey =
+          (deploymentId ? providerLookup.byDeploymentId.get(deploymentId) : undefined) ??
+          (apiBase ? providerLookup.byApiBase.get(apiBase) : undefined);
+        const routeKey = `${deploymentId}\u0000${provider}\u0000${model}\u0000${apiBase}`;
         const route = routeTotals.get(routeKey) ?? {
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),
+          ...(providerKey ? { providerKey } : {}),
           ...(deploymentId ? { deploymentId } : {}),
+          ...(apiBase ? { apiBase } : {}),
           input: 0,
           output: 0,
           cachedInput: 0,
@@ -374,6 +493,10 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
       const model = String(latest.model ?? '').trim();
       const provider = String(latest.custom_llm_provider ?? latest.provider ?? '').trim();
       const deploymentId = String(latest.model_id ?? '').trim();
+      const apiBase = normalizeApiBase(latest.api_base);
+      const providerKey =
+        (deploymentId ? providerLookup.byDeploymentId.get(deploymentId) : undefined) ??
+        (apiBase ? providerLookup.byApiBase.get(apiBase) : undefined);
       return {
         health: 'OK',
         usage: {
@@ -390,14 +513,18 @@ export class LiteLlmSpendObservability implements ObservabilityPort {
               lastObservedRoute: {
                 ...(model ? { model } : {}),
                 ...(provider ? { provider } : {}),
+                ...(providerKey ? { providerKey } : {}),
                 ...(deploymentId ? { deploymentId } : {}),
+                ...(apiBase ? { apiBase } : {}),
               },
             }
           : {}),
         routeUsage: [...routeTotals.values()].map((route) => ({
           ...(route.model ? { model: route.model } : {}),
           ...(route.provider ? { provider: route.provider } : {}),
+          ...(route.providerKey ? { providerKey: route.providerKey } : {}),
           ...(route.deploymentId ? { deploymentId: route.deploymentId } : {}),
+          ...(route.apiBase ? { apiBase: route.apiBase } : {}),
           input: route.input,
           output: route.output,
           ...(route.cachedInput > 0 ? { cachedInput: route.cachedInput } : {}),

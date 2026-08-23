@@ -103,7 +103,9 @@ export interface UsageSummary {
 export interface RouteUsageSummary {
   model?: string;
   provider?: string;
+  providerKey?: string;
   deploymentId?: string;
+  apiBase?: string;
   input: number;
   output: number;
   cachedInput?: number;

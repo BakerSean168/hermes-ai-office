@@ -99,6 +99,7 @@ export async function buildControlPlane(
           secrets: adminSecrets,
           keyName: env.MODEL_CP_V3_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
           lookbackDays: Number(env.MODEL_CP_V3_LITELLM_OBSERVABILITY_LOOKBACK_DAYS ?? 365),
+          modelRegistry,
         }));
   const repositoryRoots = (env.MODEL_CP_V3_REPOSITORY_ROOTS ?? '/home/ubuntu/projects,/opt/data')
     .split(',')
