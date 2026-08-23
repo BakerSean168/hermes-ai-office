@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Mapping
 from pathlib import Path
 import re
@@ -18,11 +19,14 @@ from typing import Any
 import urllib.parse
 import urllib.request
 
-_CONTROL_PLANE_BASE = "http://127.0.0.1:8320"
-_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
+_CONTROL_PLANE_BASE = os.environ.get(
+    "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
+).rstrip("/")
+_V3_PHASES = {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
 _V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
 _V3_DEFAULT_AWAIT = {
+    "ORCHESTRATE": False,
     "INVESTIGATE_PLAN": True,
     "IMPLEMENT": False,
     "IMPLEMENT_FIX": False,
@@ -30,6 +34,7 @@ _V3_DEFAULT_AWAIT = {
     "FINALIZE": True,
 }
 _V3_DEFAULT_WAIT_SECONDS = {
+    "ORCHESTRATE": 0.0,
     "INVESTIGATE_PLAN": 240.0,
     "IMPLEMENT": 0.0,
     "IMPLEMENT_FIX": 0.0,
@@ -52,7 +57,7 @@ _RUN_PHASE_SCHEMA = {
             "project_key": {"type": "string"},
             "repository_path": {
                 "type": "string",
-                "description": "Required only for an initial INVESTIGATE_PLAN or IMPLEMENT.",
+                "description": "Required for ORCHESTRATE, initial INVESTIGATE_PLAN, or IMPLEMENT.",
             },
             "base_revision": {"type": "string"},
             "previous_execution_id": {
@@ -267,8 +272,8 @@ def _run_development_phase_tool(args: dict[str, Any], **kwargs: Any) -> str:
         previous_execution_id = str(args.get("previous_execution_id") or "").strip()
         previous = _v3_execution_snapshot(previous_execution_id) if previous_execution_id else None
         repository_path = str(args.get("repository_path") or "").strip()
-        if phase in {"INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
-            raise ValueError("repository_path is required for INVESTIGATE_PLAN and IMPLEMENT")
+        if phase in {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
+            raise ValueError("repository_path is required for ORCHESTRATE, INVESTIGATE_PLAN, and IMPLEMENT")
 
         context: dict[str, Any] = {}
         if previous_execution_id:
@@ -471,7 +476,7 @@ def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] |
     if development_topic:
         sections.append(
             "AI Office is the development execution authority. Delegate with ai_office_run_phase rather than directly choosing or launching a coding harness. "
-            "Use INVESTIGATE_PLAN for investigation/planning, IMPLEMENT for an isolated writer, VERIFY_REVIEW for a fresh read-only review, IMPLEMENT_FIX only after a FAIL review, and FINALIZE only after a PASS review. "
+            "Use ORCHESTRATE for a multi-ticket Active Plan: the OpenHands supervisor can fan out isolated Codex/Claude/OpenCode/DSH workers and fan in their results. Use INVESTIGATE_PLAN for a bounded investigation, IMPLEMENT for an isolated writer, VERIFY_REVIEW for a fresh read-only review, IMPLEMENT_FIX only after a FAIL review, and FINALIZE only after a PASS review. "
             "VERIFY_REVIEW and FINALIZE enforce a strict first-line PASS/FAIL protocol. Preserve executionId across turns; implementation is asynchronous by default, so recover with ai_office_get_execution or ai_office_list_active. "
             "Backend and logical model are policy decisions; physical provider selection, fallback, health, and spend are exclusively LiteLLM decisions."
         )

@@ -132,15 +132,42 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     assert.deepEqual(body.agent.llm.litellm_extra_body, { user: 'exec_1' });
     assert.deepEqual(
       body.agent.tools.map((tool: any) => tool.name),
-      ['terminal', 'file_editor', 'task_tracker'],
+      ['terminal', 'file_editor', 'task_tracker', 'task_tool_set'],
     );
     assert.deepEqual(body.tool_module_qualnames, {
       terminal: 'openhands.tools.terminal.definition',
       file_editor: 'openhands.tools.file_editor.definition',
       task_tracker: 'openhands.tools.task_tracker.definition',
+      task_tool_set: 'openhands.tools.task.definition',
     });
     assert.equal(body.workspace.working_dir, '/workspace/executions/exec_1/repo');
     assert.equal(body.observability_metadata.execution_id, 'exec_1');
+
+    await host.createExecution({
+      executionId: 'exec_supervisor_1',
+      projectKey: 'pixel-agents',
+      phase: 'ORCHESTRATE',
+      objective: 'Supervise the active plan.',
+      repositoryPath: '/workspace/executions/exec_supervisor_1/repo',
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'planning-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'read_oriented',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_supervisor_1', phase: 'ORCHESTRATE' },
+    });
+    const supervisorBody = createBody as any;
+    assert.deepEqual(
+      supervisorBody.agent.tools.map((tool: any) => tool.name),
+      ['terminal', 'file_editor', 'task_tracker', 'task_tool_set', 'ai_office_worker'],
+    );
+    assert.equal(
+      supervisorBody.tool_module_qualnames.ai_office_worker,
+      'hermes_ai_office_tools.worker',
+    );
 
     const acpCreated = await host.createExecution({
       executionId: 'exec_acp_1',
@@ -166,6 +193,98 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       kind: 'StaticSecret',
       value: 'exec_acp_1',
     });
+    assert.deepEqual(acpBody.secrets.LITELLM_V3_KEY, {
+      kind: 'StaticSecret',
+      value: 'virtual-secret',
+    });
+    assert.deepEqual(acpBody.secrets.LITELLM_V3_OPENAI_BASE_URL, {
+      kind: 'StaticSecret',
+      value: 'http://127.0.0.1:4000/v1',
+    });
+
+    await host.createExecution({
+      executionId: 'exec_codex_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review with Codex.',
+      repositoryPath: '/workspace/executions/exec_codex_1/repo',
+      selection: {
+        backend: 'codex-acp',
+        modelClass: 'review-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_codex_1', phase: 'VERIFY_REVIEW' },
+    });
+    const codexBody = createBody as any;
+    assert.equal(codexBody.agent.acp_server, 'codex');
+    assert.equal(codexBody.agent.acp_model, 'review-premium');
+    assert.equal(codexBody.secrets.CODEX_API_KEY.value, 'virtual-secret');
+    assert.equal(codexBody.secrets.MODEL_PROVIDER.value, 'hermes-litellm');
+    assert.equal(codexBody.secrets.NO_BROWSER.value, '1');
+    const codexConfig = JSON.parse(codexBody.secrets.CODEX_CONFIG.value);
+    assert.equal(codexConfig.model, 'review-premium');
+    assert.equal(codexConfig.model_provider, 'hermes-litellm');
+    assert.deepEqual(codexConfig.agents, { enabled: false });
+    assert.deepEqual(codexConfig.features, {
+      multi_agent: false,
+      multi_agent_v2: { enabled: false },
+    });
+    assert.deepEqual(codexConfig.model_providers['hermes-litellm'], {
+      name: 'Hermes LiteLLM',
+      base_url: 'http://127.0.0.1:4000/v1',
+      env_key: 'CODEX_API_KEY',
+      wire_api: 'responses',
+    });
+
+    await host.createExecution({
+      executionId: 'exec_claude_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review with Claude Code.',
+      repositoryPath: '/workspace/executions/exec_claude_1/repo',
+      selection: {
+        backend: 'claude-code-acp',
+        modelClass: 'review-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_claude_1', phase: 'VERIFY_REVIEW' },
+    });
+    const claudeBody = createBody as any;
+    assert.equal(claudeBody.agent.acp_server, 'claude-code');
+    assert.equal(claudeBody.agent.acp_model, 'review-premium');
+    assert.equal(claudeBody.secrets.ANTHROPIC_API_KEY.value, 'virtual-secret');
+    assert.equal(claudeBody.secrets.ANTHROPIC_BASE_URL.value, 'http://127.0.0.1:4000');
+    assert.equal(claudeBody.secrets.ANTHROPIC_CUSTOM_MODEL_OPTION.value, 'review-premium');
+
+    await host.createExecution({
+      executionId: 'exec_dsh_1',
+      projectKey: 'pixel-agents',
+      phase: 'IMPLEMENT',
+      objective: 'Implement with DSH.',
+      repositoryPath: '/workspace/executions/exec_dsh_1/repo',
+      selection: {
+        backend: 'dsh-acp',
+        modelClass: 'implementation-efficient',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'isolated_write',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_dsh_1', phase: 'IMPLEMENT' },
+    });
+    const dshBody = createBody as any;
+    assert.equal(dshBody.agent.acp_model, 'implementation-efficient');
+    assert.equal(dshBody.secrets.DEEPSEEK_API_KEY.value, 'virtual-secret');
+    assert.equal(dshBody.secrets.DEEPSEEK_BASE_URL.value, 'http://127.0.0.1:4000/v1');
+    assert.equal(dshBody.secrets.DSH_ACP_MODEL.value, 'implementation-efficient');
+    assert.equal(dshBody.secrets.DSH_HOME.value, '/openhands-state/dsh');
+    assert.equal(dshBody.secrets.DSH_BIN.value, '/openhands-state/dsh-cli/node_modules/.bin/dsh');
 
     const completed = await host.getExecution(created.conversationId);
     assert.equal(completed.status, 'SUCCEEDED');

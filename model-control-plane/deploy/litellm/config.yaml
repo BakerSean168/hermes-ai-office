@@ -18,6 +18,14 @@ router_settings:
     review-premium: gpt-5.6-sol
     implementation-efficient: deepseek-v4-flash
 
+  # Implementation may fall back within the efficient coding tier. Premium
+  # planning/review intentionally has no cross-quality fallback: if every GPT
+  # deployment is unhealthy, surface that condition to the Supervisor instead
+  # of silently degrading a review to a cheaper model class.
+  fallbacks:
+    - implementation-efficient: [glm-5.2]
+    - deepseek-v4-flash: [glm-5.2]
+
 litellm_settings:
   drop_params: true
   set_verbose: false

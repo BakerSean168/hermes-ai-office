@@ -393,11 +393,13 @@ export class ExecutionLinkRepository {
     const rows = input.projectKey
       ? (this.#db
           .prepare(
-            'SELECT * FROM v3_execution_links WHERE project_key=? ORDER BY created_at DESC LIMIT ? OFFSET ?',
+            'SELECT * FROM v3_execution_links WHERE project_key=? ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?',
           )
           .all(input.projectKey, limit, offset) as unknown as ExecutionLinkRow[])
       : (this.#db
-          .prepare('SELECT * FROM v3_execution_links ORDER BY created_at DESC LIMIT ? OFFSET ?')
+          .prepare(
+            'SELECT * FROM v3_execution_links ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?',
+          )
           .all(limit, offset) as unknown as ExecutionLinkRow[]);
     return rows.map(rowToRecord);
   }

@@ -3,10 +3,10 @@
 AI Office is the Hermes-facing development execution facade.
 
 ```text
-Hermes Brain -> AI Office V3 -> OpenHands -> LiteLLM
+Hermes -> AI Office V3 -> OpenHands Supervisor -> isolated coding workers -> LiteLLM
 ```
 
-The plugin intentionally has no parallel provider database and no direct coding-harness placement path.
+The Hermes plugin is intentionally thin: it has no parallel provider database and does not orchestrate ticket batches itself. Project-level decomposition and fan-out belong to the OpenHands Supervisor; workspace admission, lineage, and review gates remain deterministic in the Control Plane.
 
 ## Tools
 
@@ -21,13 +21,16 @@ The only hook is `pre_llm_call`, which tells the Hermes Brain when to delegate d
 
 ## Development protocol
 
+- `ORCHESTRATE`
 - `INVESTIGATE_PLAN`
 - `IMPLEMENT`
 - `VERIFY_REVIEW`
 - `IMPLEMENT_FIX`
 - `FINALIZE`
 
-Review results must begin with exactly `PASS` or `FAIL`. A FAIL review can enter `IMPLEMENT_FIX`; a PASS review can enter `FINALIZE`.
+Reviewers should put `PASS` or `FAIL` on the first non-empty line. The parser prefers that strict contract and otherwise accepts only one unique standalone verdict token in the whole result; ambiguous results fail closed as `UNKNOWN`. A blocking review can enter `IMPLEMENT_FIX`; an approved review can enter `FINALIZE`.
+
+`ORCHESTRATE` runs in a read-oriented Supervisor workspace. It may use OpenHands `task_tool_set` for internal analysis and `ai_office_worker` to launch multiple isolated workers. External ACP backends currently include OpenCode, DSH, Codex, Claude Code, and ZCode. Runtime readiness is separate from registration: only smoke-proven workers are enabled by default.
 
 ## Dashboard
 

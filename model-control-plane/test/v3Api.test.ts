@@ -255,6 +255,50 @@ test('V3 cancel keeps product status CANCELLED when OpenHands pause is the trans
   }
 });
 
+test('V3 cancel is monotonic when the pause transport briefly still reports RUNNING', async () => {
+  const host = new FakeHost();
+  host.cancelExecution = async () => ({
+    conversationId: '22222222-2222-4222-8222-222222222222',
+    status: 'RUNNING',
+  });
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': false },
+  });
+  try {
+    const started = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'v3-cancel-race' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Cancellation race probe.',
+        projectKey: 'memo-flow',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    const executionId = started.json().executionId;
+    const cancelled = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/executions/${executionId}/cancel`,
+    });
+    assert.equal(cancelled.statusCode, 200);
+    assert.equal(cancelled.json().status, 'CANCELLED');
+
+    const reread = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(reread.json().status, 'CANCELLED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives reviewer findings through causal lineage', async () => {
   const host = new FakeHost();
   const provisions: Array<{
@@ -905,6 +949,44 @@ test('V3 writer admission allows two isolated writers per project and rejects th
   }
 });
 
+test('V3 writer admission counts PAUSED writer leases during ACP startup', async () => {
+  const host = new FakeHost();
+  host.status = 'PAUSED';
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+    },
+  });
+  try {
+    const startWriter = (key: string) =>
+      runtime.app.inject({
+        method: 'POST',
+        url: '/api/v3/development/executions',
+        headers: { 'idempotency-key': key },
+        payload: {
+          phase: 'IMPLEMENT',
+          objective: `Paused startup writer ${key}`,
+          projectKey: 'paused-startup-project',
+          repository: { path: '/tmp/fake-repo' },
+          await: false,
+        },
+      });
+    assert.equal((await startWriter('paused-writer-1')).statusCode, 201);
+    assert.equal((await startWriter('paused-writer-2')).statusCode, 201);
+    const third = await startWriter('paused-writer-3');
+    assert.equal(third.statusCode, 409);
+    assert.equal(third.json().error.code, 'WRITER_CONCURRENCY_PROJECT_LIMIT');
+    assert.equal(host.creates, 2);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('V3 writer admission enforces the global active writer cap across projects', async () => {
   const host = new FakeHost();
   const runtime = await buildControlPlane({
@@ -1243,6 +1325,10 @@ test('V3 runtime summary exposes only safe execution-plane health and logical mo
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': false,
+      'codex-acp': false,
+      'claude-code-acp': false,
+      'dsh-acp': false,
+      'zcode-acp': false,
     },
   });
   try {

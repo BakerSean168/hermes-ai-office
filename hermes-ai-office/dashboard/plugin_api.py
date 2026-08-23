@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -19,7 +20,9 @@ from fastapi import APIRouter, HTTPException
 
 router = APIRouter()
 
-_BASE_URL = "http://127.0.0.1:8320"
+_BASE_URL = os.environ.get(
+    "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
+).rstrip("/")
 _CONTRACT_PATH = Path(__file__).resolve().parents[1] / "contracts" / "dashboard.schema.json"
 _CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
 _DASHBOARD_SCHEMA_VERSION = int(_CONTRACT["properties"]["schemaVersion"]["const"])

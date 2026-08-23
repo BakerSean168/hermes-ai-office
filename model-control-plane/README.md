@@ -4,7 +4,7 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 
 ## Responsibilities
 
-- phase policy and backend selection;
+- `ORCHESTRATE` supervisor execution plus phase policy and backend selection;
 - causal execution lineage;
 - isolated implementation workspaces and read-only review snapshots;
 - strict PASS/FAIL review governance;
@@ -13,7 +13,9 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 - durable execution timing, result, LiteLLM usage, and per-deployment route usage;
 - readiness evidence.
 
-OpenHands owns worker lifecycle. LiteLLM is the only provider/model/routing/health/spend authority.
+OpenHands owns supervisor and worker lifecycle. The built-in OpenHands supervisor may use `task_tool_set` for bounded analysis and the repository-owned `ai_office_worker` tool to fan out isolated ACP coding workers. LiteLLM is the only provider/model/routing/health/spend authority.
+
+Coding backends are defined in policy independently from runtime readiness. OpenCode and DSH are the proven default implementation workers. Codex, Claude Code, and ZCode are registered ACP backends but must pass runtime smoke before they are added to `MODEL_CP_V3_ENABLED_BACKENDS`. This keeps an installed adapter from being mistaken for a production-ready worker.
 
 ## API
 
@@ -40,4 +42,6 @@ npm run build -w model-control-plane
 
 ## Production
 
-The canonical checkout is `/home/ubuntu/projects/pixel-agents`. The service listens on `127.0.0.1:8320` and is installed from `deploy/hermes-model-control-plane.service` plus the V3 production drop-in.
+The development execution plane runs on GCP Dev from `/home/dev/projects/pixel-agents`. The Control Plane listens only on `127.0.0.1:8320` and is installed with `deploy/gcp/install-gcp-execution-plane.sh`; OpenHands and all mutable workspaces are colocated on that host.
+
+Oracle2 remains the Hermes ingress plus LiteLLM provider authority. Hermes reaches GCP through the host-private `hermes-ai-office-gcp-tunnel.service` at `127.0.0.1:8321`; Oracle2 does not run a second Control Plane or OpenHands worker. This avoids split workspace ownership and keeps Hermes a thin delegation boundary.

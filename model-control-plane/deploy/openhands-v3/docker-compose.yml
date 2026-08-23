@@ -2,10 +2,15 @@ name: hermes-openhands-v3
 
 services:
   agent-server:
-    image: hermes-openhands-agent-server:1.39.1-source-arm64
+    image: ${OPENHANDS_SOURCE_IMAGE:-hermes-openhands-agent-server:1.39.1-source}
     container_name: hermes-openhands-v3
-    platform: linux/arm64
     network_mode: host
+    # Docker does not automatically inherit the host's Tailscale MagicDNS
+    # resolver. Use the tailnet resolver explicitly so private service names
+    # (for example the Oracle-hosted LiteLLM authority) never fall back to
+    # public DNS inside the worker container.
+    dns:
+      - 100.100.100.100
     command:
       - --host
       - 127.0.0.1
@@ -18,12 +23,16 @@ services:
       LOG_JSON: 'true'
       OH_ENABLE_VNC: '0'
       OH_ENABLE_VSCODE: '0'
-      OH_PRELOAD_TOOLS: '1'
+      OH_PRELOAD_TOOLS: '0'
       OPENCODE_CONFIG: /etc/hermes-ai-office-v3/opencode.json
+      PYTHONPATH: /opt/hermes-ai-office-tools
+      AI_OFFICE_CONTROL_PLANE_URL: http://127.0.0.1:8320
     volumes:
       - /opt/data/hermes-ai-office-v3/workspaces:/workspace
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state
       - ./opencode-v3.json:/etc/hermes-ai-office-v3/opencode.json:ro
+      - ./dsh-acp-v3.patch.yml:/etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml:ro
+      - ../../openhands_tools:/opt/hermes-ai-office-tools:ro
     cap_drop:
       - ALL
     security_opt:

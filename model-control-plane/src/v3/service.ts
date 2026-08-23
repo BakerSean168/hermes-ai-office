@@ -42,6 +42,17 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
     ? `\nPrevious phase result:\n${input.context.previousResult.trim().slice(0, 12_000)}`
     : '';
   const rules: Record<DevelopmentPhase, string[]> = {
+    ORCHESTRATE: [
+      'Act as the AI Office engineering supervisor for the supplied project objective or active plan.',
+      'Keep this supervisor workspace read-only. Use task_tool_set for bounded investigation and ai_office_worker for coding-agent executions.',
+      'The Worker source repository reference is a host path for ai_office_worker launches; do not try to open that host path from the supervisor container. Inspect the current mounted workspace instead.',
+      'Launch independent IMPLEMENT workers only for dependency-independent tickets; the control plane enforces workspace isolation and writer concurrency.',
+      'Prefer OpenCode or DSH workers for implementation. Use Codex or Claude Code for premium planning/review only when the runtime summary reports that backend enabled.',
+      'For every implementation, launch an independent VERIFY_REVIEW against that implementation execution; on FAIL launch IMPLEMENT_FIX and review again.',
+      'A review is usable only when its final result begins with strict PASS or FAIL. If a premium ACP reviewer times out, is cancelled/stuck/failed, or returns no strict verdict, cancel it if still active and retry VERIFY_REVIEW with openhands-builtin. Never treat transport completion as review approval.',
+      'Do not claim that FINALIZE merges code. FINALIZE currently records a verified logical completion only; report integration as pending unless a separate integration mechanism proves it happened.',
+      'Stop and report a blocking decision instead of bypassing a protected contract, review gate, writer lease, or failed verification.',
+    ],
     INVESTIGATE_PLAN: [
       'Investigate the repository and identify evidence-backed root causes.',
       'Do not modify repository files in this phase.',
@@ -78,6 +89,9 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
   return [
     `Hermes development phase: ${input.phase}`,
     `Project: ${input.projectKey}`,
+    input.phase === 'ORCHESTRATE' && input.repository.path
+      ? `Worker source repository reference: ${input.repository.path}`
+      : '',
     '',
     'Objective:',
     input.objective.trim(),
@@ -250,13 +264,16 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     candidates: ExecutionLinkRecord[],
     mutableWorkspaceRef?: string,
   ): void {
-    const active = candidates.filter((record) => ACTIVE_WRITER_STATUSES.has(record.statusCache));
+    // A PAUSED writer still owns its mutable workspace and may be in the short
+    // ACP startup/pause transition before RUNNING. Count every writer lease as
+    // admission occupancy so concurrent starts cannot oversubscribe the cap.
+    const occupied = candidates.filter((record) => WRITER_LEASE_STATUSES.has(record.statusCache));
     const limits = this.#policy.config.concurrency;
-    if (active.length >= limits.max_active_writers) {
+    if (occupied.length >= limits.max_active_writers) {
       throw new Error('WRITER_CONCURRENCY_GLOBAL_LIMIT');
     }
     if (
-      active.filter((record) => record.projectKey === projectKey).length >=
+      occupied.filter((record) => record.projectKey === projectKey).length >=
       limits.max_active_writers_per_project
     ) {
       throw new Error('WRITER_CONCURRENCY_PROJECT_LIMIT');
@@ -338,7 +355,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!idempotencyKey.trim()) throw new Error('IDEMPOTENCY_KEY_REQUIRED');
     if (!input.objective?.trim()) throw new Error('OBJECTIVE_REQUIRED');
     if (!input.projectKey?.trim()) throw new Error('PROJECT_KEY_REQUIRED');
-    if (['INVESTIGATE_PLAN', 'IMPLEMENT'].includes(input.phase) && !input.repository?.path) {
+    if (
+      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT'].includes(input.phase) &&
+      !input.repository?.path
+    ) {
       throw new Error('REPOSITORY_PATH_REQUIRED');
     }
 
@@ -521,8 +541,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     let hostSnapshot = record.openhandsConversationId
       ? await this.#host.getExecution(record.openhandsConversationId)
       : null;
-    const preserveCancelled =
-      record.statusCache === 'CANCELLED' && hostSnapshot?.status === 'PAUSED';
+    // Once the execution host accepts cancellation, product state is monotonic.
+    // OpenHands implements cancel through an asynchronous pause primitive, so an
+    // immediate follow-up GET may transiently still report RUNNING. Never let
+    // that transport race resurrect a cancelled AI Office execution.
+    const preserveCancelled = record.statusCache === 'CANCELLED';
     if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveCancelled) {
       const observedAt = hostSnapshot.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
       record = this.#links.updateStatus(
@@ -625,11 +648,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     const record = this.#links.get(executionId);
     if (!record) return null;
     if (record.openhandsConversationId) {
-      const snapshot = await this.#host.cancelExecution(record.openhandsConversationId);
-      this.#links.updateStatus(
-        executionId,
-        snapshot.status === 'PAUSED' ? 'CANCELLED' : snapshot.status,
-      );
+      await this.#host.cancelExecution(record.openhandsConversationId);
+      this.#links.updateStatus(executionId, 'CANCELLED');
     } else {
       this.#links.updateStatus(executionId, 'CANCELLED');
     }

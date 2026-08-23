@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 
-import type { BackendPolicyConfig, DevelopmentPolicy } from '../policy.js';
+import type {
+  BackendPolicyConfig,
+  DevelopmentPolicy,
+  ManagedEnvironmentSource,
+} from '../policy.js';
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
@@ -158,6 +162,80 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
     }
   }
 
+  #builtInTools(input: ExecutionHostCreateInput): JsonRecord[] {
+    const tools = [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }];
+    if (['INVESTIGATE_PLAN', 'VERIFY_REVIEW', 'ORCHESTRATE'].includes(input.phase)) {
+      tools.push({ name: 'task_tool_set' });
+    }
+    if (input.phase === 'ORCHESTRATE') tools.push({ name: 'ai_office_worker' });
+    return tools;
+  }
+
+  #toolModuleQualnames(input: ExecutionHostCreateInput): Record<string, string> {
+    const modules: Record<string, string> = {
+      terminal: 'openhands.tools.terminal.definition',
+      file_editor: 'openhands.tools.file_editor.definition',
+      task_tracker: 'openhands.tools.task_tracker.definition',
+    };
+    if (['INVESTIGATE_PLAN', 'VERIFY_REVIEW', 'ORCHESTRATE'].includes(input.phase)) {
+      modules.task_tool_set = 'openhands.tools.task.definition';
+    }
+    if (input.phase === 'ORCHESTRATE') {
+      modules.ai_office_worker = 'hermes_ai_office_tools.worker';
+    }
+    return modules;
+  }
+
+  #managedValue(source: ManagedEnvironmentSource, input: ExecutionHostCreateInput): string {
+    const baseUrl = this.#secrets.read(this.#liteLlmBaseUrlName).replace(/\/$/, '');
+    switch (source) {
+      case 'litellm_api_key':
+        return this.#secrets.read(this.#liteLlmKeyName);
+      case 'litellm_base_url':
+        return baseUrl;
+      case 'litellm_base_url_v1':
+        return baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`;
+      case 'logical_model':
+        return input.selection.modelClass;
+      case 'execution_id':
+        return input.executionId;
+      case 'codex_config':
+        return JSON.stringify({
+          model: input.selection.modelClass,
+          model_provider: 'hermes-litellm',
+          // AI Office owns project-level delegation. Disable Codex's nested
+          // multi-agent namespace so its Responses tool schema stays portable
+          // through LiteLLM and we do not create a second orchestration layer.
+          agents: { enabled: false },
+          features: {
+            multi_agent: false,
+            multi_agent_v2: { enabled: false },
+          },
+          model_providers: {
+            'hermes-litellm': {
+              name: 'Hermes LiteLLM',
+              base_url: baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`,
+              env_key: 'CODEX_API_KEY',
+              wire_api: 'responses',
+            },
+          },
+        });
+    }
+  }
+
+  #executionSecrets(input: ExecutionHostCreateInput): JsonRecord | undefined {
+    const backend = this.#policy.backend(input.selection.backend);
+    if (!backend || input.selection.transportMode !== 'LITELLM_MANAGED') return undefined;
+    const values: Record<string, JsonRecord> = {};
+    for (const [name, source] of Object.entries(backend.managed_env ?? {})) {
+      values[name] = { kind: 'StaticSecret', value: this.#managedValue(source, input) };
+    }
+    for (const [name, value] of Object.entries(backend.static_env ?? {})) {
+      values[name] = { kind: 'StaticSecret', value };
+    }
+    return Object.keys(values).length ? values : undefined;
+  }
+
   #agentConfig(input: ExecutionHostCreateInput): JsonRecord {
     const backend = this.#policy.backend(input.selection.backend);
     if (!backend?.enabled) throw new Error('EXECUTION_BACKEND_UNAVAILABLE');
@@ -187,7 +265,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
           num_retries: 1,
           timeout: 300,
         },
-        tools: [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }],
+        tools: this.#builtInTools(input),
       };
     }
     if (backend.kind === 'acp') return this.#acpAgentConfig(backend, input);
@@ -204,12 +282,13 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       acp_startup_timeout: 90,
     };
     if (input.selection.transportMode === 'LITELLM_MANAGED') {
-      if (!backend.managed_model_prefix) {
+      if (backend.managed_model_prefix == null && !backend.managed_env) {
         // Never assume how an arbitrary ACP server consumes a managed model gateway.
-        // The backend must opt in with a probed logical-model prefix.
+        // The backend must opt in with a probed logical-model prefix or explicit
+        // managed environment mapping.
         throw new Error('ACP_MANAGED_TRANSPORT_NOT_MATERIALIZED');
       }
-      config.acp_model = `${backend.managed_model_prefix}${input.selection.modelClass}`;
+      config.acp_model = `${backend.managed_model_prefix ?? ''}${input.selection.modelClass}`;
     }
     return config;
   }
@@ -220,11 +299,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       body: JSON.stringify({
         workspace: { kind: 'LocalWorkspace', working_dir: input.repositoryPath },
         agent: this.#agentConfig(input),
-        tool_module_qualnames: {
-          terminal: 'openhands.tools.terminal.definition',
-          file_editor: 'openhands.tools.file_editor.definition',
-          task_tracker: 'openhands.tools.task_tracker.definition',
-        },
+        tool_module_qualnames: this.#toolModuleQualnames(input),
         initial_message: {
           role: 'user',
           content: [{ type: 'text', text: input.objective }],
@@ -238,21 +313,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
           project: input.projectKey.replace(/[^a-zA-Z0-9]/g, '').slice(0, 128),
           phase: input.phase.toLowerCase().replace(/_/g, ''),
         },
-        ...(this.#policy.backend(input.selection.backend)?.kind === 'acp' &&
-        input.selection.transportMode === 'LITELLM_MANAGED'
-          ? {
-              // ACPAgent injects conversation secrets into the ACP subprocess
-              // environment through OpenHands' official SecretRegistry. OpenCode
-              // reads this value via `{env:HERMES_V3_EXECUTION_ID}` and sends it
-              // as the standard OpenAI-compatible `user` request field.
-              secrets: {
-                HERMES_V3_EXECUTION_ID: {
-                  kind: 'StaticSecret',
-                  value: input.executionId,
-                },
-              },
-            }
-          : {}),
+        ...(this.#executionSecrets(input) ? { secrets: this.#executionSecrets(input) } : {}),
         observability_metadata: input.correlationMetadata,
         observability_tags: ['hermes-ai-office-v3', input.phase.toLowerCase()],
       }),

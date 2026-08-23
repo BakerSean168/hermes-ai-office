@@ -1,0 +1,32 @@
+[Unit]
+Description=Hermes AI Office V3 Control Plane (GCP execution host)
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dev/projects/pixel-agents
+ExecStart=/usr/bin/node model-control-plane/dist/main.js
+ExecStartPre=/usr/bin/test -f /home/dev/projects/pixel-agents/model-control-plane/dist/main.js
+EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
+Environment=NODE_ENV=production
+Environment=MODEL_CP_HOST=127.0.0.1
+Environment=MODEL_CP_PORT=8320
+Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/control-plane.sqlite
+Environment=MODEL_CP_V3_OPENHANDS_URL=http://127.0.0.1:18000
+Environment=MODEL_CP_V3_OPENHANDS_ENV_FILE=/srv/hermes-personal/secrets/openhands-v3.env
+Environment=MODEL_CP_V3_WORKSPACE_ROOT=/opt/data/hermes-ai-office-v3/workspaces
+Environment=MODEL_CP_V3_OPENHANDS_WORKSPACE_ROOT=/workspace
+Environment=MODEL_CP_V3_REPOSITORY_ROOTS=/home/dev/projects,/opt/data
+Environment=MODEL_CP_V3_LITELLM_ADMIN_ENV_FILE=/srv/hermes-personal/secrets/litellm.env
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/srv/hermes-personal/data/model-control-plane /opt/data/hermes-ai-office-v3/workspaces
+
+[Install]
+WantedBy=multi-user.target

@@ -50,3 +50,6 @@ agent-orchestrator.yaml
 .ao/
 .serena/
 tasks/
+# Python bytecode
+__pycache__/
+*.py[cod]

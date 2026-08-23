@@ -5,9 +5,20 @@ concurrency:
   max_active_writers_per_project: 2
 
 phases:
+  ORCHESTRATE:
+    backend_candidates:
+      - openhands-builtin
+    model_class: planning-premium
+    transport_preference:
+      - LITELLM_MANAGED
+    workspace_mode: read_oriented
+    session_policy: fresh
+
   INVESTIGATE_PLAN:
     backend_candidates:
       - openhands-builtin
+      - codex-acp
+      - claude-code-acp
       - opencode-acp
     model_class: planning-premium
     transport_preference:
@@ -18,6 +29,10 @@ phases:
   IMPLEMENT:
     backend_candidates:
       - opencode-acp
+      - dsh-acp
+      - zcode-acp
+      - claude-code-acp
+      - codex-acp
       - openhands-builtin
     model_class: implementation-efficient
     transport_preference:
@@ -28,6 +43,10 @@ phases:
   IMPLEMENT_FIX:
     backend_candidates:
       - opencode-acp
+      - dsh-acp
+      - zcode-acp
+      - claude-code-acp
+      - codex-acp
       - openhands-builtin
     model_class: implementation-efficient
     transport_preference:
@@ -37,6 +56,8 @@ phases:
 
   VERIFY_REVIEW:
     backend_candidates:
+      - codex-acp
+      - claude-code-acp
       - openhands-builtin
       - opencode-acp
     model_class: review-premium
@@ -70,6 +91,82 @@ backends:
       - acp
     acp_server: custom
     managed_model_prefix: litellm-v3/
+    managed_env:
+      LITELLM_V3_KEY: litellm_api_key
+      LITELLM_V3_OPENAI_BASE_URL: litellm_base_url_v1
+      HERMES_V3_EXECUTION_ID: execution_id
+    supports:
+      litellm_managed: true
+      write: true
+
+  codex-acp:
+    kind: acp
+    enabled: true
+    command:
+      - /openhands-state/tooling/node_modules/.bin/codex-acp
+    acp_server: codex
+    managed_model_prefix: ''
+    managed_env:
+      CODEX_API_KEY: litellm_api_key
+      CODEX_CONFIG: codex_config
+      HERMES_V3_EXECUTION_ID: execution_id
+    static_env:
+      MODEL_PROVIDER: hermes-litellm
+      NO_BROWSER: '1'
+    supports:
+      litellm_managed: true
+      write: true
+
+  claude-code-acp:
+    kind: acp
+    enabled: true
+    command:
+      - /openhands-state/tooling/node_modules/.bin/claude-agent-acp
+    acp_server: claude-code
+    managed_model_prefix: ''
+    managed_env:
+      ANTHROPIC_API_KEY: litellm_api_key
+      ANTHROPIC_BASE_URL: litellm_base_url
+      ANTHROPIC_MODEL: logical_model
+      ANTHROPIC_CUSTOM_MODEL_OPTION: logical_model
+      CLAUDE_CODE_SUBAGENT_MODEL: logical_model
+      HERMES_V3_EXECUTION_ID: execution_id
+    supports:
+      litellm_managed: true
+      write: true
+
+  dsh-acp:
+    kind: acp
+    enabled: true
+    command:
+      - /openhands-state/tooling/node_modules/.bin/dsh-acp-server
+      - --patch
+      - /etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml
+    acp_server: custom
+    managed_model_prefix: ''
+    managed_env:
+      DEEPSEEK_API_KEY: litellm_api_key
+      DEEPSEEK_BASE_URL: litellm_base_url_v1
+      DSH_ACP_MODEL: logical_model
+      HERMES_V3_EXECUTION_ID: execution_id
+    static_env:
+      DSH_HOME: /openhands-state/dsh
+      DSH_BIN: /openhands-state/dsh-cli/node_modules/.bin/dsh
+    supports:
+      litellm_managed: true
+      write: true
+
+  zcode-acp:
+    kind: acp
+    enabled: true
+    command:
+      - /openhands-state/tooling/node_modules/.bin/zcode-acp-server
+    acp_server: custom
+    managed_model_prefix: ''
+    managed_env:
+      ZCODE_MODEL: logical_model
+      ZCODE_BASE_URL: litellm_base_url_v1
+      HERMES_V3_EXECUTION_ID: execution_id
     supports:
       litellm_managed: true
       write: true

@@ -8,32 +8,77 @@ import { DevelopmentPolicy } from '../src/v3/policy.js';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const policyFile = path.resolve(here, '../config/development-policy.yaml');
 
+const allAvailable = {
+  'openhands-builtin': true,
+  'opencode-acp': true,
+  'codex-acp': true,
+  'claude-code-acp': true,
+  'dsh-acp': true,
+  'zcode-acp': true,
+};
+
 test('development policy uses LiteLLM-managed execution for all model-backed phases', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   for (const phase of [
+    'ORCHESTRATE',
     'INVESTIGATE_PLAN',
     'IMPLEMENT',
     'IMPLEMENT_FIX',
     'VERIFY_REVIEW',
   ] as const) {
-    const selected = policy.select(phase, {}, { 'openhands-builtin': true, 'opencode-acp': true });
+    const selected = policy.select(phase, {}, allAvailable);
     assert.equal(selected.transportMode, 'LITELLM_MANAGED');
-    assert.ok(['openhands-builtin', 'opencode-acp'].includes(selected.backend));
+    assert.ok(
+      [
+        'openhands-builtin',
+        'opencode-acp',
+        'codex-acp',
+        'claude-code-acp',
+        'dsh-acp',
+        'zcode-acp',
+      ].includes(selected.backend),
+    );
   }
   assert.equal(policy.config.version, 2);
   assert.deepEqual(Object.keys(policy.config.backends).sort(), [
+    'claude-code-acp',
+    'codex-acp',
     'control-plane-finalizer',
+    'dsh-acp',
     'opencode-acp',
     'openhands-builtin',
+    'zcode-acp',
   ]);
 });
 
-test('development policy falls back from OpenCode ACP to OpenHands', () => {
+test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  const selected = policy.select('ORCHESTRATE', {}, allAvailable);
+  assert.equal(selected.backend, 'openhands-builtin');
+  assert.equal(selected.modelClass, 'planning-premium');
+  assert.equal(selected.workspaceMode, 'read_oriented');
+});
+
+test('implementation prefers OpenCode and review prefers Codex', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  assert.equal(policy.select('IMPLEMENT', {}, allAvailable).backend, 'opencode-acp');
+  assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'opencode-acp');
+  assert.equal(policy.select('VERIFY_REVIEW', {}, allAvailable).backend, 'codex-acp');
+});
+
+test('development policy falls back through enabled implementation workers to OpenHands', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   const implementation = policy.select(
     'IMPLEMENT',
     {},
-    { 'opencode-acp': false, 'openhands-builtin': true },
+    {
+      'opencode-acp': false,
+      'dsh-acp': false,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'openhands-builtin': true,
+    },
   );
   assert.equal(implementation.backend, 'openhands-builtin');
   assert.equal(implementation.modelClass, 'implementation-efficient');

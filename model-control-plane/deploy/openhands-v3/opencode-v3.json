@@ -6,7 +6,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "name": "Hermes AI Office V3 / LiteLLM",
       "options": {
-        "baseURL": "http://127.0.0.1:4000/v1",
+        "baseURL": "{env:LITELLM_V3_OPENAI_BASE_URL}",
         "apiKey": "{env:LITELLM_V3_KEY}"
       },
       "models": {

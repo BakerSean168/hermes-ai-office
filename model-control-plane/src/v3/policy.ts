@@ -19,12 +19,22 @@ interface BackendSupportsConfig {
   write?: boolean;
 }
 
+export type ManagedEnvironmentSource =
+  | 'litellm_api_key'
+  | 'litellm_base_url'
+  | 'litellm_base_url_v1'
+  | 'logical_model'
+  | 'execution_id'
+  | 'codex_config';
+
 export interface BackendPolicyConfig {
   kind: 'openhands' | 'acp' | 'external_adapter' | 'internal';
   enabled: boolean;
   command?: string[];
   acp_server?: string;
   managed_model_prefix?: string;
+  managed_env?: Record<string, ManagedEnvironmentSource>;
+  static_env?: Record<string, string>;
   supports?: BackendSupportsConfig;
 }
 
@@ -112,6 +122,42 @@ function validateConfig(raw: unknown): DevelopmentPolicyConfig {
   )) {
     if (!(name in (config.backends as Record<string, unknown>))) {
       throw new Error(`V3_POLICY_BACKEND_UNKNOWN:${name}`);
+    }
+  }
+  const managedSources = new Set<ManagedEnvironmentSource>([
+    'litellm_api_key',
+    'litellm_base_url',
+    'litellm_base_url_v1',
+    'logical_model',
+    'execution_id',
+    'codex_config',
+  ]);
+  for (const [name, rawBackend] of Object.entries(
+    config.backends as Record<string, Record<string, unknown>>,
+  )) {
+    const managedEnv = rawBackend.managed_env;
+    if (managedEnv != null) {
+      if (typeof managedEnv !== 'object' || Array.isArray(managedEnv)) {
+        throw new Error(`V3_POLICY_MANAGED_ENV_INVALID:${name}`);
+      }
+      for (const source of Object.values(managedEnv as Record<string, unknown>)) {
+        if (!managedSources.has(String(source) as ManagedEnvironmentSource)) {
+          throw new Error(`V3_POLICY_MANAGED_ENV_SOURCE_INVALID:${name}`);
+        }
+      }
+    }
+    const staticEnv = rawBackend.static_env;
+    if (staticEnv != null) {
+      if (typeof staticEnv !== 'object' || Array.isArray(staticEnv)) {
+        throw new Error(`V3_POLICY_STATIC_ENV_INVALID:${name}`);
+      }
+      if (
+        Object.values(staticEnv as Record<string, unknown>).some(
+          (value) => typeof value !== 'string',
+        )
+      ) {
+        throw new Error(`V3_POLICY_STATIC_ENV_VALUE_INVALID:${name}`);
+      }
     }
   }
   return config as unknown as DevelopmentPolicyConfig;
