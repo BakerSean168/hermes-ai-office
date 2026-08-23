@@ -56,11 +56,10 @@ phases:
 
   VERIFY_REVIEW:
     backend_candidates:
-      - codex-acp
-      - claude-code-acp
+      - codex-review-headless
+      - claude-code-review-headless
       - openhands-builtin
-      - opencode-acp
-    model_class: review-premium
+    model_class: gpt-5.6-sol
     transport_preference:
       - LITELLM_MANAGED
     workspace_mode: review_snapshot
@@ -98,6 +97,50 @@ backends:
     supports:
       litellm_managed: true
       write: true
+
+  codex-review-headless:
+    kind: acp
+    enabled: true
+    command:
+      - /usr/local/bin/node
+      - /opt/hermes-ai-office-tools/headless_review_acp.mjs
+    acp_server: custom
+    managed_model_prefix: ''
+    managed_env:
+      AI_OFFICE_HEADLESS_MODEL: logical_model
+      AI_OFFICE_LITELLM_BASE_URL: litellm_base_url
+      AI_OFFICE_LITELLM_API_KEY: litellm_api_key
+      HERMES_V3_EXECUTION_ID: execution_id
+    static_env:
+      AI_OFFICE_HEADLESS_DRIVER: codex
+      AI_OFFICE_CODEX_BIN: /openhands-state/tooling/node_modules/.bin/codex
+      AI_OFFICE_WORKSPACE_ROOT: /workspace
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: '900'
+    supports:
+      litellm_managed: true
+      write: false
+
+  claude-code-review-headless:
+    kind: acp
+    enabled: true
+    command:
+      - /usr/local/bin/node
+      - /opt/hermes-ai-office-tools/headless_review_acp.mjs
+    acp_server: custom
+    managed_model_prefix: ''
+    managed_env:
+      AI_OFFICE_HEADLESS_MODEL: logical_model
+      AI_OFFICE_LITELLM_BASE_URL: litellm_base_url
+      AI_OFFICE_LITELLM_API_KEY: litellm_api_key
+      HERMES_V3_EXECUTION_ID: execution_id
+    static_env:
+      AI_OFFICE_HEADLESS_DRIVER: claude
+      AI_OFFICE_CLAUDE_BIN: /openhands-state/tooling/node_modules/.bin/claude
+      AI_OFFICE_WORKSPACE_ROOT: /workspace
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: '900'
+    supports:
+      litellm_managed: true
+      write: false
 
   codex-acp:
     kind: acp

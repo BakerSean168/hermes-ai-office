@@ -203,6 +203,77 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
 
     await host.createExecution({
+      executionId: 'exec_codex_headless_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review with headless Codex.',
+      repositoryPath: '/workspace/executions/exec_codex_headless_1/repo',
+      selection: {
+        backend: 'codex-review-headless',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: {
+        execution_id: 'exec_codex_headless_1',
+        phase: 'VERIFY_REVIEW',
+      },
+    });
+    const codexHeadlessBody = createBody as any;
+    assert.equal(codexHeadlessBody.agent.acp_server, 'custom');
+    assert.equal(codexHeadlessBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.deepEqual(codexHeadlessBody.agent.acp_command, [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ]);
+    assert.equal(codexHeadlessBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(
+      codexHeadlessBody.secrets.AI_OFFICE_LITELLM_BASE_URL.value,
+      'http://127.0.0.1:4000',
+    );
+    assert.equal(codexHeadlessBody.secrets.AI_OFFICE_LITELLM_API_KEY.value, 'virtual-secret');
+    assert.equal(codexHeadlessBody.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'codex');
+    assert.equal(
+      codexHeadlessBody.secrets.AI_OFFICE_CODEX_BIN.value,
+      '/openhands-state/tooling/node_modules/.bin/codex',
+    );
+
+    await host.createExecution({
+      executionId: 'exec_claude_headless_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review with headless Claude Code.',
+      repositoryPath: '/workspace/executions/exec_claude_headless_1/repo',
+      selection: {
+        backend: 'claude-code-review-headless',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: {
+        execution_id: 'exec_claude_headless_1',
+        phase: 'VERIFY_REVIEW',
+      },
+    });
+    const claudeHeadlessBody = createBody as any;
+    assert.equal(claudeHeadlessBody.agent.acp_server, 'custom');
+    assert.equal(claudeHeadlessBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.deepEqual(claudeHeadlessBody.agent.acp_command, [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ]);
+    assert.equal(claudeHeadlessBody.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'claude');
+    assert.equal(
+      claudeHeadlessBody.secrets.AI_OFFICE_CLAUDE_BIN.value,
+      '/openhands-state/tooling/node_modules/.bin/claude',
+    );
+    assert.equal(claudeHeadlessBody.secrets.AI_OFFICE_LITELLM_API_KEY.value, 'virtual-secret');
+
+    await host.createExecution({
       executionId: 'exec_codex_1',
       projectKey: 'pixel-agents',
       phase: 'VERIFY_REVIEW',

@@ -461,7 +461,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             const previous = this.#requirePreviousImplementation(effectiveInput);
             if (!previous.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
             repositoryPath = this.#workspace.hostPathForWorkspaceRef(previous.workspaceRef);
-            baseRevision = 'HEAD';
+            // Anchor review snapshots at the implementation's original source revision,
+            // then overlay the implementation tree. This keeps committed worker changes
+            // visible as reviewable Git diff instead of disappearing behind a moved HEAD.
+            baseRevision = previous.sourceRevision ?? 'HEAD';
           }
           const provisioned = await this.#workspace.provision({
             executionId: record.executionId,

@@ -19,6 +19,8 @@ Do not run a second mutable AI Office execution plane on Oracle2. Workspace prov
 
 A backend can be present in `config/development-policy.yaml` without being production-enabled. `MODEL_CP_V3_ENABLED_BACKENDS` is the runtime readiness gate. Enable a coding harness only after an end-to-end smoke verifies startup, model routing, repository operations, terminal completion, and review semantics where applicable.
 
+Current production review order is `codex-review-headless -> claude-code-review-headless -> openhands-builtin`, all on the `gpt-5.6-sol` logical model. The headless adapters deliberately keep OpenHands/ACP as the worker contract while invoking the native Codex/Claude one-shot CLIs so a third-party interactive ACP wrapper cannot leave a completed review turn hanging. Premium review is fail-closed: `gpt-5.6-sol` must not cross-fallback to an implementation-tier model such as GLM.
+
 The initial cutover enables OpenCode, DSH, and OpenHands builtin. Codex, Claude Code, and ZCode remain registered candidates until their ACP/runtime compatibility smoke is fully green.
 
 ## Install

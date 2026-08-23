@@ -11,6 +11,8 @@ const policyFile = path.resolve(here, '../config/development-policy.yaml');
 const allAvailable = {
   'openhands-builtin': true,
   'opencode-acp': true,
+  'codex-review-headless': true,
+  'claude-code-review-headless': true,
   'codex-acp': true,
   'claude-code-acp': true,
   'dsh-acp': true,
@@ -32,6 +34,8 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
       [
         'openhands-builtin',
         'opencode-acp',
+        'codex-review-headless',
+        'claude-code-review-headless',
         'codex-acp',
         'claude-code-acp',
         'dsh-acp',
@@ -42,7 +46,9 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
   assert.equal(policy.config.version, 2);
   assert.deepEqual(Object.keys(policy.config.backends).sort(), [
     'claude-code-acp',
+    'claude-code-review-headless',
     'codex-acp',
+    'codex-review-headless',
     'control-plane-finalizer',
     'dsh-acp',
     'opencode-acp',
@@ -59,11 +65,39 @@ test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
   assert.equal(selected.workspaceMode, 'read_oriented');
 });
 
-test('implementation prefers OpenCode and review prefers Codex', () => {
+test('implementation prefers OpenCode and review prefers headless Codex with GPT-5.6 Sol', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.equal(policy.select('IMPLEMENT', {}, allAvailable).backend, 'opencode-acp');
   assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'opencode-acp');
-  assert.equal(policy.select('VERIFY_REVIEW', {}, allAvailable).backend, 'codex-acp');
+  const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
+  assert.equal(review.backend, 'codex-review-headless');
+  assert.equal(review.modelClass, 'gpt-5.6-sol');
+});
+
+test('review falls back from headless Codex to Claude Code and then OpenHands', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  const claude = policy.select(
+    'VERIFY_REVIEW',
+    {},
+    {
+      ...allAvailable,
+      'codex-review-headless': false,
+    },
+  );
+  assert.equal(claude.backend, 'claude-code-review-headless');
+  assert.equal(claude.modelClass, 'gpt-5.6-sol');
+
+  const openhands = policy.select(
+    'VERIFY_REVIEW',
+    {},
+    {
+      ...allAvailable,
+      'codex-review-headless': false,
+      'claude-code-review-headless': false,
+    },
+  );
+  assert.equal(openhands.backend, 'openhands-builtin');
+  assert.equal(openhands.modelClass, 'gpt-5.6-sol');
 });
 
 test('development policy falls back through enabled implementation workers to OpenHands', () => {

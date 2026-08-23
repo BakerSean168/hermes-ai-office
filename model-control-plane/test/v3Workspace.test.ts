@@ -78,3 +78,57 @@ test('review snapshot freezes Git-visible implementation working tree without ig
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('review snapshot can anchor committed implementation content at the original source revision', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-committed-review-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'committed implementation\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'implementation commit');
+  const implementationHead = git(source, 'rev-parse', 'HEAD');
+  assert.notEqual(implementationHead, base);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  let snapshotRoot: string | undefined;
+  try {
+    const snapshot = await provisioner.provision({
+      executionId: 'review-committed-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'review_snapshot',
+    });
+    snapshotRoot = snapshot.hostPath;
+
+    assert.equal(snapshot.sourceRevision, base);
+    assert.equal(git(snapshot.hostPath, 'rev-parse', 'HEAD'), base);
+    assert.equal(
+      fs.readFileSync(path.join(snapshot.hostPath, 'tracked.txt'), 'utf8'),
+      'committed implementation\n',
+    );
+
+    execFileSync('chmod', ['-R', 'u+w', snapshot.hostPath]);
+    const diff = git(snapshot.hostPath, 'diff', '--no-ext-diff', 'HEAD', '--', 'tracked.txt');
+    assert.match(diff, /-base/);
+    assert.match(diff, /\+committed implementation/);
+  } finally {
+    if (snapshotRoot && fs.existsSync(snapshotRoot)) {
+      execFileSync('chmod', ['-R', 'u+w', snapshotRoot]);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

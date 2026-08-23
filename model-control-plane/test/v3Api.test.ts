@@ -1397,3 +1397,95 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
     await runtime.app.close();
   }
 });
+
+test('V3 review snapshot is anchored at the implementation original source revision', async () => {
+  const host = new FakeHost();
+  const provisions: Array<{
+    phaseWorkspace: string;
+    baseRevision?: string;
+    repositoryPath: string;
+  }> = [];
+  const anchoredWorkspace: WorkspaceProvisioningPort = {
+    hostPathForExecution(executionId) {
+      return `/host/workspaces/${executionId}`;
+    },
+    hostPathForWorkspaceRef(workspaceRef) {
+      return `/host${workspaceRef}`;
+    },
+    async provision(input) {
+      provisions.push({
+        phaseWorkspace: input.workspaceMode,
+        baseRevision: input.baseRevision,
+        repositoryPath: input.repositoryPath,
+      });
+      return {
+        hostPath: `/host/workspaces/${input.executionId}`,
+        executionPath: `/workspace/${input.executionId}`,
+        branch:
+          input.workspaceMode === 'isolated_write' ? `ai-office/${input.executionId}` : undefined,
+        sourceRevision:
+          input.workspaceMode === 'isolated_write'
+            ? 'source-base-revision-123'
+            : (input.baseRevision ?? 'unexpected-review-base'),
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: anchoredWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const implementation = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'review-anchor-implementation' },
+      payload: {
+        phase: 'IMPLEMENT',
+        objective: 'Create a change that may later be committed inside the worker workspace.',
+        projectKey: 'review-anchor-project',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    assert.equal(implementation.statusCode, 201);
+    const implementationId = implementation.json().executionId;
+
+    host.status = 'SUCCEEDED';
+    await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${implementationId}`,
+    });
+    host.status = 'RUNNING';
+
+    const review = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'review-anchor-review' },
+      payload: {
+        phase: 'VERIFY_REVIEW',
+        objective: 'Review the implementation against its original base.',
+        projectKey: 'review-anchor-project',
+        context: { previousExecutionId: implementationId },
+        await: false,
+      },
+    });
+    assert.equal(review.statusCode, 201);
+    assert.equal(review.json().selection.backend, 'codex-review-headless');
+    assert.equal(review.json().selection.modelClass, 'gpt-5.6-sol');
+
+    const reviewProvision = provisions.find((item) => item.phaseWorkspace === 'review_snapshot');
+    assert.ok(reviewProvision);
+    assert.equal(reviewProvision.baseRevision, 'source-base-revision-123');
+    assert.match(reviewProvision.repositoryPath, /^\/host\/workspace\//);
+  } finally {
+    await runtime.app.close();
+  }
+});

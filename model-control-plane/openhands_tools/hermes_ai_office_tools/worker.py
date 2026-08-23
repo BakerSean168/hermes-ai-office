@@ -38,6 +38,8 @@ WorkerPhase = Literal[
 WorkerBackend = Literal[
     "openhands-builtin",
     "opencode-acp",
+    "codex-review-headless",
+    "claude-code-review-headless",
     "codex-acp",
     "claude-code-acp",
     "dsh-acp",
