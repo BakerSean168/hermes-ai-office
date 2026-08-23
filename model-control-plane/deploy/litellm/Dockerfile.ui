@@ -1,0 +1,9 @@
+ARG LITELLM_BASE=ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
+FROM ${LITELLM_BASE}
+
+COPY ui/hermes-midnight.css /tmp/hermes-midnight.css
+RUN set -eu; \
+    target='/app/.venv/lib/python3.13/site-packages/litellm/proxy/_experimental/out/_next/static/chunks/075sund.-mh4~.css'; \
+    test -f "$target"; \
+    cat /tmp/hermes-midnight.css >> "$target"; \
+    rm -f /tmp/hermes-midnight.css

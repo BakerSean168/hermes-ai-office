@@ -23,7 +23,10 @@ services:
       start_period: 10s
 
   litellm:
-    image: ghcr.io/berriai/litellm@sha256:f440eaa5ed62d9c51511d6735cdfe62ede2712856a496ecc12fee961bc63a269
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    image: hermes-litellm-ui:1.92.2-midnight
     container_name: hermes-litellm
     platform: linux/arm64
     network_mode: host

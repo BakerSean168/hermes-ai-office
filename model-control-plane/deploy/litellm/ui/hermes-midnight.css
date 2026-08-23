@@ -1,0 +1,275 @@
+/* Hermes Midnight Indigo theme for LiteLLM Admin UI.
+ * The upstream LiteLLM 1.92.2 bundle ships dark tokens but does not expose a
+ * persistent default-dark toggle. This layer remaps its generated utility
+ * tokens to a low-glare midnight palette without changing application logic.
+ */
+
+:root,
+:host {
+  color-scheme: dark;
+  --background: #0b1020;
+  --foreground: #e8edf7;
+  --muted-foreground: #94a3b8;
+  --border: #27324a;
+  --ring: #818cf8;
+
+  --color-tremor-brand-muted: #312e81;
+  --color-tremor-brand-subtle: #3730a3;
+  --color-tremor-brand: #818cf8;
+  --color-tremor-brand-emphasis: #a5b4fc;
+  --color-tremor-brand-inverted: #0b1020;
+  --color-tremor-background-muted: #0b1020;
+  --color-tremor-background-subtle: #111827;
+  --color-tremor-background: #151d2f;
+  --color-tremor-background-emphasis: #e2e8f0;
+  --color-tremor-border: #27324a;
+  --color-tremor-ring: #334155;
+  --color-tremor-content-subtle: #64748b;
+  --color-tremor-content: #94a3b8;
+  --color-tremor-content-emphasis: #dbe4f0;
+  --color-tremor-content-strong: #f8fafc;
+  --color-tremor-content-inverted: #0b1020;
+
+  /* LiteLLM has many hard-coded gray utilities. Re-map the gray ramp so
+     backgrounds become dark while text-gray-* remains readable. */
+  --color-gray-50: #0d1424;
+  --color-gray-100: #111827;
+  --color-gray-200: #1f2a3d;
+  --color-gray-300: #334155;
+  --color-gray-400: #64748b;
+  --color-gray-500: #94a3b8;
+  --color-gray-600: #cbd5e1;
+  --color-gray-700: #dbe4f0;
+  --color-gray-800: #e8edf7;
+  --color-gray-900: #f8fafc;
+  --color-gray-950: #ffffff;
+}
+
+html,
+body {
+  background: #0b1020 !important;
+  color: #e8edf7 !important;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 18% -10%, rgba(99, 102, 241, 0.15), transparent 32rem),
+    radial-gradient(circle at 88% 5%, rgba(56, 189, 248, 0.08), transparent 28rem), #0b1020;
+}
+
+/* White utility surfaces are common in the LiteLLM bundle. */
+.bg-white,
+[class~='bg-white'] {
+  background-color: #151d2f !important;
+}
+
+/* Keep the main app chrome visibly separated from content. */
+header,
+nav,
+aside {
+  border-color: #27324a !important;
+}
+
+/* Common semantic light panels/badges need dark equivalents. */
+.bg-blue-50 {
+  background-color: #111d3a !important;
+}
+.bg-blue-100 {
+  background-color: #172554 !important;
+}
+.border-blue-200 {
+  border-color: #1e3a8a !important;
+}
+.text-blue-600,
+.text-blue-500 {
+  color: #93c5fd !important;
+}
+.hover\:bg-blue-50:hover,
+.hover\:bg-blue-100:hover {
+  background-color: #172554 !important;
+}
+
+.bg-indigo-50 {
+  background-color: #17183b !important;
+}
+.bg-indigo-100 {
+  background-color: #20215a !important;
+}
+.border-indigo-200 {
+  border-color: #3730a3 !important;
+}
+.text-indigo-600,
+.text-indigo-500 {
+  color: #a5b4fc !important;
+}
+
+.bg-green-50 {
+  background-color: #0d2a20 !important;
+}
+.bg-green-100 {
+  background-color: #123828 !important;
+}
+.border-green-200 {
+  border-color: #166534 !important;
+}
+.text-green-600,
+.text-green-500 {
+  color: #86efac !important;
+}
+
+.bg-red-50 {
+  background-color: #32151a !important;
+}
+.bg-red-100 {
+  background-color: #451a20 !important;
+}
+.border-red-200 {
+  border-color: #7f1d1d !important;
+}
+.text-red-600,
+.text-red-500 {
+  color: #fca5a5 !important;
+}
+
+.bg-yellow-50,
+.bg-amber-50 {
+  background-color: #2c2412 !important;
+}
+.bg-yellow-100,
+.bg-amber-100 {
+  background-color: #3a2e14 !important;
+}
+.border-yellow-200,
+.border-amber-200 {
+  border-color: #854d0e !important;
+}
+.text-yellow-600,
+.text-amber-600 {
+  color: #fde68a !important;
+}
+
+/* Native controls / Ant Design controls used by newer LiteLLM screens. */
+.ant-layout,
+.ant-layout-content,
+.ant-layout-header,
+.ant-layout-sider,
+.ant-card,
+.ant-table,
+.ant-table-wrapper .ant-table,
+.ant-table-thead > tr > th,
+.ant-table-tbody > tr > td,
+.ant-modal-content,
+.ant-modal-header,
+.ant-drawer-content,
+.ant-drawer-header,
+.ant-dropdown-menu,
+.ant-popover-inner,
+.ant-select-dropdown,
+.ant-tabs-nav,
+.ant-collapse,
+.ant-collapse-content,
+.ant-empty,
+.ant-list,
+.ant-descriptions-view {
+  background: #151d2f !important;
+  color: #e8edf7 !important;
+  border-color: #27324a !important;
+}
+
+.ant-table-thead > tr > th {
+  background: #111827 !important;
+}
+
+.ant-table-tbody > tr.ant-table-row:hover > td,
+.ant-table-tbody > tr > td.ant-table-cell-row-hover {
+  background: #1a2438 !important;
+}
+
+.ant-input,
+.ant-input-affix-wrapper,
+.ant-input-number,
+.ant-input-number-input,
+.ant-select-selector,
+.ant-picker,
+.ant-segmented,
+.ant-radio-button-wrapper,
+textarea,
+select {
+  background-color: #0f172a !important;
+  color: #e8edf7 !important;
+  border-color: #334155 !important;
+}
+
+.ant-input::placeholder,
+.ant-input-affix-wrapper input::placeholder,
+.ant-select-selection-placeholder,
+textarea::placeholder,
+input::placeholder {
+  color: #64748b !important;
+}
+
+.ant-select-selection-item,
+.ant-select-item,
+.ant-form-item-label > label,
+.ant-modal-title,
+.ant-drawer-title,
+.ant-card-head-title,
+.ant-tabs-tab,
+.ant-collapse-header,
+.ant-typography,
+.ant-table-cell {
+  color: #dbe4f0 !important;
+}
+
+.ant-select-item-option-active:not(.ant-select-item-option-disabled),
+.ant-select-item-option-selected:not(.ant-select-item-option-disabled),
+.ant-dropdown-menu-item:hover,
+.ant-dropdown-menu-submenu-title:hover {
+  background: #1d2940 !important;
+}
+
+/* Preserve brand-action contrast while softening large primary areas. */
+.ant-btn-primary,
+button.bg-blue-600,
+button.bg-indigo-600 {
+  background: #6366f1 !important;
+  border-color: #6366f1 !important;
+  color: #ffffff !important;
+}
+.ant-btn-primary:hover,
+button.bg-blue-600:hover,
+button.bg-indigo-600:hover {
+  background: #818cf8 !important;
+  border-color: #818cf8 !important;
+  color: #0b1020 !important;
+}
+
+/* Scrollbars: subtle, visible, and native to the dark surface. */
+* {
+  scrollbar-color: #475569 #0f172a;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #475569;
+  border: 2px solid #0f172a;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #64748b;
+}
+
+/* Marker used by deployment verification. */
+:root {
+  --hermes-litellm-theme: 'midnight-indigo-v1';
+}
