@@ -51,6 +51,7 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
             model: 'openai/deepseek-v4-flash-free',
             model_id: 'deployment-new',
             custom_llm_provider: 'openai',
+            api_base: 'https://relay.example/v1/',
             prompt_tokens: 120,
             completion_tokens: 20,
             spend: 0.03,
@@ -68,6 +69,7 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
             model: 'openai/deepseek-v4-flash-free',
             model_id: 'deployment-old',
             custom_llm_provider: 'openai',
+            api_base: 'https://relay.example/v1',
             prompt_tokens: 100,
             completion_tokens: 10,
             spend: 0.02,
@@ -95,6 +97,33 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
     baseUrl: `http://127.0.0.1:${port}`,
     secrets: new EnvFileValueProvider(envFile),
     healthTtlMs: 60_000,
+    modelRegistry: {
+      summary: async () => ({
+        authority: 'LITELLM',
+        health: 'OK',
+        credentials: { count: 0, items: [] },
+        deployments: {
+          count: 1,
+          active: 1,
+          paused: 0,
+          groups: { 'deepseek-v4-flash': 1 },
+          items: [
+            {
+              id: 'current-deployment-id',
+              group: 'deepseek-v4-flash',
+              model: 'openai/deepseek-v4-flash-free',
+              blocked: false,
+              providerKey: 'relay-provider',
+            },
+          ],
+        },
+        aliases: {},
+      }),
+      providerRoutingIndex: async () => ({
+        byDeploymentId: { 'current-deployment-id': 'relay-provider' },
+        byApiBase: { 'https://relay.example/v1': 'relay-provider' },
+      }),
+    },
   });
 
   try {
@@ -113,13 +142,17 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
     assert.deepEqual(summary.lastObservedRoute, {
       model: 'openai/deepseek-v4-flash-free',
       provider: 'openai',
+      providerKey: 'relay-provider',
       deploymentId: 'deployment-new',
+      apiBase: 'https://relay.example/v1',
     });
     assert.deepEqual(summary.routeUsage, [
       {
         model: 'openai/deepseek-v4-flash-free',
         provider: 'openai',
+        providerKey: 'relay-provider',
         deploymentId: 'deployment-new',
+        apiBase: 'https://relay.example/v1',
         input: 120,
         output: 20,
         cachedInput: 80,
@@ -130,7 +163,9 @@ test('LiteLLM spend observability correlates exact execution end_user and aggreg
       {
         model: 'openai/deepseek-v4-flash-free',
         provider: 'openai',
+        providerKey: 'relay-provider',
         deploymentId: 'deployment-old',
+        apiBase: 'https://relay.example/v1',
         input: 100,
         output: 10,
         cachedInput: 50,
@@ -294,6 +329,10 @@ test('LiteLLM model registry deduplicates alias projections and never exposes cr
     assert.equal(summary.deployments.items[0]?.group, 'gpt-5.6-sol');
     assert.equal(summary.deployments.items[0]?.providerKey, 'teamorouter-gpt-5-6');
     assert.doesNotMatch(JSON.stringify(summary), /must-not-leak|secret\.example/);
+
+    const routingIndex = await registry.providerRoutingIndex();
+    assert.equal(routingIndex.byDeploymentId['deployment-1'], 'teamorouter-gpt-5-6');
+    assert.equal(routingIndex.byApiBase['https://secret.example/v1'], 'teamorouter-gpt-5-6');
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

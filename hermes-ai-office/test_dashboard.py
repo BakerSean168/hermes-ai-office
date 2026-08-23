@@ -35,6 +35,8 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parent
 API_PATH = ROOT / "dashboard" / "plugin_api.py"
+CONTRACT_PATH = ROOT / "contracts" / "dashboard.schema.json"
+CONTRACT = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 spec = importlib.util.spec_from_file_location("hermes_ai_office_dashboard", API_PATH)
 assert spec and spec.loader
 api = importlib.util.module_from_spec(spec)
@@ -66,10 +68,29 @@ class DashboardTest(unittest.TestCase):
                 "objectiveSummary": "Implement feature",
                 "phase": "IMPLEMENT",
                 "status": "SUCCEEDED",
-                "selection": {"modelClass": "implementation-efficient", "backend": "opencode-acp"},
+                "selection": {
+                    "modelClass": "implementation-efficient",
+                    "backend": "opencode-acp",
+                    "workspaceMode": "fresh_implementation_workspace",
+                },
                 "timing": {"startedAt": "2026-08-22T10:00:00Z", "endedAt": "2026-08-22T10:01:00Z", "durationMs": 60000},
                 "usage": {"input": 100, "output": 20, "costUsd": 0.01, "calls": 2},
-                "refs": {"upstream": {"routeUsage": [{"deploymentId": "dep-paid", "model": "openai/deepseek-v4-flash", "input": 100, "output": 20, "costUsd": 0.01, "calls": 2}]}},
+                "refs": {
+                    "upstream": {
+                        "routeUsage": [
+                            {
+                                "deploymentId": "dep-paid",
+                                "provider": "openai",
+                                "providerKey": "teamorouter",
+                                "model": "openai/deepseek-v4-flash",
+                                "input": 100,
+                                "output": 20,
+                                "costUsd": 0.01,
+                                "calls": 2,
+                            }
+                        ]
+                    }
+                },
             },
             catalog,
         )
@@ -154,14 +175,105 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(result["calls"], 3)
         self.assertAlmostEqual(result["costUsd"], 0.03)
 
+    def test_contract_is_the_single_dashboard_shape_source(self) -> None:
+        version = CONTRACT["properties"]["schemaVersion"]["const"]
+        self.assertEqual(api._DASHBOARD_SCHEMA_VERSION, version)
+        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        self.assertIn(f"const DASHBOARD_SCHEMA_VERSION = {version};", source)
+        self.assertIn(".then(assertDashboardContract)", source)
+
+        catalog = {
+            "dep-paid": {
+                "providerKey": "teamorouter",
+                "group": "deepseek-v4-flash",
+                "commercialType": "METERED",
+                "supplyOrigin": "COMMERCIAL_RELAY",
+            }
+        }
+        execution = api._execution(
+            {
+                "executionId": "exec-contract",
+                "projectKey": "project-contract",
+                "objectiveSummary": "Verify dashboard contract",
+                "phase": "IMPLEMENT",
+                "status": "SUCCEEDED",
+                "selection": {
+                    "modelClass": "implementation-efficient",
+                    "backend": "opencode-acp",
+                    "workspaceMode": "fresh_implementation_workspace",
+                },
+                "timing": {
+                    "startedAt": "2026-08-23T01:00:00Z",
+                    "endedAt": "2026-08-23T01:00:01Z",
+                    "durationMs": 1000,
+                },
+                "usage": {"input": 10, "output": 2, "calls": 1, "costUsd": 0},
+                "refs": {
+                    "upstream": {
+                        "route": {
+                            "deploymentId": "dep-paid",
+                            "provider": "openai",
+                            "providerKey": "teamorouter",
+                            "model": "openai/deepseek-v4-flash",
+                        },
+                        "routeUsage": [
+                            {
+                                "deploymentId": "dep-paid",
+                                "provider": "openai",
+                                "providerKey": "teamorouter",
+                                "model": "openai/deepseek-v4-flash",
+                                "input": 10,
+                                "output": 2,
+                                "calls": 1,
+                                "costUsd": 0,
+                            }
+                        ],
+                    }
+                },
+            },
+            catalog,
+        )
+        self.assertEqual(set(execution), set(CONTRACT["$defs"]["Execution"]["properties"]))
+        self.assertEqual(set(execution["usage"]), set(CONTRACT["$defs"]["Usage"]["properties"]))
+        self.assertEqual(set(execution["route"]), set(CONTRACT["$defs"]["Route"]["properties"]))
+        self.assertEqual(set(execution["routeUsage"][0]), set(CONTRACT["$defs"]["RouteUsage"]["properties"]))
+        self.assertEqual(set(api._summary([execution])), set(CONTRACT["$defs"]["Summary"]["properties"]))
+        analytics = api._analytics([execution])
+        self.assertEqual(set(analytics), set(CONTRACT["$defs"]["Analytics"]["properties"]))
+        for rows in analytics.values():
+            for row in rows:
+                self.assertEqual(set(row), set(CONTRACT["$defs"]["AnalyticsRow"]["properties"]))
+
+    def test_control_plane_projection_is_strict_not_alias_based(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "projectKey"):
+            api._execution(
+                {
+                    "executionId": "exec-bad",
+                    "project_key": "legacy-alias-is-not-supported",
+                    "objectiveSummary": "Bad payload",
+                    "phase": "IMPLEMENT",
+                    "status": "RUNNING",
+                    "selection": {
+                        "modelClass": "implementation-efficient",
+                        "backend": "opencode-acp",
+                        "workspaceMode": "fresh_implementation_workspace",
+                    },
+                },
+                {},
+            )
+
     def test_frontend_is_two_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('setView("overview")', source)
         self.assertIn('setView("analytics")', source)
+        self.assertIn('className: "hao-toolbar"', source)
+        self.assertNotIn("HERMES · EXECUTION CONTROL PLANE", source)
+        self.assertNotIn('h("h1"', source)
+        self.assertNotIn('h("td", h(', source)
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.0.1")
+        self.assertEqual(manifest["version"], "1.1.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:
@@ -175,6 +287,12 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('.hao-shell[data-theme-mode="light"]', styles)
         self.assertIn("--hao-bg: #0f1115", styles)
         self.assertIn("--hao-bg: #f6f7f9", styles)
+
+    def test_contract_changes_are_dashboard_backend_only(self) -> None:
+        deploy = (ROOT / "scripts" / "deploy-oracle2-safe.sh").read_text(encoding="utf-8")
+        self.assertIn('path.startswith("contracts/")', deploy)
+        self.assertIn('p.startswith("contracts/")', deploy)
+        self.assertIn('kind = "dashboard_backend"', deploy)
 
 
 if __name__ == "__main__":

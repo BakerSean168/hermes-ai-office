@@ -8,6 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
+  const DASHBOARD_SCHEMA_VERSION = 3;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -21,8 +22,6 @@
 
   const COPY = {
     en: {
-      title: "AI Office",
-      subtitle: "Execution console for OpenHands + LiteLLM",
       overview: "Overview",
       analytics: "Analytics",
       active: "Active now",
@@ -64,8 +63,6 @@
       pausedDeployments: "paused",
     },
     zh: {
-      title: "AI Office",
-      subtitle: "OpenHands + LiteLLM 执行控制台",
       overview: "总览",
       analytics: "统计",
       active: "正在执行",
@@ -110,6 +107,14 @@
 
   function api(path) {
     return fetchJSON(API_ROOT + path);
+  }
+
+  function assertDashboardContract(value) {
+    if (!value || value.schemaVersion !== DASHBOARD_SCHEMA_VERSION) {
+      const actual = value && value.schemaVersion != null ? value.schemaVersion : "missing";
+      throw new Error("AI Office dashboard contract mismatch: expected v" + DASHBOARD_SCHEMA_VERSION + ", received v" + actual);
+    }
+    return value;
   }
 
   function parseRgb(value) {
@@ -211,9 +216,7 @@
   function routeLabel(item) {
     const route = item && item.route;
     if (!route) return "—";
-    const provider = route.providerKey || route.provider || "unknown";
-    const model = route.physicalModel || "unknown";
-    return provider + " · " + model;
+    return route.providerKey + " · " + route.physicalModel;
   }
 
   function Badge(props) {
@@ -274,12 +277,12 @@
             return h(
               "tr",
               { key: item.executionId, title: item.executionId },
-              h("td", h("span", { className: "hao-project" }, item.projectKey || "—")),
-              h("td", h("div", { className: "hao-objective" }, item.objective || "—")),
-              h("td", h("span", { className: "hao-phase" }, item.phase || "—")),
-              h("td", h(Badge, { value: item.status })),
-              h("td", h("span", { className: "hao-mono" }, item.logicalModel || "—")),
-              h("td", h("span", { className: "hao-route" }, routeLabel(item))),
+              h("td", null, h("span", { className: "hao-project" }, item.projectKey)),
+              h("td", null, h("div", { className: "hao-objective" }, item.objective)),
+              h("td", null, h("span", { className: "hao-phase" }, item.phase)),
+              h("td", null, h(Badge, { value: item.status })),
+              h("td", null, h("span", { className: "hao-mono" }, item.logicalModel)),
+              h("td", null, h("span", { className: "hao-route" }, routeLabel(item))),
               h("td", { className: "hao-muted" }, dateTime(item.startedAt, locale)),
               h("td", { className: "hao-mono" }, duration(runningElapsed(item, now))),
               h("td", { className: "hao-right hao-mono" }, compact(item.totalTokens || 0, locale)),
@@ -304,7 +307,7 @@
           h("div", { className: "hao-running-top" }, h(Badge, { value: item.status }), h("span", { className: "hao-phase" }, item.phase)),
           h("h3", null, item.objective || item.projectKey),
           h("div", { className: "hao-running-project" }, item.projectKey),
-          h("div", { className: "hao-running-route" }, item.logicalModel || "—", h("span", null, "→"), routeLabel(item)),
+          h("div", { className: "hao-running-route" }, item.logicalModel, h("span", null, "→"), routeLabel(item)),
           h("div", { className: "hao-running-foot" },
             h("span", null, props.t.started + " " + dateTime(item.startedAt, props.locale)),
             h("strong", null, duration(runningElapsed(item, props.now))),
@@ -368,7 +371,7 @@
         )),
         h("tbody", null, (props.rows || []).map(function (row) {
           return h("tr", { key: row.key },
-            h("td", h("strong", { className: "hao-analytics-key" }, row.key)),
+            h("td", null, h("strong", { className: "hao-analytics-key" }, row.key)),
             h("td", { className: "hao-right hao-mono" }, integer(row.executions, props.locale)),
             h("td", { className: "hao-right hao-mono" }, percentage(row.successRate)),
             h("td", { className: "hao-right hao-mono" }, compact(row.totalTokens, props.locale)),
@@ -422,6 +425,7 @@
     const load = React.useCallback(function () {
       setLoading(true);
       return api("/dashboard")
+        .then(assertDashboardContract)
         .then(function (value) { setData(value); setError(""); })
         .catch(function (cause) { setError(String(cause)); })
         .finally(function () { setLoading(false); });
@@ -438,17 +442,16 @@
     return h(
       "main",
       { className: "hao-shell", "data-theme-mode": themeMode },
-      h("header", { className: "hao-header" },
-        h("div", null, h("div", { className: "hao-kicker" }, "HERMES · EXECUTION CONTROL PLANE"), h("h1", null, t.title), h("p", null, t.subtitle)),
-        h("div", { className: "hao-header-actions" },
+      h("header", { className: "hao-toolbar" },
+        h("nav", { className: "hao-toolbar-nav" },
+          h("button", { type: "button", className: view === "overview" ? "is-active" : "", onClick: function () { setView("overview"); } }, t.overview),
+          h("button", { type: "button", className: view === "analytics" ? "is-active" : "", onClick: function () { setView("analytics"); } }, t.analytics),
+        ),
+        h("div", { className: "hao-toolbar-actions" },
           data ? h("span", { className: "hao-updated" }, t.updated + " " + dateTime(data.generatedAt, locale)) : null,
           adminUrl ? h("a", { className: "hao-button hao-button-secondary", href: adminUrl, target: "_blank", rel: "noreferrer" }, t.admin) : null,
           h("button", { className: "hao-button", type: "button", onClick: load, disabled: loading }, loading ? "…" : t.refresh),
         ),
-      ),
-      h("nav", { className: "hao-nav" },
-        h("button", { type: "button", className: view === "overview" ? "is-active" : "", onClick: function () { setView("overview"); } }, t.overview),
-        h("button", { type: "button", className: view === "analytics" ? "is-active" : "", onClick: function () { setView("analytics"); } }, t.analytics),
       ),
       error ? h("div", { className: "hao-error" }, error) : null,
       !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now }),

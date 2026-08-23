@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import threading
 import time
 import urllib.parse
@@ -19,6 +20,9 @@ from fastapi import APIRouter, HTTPException
 router = APIRouter()
 
 _BASE_URL = "http://127.0.0.1:8320"
+_CONTRACT_PATH = Path(__file__).resolve().parents[1] / "contracts" / "dashboard.schema.json"
+_CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+_DASHBOARD_SCHEMA_VERSION = int(_CONTRACT["properties"]["schemaVersion"]["const"])
 _TERMINAL = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _CACHE_LOCK = threading.Lock()
 _CACHE: tuple[float, int, Dict[str, Any]] | None = None
@@ -46,6 +50,13 @@ def _number(value: Any) -> float:
         return 0.0
 
 
+def _required_string(value: Mapping[str, Any], key: str, source: str) -> str:
+    raw = value.get(key)
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError(f"control-plane contract violation: {source}.{key} must be a non-empty string")
+    return raw
+
+
 def _usage(value: Any) -> Dict[str, Any]:
     raw = value if isinstance(value, Mapping) else {}
     return {
@@ -71,13 +82,14 @@ def _route_catalog(registry: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 
 def _enrich_route(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
-    deployment_id = str(raw.get("deploymentId") or "").strip()
-    deployment = catalog.get(deployment_id, {}) if deployment_id else {}
+    deployment_id = _required_string(raw, "deploymentId", "refs.upstream.route")
+    provider_key = _required_string(raw, "providerKey", "refs.upstream.route")
+    physical_model = _required_string(raw, "model", "refs.upstream.route")
+    deployment = catalog.get(deployment_id, {})
     return {
-        "deploymentId": deployment_id or None,
-        "provider": str(raw.get("provider") or "").strip() or None,
-        "providerKey": str(deployment.get("providerKey") or raw.get("provider") or "unknown"),
-        "physicalModel": str(raw.get("model") or deployment.get("model") or "unknown"),
+        "deploymentId": deployment_id,
+        "providerKey": provider_key,
+        "physicalModel": physical_model,
         "modelGroup": str(deployment.get("group") or "") or None,
         "credential": str(deployment.get("credential") or "") or None,
         "commercialType": str(deployment.get("commercialType") or "") or None,
@@ -89,7 +101,9 @@ def _enrich_route(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any
 def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
     timing = raw.get("timing") if isinstance(raw.get("timing"), Mapping) else {}
     usage = _usage(raw.get("usage"))
-    selection = raw.get("selection") if isinstance(raw.get("selection"), Mapping) else {}
+    selection = raw.get("selection")
+    if not isinstance(selection, Mapping):
+        raise RuntimeError("control-plane contract violation: selection must be an object")
     refs = raw.get("refs") if isinstance(raw.get("refs"), Mapping) else {}
     upstream = refs.get("upstream") if isinstance(refs.get("upstream"), Mapping) else {}
     route_usage_raw = upstream.get("routeUsage") if isinstance(upstream.get("routeUsage"), list) else []
@@ -102,22 +116,29 @@ def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]])
         routes.append(route)
     last_raw = upstream.get("route") if isinstance(upstream.get("route"), Mapping) else {}
     last_route = _enrich_route(last_raw, catalog) if last_raw else (routes[0] if routes else None)
-    status = str(raw.get("status") or "UNKNOWN").upper()
-    started_at = str(timing.get("startedAt") or raw.get("createdAt") or "") or None
+    execution_id = _required_string(raw, "executionId", "execution")
+    project_key = _required_string(raw, "projectKey", "execution")
+    objective = _required_string(raw, "objectiveSummary", "execution")
+    phase = _required_string(raw, "phase", "execution")
+    status = _required_string(raw, "status", "execution").upper()
+    logical_model = _required_string(selection, "modelClass", "execution.selection")
+    backend = _required_string(selection, "backend", "execution.selection")
+    workspace_mode = _required_string(selection, "workspaceMode", "execution.selection")
+    started_at = str(timing.get("startedAt") or "") or None
     ended_at = str(timing.get("endedAt") or "") or None
     duration_ms = int(_number(timing.get("durationMs"))) if timing.get("durationMs") is not None else None
     return {
-        "executionId": str(raw.get("executionId") or ""),
-        "projectKey": str(raw.get("projectKey") or "default"),
-        "objective": str(raw.get("objectiveSummary") or ""),
-        "phase": str(raw.get("phase") or "UNKNOWN"),
+        "executionId": execution_id,
+        "projectKey": project_key,
+        "objective": objective,
+        "phase": phase,
         "status": status,
         "startedAt": started_at,
         "endedAt": ended_at,
         "durationMs": duration_ms,
-        "logicalModel": str(selection.get("modelClass") or "") or None,
-        "backend": str(selection.get("backend") or "") or None,
-        "workspaceMode": str(selection.get("workspaceMode") or "") or None,
+        "logicalModel": logical_model,
+        "backend": backend,
+        "workspaceMode": workspace_mode,
         "previousExecutionId": raw.get("previousExecutionId"),
         "usage": usage,
         "totalTokens": usage["input"] + usage["output"],
@@ -193,9 +214,9 @@ def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
     for execution in executions:
         usage = execution.get("usage") if isinstance(execution.get("usage"), Mapping) else {}
         for group_name, key in (
-            ("projects", str(execution.get("projectKey") or "unknown")),
-            ("phases", str(execution.get("phase") or "UNKNOWN")),
-            ("logicalModels", str(execution.get("logicalModel") or "unknown")),
+            ("projects", str(execution["projectKey"])),
+            ("phases", str(execution["phase"])),
+            ("logicalModels", str(execution["logicalModel"])),
         ):
             bucket = groups[group_name].setdefault(key, _new_bucket(key))
             _add(bucket, execution, usage)
@@ -203,8 +224,8 @@ def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
         for route in routes:
             if not isinstance(route, Mapping):
                 continue
-            provider_key = str(route.get("providerKey") or "unknown")
-            physical_model = str(route.get("physicalModel") or "unknown")
+            provider_key = str(route["providerKey"])
+            physical_model = str(route["physicalModel"])
             _add(
                 groups["providers"].setdefault(provider_key, _new_bucket(provider_key)),
                 execution,
@@ -300,7 +321,7 @@ def _build_dashboard(limit: int) -> Dict[str, Any]:
     active = [item for item in executions if not item["terminal"]]
     history = [item for item in executions if item["terminal"]]
     result: Dict[str, Any] = {
-        "schemaVersion": 2,
+        "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "summary": _summary(executions),
         "active": active,

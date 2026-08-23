@@ -83,6 +83,10 @@ export interface ModelRegistrySummary {
 
 export interface ModelRegistryPort {
   summary(): Promise<ModelRegistrySummary>;
+  providerRoutingIndex?(): Promise<{
+    byDeploymentId: Record<string, string>;
+    byApiBase: Record<string, string>;
+  }>;
 }
 
 export interface ObservabilityExecutionSummary {
@@ -93,7 +97,9 @@ export interface ObservabilityExecutionSummary {
   lastObservedRoute?: {
     model?: string;
     provider?: string;
+    providerKey?: string;
     deploymentId?: string;
+    apiBase?: string;
   };
   routeUsage?: RouteUsageSummary[];
 }
