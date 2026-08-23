@@ -7,13 +7,21 @@ export function reviewVerdict(value: string): ReviewVerdict {
     .find(Boolean);
   if (!firstLine) return 'UNKNOWN';
 
-  const [rawToken] = firstLine.split(':', 1);
-  const token =
-    rawToken
-      ?.trim()
-      .toUpperCase()
-      .replace(/[\s-]+/g, '_') ?? '';
-  if (token === 'PASS' || token === 'APPROVED') return 'APPROVED';
-  if (['FAIL', 'REJECTED', 'BLOCKED', 'CHANGES_REQUESTED'].includes(token)) return 'BLOCKING';
+  const exactToken = firstLine.toUpperCase().replace(/[\s_-]+/g, '_');
+  if (exactToken === 'PASS' || exactToken === 'APPROVED') return 'APPROVED';
+  if (['FAIL', 'REJECTED', 'BLOCKED', 'CHANGES_REQUESTED'].includes(exactToken)) {
+    return 'BLOCKING';
+  }
+
+  const historical = firstLine.match(
+    /^(APPROVED|BLOCKED|REJECTED|CHANGES[\s_-]+REQUESTED)\s*(?::|-|–|—)\s*.*$/i,
+  );
+  if (!historical) return 'UNKNOWN';
+
+  const historicalToken = historical[1]?.toUpperCase().replace(/[\s_-]+/g, '_');
+  if (historicalToken === 'APPROVED') return 'APPROVED';
+  if (['BLOCKED', 'REJECTED', 'CHANGES_REQUESTED'].includes(historicalToken ?? '')) {
+    return 'BLOCKING';
+  }
   return 'UNKNOWN';
 }
