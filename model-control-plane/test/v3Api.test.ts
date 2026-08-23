@@ -6,6 +6,7 @@ import type {
   ExecutionHostPort,
   ExecutionHostSnapshot,
   ModelGatewayPort,
+  ObservabilityPort,
 } from '../src/v3/ports.js';
 import type { WorkspaceProvisioningPort } from '../src/v3/workspace.js';
 
@@ -1034,6 +1035,104 @@ test('V3 IMPLEMENT_FIX enforces a single writer lease for the implementation wor
     assert.equal(competingFix.statusCode, 409);
     assert.equal(competingFix.json().error.code, 'WORKSPACE_WRITER_LEASE_CONFLICT');
     assert.equal(host.creates, 3, 'only implementation, review, and first fix should launch');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('V3 explicit list hydration refreshes durable terminal observations', async () => {
+  const host = new FakeHost();
+  let providerKey = 'legacy-provider';
+  let observations = 0;
+  const observability: ObservabilityPort = {
+    source: 'LITELLM',
+    async health() {
+      return 'OK';
+    },
+    async getExecutionSummary() {
+      observations += 1;
+      return {
+        health: 'OK',
+        usage: {
+          source: 'LITELLM_REPORTED',
+          input: 100,
+          output: 10,
+          costUsd: 0,
+          calls: 1,
+        },
+        lastObservedRoute: {
+          deploymentId: 'deployment-1',
+          model: 'openai/test-model',
+          providerKey,
+        },
+        routeUsage: [
+          {
+            deploymentId: 'deployment-1',
+            model: 'openai/test-model',
+            providerKey,
+            input: 100,
+            output: 10,
+            costUsd: 0,
+            calls: 1,
+          },
+        ],
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Observability: observability,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+    },
+  });
+  try {
+    const started = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'v3-list-hydrate-refresh' },
+      payload: {
+        phase: 'IMPLEMENT',
+        objective: 'Persist and then refresh route evidence.',
+        projectKey: 'hydrate-project',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    const executionId = started.json().executionId;
+    host.status = 'SUCCEEDED';
+
+    const completed = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(completed.statusCode, 200);
+    assert.equal(completed.json().refs.upstream.routeUsage[0].providerKey, 'legacy-provider');
+    const baselineObservations = observations;
+    assert.ok(baselineObservations > 0);
+
+    providerKey = 'canonical-provider';
+    const cached = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v3/development/executions?projectKey=hydrate-project&limit=10',
+    });
+    assert.equal(cached.json().items[0].refs.upstream.routeUsage[0].providerKey, 'legacy-provider');
+    assert.equal(observations, baselineObservations);
+
+    const hydrated = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v3/development/executions?projectKey=hydrate-project&limit=10&hydrate=1',
+    });
+    assert.equal(hydrated.statusCode, 200);
+    assert.equal(
+      hydrated.json().items[0].refs.upstream.routeUsage[0].providerKey,
+      'canonical-provider',
+    );
+    assert.equal(observations, baselineObservations + 1);
   } finally {
     await runtime.app.close();
   }

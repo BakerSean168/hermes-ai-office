@@ -644,7 +644,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     for (const record of records) {
       if (
         record.openhandsConversationId &&
-        (!TERMINAL.has(record.statusCache) || (input.hydrate === true && !record.observedUsage))
+        (!TERMINAL.has(record.statusCache) || input.hydrate === true)
       ) {
         try {
           const snapshot = await this.get(record.executionId);
