@@ -12,7 +12,7 @@ Read APIs:
 - `GET /api/v3/development/executions?limit=5000&hydrate=1`
 - `GET /api/v3/development/executions/:executionId`
 - `GET /api/v3/development/plans?limit=100`
-- `GET /api/v3/development/plans/:planId`
+- `GET /api/v3/development/plans/:planId[?hydrate=true]`
 
 Write APIs:
 
@@ -25,5 +25,10 @@ Write APIs:
 New execution and plan creation requests require an `Idempotency-Key`. Recovery and
 cancellation are plan-scoped and idempotent; raw execution continuation is not part
 of the public protocol.
+
+Plan reads return the durable projection by default and therefore never wait on an
+execution host. `hydrate=true` explicitly refreshes execution observations. Plan
+reconcile returns `202 Accepted` with a pollable `statusUrl`; reconciliation runs in
+the background, is serialized per plan, and does not block unrelated plans.
 
 The execution list includes durable timing, aggregate usage, final physical route, and per-deployment route usage when observed. `hydrate=1` backfills missing historical LiteLLM usage into durable V3 correlation state.

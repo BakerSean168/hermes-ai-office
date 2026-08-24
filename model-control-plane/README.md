@@ -29,7 +29,7 @@ Coding backends are defined in policy independently from runtime readiness. Open
 - `GET /api/v3/development/readiness`
 - `GET /api/v3/development/model-registry`
 - `GET /api/v3/development/plans`
-- `GET /api/v3/development/plans/:planId`
+- `GET /api/v3/development/plans/:planId[?hydrate=true]`
 - `POST /api/v3/development/plans`
 - `POST /api/v3/development/plans/:planId/reconcile`
 - `POST /api/v3/development/plans/:planId/cancel`
@@ -40,7 +40,7 @@ Coding backends are defined in policy independently from runtime readiness. Open
 
 `GET /api/v3/development/executions?limit=5000&hydrate=1` backfills missing historical LiteLLM observations into durable execution correlation state.
 
-Plan creation is the normal multi-step protocol. The coordinator persists the graph before launching work, retries transport failures once, applies strict independent review gates, integrates only clean committed implementations, and starts dependent batches from the preceding integrated revision. When plan creation explicitly authorizes delivery, the coordinator also pushes the integrated revision, creates or reuses a pull request, waits for checks, creates a bounded reviewed repair batch for failed pre-merge checks, merges through GitHub branch protection, and verifies checks on the merge revision. Explicit plan reconcile recovers a blocked infrastructure attempt after the underlying fault is repaired.
+Plan creation is the normal multi-step protocol. The coordinator persists the graph before launching work, retries transport failures once, applies strict independent review gates, integrates only clean committed implementations, and starts dependent batches from the preceding integrated revision. When plan creation explicitly authorizes delivery, the coordinator also pushes the integrated revision, creates or reuses a pull request, waits for checks, creates a bounded reviewed repair batch for failed pre-merge checks, merges through GitHub branch protection, and verifies checks on the merge revision. Explicit plan reconcile recovers a blocked infrastructure attempt after the underlying fault is repaired. It returns `202 Accepted`; clients poll the returned `statusUrl`. Plan reads use durable state by default, while `hydrate=true` explicitly refreshes host observations. Reconciliation is serialized per plan so a slow execution host cannot stall unrelated plans.
 
 Delivery is opt-in and fail-closed. `delivery.autoMerge` must be explicitly true;
 without that authorization AI Office never pushes or merges. A delivery plan is
