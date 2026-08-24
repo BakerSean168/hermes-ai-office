@@ -80,6 +80,8 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
       'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
+      'AI Office anchors this frozen snapshot at the implementation original source revision and overlays the Git-visible implementation tree. A detached HEAD or apparent uncommitted changes in this review copy are expected snapshot representation, not evidence that the implementation workspace was left dirty.',
+      'Review implementation correctness and locally verifiable acceptance criteria only. Do not fail because the delivery branch, pull request, remote checks, merge, or post-merge verification is not present yet; AI Office performs those delivery gates only after this review passes.',
       'Do not classify read-only permission errors as implementation defects.',
       'If dependency installation, compilation, tests, or build outputs require writes, copy the complete review snapshot to a fresh temporary directory under /tmp, make only that disposable copy writable, run verification there, and discard it afterward.',
       'Run setup, dependency installation, tests, typecheck, build, and cleanup as short separate terminal tool invocations; do not combine the whole verification workflow into one long compound shell command.',
