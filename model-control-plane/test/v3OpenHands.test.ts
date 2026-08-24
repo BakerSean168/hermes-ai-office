@@ -158,6 +158,8 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
     assert.equal(body.workspace.working_dir, '/workspace/executions/exec_1/repo');
     assert.equal(body.observability_metadata.execution_id, 'exec_1');
+    assert.deepEqual(body.secrets.CI, { kind: 'StaticSecret', value: '1' });
+    assert.deepEqual(body.secrets.NX_TUI, { kind: 'StaticSecret', value: 'false' });
 
     await host.createExecution({
       executionId: 'exec_supervisor_1',

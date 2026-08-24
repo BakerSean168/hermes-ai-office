@@ -244,7 +244,13 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
   #executionSecrets(input: ExecutionHostCreateInput): JsonRecord | undefined {
     const backend = this.#policy.backend(input.selection.backend);
     if (!backend || input.selection.transportMode !== 'LITELLM_MANAGED') return undefined;
-    const values: Record<string, JsonRecord> = {};
+    const values: Record<string, JsonRecord> = {
+      // Execution hosts allocate a PTY for tool compatibility. Explicitly keep
+      // test runners in automation mode so completed commands cannot strand an
+      // execution in an interactive TUI (for example Nx's terminal UI).
+      CI: { kind: 'StaticSecret', value: '1' },
+      NX_TUI: { kind: 'StaticSecret', value: 'false' },
+    };
     for (const [name, source] of Object.entries(backend.managed_env ?? {})) {
       values[name] = { kind: 'StaticSecret', value: this.#managedValue(source, input) };
     }
