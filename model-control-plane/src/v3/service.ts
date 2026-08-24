@@ -14,6 +14,9 @@ import type {
   StartDevelopmentExecutionInput,
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
+import type { PlanDeliveryPort } from './delivery.js';
+import { DurablePlanOrchestrator } from './planOrchestrator.js';
+import { PlanRepository, type CreatePlanInput } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
@@ -63,12 +66,14 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Implement the approved objective in the isolated workspace.',
       'Run focused tests or checks that are proportionate to the change.',
       'Do not silently broaden scope beyond the objective.',
+      'Before finishing, commit all intended changes to Git with a meaningful commit message and leave the workspace clean; deterministic batch integration rejects uncommitted changes.',
       'Finish with changed files, validation evidence, and any remaining risk.',
     ],
     IMPLEMENT_FIX: [
       'Address only the review or verification findings supplied in context.',
       'Preserve already-correct implementation work.',
       'Run focused regression checks before finishing.',
+      'Before finishing, commit all intended fixes to Git with a meaningful commit message and leave the workspace clean; deterministic batch integration rejects uncommitted changes.',
     ],
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
@@ -135,6 +140,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #gateway?: ModelGatewayPort;
   readonly #observability: ObservabilityPort;
+  readonly #planOrchestrator: DurablePlanOrchestrator;
   readonly #backendAvailability: Readonly<Record<string, boolean>>;
   #writerAdmissionTail: Promise<void> = Promise.resolve();
 
@@ -145,6 +151,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     workspace: WorkspaceProvisioningPort;
     gateway?: ModelGatewayPort;
     observability?: ObservabilityPort;
+    plans: PlanRepository;
+    delivery?: PlanDeliveryPort;
     backendAvailability?: Readonly<Record<string, boolean>>;
   }) {
     this.#policy = options.policy;
@@ -153,6 +161,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     this.#workspace = options.workspace;
     this.#gateway = options.gateway;
     this.#observability = options.observability ?? new UnconfiguredObservability();
+    this.#planOrchestrator = new DurablePlanOrchestrator({
+      repository: options.plans,
+      links: options.links,
+      workspace: options.workspace,
+      delivery: options.delivery,
+      executions: this,
+    });
     this.#backendAvailability = options.backendAvailability ?? {};
   }
 
@@ -362,7 +377,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       throw new Error('REPOSITORY_PATH_REQUIRED');
     }
 
-    const existing = this.#links.findByIdempotencyKey(idempotencyKey);
+    const existing = input.plan
+      ? this.#links.findByCommandKey(input.plan.commandKey)
+      : this.#links.findByIdempotencyKey(idempotencyKey);
     let fixLineage: {
       review: ExecutionLinkRecord;
       implementation: ExecutionLinkRecord;
@@ -395,6 +412,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         selection,
         hermes: input.hermes,
         previousExecutionId: effectiveInput.context?.previousExecutionId,
+        plan: effectiveInput.plan,
       });
 
     let reservation: ReturnType<ExecutionLinkRepository['reserve']>;
@@ -402,7 +420,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       reservation = { record: existing, created: false };
     } else if (WRITER_PHASES.has(input.phase)) {
       reservation = await this.#withWriterAdmission(async () => {
-        const raced = this.#links.findByIdempotencyKey(idempotencyKey);
+        const raced = effectiveInput.plan
+          ? this.#links.findByCommandKey(effectiveInput.plan.commandKey)
+          : this.#links.findByIdempotencyKey(idempotencyKey);
         if (raced) return { record: raced, created: false };
         const candidates = await this.#reconcileWriterCandidates();
         if (effectiveInput.phase === 'IMPLEMENT_FIX') {
@@ -623,28 +643,24 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     };
   }
 
-  async continue(
-    executionId: string,
-    message: string,
-  ): Promise<DevelopmentExecutionSnapshot | null> {
-    const cleanMessage = message.trim();
-    if (!cleanMessage) throw new Error('CONTINUATION_MESSAGE_REQUIRED');
-    const record = this.#links.get(executionId);
-    if (!record) return null;
-    if (!record.openhandsConversationId || !this.#host.continueExecution) {
-      throw new Error('EXECUTION_NOT_CONTINUABLE');
-    }
-    const current = await this.get(executionId);
-    if (!current) return null;
-    if (current.status !== 'PAUSED') {
-      throw new Error('EXECUTION_NOT_CONTINUABLE');
-    }
-    const snapshot = await this.#host.continueExecution(
-      record.openhandsConversationId,
-      cleanMessage.slice(0, 20_000),
-    );
-    this.#links.updateStatus(executionId, snapshot.status);
-    return this.get(executionId);
+  createPlan(input: CreatePlanInput, commandKey: string) {
+    return this.#planOrchestrator.createPlan(input, commandKey);
+  }
+
+  getPlan(planId: string, hydrateExecutions = true) {
+    return this.#planOrchestrator.getPlan(planId, hydrateExecutions);
+  }
+
+  listPlans(limit?: number) {
+    return this.#planOrchestrator.listPlans(limit);
+  }
+
+  cancelPlan(planId: string) {
+    return this.#planOrchestrator.cancelPlan(planId);
+  }
+
+  reconcilePlans(planId?: string, recoverBlocked = false) {
+    return this.#planOrchestrator.reconcilePlans(planId, recoverBlocked);
   }
 
   async cancel(executionId: string): Promise<DevelopmentExecutionSnapshot | null> {

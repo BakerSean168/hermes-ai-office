@@ -16,13 +16,21 @@ There is no fallback to the retired V2 control plane and no direct-harness place
 ## Execution phases
 
 ```text
-INVESTIGATE_PLAN -> IMPLEMENT -> VERIFY_REVIEW
-                                 | PASS -> FINALIZE
-                                 | FAIL -> IMPLEMENT_FIX -> VERIFY_REVIEW
+PLAN -> IMPLEMENT -> VERIFY_REVIEW
+                    | FAIL -> IMPLEMENT_FIX -> VERIFY_REVIEW
+                    | PASS -> BATCH_INTEGRATE -> next batch
+                                               -> authorized delivery
+                                                  -> PR checks
+                                                     | FAIL -> delivery-fix batch
+                                                     | PASS -> merge -> post-merge checks
 ```
 
 `VERIFY_REVIEW` is strict: its first non-empty line is exactly `PASS` or `FAIL`.
 The control plane persists terminal review evidence first-write-wins. Caller supplied `previousResult` is never authoritative for a review verdict.
+
+Remote delivery sits behind the small `PlanDeliveryPort.reconcile` interface.
+The coordinator owns durable causal state; the GitHub adapter owns Git push, PR
+reuse, check interpretation, protected merge, and merge-revision verification.
 
 ## Provider routing
 

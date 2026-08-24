@@ -4,6 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  PLAN_LIMITS,
+  WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+  WORKSPACE_GIT_MAX_BUFFER_BYTES,
+  WORKSPACE_GIT_TIMEOUT_MS,
+  WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+  WORKSPACE_PERMISSION_TIMEOUT_MS,
+} from './planConstants.js';
 import type { WorkspaceMode } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -24,6 +32,13 @@ export interface WorkspaceProvisioningPort {
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
   }): Promise<ProvisionedWorkspace>;
+  integrateBatch(input: {
+    planId: string;
+    batchKey: string;
+    repositoryPath: string;
+    baseRevision: string;
+    implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+  }): Promise<{ revision: string; ref: string }>;
 }
 
 interface UnixIdentity {
@@ -36,14 +51,29 @@ function inside(child: string, parent: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function safeDirectory(directory: string): string[] {
+  return [
+    '-c',
+    `safe.directory=${directory}`,
+    '-c',
+    `safe.directory=${path.join(directory, '.git')}`,
+  ];
+}
+
 async function git(cwd: string, args: string[], identity?: UnixIdentity): Promise<string> {
-  const result = await execFileAsync('git', ['-C', cwd, ...args], {
-    ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
-    encoding: 'utf8',
-    timeout: 120_000,
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return result.stdout.trim();
+  try {
+    const result = await execFileAsync('git', ['-C', cwd, ...args], {
+      ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
+      encoding: 'utf8',
+      timeout: WORKSPACE_GIT_TIMEOUT_MS,
+      maxBuffer: WORKSPACE_GIT_MAX_BUFFER_BYTES,
+    });
+    return result.stdout.trim();
+  } catch (error) {
+    const failure = error as Error & { stderr?: string };
+    const detail = failure.stderr?.trim() || failure.message;
+    throw new Error(`GIT_COMMAND_FAILED:${detail.slice(0, PLAN_LIMITS.errorDetailCharacters)}`);
+  }
 }
 
 async function gitNullList(
@@ -54,8 +84,8 @@ async function gitNullList(
   const result = await execFileAsync('git', ['-C', cwd, ...args], {
     ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
     encoding: 'utf8',
-    timeout: 120_000,
-    maxBuffer: 16 * 1024 * 1024,
+    timeout: WORKSPACE_GIT_TIMEOUT_MS,
+    maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
   });
   return result.stdout.split('\0').filter(Boolean);
 }
@@ -87,7 +117,9 @@ function overlayWorkingTree(sourceRepo: string, snapshotRepo: string, entries: s
 }
 
 async function chownTree(target: string, owner: UnixIdentity): Promise<void> {
-  await execFileAsync('chown', ['-R', `${owner.uid}:${owner.gid}`, target], { timeout: 120_000 });
+  await execFileAsync('chown', ['-R', `${owner.uid}:${owner.gid}`, target], {
+    timeout: WORKSPACE_GIT_TIMEOUT_MS,
+  });
 }
 
 export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
@@ -178,8 +210,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         uid: sourceOwner.uid,
         gid: sourceOwner.gid,
         encoding: 'utf8',
-        timeout: 180_000,
-        maxBuffer: 16 * 1024 * 1024,
+        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
       });
 
       if (
@@ -225,13 +257,100 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       input.workspaceMode === 'isolated_write' ||
       input.workspaceMode === 'reuse_implementation_workspace'
     ) {
-      await execFileAsync('chmod', ['-R', 'u+rwX,go-rwx', hostPath], { timeout: 60_000 });
+      await execFileAsync('chmod', ['-R', 'u+rwX,go-rwx', hostPath], {
+        timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
+      });
       return { hostPath, executionPath, branch, sourceRevision: resolvedRevision };
     }
 
     // Read/review phases get a physically read-only clone. OpenHands owns the files but
     // cannot mutate them, so a prompt mistake cannot silently turn investigation into implementation.
-    await execFileAsync('chmod', ['-R', 'a-w', hostPath], { timeout: 60_000 });
+    await execFileAsync('chmod', ['-R', 'a-w', hostPath], {
+      timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
+    });
     return { hostPath, executionPath, sourceRevision: resolvedRevision };
+  }
+
+  async integrateBatch(input: {
+    planId: string;
+    batchKey: string;
+    repositoryPath: string;
+    baseRevision: string;
+    implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+  }): Promise<{ revision: string; ref: string }> {
+    const requested = path.resolve(input.repositoryPath);
+    if (!this.#allowedRepositoryRoots.some((root) => inside(requested, root))) {
+      throw new Error('V3_REPOSITORY_PATH_NOT_ALLOWED');
+    }
+    const requestedStat = fs.statSync(requested, { throwIfNoEntry: false });
+    if (!requestedStat?.isDirectory()) throw new Error('V3_REPOSITORY_NOT_FOUND');
+    const requestedOwner = { uid: requestedStat.uid, gid: requestedStat.gid };
+    const repoRoot = path.resolve(
+      await git(requested, ['rev-parse', '--show-toplevel'], requestedOwner),
+    );
+    const repoStat = fs.statSync(repoRoot);
+    const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    const integrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-integrate-'));
+    fs.chownSync(integrationRoot, sourceOwner.uid, sourceOwner.gid);
+    const integrationRepo = path.join(integrationRoot, 'repo');
+    const safePlan = input.planId.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const safeBatch = input.batchKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const integrationRef = `refs/ai-office/plans/${safePlan}/batches/${safeBatch}`;
+    try {
+      const sourceBundle = path.join(integrationRoot, 'source.bundle');
+      await git(repoRoot, ['bundle', 'create', sourceBundle, '--all'], sourceOwner);
+      await execFileAsync('git', ['clone', '--no-hardlinks', sourceBundle, integrationRepo], {
+        encoding: 'utf8',
+        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+      });
+      await git(integrationRepo, ['checkout', '--detach', input.baseRevision]);
+      for (const [index, implementation] of input.implementations.entries()) {
+        const implementationPath = this.hostPathForWorkspaceRef(implementation.workspaceRef);
+        const trustedImplementation = safeDirectory(implementationPath);
+        const dirty = await git(implementationPath, [
+          ...trustedImplementation,
+          'status',
+          '--porcelain',
+        ]);
+        if (dirty) throw new Error('BATCH_INTEGRATION_UNCOMMITTED_CHANGES');
+        const head = await git(implementationPath, [...trustedImplementation, 'rev-parse', 'HEAD']);
+        if (head === implementation.sourceRevision) {
+          throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
+        }
+        const fetchedRef = `refs/ai-office/incoming/${index}`;
+        const implementationBundle = path.join(integrationRoot, `implementation-${index}.bundle`);
+        await git(implementationPath, [
+          ...trustedImplementation,
+          'bundle',
+          'create',
+          implementationBundle,
+          'HEAD',
+        ]);
+        await git(integrationRepo, ['fetch', implementationBundle, `HEAD:${fetchedRef}`]);
+        await git(integrationRepo, [
+          '-c',
+          'user.name=Hermes AI Office',
+          '-c',
+          'user.email=ai-office@localhost',
+          'merge',
+          '--no-ff',
+          '--no-edit',
+          fetchedRef,
+        ]);
+      }
+      const revision = await git(integrationRepo, ['rev-parse', 'HEAD']);
+      const integrationBundle = path.join(integrationRoot, 'integrated.bundle');
+      await git(integrationRepo, ['bundle', 'create', integrationBundle, 'HEAD']);
+      fs.chownSync(integrationBundle, sourceOwner.uid, sourceOwner.gid);
+      await git(repoRoot, ['fetch', integrationBundle, `+HEAD:${integrationRef}`], sourceOwner);
+      return { revision, ref: integrationRef };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith('BATCH_INTEGRATION_')) throw error;
+      throw new Error(`BATCH_INTEGRATION_FAILED:${message}`);
+    } finally {
+      fs.rmSync(integrationRoot, { recursive: true, force: true });
+    }
   }
 }

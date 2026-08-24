@@ -132,3 +132,58 @@ test('review snapshot can anchor committed implementation content at the origina
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('batch integration creates a durable repository ref without changing the source worktree', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integrate-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'implementation-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(implementation.hostPath, 'tracked.txt'), 'implemented\n');
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    git(implementation.hostPath, 'add', '.');
+    git(implementation.hostPath, 'commit', '-m', 'implement change');
+
+    const integrated = await provisioner.integrateBatch({
+      planId: 'plan-1',
+      batchKey: 'batch-1',
+      repositoryPath: source,
+      baseRevision: base,
+      implementations: [
+        {
+          workspaceRef: implementation.executionPath,
+          sourceRevision: implementation.sourceRevision,
+        },
+      ],
+    });
+
+    assert.equal(integrated.ref, 'refs/ai-office/plans/plan-1/batches/batch-1');
+    assert.equal(git(source, 'rev-parse', integrated.ref), integrated.revision);
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+    assert.equal(fs.readFileSync(path.join(source, 'tracked.txt'), 'utf8'), 'base\n');
+    assert.equal(git(source, 'show', `${integrated.revision}:tracked.txt`), 'implemented');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

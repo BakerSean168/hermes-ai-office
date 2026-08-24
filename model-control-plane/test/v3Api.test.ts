@@ -68,6 +68,12 @@ const workspace: WorkspaceProvisioningPort = {
       sourceRevision: 'abc123',
     };
   },
+  async integrateBatch(input) {
+    return {
+      revision: `integrated-${input.batchKey}`,
+      ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+    };
+  },
 };
 
 const gateway: ModelGatewayPort = {
@@ -307,6 +313,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
     workspaceMode: string;
   }> = [];
   const reuseWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
     hostPathForExecution(executionId) {
       return `/host/workspaces/executions/${executionId}/repo`;
     },
@@ -1260,11 +1267,10 @@ test('V3 execution list reconciles non-terminal cached state from the execution 
   }
 });
 
-test('V3 continue resumes only a PAUSED execution through the existing OpenHands conversation', async () => {
-  const host = new FakeHost();
+test('V3 continuation endpoint is retired from the public protocol', async () => {
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
-    v3ExecutionHost: host,
+    v3ExecutionHost: new FakeHost(),
     v3ModelGateway: gateway,
     v3Workspace: workspace,
     v3BackendAvailability: {
@@ -1273,43 +1279,12 @@ test('V3 continue resumes only a PAUSED execution through the existing OpenHands
     },
   });
   try {
-    const started = await runtime.app.inject({
+    const response = await runtime.app.inject({
       method: 'POST',
-      url: '/api/v3/development/executions',
-      headers: { 'idempotency-key': 'v3-continue-base' },
-      payload: {
-        phase: 'INVESTIGATE_PLAN',
-        objective: 'Pause and continue this execution.',
-        projectKey: 'continue-project',
-        repository: { path: '/tmp/fake-repo' },
-        await: false,
-      },
+      url: '/api/v3/development/executions/exec-retired/messages',
+      payload: { message: 'Continue.' },
     });
-    const executionId = started.json().executionId;
-
-    const rejectedWhileRunning = await runtime.app.inject({
-      method: 'POST',
-      url: `/api/v3/development/executions/${executionId}/messages`,
-      payload: { message: 'Do not inject while running.' },
-    });
-    assert.equal(rejectedWhileRunning.statusCode, 409);
-    assert.equal(rejectedWhileRunning.json().error.code, 'EXECUTION_NOT_CONTINUABLE');
-
-    host.status = 'PAUSED';
-    const paused = await runtime.app.inject({
-      method: 'GET',
-      url: `/api/v3/development/executions/${executionId}`,
-    });
-    assert.equal(paused.json().status, 'PAUSED');
-
-    const continued = await runtime.app.inject({
-      method: 'POST',
-      url: `/api/v3/development/executions/${executionId}/messages`,
-      payload: { message: 'Continue from the existing evidence and finish.' },
-    });
-    assert.equal(continued.statusCode, 200);
-    assert.equal(continued.json().status, 'RUNNING');
-    assert.equal(continued.json().executionId, executionId);
+    assert.equal(response.statusCode, 404);
   } finally {
     await runtime.app.close();
   }
@@ -1406,6 +1381,7 @@ test('V3 review snapshot is anchored at the implementation original source revis
     repositoryPath: string;
   }> = [];
   const anchoredWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
     hostPathForExecution(executionId) {
       return `/host/workspaces/${executionId}`;
     },

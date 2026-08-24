@@ -8,7 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
-  const DASHBOARD_SCHEMA_VERSION = 3;
+  const DASHBOARD_SCHEMA_VERSION = 4;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -47,6 +47,7 @@
       updated: "Updated",
       runtime: "Runtime",
       readiness: "Readiness",
+      plans: "Development plans",
       providers: "LiteLLM registry",
       admin: "Open LiteLLM Admin",
       groupProject: "Projects",
@@ -88,6 +89,7 @@
       updated: "更新于",
       runtime: "运行时",
       readiness: "晋级证据",
+      plans: "项目计划",
       providers: "LiteLLM 供应池",
       admin: "打开 LiteLLM Admin",
       groupProject: "按项目",
@@ -321,6 +323,24 @@
     );
   }
 
+  function PlanCards(props) {
+    const rows = props.rows || [];
+    if (!rows.length) return h("div", { className: "hao-empty" }, "No active plans");
+    return h("div", { className: "hao-running-grid" }, rows.map(function (plan) {
+      const batch = plan.currentBatch || {};
+      return h("article", { className: "hao-running-card", key: plan.planId },
+        h("div", { className: "hao-running-top" }, h(Badge, { value: plan.status }), h("span", { className: "hao-phase" }, batch.key || plan.deliveryStage || "complete")),
+        h("h3", null, plan.objective),
+        h("div", { className: "hao-running-project" }, plan.projectKey),
+        h("div", { className: "hao-running-route" },
+          (batch.title || "All batches complete") + " · " + plan.workItems.succeeded + "/" + plan.workItems.total + " items · " + plan.batches.succeeded + "/" + plan.batches.total + " batches"
+        ),
+        plan.blockedReason ? h("div", { className: "hao-running-foot" }, h("strong", null, plan.blockedReason)) : null,
+        plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", { href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer" }, "Pull request")) : null,
+      );
+    }));
+  }
+
   function Overview(props) {
     const data = props.data;
     const t = props.t;
@@ -347,6 +367,7 @@
         h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) }),
       ),
       h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t: t, locale: props.locale, now: props.now })),
+      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans })),
       h(
         "div",
         { className: "hao-runtime-strip" },

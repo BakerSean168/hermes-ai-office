@@ -73,6 +73,13 @@ export interface StartDevelopmentExecutionInput {
   hermes?: HermesExecutionContext;
   await?: boolean;
   timeoutMs?: number;
+  plan?: {
+    planId: string;
+    batchId: string;
+    workItemId: string;
+    attempt: number;
+    commandKey: string;
+  };
 }
 
 export interface ExecutionSelection {
@@ -175,6 +182,11 @@ export interface ExecutionLinkRecord {
   gitBranch?: string;
   sourceRevision?: string;
   previousExecutionId?: string;
+  planId?: string;
+  batchId?: string;
+  workItemId?: string;
+  attempt?: number;
+  commandKey?: string;
   resultText?: string;
   observedUsage?: UsageSummary;
   observedRoutes?: RouteUsageSummary[];

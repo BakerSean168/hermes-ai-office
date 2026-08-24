@@ -33,6 +33,11 @@ interface ExecutionLinkRow {
   git_branch: string | null;
   source_revision: string | null;
   previous_execution_id: string | null;
+  plan_id: string | null;
+  batch_id: string | null;
+  work_item_id: string | null;
+  attempt: number | null;
+  command_key: string | null;
   result_text: string | null;
   usage_json: string | null;
   observed_routes_json: string | null;
@@ -66,6 +71,11 @@ export function ensureV3Schema(db: DatabaseSync): void {
       git_branch TEXT,
       source_revision TEXT,
       previous_execution_id TEXT,
+      plan_id TEXT,
+      batch_id TEXT,
+      work_item_id TEXT,
+      attempt INTEGER,
+      command_key TEXT,
       result_text TEXT,
       usage_json TEXT,
       observed_routes_json TEXT,
@@ -110,6 +120,21 @@ export function ensureV3Schema(db: DatabaseSync): void {
   if (!columns.has('ended_at')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN ended_at INTEGER');
   }
+  if (!columns.has('plan_id')) db.exec('ALTER TABLE v3_execution_links ADD COLUMN plan_id TEXT');
+  if (!columns.has('batch_id')) db.exec('ALTER TABLE v3_execution_links ADD COLUMN batch_id TEXT');
+  if (!columns.has('work_item_id')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN work_item_id TEXT');
+  }
+  if (!columns.has('attempt')) db.exec('ALTER TABLE v3_execution_links ADD COLUMN attempt INTEGER');
+  if (!columns.has('command_key')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN command_key TEXT');
+  }
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_v3_execution_links_command_key ON v3_execution_links(command_key) WHERE command_key IS NOT NULL',
+  );
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_v3_execution_links_work_item ON v3_execution_links(work_item_id, created_at)',
+  );
   db.exec('UPDATE v3_execution_links SET started_at=created_at WHERE started_at IS NULL');
   db.exec(`UPDATE v3_execution_links
              SET ended_at=updated_at
@@ -162,6 +187,11 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
+    planId: row.plan_id ?? undefined,
+    batchId: row.batch_id ?? undefined,
+    workItemId: row.work_item_id ?? undefined,
+    attempt: row.attempt ?? undefined,
+    commandKey: row.command_key ?? undefined,
     resultText: row.result_text ?? undefined,
     observedUsage: parsedJson<UsageSummary>(row.usage_json),
     observedRoutes: parsedJson<RouteUsageSummary[]>(row.observed_routes_json),
@@ -196,6 +226,13 @@ export class ExecutionLinkRepository {
     return row ? rowToRecord(row) : null;
   }
 
+  findByCommandKey(key: string): ExecutionLinkRecord | null {
+    const row = this.#db
+      .prepare('SELECT * FROM v3_execution_links WHERE command_key=?')
+      .get(key) as ExecutionLinkRow | undefined;
+    return row ? rowToRecord(row) : null;
+  }
+
   reserve(input: {
     idempotencyKey: string;
     projectKey: string;
@@ -204,8 +241,17 @@ export class ExecutionLinkRepository {
     selection: ExecutionSelection;
     hermes?: HermesExecutionContext;
     previousExecutionId?: string | null;
+    plan?: {
+      planId: string;
+      batchId: string;
+      workItemId: string;
+      attempt: number;
+      commandKey: string;
+    };
   }): { record: ExecutionLinkRecord; created: boolean } {
-    const existing = this.findByIdempotencyKey(input.idempotencyKey);
+    const existing = input.plan
+      ? this.findByCommandKey(input.plan.commandKey)
+      : this.findByIdempotencyKey(input.idempotencyKey);
     if (existing) return { record: existing, created: false };
 
     const now = Date.now();
@@ -217,8 +263,9 @@ export class ExecutionLinkRepository {
              execution_id,idempotency_key,project_key,phase,objective_summary,
              hermes_profile,hermes_session_id,hermes_turn_id,
              backend,transport_mode,logical_model_class,workspace_mode,session_policy,
-             previous_execution_id,selection_reasons_json,status_cache,created_at,updated_at
-           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+             previous_execution_id,plan_id,batch_id,work_item_id,attempt,command_key,
+             selection_reasons_json,status_cache,created_at,updated_at
+           ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           executionId,
@@ -235,13 +282,20 @@ export class ExecutionLinkRepository {
           input.selection.workspaceMode,
           input.selection.sessionPolicy,
           input.previousExecutionId ?? null,
+          input.plan?.planId ?? null,
+          input.plan?.batchId ?? null,
+          input.plan?.workItemId ?? null,
+          input.plan?.attempt ?? null,
+          input.plan?.commandKey ?? null,
           JSON.stringify(input.selection.reasons),
           'STARTING',
           now,
           now,
         );
     } catch (error) {
-      const raced = this.findByIdempotencyKey(input.idempotencyKey);
+      const raced = input.plan
+        ? this.findByCommandKey(input.plan.commandKey)
+        : this.findByIdempotencyKey(input.idempotencyKey);
       if (raced) return { record: raced, created: false };
       throw error;
     }

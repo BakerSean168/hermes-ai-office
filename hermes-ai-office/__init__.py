@@ -22,11 +22,10 @@ import urllib.request
 _CONTROL_PLANE_BASE = os.environ.get(
     "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
 ).rstrip("/")
-_V3_PHASES = {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
+_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
 _V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
 _V3_DEFAULT_AWAIT = {
-    "ORCHESTRATE": False,
     "INVESTIGATE_PLAN": True,
     "IMPLEMENT": False,
     "IMPLEMENT_FIX": False,
@@ -34,7 +33,6 @@ _V3_DEFAULT_AWAIT = {
     "FINALIZE": True,
 }
 _V3_DEFAULT_WAIT_SECONDS = {
-    "ORCHESTRATE": 0.0,
     "INVESTIGATE_PLAN": 240.0,
     "IMPLEMENT": 0.0,
     "IMPLEMENT_FIX": 0.0,
@@ -57,7 +55,7 @@ _RUN_PHASE_SCHEMA = {
             "project_key": {"type": "string"},
             "repository_path": {
                 "type": "string",
-                "description": "Required for ORCHESTRATE, initial INVESTIGATE_PLAN, or IMPLEMENT.",
+                "description": "Required for initial INVESTIGATE_PLAN or IMPLEMENT.",
             },
             "base_revision": {"type": "string"},
             "previous_execution_id": {
@@ -89,21 +87,6 @@ _GET_EXECUTION_SCHEMA = {
     },
 }
 
-_CONTINUE_EXECUTION_SCHEMA = {
-    "name": "ai_office_continue_execution",
-    "description": "Resume the same PAUSED execution. Review corrections should use IMPLEMENT_FIX instead.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "execution_id": {"type": "string"},
-            "message": {"type": "string"},
-            "await": {"type": "boolean"},
-            "wait_timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600},
-        },
-        "required": ["execution_id", "message"],
-    },
-}
-
 _CANCEL_EXECUTION_SCHEMA = {
     "name": "ai_office_cancel_execution",
     "description": "Cancel a non-terminal AI Office execution.",
@@ -132,6 +115,100 @@ _LIST_PROVIDERS_SCHEMA = {
         "Read the authoritative LiteLLM provider/model registry. Provider mutation belongs in LiteLLM Admin, not AI Office."
     ),
     "parameters": {"type": "object", "properties": {}},
+}
+
+_CREATE_PLAN_SCHEMA = {
+    "name": "ai_office_create_plan",
+    "description": (
+        "Submit the analyzed ORCHESTRATE proposal as one durable development plan. The control plane validates and persists the graph before it automatically runs each work item through "
+        "IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX when needed, deterministic batch integration, dependent batches, "
+        "and, when explicitly authorized, remote checks and merge."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_key": {"type": "string"},
+            "objective": {"type": "string"},
+            "analysis_summary": {
+                "type": "string",
+                "description": "Concise repository-backed analysis that justifies this batch graph and is persisted with PLAN_CREATED.",
+            },
+            "repository_path": {"type": "string"},
+            "base_revision": {"type": "string"},
+            "delivery": {
+                "type": "object",
+                "description": "Optional explicit authorization to push, open/reuse a PR, wait for checks, merge, and verify post-merge checks.",
+                "properties": {
+                    "remote": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "target_branch": {"type": "string"},
+                    "auto_merge": {"type": "boolean", "const": True},
+                    "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
+                },
+                "required": ["branch", "auto_merge"],
+            },
+            "batches": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": {"type": "string"},
+                        "title": {"type": "string"},
+                        "depends_on": {"type": "array", "items": {"type": "string"}},
+                        "work_items": {
+                            "type": "array",
+                            "minItems": 1,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": {"type": "string"},
+                                    "title": {"type": "string"},
+                                    "objective": {"type": "string"},
+                                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                                },
+                                "required": ["key", "title", "objective"],
+                            },
+                        },
+                    },
+                    "required": ["key", "title", "work_items"],
+                },
+            },
+        },
+        "required": ["objective", "analysis_summary", "repository_path", "batches"],
+    },
+}
+
+_GET_PLAN_SCHEMA = {
+    "name": "ai_office_get_plan",
+    "description": "Get the durable plan, batch, work-item, execution, review-gate, and integration projection.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "plan_id": {"type": "string"},
+            "reconcile": {"type": "boolean", "description": "Request an immediate recovery/reconcile pass before reading."},
+        },
+        "required": ["plan_id"],
+    },
+}
+
+_CANCEL_PLAN_SCHEMA = {
+    "name": "ai_office_cancel_plan",
+    "description": "Cancel a durable plan and all of its non-terminal worker executions.",
+    "parameters": {
+        "type": "object",
+        "properties": {"plan_id": {"type": "string"}},
+        "required": ["plan_id"],
+    },
+}
+
+_LIST_PLANS_SCHEMA = {
+    "name": "ai_office_list_plans",
+    "description": "List durable development plans for recovery after Telegram, Hermes, or gateway reconnects.",
+    "parameters": {
+        "type": "object",
+        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+    },
 }
 
 _AI_OFFICE_RE = re.compile(r"\bai[\s_-]*office\b", re.IGNORECASE)
@@ -239,6 +316,97 @@ def _idempotency_key(phase: str, payload: Mapping[str, Any], kwargs: Mapping[str
     return f"hermes-v3-{phase.lower()}-{digest}"
 
 
+def _plan_idempotency_key(payload: Mapping[str, Any]) -> str:
+    digest = hashlib.blake2b(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        digest_size=16,
+    ).hexdigest()
+    return f"hermes-v3-plan-{digest}"
+
+
+def _compact_plan(plan: Mapping[str, Any], *, detail: bool = True) -> dict[str, Any]:
+    compact: dict[str, Any] = {
+        key: plan.get(key)
+        for key in (
+            "planId",
+            "projectKey",
+            "objective",
+            "status",
+            "blockedReason",
+            "currentRevision",
+            "createdAt",
+            "updatedAt",
+            "deliveryStage",
+            "deliveryEvidence",
+            "pullRequestUrl",
+            "mergeRevision",
+        )
+        if plan.get(key) is not None
+    }
+    batches = []
+    for batch in plan.get("batches") or []:
+        if not isinstance(batch, Mapping):
+            continue
+        compact_batch = {
+            key: batch.get(key)
+            for key in (
+                "batchId",
+                "key",
+                "title",
+                "status",
+                "baseRevision",
+                "integratedRevision",
+                "integrationRef",
+                "blockedReason",
+            )
+            if batch.get(key) is not None
+        }
+        if detail:
+            work_items = []
+            for item in batch.get("workItems") or []:
+                if not isinstance(item, Mapping):
+                    continue
+                compact_item = {
+                    key: item.get(key)
+                    for key in ("workItemId", "key", "title", "status", "blockedReason")
+                    if item.get(key) is not None
+                }
+                executions = []
+                for execution in item.get("executions") or []:
+                    if not isinstance(execution, Mapping):
+                        continue
+                    result = execution.get("result") if isinstance(execution.get("result"), Mapping) else {}
+                    final_text = str(result.get("finalText") or "").strip()
+                    selection = execution.get("selection") if isinstance(execution.get("selection"), Mapping) else {}
+                    executions.append(
+                        {
+                            "executionId": execution.get("executionId"),
+                            "phase": execution.get("phase"),
+                            "status": execution.get("status"),
+                            "backend": selection.get("backend"),
+                            **({"verdict": final_text.splitlines()[0][:80]} if final_text else {}),
+                            "timing": execution.get("timing"),
+                            "usage": execution.get("usage"),
+                        }
+                    )
+                compact_item["executions"] = executions
+                work_items.append(compact_item)
+            compact_batch["workItems"] = work_items
+        batches.append(compact_batch)
+    compact["batches"] = batches
+    if detail:
+        compact["events"] = [
+            {
+                key: event.get(key)
+                for key in ("eventId", "type", "batchId", "workItemId", "executionId", "createdAt")
+                if event.get(key) is not None
+            }
+            for event in (plan.get("events") or [])[-6:]
+            if isinstance(event, Mapping)
+        ]
+    return compact
+
+
 def _wait_for_execution(
     snapshot: dict[str, Any], *, wait: bool, timeout_seconds: float
 ) -> tuple[dict[str, Any], bool]:
@@ -272,8 +440,8 @@ def _run_development_phase_tool(args: dict[str, Any], **kwargs: Any) -> str:
         previous_execution_id = str(args.get("previous_execution_id") or "").strip()
         previous = _v3_execution_snapshot(previous_execution_id) if previous_execution_id else None
         repository_path = str(args.get("repository_path") or "").strip()
-        if phase in {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
-            raise ValueError("repository_path is required for ORCHESTRATE, INVESTIGATE_PLAN, and IMPLEMENT")
+        if phase in {"INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
+            raise ValueError("repository_path is required for INVESTIGATE_PLAN and IMPLEMENT")
 
         context: dict[str, Any] = {}
         if previous_execution_id:
@@ -368,26 +536,6 @@ def _get_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
-def _continue_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
-    try:
-        execution_id = str(args.get("execution_id") or "").strip()
-        message = str(args.get("message") or "").strip()
-        if not message:
-            raise ValueError("message is required")
-        snapshot = _control_plane_request(
-            _v3_execution_path(execution_id, "/messages"),
-            method="POST",
-            payload={"message": message[:20_000]},
-            timeout=8.0,
-        )
-        wait = bool(args.get("await", False))
-        timeout = max(0.0, min(float(args.get("wait_timeout_seconds") or 0.0), 600.0))
-        snapshot, timed_out = _wait_for_execution(snapshot, wait=wait, timeout_seconds=timeout)
-        return json.dumps({"ok": True, "awaitRequested": wait, "awaitTimedOut": timed_out, **snapshot}, ensure_ascii=False)
-    except Exception as exc:
-        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
-
-
 def _cancel_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         snapshot = _control_plane_request(
@@ -463,6 +611,142 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
+def _create_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        objective = str(args.get("objective") or "").strip()
+        analysis_summary = str(args.get("analysis_summary") or "").strip()
+        repository_path = str(args.get("repository_path") or "").strip()
+        raw_batches = args.get("batches")
+        if not objective:
+            raise ValueError("objective is required")
+        if not analysis_summary:
+            raise ValueError("analysis_summary is required")
+        if not repository_path:
+            raise ValueError("repository_path is required")
+        if not isinstance(raw_batches, list) or not raw_batches:
+            raise ValueError("batches is required")
+        batches = []
+        for raw_batch in raw_batches[:24]:
+            if not isinstance(raw_batch, Mapping):
+                raise ValueError("each batch must be an object")
+            work_items = []
+            raw_items = raw_batch.get("work_items")
+            if not isinstance(raw_items, list) or not raw_items:
+                raise ValueError("each batch requires work_items")
+            for raw_item in raw_items[:48]:
+                if not isinstance(raw_item, Mapping):
+                    raise ValueError("each work item must be an object")
+                work_items.append(
+                    {
+                        "key": str(raw_item.get("key") or "")[:160],
+                        "title": str(raw_item.get("title") or "")[:500],
+                        "objective": str(raw_item.get("objective") or "")[:20_000],
+                        "acceptanceCriteria": _text_list(raw_item.get("acceptance_criteria")),
+                    }
+                )
+            batches.append(
+                {
+                    "key": str(raw_batch.get("key") or "")[:160],
+                    "title": str(raw_batch.get("title") or "")[:500],
+                    "dependsOn": _text_list(raw_batch.get("depends_on"), limit=24, item_limit=160),
+                    "workItems": work_items,
+                }
+            )
+        base_revision = str(args.get("base_revision") or "").strip()
+        payload = {
+            "projectKey": _project_key(args),
+            "objective": objective[:20_000],
+            "analysisSummary": analysis_summary[:12_000],
+            "repository": {
+                "path": repository_path,
+                **({"baseRevision": base_revision[:240]} if base_revision else {}),
+            },
+            "batches": batches,
+        }
+        raw_delivery = args.get("delivery")
+        if raw_delivery is not None:
+            if not isinstance(raw_delivery, Mapping):
+                raise ValueError("delivery must be an object")
+            branch = str(raw_delivery.get("branch") or "").strip()
+            if not branch:
+                raise ValueError("delivery.branch is required")
+            if raw_delivery.get("auto_merge") is not True:
+                raise ValueError("delivery.auto_merge must be explicitly true")
+            payload["delivery"] = {
+                "remote": str(raw_delivery.get("remote") or "origin")[:160],
+                "branch": branch[:240],
+                "targetBranch": str(raw_delivery.get("target_branch") or "main")[:240],
+                "autoMerge": True,
+                "mergeMethod": str(raw_delivery.get("merge_method") or "merge")[:20],
+            }
+        plan = _control_plane_request(
+            "/api/v3/development/plans",
+            method="POST",
+            payload=payload,
+            idempotency_key=_plan_idempotency_key(payload),
+            timeout=12.0,
+        )
+        return json.dumps({"ok": True, **_compact_plan(plan)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
+def _get_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        plan_id = str(args.get("plan_id") or "").strip()
+        if not plan_id:
+            raise ValueError("plan_id is required")
+        suffix = "/reconcile" if args.get("reconcile") else ""
+        plan = _control_plane_request(
+            f"/api/v3/development/plans/{urllib.parse.quote(plan_id, safe='')}{suffix}",
+            method="POST" if suffix else "GET",
+            payload={} if suffix else None,
+            timeout=12.0,
+        )
+        return json.dumps({"ok": True, **_compact_plan(plan)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
+def _cancel_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        plan_id = str(args.get("plan_id") or "").strip()
+        if not plan_id:
+            raise ValueError("plan_id is required")
+        plan = _control_plane_request(
+            f"/api/v3/development/plans/{urllib.parse.quote(plan_id, safe='')}/cancel",
+            method="POST",
+            payload={},
+            timeout=12.0,
+        )
+        return json.dumps({"ok": True, **_compact_plan(plan)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
+def _list_development_plans_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        limit = max(1, min(int(args.get("limit") or 50), 200))
+        plans = _control_plane_request(
+            "/api/v3/development/plans?" + urllib.parse.urlencode({"limit": limit}),
+            timeout=8.0,
+        )
+        items = plans.get("items") if isinstance(plans, Mapping) else []
+        return json.dumps(
+            {
+                "ok": True,
+                "items": [
+                    _compact_plan(plan, detail=False)
+                    for plan in items
+                    if isinstance(plan, Mapping)
+                ],
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
 def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] | None:
     text = str(user_message or "").strip()
     if not text:
@@ -475,9 +759,8 @@ def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] |
     sections: list[str] = []
     if development_topic:
         sections.append(
-            "AI Office is the development execution authority. Delegate with ai_office_run_phase rather than directly choosing or launching a coding harness. "
-            "Use ORCHESTRATE for a multi-ticket Active Plan: the OpenHands supervisor can fan out isolated Codex/Claude/OpenCode/DSH workers and fan in their results. Use INVESTIGATE_PLAN for a bounded investigation, IMPLEMENT for an isolated writer, VERIFY_REVIEW for a fresh read-only review, IMPLEMENT_FIX only after a FAIL review, and FINALIZE only after a PASS review. "
-            "VERIFY_REVIEW and FINALIZE enforce a strict first-line PASS/FAIL protocol. Preserve executionId across turns; implementation is asynchronous by default, so recover with ai_office_get_execution or ai_office_list_active. "
+            "AI Office is the development execution authority. For a complete multi-step task, create one durable graph with ai_office_create_plan; the control plane then automatically runs IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic batch integration, and dependent batches without Hermes polling. "
+            "Use ai_office_run_phase only for a standalone investigation or operator-directed single phase. VERIFY_REVIEW enforces a strict first-line PASS/FAIL protocol. Preserve planId across turns and recover with ai_office_get_plan or ai_office_list_plans after Telegram, Hermes, or gateway reconnects. "
             "Backend and logical model are policy decisions; physical provider selection, fallback, health, and spend are exclusively LiteLLM decisions."
         )
     if provider_topic:
@@ -502,9 +785,12 @@ def register(ctx: Any) -> None:
     _CTX = ctx
     tools = (
         (_LIST_PROVIDERS_SCHEMA, _list_shared_providers_tool, "📡"),
+        (_CREATE_PLAN_SCHEMA, _create_development_plan_tool, "🗺️"),
+        (_GET_PLAN_SCHEMA, _get_development_plan_tool, "🧭"),
+        (_CANCEL_PLAN_SCHEMA, _cancel_development_plan_tool, "🛑"),
+        (_LIST_PLANS_SCHEMA, _list_development_plans_tool, "📚"),
         (_RUN_PHASE_SCHEMA, _run_development_phase_tool, "🚀"),
         (_GET_EXECUTION_SCHEMA, _get_development_execution_tool, "🔎"),
-        (_CONTINUE_EXECUTION_SCHEMA, _continue_development_execution_tool, "▶️"),
         (_CANCEL_EXECUTION_SCHEMA, _cancel_development_execution_tool, "⛔"),
         (_LIST_ACTIVE_SCHEMA, _list_active_development_executions_tool, "📋"),
     )

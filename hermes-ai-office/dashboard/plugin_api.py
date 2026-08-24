@@ -276,6 +276,57 @@ def _summary(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
+    plans = []
+    summary = {"total": 0, "active": 0, "blocked": 0, "succeeded": 0}
+    for raw in raw_plans if isinstance(raw_plans, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        batches = [batch for batch in raw.get("batches", []) if isinstance(batch, Mapping)]
+        work_items = [
+            item
+            for batch in batches
+            for item in batch.get("workItems", [])
+            if isinstance(item, Mapping)
+        ]
+        status = _required_string(raw, "status", "plan").upper()
+        current = next((batch for batch in batches if batch.get("status") == "RUNNING"), None)
+        plans.append(
+            {
+                "planId": _required_string(raw, "planId", "plan"),
+                "projectKey": _required_string(raw, "projectKey", "plan"),
+                "objective": _required_string(raw, "objective", "plan"),
+                "status": status,
+                "currentRevision": _required_string(raw, "currentRevision", "plan"),
+                "blockedReason": raw.get("blockedReason"),
+                "deliveryStage": raw.get("deliveryStage"),
+                "pullRequestUrl": raw.get("pullRequestUrl"),
+                "mergeRevision": raw.get("mergeRevision"),
+                "createdAt": raw.get("createdAt"),
+                "updatedAt": raw.get("updatedAt"),
+                "batches": {"total": len(batches), "succeeded": sum(batch.get("status") == "SUCCEEDED" for batch in batches)},
+                "workItems": {"total": len(work_items), "succeeded": sum(item.get("status") == "SUCCEEDED" for item in work_items)},
+                "currentBatch": (
+                    {
+                        "key": current.get("key"),
+                        "title": current.get("title"),
+                        "status": current.get("status"),
+                    }
+                    if current
+                    else None
+                ),
+            }
+        )
+        summary["total"] += 1
+        if status in {"PENDING", "RUNNING"}:
+            summary["active"] += 1
+        elif status == "BLOCKED":
+            summary["blocked"] += 1
+        elif status == "SUCCEEDED":
+            summary["succeeded"] += 1
+    return plans, summary
+
+
 def _fetch_all_executions(max_items: int) -> list[Mapping[str, Any]]:
     global _HISTORY_HYDRATED
     hydrate = not _HISTORY_HYDRATED
@@ -319,10 +370,12 @@ def _build_dashboard(limit: int) -> Dict[str, Any]:
     runtime = _fetch_json("/api/v3/development/runtime-summary")
     readiness = _fetch_json("/api/v3/development/readiness")
     registry = _fetch_json("/api/v3/development/model-registry")
+    plan_payload = _fetch_json("/api/v3/development/plans?limit=100")
     catalog = _route_catalog(registry)
     executions = [_execution(item, catalog) for item in _fetch_all_executions(limit)]
     active = [item for item in executions if not item["terminal"]]
     history = [item for item in executions if item["terminal"]]
+    plans, plan_summary = _plans(plan_payload.get("items"))
     result: Dict[str, Any] = {
         "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -330,6 +383,8 @@ def _build_dashboard(limit: int) -> Dict[str, Any]:
         "active": active,
         "history": history,
         "analytics": _analytics(executions),
+        "plans": plans,
+        "planSummary": plan_summary,
         "runtime": runtime,
         "readiness": readiness,
         "registry": registry,
