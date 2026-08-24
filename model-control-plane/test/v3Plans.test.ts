@@ -408,3 +408,61 @@ test('a delivery-authorized plan is not complete until remote and post-merge che
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('plan-scoped cancellation stops active workers and survives repeated requests', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-cancel-'));
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'opencode-acp': true },
+  });
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'cancel-plan' },
+      payload: {
+        projectKey: 'example',
+        objective: 'Cancel this plan.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Wait for cancellation.' }],
+          },
+        ],
+      },
+    });
+    const planId = created.json().planId as string;
+    const executionId = created.json().batches[0].workItems[0].executions[0].executionId;
+    const cancelled = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/cancel`,
+    });
+    assert.equal(cancelled.statusCode, 200);
+    assert.equal(cancelled.json().status, 'CANCELLED');
+    assert.equal(cancelled.json().batches[0].status, 'CANCELLED');
+    assert.equal(cancelled.json().batches[0].workItems[0].status, 'CANCELLED');
+    assert.equal(cancelled.json().batches[0].workItems[0].executions[0].status, 'CANCELLED');
+    assert.equal(host.executions.get(`conversation-1`)?.status, 'PAUSED');
+
+    const repeated = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/cancel`,
+    });
+    assert.equal(repeated.json().status, 'CANCELLED');
+    assert.equal(
+      repeated.json().events.filter((event: { type: string }) => event.type === 'PLAN_CANCELLED')
+        .length,
+      1,
+    );
+    assert.equal(executionId.startsWith('exec_'), true);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

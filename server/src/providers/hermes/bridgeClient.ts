@@ -121,12 +121,30 @@ export interface HermesKanbanRun {
   started_at?: number;
 }
 
+export interface HermesKanbanEvent {
+  id?: string | number;
+  task_id?: string;
+  type?: string;
+  created_at?: string | number;
+}
+
+export interface HermesDevelopmentPlan {
+  planId: string;
+  projectKey: string;
+  objective: string;
+  status: string;
+  currentRevision: string;
+  deliveryStage?: string;
+  pullRequestUrl?: string;
+  mergeRevision?: string;
+}
+
 export interface HermesKanban {
   tasks: HermesKanbanTask[];
   links: HermesKanbanLink[];
   runs: HermesKanbanRun[];
-  events?: Array<Record<string, unknown>>;
-  plans?: Array<Record<string, unknown>>;
+  events?: HermesKanbanEvent[];
+  plans?: HermesDevelopmentPlan[];
 }
 
 // ── Spawn wire types (hermes-office-bridge /api/spawns) ───────

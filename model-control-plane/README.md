@@ -32,10 +32,10 @@ Coding backends are defined in policy independently from runtime readiness. Open
 - `GET /api/v3/development/plans/:planId`
 - `POST /api/v3/development/plans`
 - `POST /api/v3/development/plans/:planId/reconcile`
+- `POST /api/v3/development/plans/:planId/cancel`
 - `GET /api/v3/development/executions`
 - `GET /api/v3/development/executions/:executionId`
 - `POST /api/v3/development/executions`
-- `POST /api/v3/development/executions/:executionId/messages`
 - `POST /api/v3/development/executions/:executionId/cancel`
 
 `GET /api/v3/development/executions?limit=5000&hydrate=1` backfills missing historical LiteLLM observations into durable execution correlation state.

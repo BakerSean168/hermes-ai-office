@@ -20,6 +20,7 @@ import type {
 } from './v3/ports.js';
 import { DevelopmentPolicy } from './v3/policy.js';
 import { PlanRepository } from './v3/plans.js';
+import { PLAN_RECONCILE_INTERVAL_MS } from './v3/planConstants.js';
 import { loadV3ReadinessEvidence } from './v3/readiness.js';
 import { DevelopmentExecutionService, UnconfiguredObservability } from './v3/service.js';
 import { WorkspaceProvisioner, type WorkspaceProvisioningPort } from './v3/workspace.js';
@@ -156,7 +157,7 @@ export async function buildControlPlane(
         .reconcilePlans()
         .catch((error) => app.log.error(error, 'V3 plan reconciliation failed'));
     },
-    Number(env.MODEL_CP_V3_RECONCILE_INTERVAL_MS ?? 5_000),
+    Number(env.MODEL_CP_V3_RECONCILE_INTERVAL_MS ?? PLAN_RECONCILE_INTERVAL_MS),
   );
   reconcileInterval.unref();
 

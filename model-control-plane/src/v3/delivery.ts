@@ -3,6 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  DELIVERY_COMMAND_MAX_BUFFER_BYTES,
+  DELIVERY_COMMAND_TIMEOUT_MS,
+  PLAN_LIMITS,
+} from './planConstants.js';
+
 const execFileAsync = promisify(execFile);
 
 export type DeliveryStage =
@@ -62,6 +68,8 @@ interface PullRequestView {
   url: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   mergeStateStatus?: string;
+  headRefOid?: string;
+  baseRefName?: string;
   mergeCommit?: { oid?: string } | null;
   statusCheckRollup?: Array<{
     name?: string;
@@ -78,6 +86,12 @@ interface CheckSummary {
   failed: string[];
   passed: string[];
 }
+
+export type DeliveryCommandRunner = (
+  cwd: string,
+  command: string,
+  args: string[],
+) => Promise<string>;
 
 function validateRef(value: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) || value.includes('..')) {
@@ -109,9 +123,11 @@ function summarizeChecks(checks: PullRequestView['statusCheckRollup'] = []): Che
 
 export class GitHubPlanDelivery implements PlanDeliveryPort {
   readonly #home?: string;
+  readonly #commandRunner?: DeliveryCommandRunner;
 
-  constructor(options: { home?: string } = {}) {
+  constructor(options: { home?: string; commandRunner?: DeliveryCommandRunner } = {}) {
     this.#home = options.home;
+    this.#commandRunner = options.commandRunner;
   }
 
   #owner(cwd: string): { uid: number; gid: number; home: string } {
@@ -127,6 +143,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
   }
 
   async #run(cwd: string, command: string, args: string[]): Promise<string> {
+    if (this.#commandRunner) return this.#commandRunner(cwd, command, args);
     try {
       const owner = this.#owner(cwd);
       const result = await execFileAsync(command, args, {
@@ -139,8 +156,8 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           GH_CONFIG_DIR: path.join(owner.home, '.config', 'gh'),
         },
         encoding: 'utf8',
-        timeout: 180_000,
-        maxBuffer: 8 * 1024 * 1024,
+        timeout: DELIVERY_COMMAND_TIMEOUT_MS,
+        maxBuffer: DELIVERY_COMMAND_MAX_BUFFER_BYTES,
       });
       return result.stdout.trim();
     } catch (error) {
@@ -164,7 +181,8 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     input: PlanDeliveryRequest,
     repository: string,
   ): Promise<PullRequestView | undefined> {
-    const fields = 'number,url,state,mergeStateStatus,mergeCommit,statusCheckRollup';
+    const fields =
+      'number,url,state,mergeStateStatus,mergeCommit,statusCheckRollup,headRefOid,baseRefName';
     const output = await this.#run(input.repositoryPath, 'gh', [
       'pr',
       'list',
@@ -175,11 +193,23 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       '--repo',
       repository,
       '--limit',
-      '1',
+      '100',
       '--json',
       fields,
     ]);
-    return (JSON.parse(output) as PullRequestView[])[0];
+    const pullRequests = JSON.parse(output) as PullRequestView[];
+    return (
+      pullRequests.find(
+        (pullRequest) =>
+          pullRequest.state === 'OPEN' && pullRequest.baseRefName === input.config.targetBranch,
+      ) ??
+      pullRequests.find(
+        (pullRequest) =>
+          pullRequest.state === 'MERGED' &&
+          pullRequest.baseRefName === input.config.targetBranch &&
+          pullRequest.headRefOid === input.revision,
+      )
+    );
   }
 
   async #pullRequest(input: PlanDeliveryRequest, repository: string): Promise<PullRequestView> {
@@ -269,7 +299,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           evidence: { ...checks },
         };
       }
-      if (checks.pending.length > 0) {
+      if (checks.pending.length > 0 || (checks.failed.length === 0 && checks.passed.length === 0)) {
         return {
           outcome: 'WAITING',
           stage: 'CHECKS',
@@ -300,7 +330,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           pullRequestUrl: pullRequest.url,
           evidence: {
             mergeStateStatus: pullRequest.mergeStateStatus,
-            message: error.message.slice(0, 2_000),
+            message: error.message.slice(0, PLAN_LIMITS.errorDetailCharacters),
           },
         };
       }

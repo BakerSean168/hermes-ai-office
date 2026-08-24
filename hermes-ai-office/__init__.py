@@ -89,21 +89,6 @@ _GET_EXECUTION_SCHEMA = {
     },
 }
 
-_CONTINUE_EXECUTION_SCHEMA = {
-    "name": "ai_office_continue_execution",
-    "description": "Resume the same PAUSED execution. Review corrections should use IMPLEMENT_FIX instead.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "execution_id": {"type": "string"},
-            "message": {"type": "string"},
-            "await": {"type": "boolean"},
-            "wait_timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600},
-        },
-        "required": ["execution_id", "message"],
-    },
-}
-
 _CANCEL_EXECUTION_SCHEMA = {
     "name": "ai_office_cancel_execution",
     "description": "Cancel a non-terminal AI Office execution.",
@@ -201,6 +186,16 @@ _GET_PLAN_SCHEMA = {
             "plan_id": {"type": "string"},
             "reconcile": {"type": "boolean", "description": "Request an immediate recovery/reconcile pass before reading."},
         },
+        "required": ["plan_id"],
+    },
+}
+
+_CANCEL_PLAN_SCHEMA = {
+    "name": "ai_office_cancel_plan",
+    "description": "Cancel a durable plan and all of its non-terminal worker executions.",
+    "parameters": {
+        "type": "object",
+        "properties": {"plan_id": {"type": "string"}},
         "required": ["plan_id"],
     },
 }
@@ -539,26 +534,6 @@ def _get_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
-def _continue_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
-    try:
-        execution_id = str(args.get("execution_id") or "").strip()
-        message = str(args.get("message") or "").strip()
-        if not message:
-            raise ValueError("message is required")
-        snapshot = _control_plane_request(
-            _v3_execution_path(execution_id, "/messages"),
-            method="POST",
-            payload={"message": message[:20_000]},
-            timeout=8.0,
-        )
-        wait = bool(args.get("await", False))
-        timeout = max(0.0, min(float(args.get("wait_timeout_seconds") or 0.0), 600.0))
-        snapshot, timed_out = _wait_for_execution(snapshot, wait=wait, timeout_seconds=timeout)
-        return json.dumps({"ok": True, "awaitRequested": wait, "awaitTimedOut": timed_out, **snapshot}, ensure_ascii=False)
-    except Exception as exc:
-        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
-
-
 def _cancel_development_execution_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         snapshot = _control_plane_request(
@@ -727,6 +702,22 @@ def _get_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
+def _cancel_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        plan_id = str(args.get("plan_id") or "").strip()
+        if not plan_id:
+            raise ValueError("plan_id is required")
+        plan = _control_plane_request(
+            f"/api/v3/development/plans/{urllib.parse.quote(plan_id, safe='')}/cancel",
+            method="POST",
+            payload={},
+            timeout=12.0,
+        )
+        return json.dumps({"ok": True, **_compact_plan(plan)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
 def _list_development_plans_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         limit = max(1, min(int(args.get("limit") or 50), 200))
@@ -790,10 +781,10 @@ def register(ctx: Any) -> None:
         (_LIST_PROVIDERS_SCHEMA, _list_shared_providers_tool, "📡"),
         (_CREATE_PLAN_SCHEMA, _create_development_plan_tool, "🗺️"),
         (_GET_PLAN_SCHEMA, _get_development_plan_tool, "🧭"),
+        (_CANCEL_PLAN_SCHEMA, _cancel_development_plan_tool, "🛑"),
         (_LIST_PLANS_SCHEMA, _list_development_plans_tool, "📚"),
         (_RUN_PHASE_SCHEMA, _run_development_phase_tool, "🚀"),
         (_GET_EXECUTION_SCHEMA, _get_development_execution_tool, "🔎"),
-        (_CONTINUE_EXECUTION_SCHEMA, _continue_development_execution_tool, "▶️"),
         (_CANCEL_EXECUTION_SCHEMA, _cancel_development_execution_tool, "⛔"),
         (_LIST_ACTIVE_SCHEMA, _list_active_development_executions_tool, "📋"),
     )

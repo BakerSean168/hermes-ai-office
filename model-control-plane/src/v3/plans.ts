@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { DeliveryStage, PlanDeliveryConfig } from './delivery.js';
+import { PLAN_LIMITS } from './planConstants.js';
 
 export type PlanStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
-export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED';
+export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
 
 export interface CreatePlanInput {
   projectKey: string;
@@ -484,6 +485,33 @@ export class PlanRepository {
       .run(status, blockedReason ?? null, Date.now(), planId);
   }
 
+  cancel(planId: string): void {
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#db
+        .prepare(
+          "UPDATE v3_plan_work_items SET status='CANCELLED',blocked_reason=NULL,updated_at=? WHERE plan_id=? AND status!='SUCCEEDED'",
+        )
+        .run(now, planId);
+      this.#db
+        .prepare(
+          "UPDATE v3_plan_batches SET status='CANCELLED',blocked_reason=NULL,updated_at=? WHERE plan_id=? AND status!='SUCCEEDED'",
+        )
+        .run(now, planId);
+      this.#db
+        .prepare(
+          "UPDATE v3_plans SET status='CANCELLED',blocked_reason=NULL,updated_at=? WHERE plan_id=?",
+        )
+        .run(now, planId);
+      this.appendEvent(planId, 'PLAN_CANCELLED');
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   setDeliveryState(
     planId: string,
     input: {
@@ -513,7 +541,7 @@ export class PlanRepository {
     const batches = this.batches(planId);
     const repairAttempt =
       batches.filter((batch) => batch.key.startsWith('delivery-fix-')).length + 1;
-    if (repairAttempt > 3) return null;
+    if (repairAttempt > PLAN_LIMITS.deliveryRepairAttempts) return null;
     const existing = batches.find((batch) => batch.key === `delivery-fix-${repairAttempt}`);
     if (existing) return existing;
     const predecessor = batches.at(-1);
@@ -552,7 +580,7 @@ export class PlanRepository {
           batchId,
           `delivery-fix-${repairAttempt}`,
           `Repair failed remote checks (attempt ${repairAttempt})`,
-          `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, 12_000)}`,
+          `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`,
           JSON.stringify([
             'The previously failing remote checks pass.',
             'Focused regression tests pass locally.',

@@ -4,6 +4,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
+import {
+  PLAN_LIMITS,
+  WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+  WORKSPACE_GIT_MAX_BUFFER_BYTES,
+  WORKSPACE_GIT_TIMEOUT_MS,
+  WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+  WORKSPACE_PERMISSION_TIMEOUT_MS,
+} from './planConstants.js';
 import type { WorkspaceMode } from './types.js';
 
 const execFileAsync = promisify(execFile);
@@ -57,14 +65,14 @@ async function git(cwd: string, args: string[], identity?: UnixIdentity): Promis
     const result = await execFileAsync('git', ['-C', cwd, ...args], {
       ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
       encoding: 'utf8',
-      timeout: 120_000,
-      maxBuffer: 8 * 1024 * 1024,
+      timeout: WORKSPACE_GIT_TIMEOUT_MS,
+      maxBuffer: WORKSPACE_GIT_MAX_BUFFER_BYTES,
     });
     return result.stdout.trim();
   } catch (error) {
     const failure = error as Error & { stderr?: string };
     const detail = failure.stderr?.trim() || failure.message;
-    throw new Error(`GIT_COMMAND_FAILED:${detail.slice(0, 2_000)}`);
+    throw new Error(`GIT_COMMAND_FAILED:${detail.slice(0, PLAN_LIMITS.errorDetailCharacters)}`);
   }
 }
 
@@ -76,8 +84,8 @@ async function gitNullList(
   const result = await execFileAsync('git', ['-C', cwd, ...args], {
     ...(identity ? { uid: identity.uid, gid: identity.gid } : {}),
     encoding: 'utf8',
-    timeout: 120_000,
-    maxBuffer: 16 * 1024 * 1024,
+    timeout: WORKSPACE_GIT_TIMEOUT_MS,
+    maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
   });
   return result.stdout.split('\0').filter(Boolean);
 }
@@ -109,7 +117,9 @@ function overlayWorkingTree(sourceRepo: string, snapshotRepo: string, entries: s
 }
 
 async function chownTree(target: string, owner: UnixIdentity): Promise<void> {
-  await execFileAsync('chown', ['-R', `${owner.uid}:${owner.gid}`, target], { timeout: 120_000 });
+  await execFileAsync('chown', ['-R', `${owner.uid}:${owner.gid}`, target], {
+    timeout: WORKSPACE_GIT_TIMEOUT_MS,
+  });
 }
 
 export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
@@ -200,8 +210,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         uid: sourceOwner.uid,
         gid: sourceOwner.gid,
         encoding: 'utf8',
-        timeout: 180_000,
-        maxBuffer: 16 * 1024 * 1024,
+        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
       });
 
       if (
@@ -247,13 +257,17 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       input.workspaceMode === 'isolated_write' ||
       input.workspaceMode === 'reuse_implementation_workspace'
     ) {
-      await execFileAsync('chmod', ['-R', 'u+rwX,go-rwx', hostPath], { timeout: 60_000 });
+      await execFileAsync('chmod', ['-R', 'u+rwX,go-rwx', hostPath], {
+        timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
+      });
       return { hostPath, executionPath, branch, sourceRevision: resolvedRevision };
     }
 
     // Read/review phases get a physically read-only clone. OpenHands owns the files but
     // cannot mutate them, so a prompt mistake cannot silently turn investigation into implementation.
-    await execFileAsync('chmod', ['-R', 'a-w', hostPath], { timeout: 60_000 });
+    await execFileAsync('chmod', ['-R', 'a-w', hostPath], {
+      timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
+    });
     return { hostPath, executionPath, sourceRevision: resolvedRevision };
   }
 
@@ -287,8 +301,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       await git(repoRoot, ['bundle', 'create', sourceBundle, '--all'], sourceOwner);
       await execFileAsync('git', ['clone', '--no-hardlinks', sourceBundle, integrationRepo], {
         encoding: 'utf8',
-        timeout: 180_000,
-        maxBuffer: 16 * 1024 * 1024,
+        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
       });
       await git(integrationRepo, ['checkout', '--detach', input.baseRevision]);
       for (const [index, implementation] of input.implementations.entries()) {

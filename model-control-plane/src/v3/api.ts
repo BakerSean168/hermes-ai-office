@@ -162,6 +162,18 @@ export function registerV3Routes(
     },
   );
 
+  app.post<{ Params: { planId: string } }>(
+    '/api/v3/development/plans/:planId/cancel',
+    async (request, reply) => {
+      const plan = await service.cancelPlan(request.params.planId);
+      if (!plan) {
+        reply.code(404);
+        return { error: { code: 'PLAN_NOT_FOUND' } };
+      }
+      return plan;
+    },
+  );
+
   app.get('/api/v3/development/model-registry', async (_request, reply) => {
     if (!modelRegistry) {
       reply.code(503);
@@ -316,30 +328,6 @@ export function registerV3Routes(
     async (request, reply) => {
       try {
         const snapshot = await service.get(request.params.executionId);
-        if (!snapshot) {
-          reply.code(404);
-          return { error: { code: 'EXECUTION_NOT_FOUND' } };
-        }
-        return snapshot;
-      } catch (error) {
-        const code = errorCode(error);
-        reply.code(errorStatus(code));
-        return { error: { code } };
-      }
-    },
-  );
-
-  app.post<{ Params: { executionId: string } }>(
-    '/api/v3/development/executions/:executionId/messages',
-    async (request, reply) => {
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      const message = String(body.message ?? '').trim();
-      if (!message) {
-        reply.code(400);
-        return { error: { code: 'CONTINUATION_MESSAGE_REQUIRED' } };
-      }
-      try {
-        const snapshot = await service.continue(request.params.executionId, message);
         if (!snapshot) {
           reply.code(404);
           return { error: { code: 'EXECUTION_NOT_FOUND' } };

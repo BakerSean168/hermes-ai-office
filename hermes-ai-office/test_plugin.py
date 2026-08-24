@@ -41,11 +41,11 @@ class PluginTest(unittest.TestCase):
                 "ai_office_list_providers",
                 "ai_office_run_phase",
                 "ai_office_get_execution",
-                "ai_office_continue_execution",
                 "ai_office_cancel_execution",
                 "ai_office_list_active",
                 "ai_office_create_plan",
                 "ai_office_get_plan",
+                "ai_office_cancel_plan",
                 "ai_office_list_plans",
             },
         )
@@ -134,16 +134,6 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(payload["hints"]["parallelism"], 3)
         self.assertEqual(payload["override"]["backend"], "openhands-builtin")
         self.assertEqual(payload["override"]["modelClass"], "implementation-efficient")
-
-    def test_continue_rejects_empty_message_before_network(self) -> None:
-        with mock.patch.object(plugin, "_control_plane_request") as request:
-            result = json.loads(
-                plugin._continue_development_execution_tool(
-                    {"execution_id": "exec-1", "message": "  "}
-                )
-            )
-        self.assertFalse(result["ok"])
-        request.assert_not_called()
 
     def test_list_active_filters_terminal_executions(self) -> None:
         with mock.patch.object(
@@ -298,6 +288,22 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(execution["verdict"], "PASS")
         self.assertNotIn("result", execution)
         self.assertLess(len(raw), 2000)
+
+    def test_cancel_plan_uses_plan_scoped_recovery_api(self) -> None:
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            return_value={"planId": "plan-1", "status": "CANCELLED", "batches": []},
+        ) as request:
+            result = json.loads(plugin._cancel_development_plan_tool({"plan_id": "plan-1"}))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "CANCELLED")
+        request.assert_called_once_with(
+            "/api/v3/development/plans/plan-1/cancel",
+            method="POST",
+            payload={},
+            timeout=12.0,
+        )
 
     def test_pre_llm_development_guidance_is_v3_only(self) -> None:
         result = plugin._on_pre_llm_call(user_message="帮我实现并审查这个功能")

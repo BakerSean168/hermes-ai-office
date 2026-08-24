@@ -5,10 +5,10 @@ provides_tools:
   - ai_office_list_providers
   - ai_office_create_plan
   - ai_office_get_plan
+  - ai_office_cancel_plan
   - ai_office_list_plans
   - ai_office_run_phase
   - ai_office_get_execution
-  - ai_office_continue_execution
   - ai_office_cancel_execution
   - ai_office_list_active
 provides_hooks:

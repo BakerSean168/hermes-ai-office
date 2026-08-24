@@ -117,5 +117,4 @@ export interface DevelopmentExecutionServicePort {
   ): Promise<DevelopmentExecutionSnapshot>;
   get(executionId: string): Promise<DevelopmentExecutionSnapshot | null>;
   cancel(executionId: string): Promise<DevelopmentExecutionSnapshot | null>;
-  continue(executionId: string, message: string): Promise<DevelopmentExecutionSnapshot | null>;
 }
