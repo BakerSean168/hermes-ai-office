@@ -10,7 +10,7 @@ import type {
   ExecutionHostPort,
   ExecutionHostSnapshot,
 } from '../ports.js';
-import type { ExecutionStatus, UsageSummary } from '../types.js';
+import type { ExecutionFailure, ExecutionStatus, UsageSummary } from '../types.js';
 
 interface JsonRecord {
   [key: string]: unknown;
@@ -46,6 +46,24 @@ function mapStatus(value: unknown): ExecutionStatus {
     default:
       return 'UNKNOWN';
   }
+}
+
+function executionFailure(value: unknown): ExecutionFailure | undefined {
+  const event = asRecord(value);
+  const code = typeof event.code === 'string' ? event.code.trim() : '';
+  if (!code) return undefined;
+  const detail =
+    typeof event.detail === 'string'
+      ? event.detail
+          .trim()
+          .replace(/(authorization\s*:\s*bearer\s+)[^\s'",}]+/gi, '$1[REDACTED]')
+          .replace(/\b(?:sk|sess)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+          .slice(0, 2_000)
+      : '';
+  const retryable =
+    /(?:ServiceUnavailable|RateLimit|Timeout|Connection|InternalServer)/i.test(code) ||
+    /(?:HTTP\s*429|HTTP\s*5\d\d|Error code:\s*(?:429|5\d\d)|No available channel)/i.test(detail);
+  return { code, ...(detail ? { detail } : {}), retryable };
 }
 
 function usageFromConversation(payload: JsonRecord): UsageSummary | null {
@@ -326,6 +344,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
   async #snapshot(payload: JsonRecord, conversationId: string): Promise<ExecutionHostSnapshot> {
     const status = mapStatus(payload.execution_status);
     let finalText: string | undefined;
+    let error: ExecutionFailure | undefined;
     if (['SUCCEEDED', 'FAILED', 'STUCK'].includes(status)) {
       try {
         const result = await this.#json(
@@ -336,10 +355,22 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
         // The lifecycle state remains authoritative even when final-response fetch is unavailable.
       }
     }
+    if (status === 'FAILED' || status === 'STUCK') {
+      try {
+        const events = await this.#json(
+          `/api/conversations/${encodeURIComponent(conversationId)}/events/search?limit=1&kind=ConversationErrorEvent&sort_order=TIMESTAMP_DESC`,
+        );
+        const items = Array.isArray(events.items) ? events.items : [];
+        error = executionFailure(items[0]);
+      } catch {
+        // Keep the terminal host state even when diagnostic event retrieval is unavailable.
+      }
+    }
     return {
       conversationId,
       status,
       finalText,
+      error,
       startedAt: typeof payload.created_at === 'string' ? payload.created_at : undefined,
       updatedAt: typeof payload.updated_at === 'string' ? payload.updated_at : undefined,
       usage: usageFromConversation(payload),
@@ -348,6 +379,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       upstream: {
         executionStatus: payload.execution_status,
         availableModels: payload.available_models,
+        error,
       },
     };
   }

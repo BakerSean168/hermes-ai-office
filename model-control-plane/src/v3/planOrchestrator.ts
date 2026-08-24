@@ -49,6 +49,13 @@ function durableSnapshot(record: ExecutionLinkRecord): DevelopmentExecutionSnaps
           git: { branch: record.gitBranch ?? null },
         }
       : null,
+    error: record.errorCode
+      ? {
+          code: record.errorCode,
+          ...(record.errorDetail ? { detail: record.errorDetail } : {}),
+          retryable: record.errorRetryable === true,
+        }
+      : null,
     timing: {
       startedAt: new Date(record.startedAt ?? record.createdAt).toISOString(),
       endedAt: ended ? new Date(record.endedAt ?? record.updatedAt).toISOString() : undefined,
@@ -243,7 +250,10 @@ export class DurablePlanOrchestrator {
           record.previousExecutionId === latest.previousExecutionId,
       ).length;
       const totalPhaseAttempts = records.filter((record) => record.phase === latest.phase).length;
-      if (sameParentAttempts < PLAN_LIMITS.transportAttemptsPerParent) {
+      const attemptLimit = snapshot.error?.retryable
+        ? PLAN_LIMITS.retryableTransportAttemptsPerParent
+        : PLAN_LIMITS.transportAttemptsPerParent;
+      if (sameParentAttempts < attemptLimit) {
         await this.#launchPlanPhase(
           plan,
           batch,

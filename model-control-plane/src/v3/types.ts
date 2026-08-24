@@ -143,6 +143,12 @@ export interface ExecutionResult {
   };
 }
 
+export interface ExecutionFailure {
+  code: string;
+  detail?: string;
+  retryable: boolean;
+}
+
 export interface DevelopmentExecutionSnapshot {
   executionId: string;
   projectKey: string;
@@ -151,6 +157,7 @@ export interface DevelopmentExecutionSnapshot {
   status: ExecutionStatus;
   selection: ExecutionSelection;
   result?: ExecutionResult | null;
+  error?: ExecutionFailure | null;
   timing: ExecutionTiming;
   usage?: UsageSummary | null;
   refs: ExecutionRefs;
@@ -188,6 +195,9 @@ export interface ExecutionLinkRecord {
   attempt?: number;
   commandKey?: string;
   resultText?: string;
+  errorCode?: string;
+  errorDetail?: string;
+  errorRetryable?: boolean;
   observedUsage?: UsageSummary;
   observedRoutes?: RouteUsageSummary[];
   selectionReasons: string[];
