@@ -313,6 +313,78 @@ test('V3 cancel is monotonic when the pause transport briefly still reports RUNN
   }
 });
 
+test('V3 terminal cancellation survives a concurrent stale host observation', async () => {
+  const host = new FakeHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': false },
+  });
+  try {
+    const started = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'v3-cancel-concurrent-race' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Concurrent cancellation race probe.',
+        projectKey: 'memo-flow',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    const executionId = started.json().executionId;
+
+    let releaseStale!: () => void;
+    const staleReleased = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    let staleStarted!: () => void;
+    const staleObserved = new Promise<void>((resolve) => {
+      staleStarted = resolve;
+    });
+    let gets = 0;
+    host.getExecution = async () => {
+      gets += 1;
+      if (gets === 1) {
+        staleStarted();
+        await staleReleased;
+      }
+      return {
+        conversationId: '22222222-2222-4222-8222-222222222222',
+        status: 'PAUSED',
+      };
+    };
+    host.cancelExecution = async () => ({
+      conversationId: '22222222-2222-4222-8222-222222222222',
+      status: 'PAUSED',
+    });
+
+    const staleRead = runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    await staleObserved;
+    const cancelled = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/executions/${executionId}/cancel`,
+    });
+    assert.equal(cancelled.json().status, 'CANCELLED');
+    releaseStale();
+    assert.equal((await staleRead).json().status, 'CANCELLED');
+
+    const reread = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(reread.json().status, 'CANCELLED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives reviewer findings through causal lineage', async () => {
   const host = new FakeHost();
   const provisions: Array<{

@@ -579,8 +579,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         Number.isFinite(observedAt) ? observedAt : undefined,
       );
     }
-    const effectiveStatus = preserveCancelled
-      ? 'CANCELLED'
+    const effectiveStatus = TERMINAL.has(record.statusCache)
+      ? record.statusCache
       : (hostSnapshot?.status ?? record.statusCache);
     const hostFinalText = hostSnapshot?.finalText?.trim();
     if (hostFinalText && TERMINAL.has(effectiveStatus) && !record.resultText) {

@@ -355,9 +355,11 @@ export class ExecutionLinkRepository {
             SET status_cache=?,
                 ended_at=CASE WHEN ? IS NOT NULL AND ended_at IS NULL THEN ? ELSE ended_at END,
                 updated_at=?
-          WHERE execution_id=?`,
+          WHERE execution_id=?
+            AND (status_cache NOT IN ('SUCCEEDED','FAILED','STUCK','CANCELLED')
+                 OR status_cache=?)`,
       )
-      .run(status, endedAt, endedAt, now, executionId);
+      .run(status, endedAt, endedAt, now, executionId, status);
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;

@@ -275,8 +275,13 @@ export class DurablePlanOrchestrator {
 
     const verdict = reviewVerdict(snapshot.result?.finalText ?? '');
     if (verdict === 'BLOCKING') {
-      const fixAttempt = records.filter((record) => record.phase === 'IMPLEMENT_FIX').length + 1;
-      if (fixAttempt > PLAN_LIMITS.reviewFixAttempts) {
+      const completedFixCycles = new Set(
+        records
+          .filter((record) => record.phase === 'IMPLEMENT_FIX' && record.previousExecutionId)
+          .map((record) => record.previousExecutionId),
+      ).size;
+      const fixCycle = completedFixCycles + 1;
+      if (fixCycle > PLAN_LIMITS.reviewFixAttempts) {
         const reason = 'REVIEW_FIX_LIMIT_EXCEEDED';
         this.#blockWorkItem(
           plan.planId,
@@ -287,6 +292,7 @@ export class DurablePlanOrchestrator {
         );
         return;
       }
+      const fixAttempt = records.filter((record) => record.phase === 'IMPLEMENT_FIX').length + 1;
       await this.#launchPlanPhase(
         plan,
         batch,
@@ -582,7 +588,16 @@ export class DurablePlanOrchestrator {
                 ) {
                   continue;
                 }
-                const phase = latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW';
+                const recoverReviewLimit =
+                  item.blockedReason === 'REVIEW_FIX_LIMIT_EXCEEDED' &&
+                  latest.phase === 'VERIFY_REVIEW' &&
+                  reviewVerdict(latest.resultText ?? '') === 'BLOCKING';
+                const phase = recoverReviewLimit
+                  ? 'IMPLEMENT_FIX'
+                  : (latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW');
+                const previousExecutionId = recoverReviewLimit
+                  ? latest.executionId
+                  : latest.previousExecutionId;
                 const attempt = records.filter((record) => record.phase === phase).length + 1;
                 this.#repository.setWorkItemStatus(item.workItemId, 'RUNNING');
                 this.#repository.appendEvent(
@@ -596,7 +611,7 @@ export class DurablePlanOrchestrator {
                   batch,
                   item,
                   phase,
-                  latest.previousExecutionId,
+                  previousExecutionId,
                   attempt,
                   phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
                 );
