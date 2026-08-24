@@ -135,10 +135,13 @@ export function registerV3Routes(
     }
   });
 
-  app.get<{ Params: { planId: string } }>(
+  app.get<{ Params: { planId: string }; Querystring: { hydrate?: string } }>(
     '/api/v3/development/plans/:planId',
     async (request, reply) => {
-      const plan = await service.getPlan(request.params.planId);
+      const plan = await service.getPlan(
+        request.params.planId,
+        request.query?.hydrate === '1' || request.query?.hydrate === 'true',
+      );
       if (!plan) {
         reply.code(404);
         return { error: { code: 'PLAN_NOT_FOUND' } };
@@ -155,12 +158,21 @@ export function registerV3Routes(
   app.post<{ Params: { planId: string } }>(
     '/api/v3/development/plans/:planId/reconcile',
     async (request, reply) => {
-      if (!(await service.getPlan(request.params.planId))) {
+      const plan = await service.getPlan(request.params.planId, false);
+      if (!plan) {
         reply.code(404);
         return { error: { code: 'PLAN_NOT_FOUND' } };
       }
-      await service.reconcilePlans(request.params.planId, true);
-      return service.getPlan(request.params.planId);
+      void service
+        .reconcilePlans(request.params.planId, true)
+        .catch((error) => request.log.error(error, 'V3 requested plan reconciliation failed'));
+      reply.code(202);
+      return {
+        planId: plan.planId,
+        accepted: true,
+        status: plan.status,
+        statusUrl: `/api/v3/development/plans/${plan.planId}`,
+      };
     },
   );
 
