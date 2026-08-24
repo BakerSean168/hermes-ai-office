@@ -107,3 +107,39 @@ test('production delivery never mistakes an older merged pull request for the re
     false,
   );
 });
+
+test('production delivery waits for an open pull request to observe the pushed revision', async () => {
+  const commands: string[] = [];
+  const runner: DeliveryCommandRunner = async (_cwd, command, args) => {
+    const key = commandKey(command, args);
+    commands.push(key);
+    if (key === 'git remote get-url origin') return 'git@github.com:example/project.git';
+    if (key.includes('gh pr list')) {
+      return JSON.stringify([
+        {
+          number: 9,
+          url: 'https://github.com/example/project/pull/9',
+          state: 'OPEN',
+          baseRefName: 'main',
+          headRefOid: 'stale123',
+          statusCheckRollup: [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+        },
+      ]);
+    }
+    if (key === 'git push origin abc123:refs/heads/feature/durable-delivery') return '';
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  const result = await new GitHubPlanDelivery({ commandRunner: runner }).reconcile(request);
+
+  assert.equal(result.outcome, 'WAITING');
+  assert.equal(result.stage, 'CHECKS');
+  assert.deepEqual(result.evidence, {
+    expectedRevision: 'abc123',
+    observedRevision: 'stale123',
+  });
+  assert.equal(
+    commands.some((command) => command.includes('gh pr merge')),
+    false,
+  );
+});

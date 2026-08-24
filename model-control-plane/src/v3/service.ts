@@ -651,7 +651,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#planOrchestrator.getPlan(planId, hydrateExecutions);
   }
 
-  listPlans(limit = 100) {
+  listPlans(limit?: number) {
     return this.#planOrchestrator.listPlans(limit);
   }
 

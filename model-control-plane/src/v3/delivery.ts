@@ -193,7 +193,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       '--repo',
       repository,
       '--limit',
-      '100',
+      String(PLAN_LIMITS.pullRequestResults),
       '--json',
       fields,
     ]);
@@ -225,7 +225,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       '--repo',
       repository,
       '--title',
-      input.objective.slice(0, 240),
+      input.objective.slice(0, PLAN_LIMITS.pullRequestTitleCharacters),
       '--body',
       `Durable AI Office plan: ${input.planId}`,
     ]);
@@ -289,6 +289,17 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     }
 
     if (pullRequest.state !== 'MERGED') {
+      if (pullRequest.headRefOid !== input.revision) {
+        return {
+          outcome: 'WAITING',
+          stage: 'CHECKS',
+          pullRequestUrl: pullRequest.url,
+          evidence: {
+            expectedRevision: input.revision,
+            observedRevision: pullRequest.headRefOid,
+          },
+        };
+      }
       const checks = summarizeChecks(pullRequest.statusCheckRollup);
       if (checks.failed.length > 0) {
         return {

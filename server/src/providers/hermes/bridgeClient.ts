@@ -124,7 +124,8 @@ export interface HermesKanbanRun {
 export interface HermesKanbanEvent {
   id?: string | number;
   task_id?: string;
-  type?: string;
+  kind?: string;
+  payload?: string;
   created_at?: string | number;
 }
 

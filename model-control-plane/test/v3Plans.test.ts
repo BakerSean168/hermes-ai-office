@@ -14,10 +14,15 @@ import type {
 import type { WorkspaceProvisioningPort } from '../src/v3/workspace.js';
 
 class PlanHost implements ExecutionHostPort {
-  readonly executions = new Map<string, ExecutionHostSnapshot>();
+  readonly executions: Map<string, ExecutionHostSnapshot>;
   creates = 0;
   gets = 0;
   lastCreateInput?: ExecutionHostCreateInput;
+  cancelFailure?: Error;
+
+  constructor(executions = new Map<string, ExecutionHostSnapshot>()) {
+    this.executions = executions;
+  }
 
   async health() {
     return 'OK' as const;
@@ -40,6 +45,7 @@ class PlanHost implements ExecutionHostPort {
   }
 
   async cancelExecution(conversationId: string) {
+    if (this.cancelFailure) throw this.cancelFailure;
     const snapshot = await this.getExecution(conversationId);
     snapshot.status = 'PAUSED';
     return snapshot;
@@ -50,6 +56,12 @@ class PlanHost implements ExecutionHostPort {
     if (!snapshot) throw new Error('missing fake execution');
     snapshot.status = 'SUCCEEDED';
     snapshot.finalText = finalText;
+  }
+
+  timeout(conversationId: string) {
+    const snapshot = this.executions.get(conversationId);
+    if (!snapshot) throw new Error('missing fake execution');
+    snapshot.status = 'STUCK';
   }
 }
 
@@ -101,7 +113,7 @@ class PlanDelivery implements PlanDeliveryPort {
   }
 }
 
-test('a durable plan automatically reviews, fixes, and resumes without duplicate writers', async () => {
+test('a durable plan survives worker timeout, failed review, integration failure, and gateway restart', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-'));
   const dbFile = path.join(directory, 'control-plane.sqlite');
   const host = new PlanHost();
@@ -172,12 +184,21 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     assert.equal(host.creates, 1);
     assert.match(host.lastCreateInput?.objective ?? '', /commit all intended changes to Git/);
 
-    host.succeed(firstImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    host.timeout(firstImplementation.refs.openhandsConversationId);
     await runtime.v3.reconcilePlans();
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const firstReview = body.batches[0].workItems[0].executions[1];
+    const retriedImplementation = body.batches[0].workItems[0].executions[1];
+    assert.equal(retriedImplementation.phase, 'IMPLEMENT');
+    assert.equal(host.creates, 2);
+
+    host.succeed(retriedImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstReview = body.batches[0].workItems[0].executions[2];
     assert.equal(firstReview.phase, 'VERIFY_REVIEW');
 
     host.succeed(
@@ -188,7 +209,7 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const fallbackReview = body.batches[0].workItems[0].executions[2];
+    const fallbackReview = body.batches[0].workItems[0].executions[3];
     assert.equal(fallbackReview.phase, 'VERIFY_REVIEW');
     assert.equal(fallbackReview.selection.backend, 'openhands-builtin');
 
@@ -197,7 +218,7 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const fix = body.batches[0].workItems[0].executions[3];
+    const fix = body.batches[0].workItems[0].executions[4];
     assert.equal(fix.phase, 'IMPLEMENT_FIX');
     assert.match(host.lastCreateInput?.objective ?? '', /commit all intended fixes to Git/);
 
@@ -206,7 +227,7 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const secondReview = body.batches[0].workItems[0].executions[4];
+    const secondReview = body.batches[0].workItems[0].executions[5];
     assert.equal(secondReview.phase, 'VERIFY_REVIEW');
 
     host.succeed(
@@ -222,7 +243,9 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     const createsBeforeRestart = host.creates;
     await runtime.app.close();
 
-    runtime = await buildControlPlane(options);
+    const restartedHost = new PlanHost(host.executions);
+    restartedHost.creates = host.creates;
+    runtime = await buildControlPlane({ ...options, v3ExecutionHost: restartedHost });
     await runtime.app.inject({
       method: 'POST',
       url: `/api/v3/development/plans/${planId}/reconcile`,
@@ -236,20 +259,20 @@ test('a durable plan automatically reviews, fixes, and resumes without duplicate
     assert.equal(body.batches[0].status, 'SUCCEEDED');
     assert.equal(body.batches[1].status, 'RUNNING');
     assert.equal(body.batches[1].baseRevision, body.batches[0].integratedRevision);
-    assert.equal(host.creates, createsBeforeRestart + 1);
+    assert.equal(restartedHost.creates, createsBeforeRestart + 1);
     assert.equal(
       body.batches[0].workItems[0].executions.filter(
         (execution: { phase: string }) => execution.phase === 'IMPLEMENT',
       ).length,
-      1,
+      2,
     );
-    const getsBeforeList = host.gets;
+    const getsBeforeList = restartedHost.gets;
     const listed = await runtime.app.inject({
       method: 'GET',
       url: '/api/v3/development/plans?limit=10',
     });
     assert.equal(listed.statusCode, 200);
-    assert.equal(host.gets, getsBeforeList);
+    assert.equal(restartedHost.gets, getsBeforeList);
   } finally {
     await runtime.app.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -461,6 +484,58 @@ test('plan-scoped cancellation stops active workers and survives repeated reques
       1,
     );
     assert.equal(executionId.startsWith('exec_'), true);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('plan cancellation remains durable when an execution host cannot cancel a worker', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-cancel-failure-'));
+  const host = new PlanHost();
+  host.cancelFailure = new Error('gateway unavailable');
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'opencode-acp': true },
+  });
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'cancel-plan-host-failure' },
+      payload: {
+        projectKey: 'example',
+        objective: 'Cancel durably despite a failed host call.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Wait for cancellation.' }],
+          },
+        ],
+      },
+    });
+    const planId = created.json().planId as string;
+
+    const cancelled = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/cancel`,
+    });
+
+    assert.equal(cancelled.statusCode, 200);
+    assert.equal(cancelled.json().status, 'CANCELLED');
+    assert.equal(
+      cancelled
+        .json()
+        .events.some((event: { type: string }) => event.type === 'PLAN_WORKER_CANCEL_FAILED'),
+      true,
+    );
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await runtime.v3.getPlan(planId))?.status, 'CANCELLED');
   } finally {
     await runtime.app.close();
     fs.rmSync(directory, { recursive: true, force: true });

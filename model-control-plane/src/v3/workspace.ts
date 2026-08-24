@@ -32,7 +32,7 @@ export interface WorkspaceProvisioningPort {
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
   }): Promise<ProvisionedWorkspace>;
-  integrateBatch?(input: {
+  integrateBatch(input: {
     planId: string;
     batchKey: string;
     repositoryPath: string;

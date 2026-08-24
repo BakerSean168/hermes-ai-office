@@ -24,7 +24,9 @@ The only hook is `pre_llm_call`, which tells the Hermes Brain to use `ai_office_
 
 ## Development protocol
 
-- `ORCHESTRATE`
+- `ai_office_create_plan` is the sole public `ORCHESTRATE` boundary: Hermes analyzes
+  the objective, submits the complete batch graph once, and receives its durable
+  `planId` before any worker is launched.
 - `INVESTIGATE_PLAN`
 - `IMPLEMENT`
 - `VERIFY_REVIEW`
@@ -33,7 +35,10 @@ The only hook is `pre_llm_call`, which tells the Hermes Brain to use `ai_office_
 
 Reviewers should put `PASS` or `FAIL` on the first non-empty line. The parser prefers that strict contract and otherwise accepts only one unique standalone verdict token in the whole result; ambiguous results fail closed as `UNKNOWN`. A blocking review enters `IMPLEMENT_FIX`; an approved plan work item enters deterministic batch integration. When `ai_office_create_plan` explicitly sets `delivery.auto_merge=true`, AI Office continues through pull-request checks, bounded reviewed CI repair, merge, and post-merge verification before reporting plan success.
 
-`ORCHESTRATE` runs in a read-oriented Supervisor workspace. It may use OpenHands `task_tool_set` for internal analysis and `ai_office_worker` to launch multiple isolated workers. External ACP backends currently include OpenCode, DSH, Codex, Claude Code, and ZCode. Runtime readiness is separate from registration: only smoke-proven workers are enabled by default.
+The legacy single-execution phase tool does not expose `ORCHESTRATE`; it cannot
+bypass durable graph validation. External ACP backends currently include OpenCode,
+DSH, Codex, Claude Code, and ZCode. Runtime readiness is separate from registration:
+only smoke-proven workers are enabled by default.
 
 ## Dashboard
 

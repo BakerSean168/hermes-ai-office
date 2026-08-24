@@ -4,6 +4,9 @@ export const PLAN_LIMITS = {
   deliveryRepairAttempts: 3,
   errorDetailCharacters: 2_000,
   repairEvidenceCharacters: 12_000,
+  listResults: 100,
+  pullRequestResults: 100,
+  pullRequestTitleCharacters: 240,
 } as const;
 
 export const PLAN_RECONCILE_INTERVAL_MS = 5_000;

@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { DevelopmentPolicy } from './policy.js';
 import type { ModelRegistryPort } from './ports.js';
+import { PLAN_LIMITS } from './planConstants.js';
 import type { DevelopmentExecutionService } from './service.js';
 import { buildV3ReadinessReport, type V3ReadinessEvidence } from './readiness.js';
 import {
@@ -81,6 +82,7 @@ export function registerV3Routes(
         {
           projectKey: String(body.projectKey ?? ''),
           objective: String(body.objective ?? ''),
+          analysisSummary: body.analysisSummary ? String(body.analysisSummary) : undefined,
           repository: {
             path: String(repository.path ?? ''),
             baseRevision: repository.baseRevision ? String(repository.baseRevision) : undefined,
@@ -147,7 +149,7 @@ export function registerV3Routes(
 
   app.get('/api/v3/development/plans', async (request) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
-    return { items: await service.listPlans(Number(query.limit ?? 100)) };
+    return { items: await service.listPlans(Number(query.limit ?? PLAN_LIMITS.listResults)) };
   });
 
   app.post<{ Params: { planId: string } }>(

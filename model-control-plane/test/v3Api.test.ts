@@ -68,6 +68,12 @@ const workspace: WorkspaceProvisioningPort = {
       sourceRevision: 'abc123',
     };
   },
+  async integrateBatch(input) {
+    return {
+      revision: `integrated-${input.batchKey}`,
+      ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+    };
+  },
 };
 
 const gateway: ModelGatewayPort = {
@@ -307,6 +313,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
     workspaceMode: string;
   }> = [];
   const reuseWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
     hostPathForExecution(executionId) {
       return `/host/workspaces/executions/${executionId}/repo`;
     },
@@ -1374,6 +1381,7 @@ test('V3 review snapshot is anchored at the implementation original source revis
     repositoryPath: string;
   }> = [];
   const anchoredWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
     hostPathForExecution(executionId) {
       return `/host/workspaces/${executionId}`;
     },

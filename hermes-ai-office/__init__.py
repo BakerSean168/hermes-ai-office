@@ -22,11 +22,10 @@ import urllib.request
 _CONTROL_PLANE_BASE = os.environ.get(
     "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
 ).rstrip("/")
-_V3_PHASES = {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
+_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
 _V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
 _V3_DEFAULT_AWAIT = {
-    "ORCHESTRATE": False,
     "INVESTIGATE_PLAN": True,
     "IMPLEMENT": False,
     "IMPLEMENT_FIX": False,
@@ -34,7 +33,6 @@ _V3_DEFAULT_AWAIT = {
     "FINALIZE": True,
 }
 _V3_DEFAULT_WAIT_SECONDS = {
-    "ORCHESTRATE": 0.0,
     "INVESTIGATE_PLAN": 240.0,
     "IMPLEMENT": 0.0,
     "IMPLEMENT_FIX": 0.0,
@@ -57,7 +55,7 @@ _RUN_PHASE_SCHEMA = {
             "project_key": {"type": "string"},
             "repository_path": {
                 "type": "string",
-                "description": "Required for ORCHESTRATE, initial INVESTIGATE_PLAN, or IMPLEMENT.",
+                "description": "Required for initial INVESTIGATE_PLAN or IMPLEMENT.",
             },
             "base_revision": {"type": "string"},
             "previous_execution_id": {
@@ -122,7 +120,7 @@ _LIST_PROVIDERS_SCHEMA = {
 _CREATE_PLAN_SCHEMA = {
     "name": "ai_office_create_plan",
     "description": (
-        "Create one durable development plan. The control plane automatically runs each work item through "
+        "Submit the analyzed ORCHESTRATE proposal as one durable development plan. The control plane validates and persists the graph before it automatically runs each work item through "
         "IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX when needed, deterministic batch integration, dependent batches, "
         "and, when explicitly authorized, remote checks and merge."
     ),
@@ -131,6 +129,10 @@ _CREATE_PLAN_SCHEMA = {
         "properties": {
             "project_key": {"type": "string"},
             "objective": {"type": "string"},
+            "analysis_summary": {
+                "type": "string",
+                "description": "Concise repository-backed analysis that justifies this batch graph and is persisted with PLAN_CREATED.",
+            },
             "repository_path": {"type": "string"},
             "base_revision": {"type": "string"},
             "delivery": {
@@ -173,7 +175,7 @@ _CREATE_PLAN_SCHEMA = {
                 },
             },
         },
-        "required": ["objective", "repository_path", "batches"],
+        "required": ["objective", "analysis_summary", "repository_path", "batches"],
     },
 }
 
@@ -438,8 +440,8 @@ def _run_development_phase_tool(args: dict[str, Any], **kwargs: Any) -> str:
         previous_execution_id = str(args.get("previous_execution_id") or "").strip()
         previous = _v3_execution_snapshot(previous_execution_id) if previous_execution_id else None
         repository_path = str(args.get("repository_path") or "").strip()
-        if phase in {"ORCHESTRATE", "INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
-            raise ValueError("repository_path is required for ORCHESTRATE, INVESTIGATE_PLAN, and IMPLEMENT")
+        if phase in {"INVESTIGATE_PLAN", "IMPLEMENT"} and not repository_path:
+            raise ValueError("repository_path is required for INVESTIGATE_PLAN and IMPLEMENT")
 
         context: dict[str, Any] = {}
         if previous_execution_id:
@@ -612,10 +614,13 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
 def _create_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         objective = str(args.get("objective") or "").strip()
+        analysis_summary = str(args.get("analysis_summary") or "").strip()
         repository_path = str(args.get("repository_path") or "").strip()
         raw_batches = args.get("batches")
         if not objective:
             raise ValueError("objective is required")
+        if not analysis_summary:
+            raise ValueError("analysis_summary is required")
         if not repository_path:
             raise ValueError("repository_path is required")
         if not isinstance(raw_batches, list) or not raw_batches:
@@ -651,6 +656,7 @@ def _create_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         payload = {
             "projectKey": _project_key(args),
             "objective": objective[:20_000],
+            "analysisSummary": analysis_summary[:12_000],
             "repository": {
                 "path": repository_path,
                 **({"baseRevision": base_revision[:240]} if base_revision else {}),

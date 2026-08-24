@@ -128,7 +128,7 @@ export class DurablePlanOrchestrator {
     };
   }
 
-  async listPlans(limit = 100) {
+  async listPlans(limit: number = PLAN_LIMITS.listResults) {
     const items = [];
     for (const plan of this.#repository.list(limit)) {
       const projection = await this.getPlan(plan.planId, false);
@@ -141,16 +141,31 @@ export class DurablePlanOrchestrator {
     const plan = this.#repository.get(planId);
     if (!plan) return null;
     if (['SUCCEEDED', 'CANCELLED'].includes(plan.status)) return this.getPlan(planId);
+    this.#repository.cancel(planId);
     for (const batch of this.#repository.batches(planId)) {
       for (const item of this.#repository.workItems(batch.batchId)) {
         for (const executionId of this.#repository.executionIds(item.workItemId)) {
           const record = this.#links.get(executionId);
-          if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache))
-            await this.#executions.cancel(executionId);
+          if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
+            try {
+              await this.#executions.cancel(executionId);
+            } catch (error) {
+              this.#repository.appendEvent(
+                planId,
+                'PLAN_WORKER_CANCEL_FAILED',
+                {
+                  message: (error instanceof Error ? error.message : String(error)).slice(
+                    0,
+                    PLAN_LIMITS.errorDetailCharacters,
+                  ),
+                },
+                { batchId: batch.batchId, workItemId: item.workItemId, executionId },
+              );
+            }
+          }
         }
       }
     }
-    this.#repository.cancel(planId);
     return this.getPlan(planId);
   }
 
@@ -364,18 +379,13 @@ export class DurablePlanOrchestrator {
       };
     });
     try {
-      const integrated = this.#workspace.integrateBatch
-        ? await this.#workspace.integrateBatch({
-            planId: plan.planId,
-            batchKey: batch.key,
-            repositoryPath: plan.repositoryPath,
-            baseRevision: batch.baseRevision ?? plan.currentRevision,
-            implementations,
-          })
-        : {
-            revision: `integrated:${implementations.map((item) => item.executionId).join('+')}`,
-            ref: `refs/ai-office/plans/${plan.planId}/batches/${batch.key}`,
-          };
+      const integrated = await this.#workspace.integrateBatch({
+        planId: plan.planId,
+        batchKey: batch.key,
+        repositoryPath: plan.repositoryPath,
+        baseRevision: batch.baseRevision ?? plan.currentRevision,
+        implementations,
+      });
       this.#repository.setBatchStatus(batch.batchId, 'SUCCEEDED', {
         integratedRevision: integrated.revision,
         integrationRef: integrated.ref,

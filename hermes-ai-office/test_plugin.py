@@ -192,6 +192,7 @@ class PluginTest(unittest.TestCase):
         args = {
             "project_key": "pixel-agents",
             "objective": "Add a small endpoint.",
+            "analysis_summary": "The endpoint is isolated and can be implemented in one batch.",
             "repository_path": "/repo/pixel-agents",
             "delivery": {
                 "branch": "feat/durable-delivery",
@@ -228,14 +229,28 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(first_key, second_key)
         self.assertEqual(request.call_args.args[0], "/api/v3/development/plans")
         payload = request.call_args.kwargs["payload"]
+        self.assertEqual(
+            payload["analysisSummary"],
+            "The endpoint is isolated and can be implemented in one batch.",
+        )
         self.assertEqual(payload["delivery"]["branch"], "feat/durable-delivery")
         self.assertTrue(payload["delivery"]["autoMerge"])
+
+    def test_legacy_phase_tool_cannot_bypass_durable_orchestration(self) -> None:
+        result = json.loads(
+            plugin._run_development_phase_tool(
+                {"phase": "ORCHESTRATE", "objective": "Create a plan."}
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("invalid development phase", result["message"])
 
     def test_create_plan_requires_explicit_auto_merge_authorization(self) -> None:
         result = json.loads(
             plugin._create_development_plan_tool(
                 {
                     "objective": "Ship it.",
+                    "analysis_summary": "One bounded delivery batch is sufficient.",
                     "repository_path": "/repo/project",
                     "delivery": {"branch": "feat/ship", "auto_merge": False},
                     "batches": [
