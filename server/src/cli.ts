@@ -23,7 +23,6 @@ import { readConfig, writeConfig } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
 import { OrgStore } from './orgStore.js';
-import { enqueueHermesWorkforceSnapshot } from './providers/hermes/workforceSyncClient.js';
 import { claudeProvider, copyHookScript, HermesProvider } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
@@ -124,7 +123,6 @@ async function main(): Promise<void> {
         store,
         orgStore: orgStore!,
         baseUrl: process.env['HERMES_BRIDGE_URL'] ?? 'http://127.0.0.1:8787',
-        onOrgSnapshot: enqueueHermesWorkforceSnapshot,
         // Persist the generated profile → Area mapping and turn the area overlay
         // on so the 7 profile zones (nameplates + colored floors) are visible.
         onAreaMappingsChanged: (mappings) => {

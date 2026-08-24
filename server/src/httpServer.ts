@@ -92,7 +92,6 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   // ── Routes ──────────────────────────────────────────────────
 
   registerHealthRoute(app);
-  registerModelControlPlaneRoutes(app);
   registerOrgRoutes(app, options);
   registerHookRoute(app, options);
   registerWebSocketRoute(app, options);
@@ -114,126 +113,6 @@ function registerHealthRoute(app: FastifyInstance): void {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     pid: process.pid,
   }));
-}
-
-// ── Model Control Plane adapter ─────────────────────────────────
-
-function modelControlPlaneUrl(): string | null {
-  const value = process.env['MODEL_CONTROL_PLANE_URL']?.trim();
-  return value ? value.replace(/\/$/, '') : null;
-}
-
-export function registerModelControlPlaneRoutes(app: FastifyInstance): void {
-  const baseUrl = modelControlPlaneUrl();
-  if (!baseUrl) return;
-
-  const proxyJson = async (
-    path: string,
-    reply: FastifyReply,
-    notFoundError?: string,
-  ): Promise<unknown> => {
-    try {
-      const response = await fetch(`${baseUrl}${path}`);
-      if (!response.ok) {
-        reply.code(response.status === 404 && notFoundError ? 404 : 502);
-        return {
-          error:
-            response.status === 404 && notFoundError
-              ? notFoundError
-              : 'model-control-plane-v2-unavailable',
-          status: response.status,
-        };
-      }
-      return await response.json();
-    } catch (error) {
-      reply.code(502);
-      return { error: 'model-control-plane-v2-unavailable', message: String(error) };
-    }
-  };
-
-  app.get('/api/model/v2/workforce', async (_request, reply) =>
-    proxyJson('/api/v2/projections/workforce', reply),
-  );
-
-  app.get('/api/model/v2/projections/office', async (_request, reply) =>
-    proxyJson('/api/v2/projections/office', reply),
-  );
-
-  app.get('/api/model/v2/projections/supply', async (_request, reply) =>
-    proxyJson('/api/v2/projections/supply', reply),
-  );
-
-  app.get('/api/model/v2/incidents', async (request, reply) => {
-    const query = request.query as Record<string, unknown>;
-    const params = new URLSearchParams();
-    for (const key of ['lifecycle', 'runId', 'positionId', 'limit']) {
-      const value = query?.[key];
-      if (typeof value === 'string') params.set(key, value);
-      else if (typeof value === 'number') params.set(key, String(value));
-    }
-    const suffix = params.size > 0 ? `?${params.toString()}` : '';
-    return proxyJson(`/api/v2/incidents${suffix}`, reply);
-  });
-
-  app.get<{ Params: { employeeId: string } }>(
-    '/api/model/v2/employees/:employeeId/dossier',
-    async (request, reply) =>
-      proxyJson(
-        `/api/v2/projections/employees/${encodeURIComponent(request.params.employeeId)}/dossier`,
-        reply,
-        'model-control-plane-v2-employee-not-found',
-      ),
-  );
-
-  app.get('/api/model/v2/events', async (request, reply) => {
-    const controller = new AbortController();
-    request.raw.on('close', () => controller.abort());
-    try {
-      const lastEventId = request.headers['last-event-id'];
-      const response = await fetch(`${baseUrl}/api/v2/events`, {
-        signal: controller.signal,
-        headers: typeof lastEventId === 'string' ? { 'Last-Event-ID': lastEventId } : undefined,
-      });
-      if (!response.ok || !response.body) {
-        reply.code(502).send({ error: 'model-control-plane-v2-events-unavailable' });
-        return;
-      }
-      reply.hijack();
-      reply.raw.writeHead(200, {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-      });
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (!controller.signal.aborted) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const chunks = buffer.split('\n\n');
-        buffer = chunks.pop() ?? '';
-        for (const chunk of chunks) {
-          const id = chunk
-            .split('\n')
-            .find((line) => line.startsWith('id: '))
-            ?.slice(4);
-          const data = chunk.split('\n').filter((line) => line.startsWith('data: '));
-          for (const line of data) {
-            if (id) reply.raw.write(`id: ${id}\n`);
-            reply.raw.write(`data: ${line.slice(6)}\n\n`);
-          }
-        }
-      }
-      reply.raw.end();
-    } catch (error) {
-      if (!controller.signal.aborted && !reply.raw.headersSent) {
-        reply
-          .code(502)
-          .send({ error: 'model-control-plane-v2-events-unavailable', message: String(error) });
-      }
-    }
-  });
 }
 
 // ── Organization read API ──────────────────────────────────────
