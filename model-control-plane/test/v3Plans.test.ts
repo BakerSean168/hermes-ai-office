@@ -314,6 +314,87 @@ test('a durable plan survives worker timeout, failed review, integration failure
   }
 });
 
+test('review fix limits count finding cycles and explicit recovery launches the blocked fix', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': false,
+    },
+  });
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'review-cycle-recovery' },
+      payload: {
+        projectKey: 'pixel-agents',
+        objective: 'Exercise bounded review-fix recovery.',
+        analysisSummary: 'One work item isolates review-cycle accounting.',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement and repair.' }],
+          },
+        ],
+      },
+    });
+    const planId = created.json().planId as string;
+    const body = async () =>
+      (
+        await runtime.app.inject({
+          method: 'GET',
+          url: `/api/v3/development/plans/${planId}`,
+        })
+      ).json();
+    const latest = async () => (await body()).batches[0].workItems[0].executions.at(-1);
+
+    await runtime.v3.reconcilePlans(planId);
+    host.succeed((await latest()).refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+
+    host.succeed((await latest()).refs.openhandsConversationId, 'FAIL\nCycle one.');
+    await runtime.v3.reconcilePlans(planId);
+    host.timeout((await latest()).refs.openhandsConversationId);
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await latest()).phase, 'IMPLEMENT_FIX');
+    host.succeed((await latest()).refs.openhandsConversationId, 'FIXED ONE');
+    await runtime.v3.reconcilePlans(planId);
+
+    host.succeed((await latest()).refs.openhandsConversationId, 'FAIL\nCycle two.');
+    await runtime.v3.reconcilePlans(planId);
+    host.succeed((await latest()).refs.openhandsConversationId, 'FIXED TWO');
+    await runtime.v3.reconcilePlans(planId);
+
+    host.succeed((await latest()).refs.openhandsConversationId, 'FAIL\nCycle three.');
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await latest()).phase, 'IMPLEMENT_FIX');
+    host.succeed((await latest()).refs.openhandsConversationId, 'FIXED THREE');
+    await runtime.v3.reconcilePlans(planId);
+
+    host.succeed((await latest()).refs.openhandsConversationId, 'FAIL\nCycle four.');
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await body()).blockedReason, 'REVIEW_FIX_LIMIT_EXCEEDED');
+
+    const recovered = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/reconcile`,
+    });
+    assert.equal(recovered.json().status, 'RUNNING');
+    assert.equal((await latest()).phase, 'IMPLEMENT_FIX');
+    assert.match(JSON.stringify((await body()).events), /WORK_ITEM_RECOVERY_REQUESTED/);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('a delivery-authorized plan is not complete until remote and post-merge checks pass', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-delivery-'));
   const host = new PlanHost();
