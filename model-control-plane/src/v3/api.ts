@@ -82,7 +82,7 @@ export function registerV3Routes(
         {
           projectKey: String(body.projectKey ?? ''),
           objective: String(body.objective ?? ''),
-          analysisSummary: body.analysisSummary ? String(body.analysisSummary) : undefined,
+          analysisSummary: String(body.analysisSummary ?? ''),
           repository: {
             path: String(repository.path ?? ''),
             baseRevision: repository.baseRevision ? String(repository.baseRevision) : undefined,
@@ -224,6 +224,10 @@ export function registerV3Routes(
     if (!DEVELOPMENT_PHASES.includes(phase as DevelopmentPhase)) {
       reply.code(400);
       return { error: { code: 'V3_PHASE_INVALID' } };
+    }
+    if (phase === 'ORCHESTRATE') {
+      reply.code(400);
+      return { error: { code: 'V3_ORCHESTRATE_REQUIRES_DURABLE_PLAN' } };
     }
     const header = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(header) ? header[0] : header;

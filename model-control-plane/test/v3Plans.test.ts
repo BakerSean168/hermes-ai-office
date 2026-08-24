@@ -133,6 +133,40 @@ test('a durable plan survives worker timeout, failed review, integration failure
 
   let runtime = await buildControlPlane(options);
   try {
+    const legacyOrchestration = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'legacy-orchestration' },
+      payload: {
+        phase: 'ORCHESTRATE',
+        projectKey: 'pixel-agents',
+        objective: 'Bypass durable plan creation.',
+        repository: { path: '/home/ubuntu/projects/pixel-agents' },
+      },
+    });
+    assert.equal(legacyOrchestration.statusCode, 400);
+    assert.equal(legacyOrchestration.json().error.code, 'V3_ORCHESTRATE_REQUIRES_DURABLE_PLAN');
+
+    const missingAnalysis = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'missing-analysis' },
+      payload: {
+        projectKey: 'pixel-agents',
+        objective: 'Create an unanalyzed plan.',
+        repository: { path: '/home/ubuntu/projects/pixel-agents' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+    });
+    assert.equal(missingAnalysis.statusCode, 400);
+    assert.equal(missingAnalysis.json().error.code, 'PLAN_ANALYSIS_REQUIRED');
+
     const created = await runtime.app.inject({
       method: 'POST',
       url: '/api/v3/development/plans',
@@ -140,6 +174,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
       payload: {
         projectKey: 'pixel-agents',
         objective: 'Add and verify a small status endpoint.',
+        analysisSummary: 'Two dependent batches isolate implementation from documentation.',
         repository: { path: '/home/ubuntu/projects/pixel-agents', baseRevision: 'base-revision' },
         batches: [
           {
@@ -332,6 +367,7 @@ test('a delivery-authorized plan is not complete until remote and post-merge che
       payload: {
         projectKey: 'example',
         objective: 'Ship the change.',
+        analysisSummary: 'One reviewed batch is sufficient for this delivery.',
         repository: { path: '/repo', baseRevision: 'base' },
         delivery: { branch: 'feature/ship', autoMerge: false },
         batches: [
@@ -353,6 +389,7 @@ test('a delivery-authorized plan is not complete until remote and post-merge che
       payload: {
         projectKey: 'example',
         objective: 'Ship the change.',
+        analysisSummary: 'One reviewed batch is sufficient for this delivery.',
         repository: { path: '/repo', baseRevision: 'base' },
         delivery: {
           branch: 'feature/ship',
@@ -450,6 +487,7 @@ test('plan-scoped cancellation stops active workers and survives repeated reques
       payload: {
         projectKey: 'example',
         objective: 'Cancel this plan.',
+        analysisSummary: 'A single active work item exercises plan cancellation.',
         repository: { path: '/repo', baseRevision: 'base' },
         batches: [
           {
@@ -509,6 +547,7 @@ test('plan cancellation remains durable when an execution host cannot cancel a w
       payload: {
         projectKey: 'example',
         objective: 'Cancel durably despite a failed host call.',
+        analysisSummary: 'A host failure must not roll back durable cancellation intent.',
         repository: { path: '/repo', baseRevision: 'base' },
         batches: [
           {

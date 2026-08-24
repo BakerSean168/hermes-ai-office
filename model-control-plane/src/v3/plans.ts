@@ -10,7 +10,7 @@ export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | '
 export interface CreatePlanInput {
   projectKey: string;
   objective: string;
-  analysisSummary?: string;
+  analysisSummary: string;
   repository: { path: string; baseRevision?: string };
   delivery?: Partial<PlanDeliveryConfig> & Pick<PlanDeliveryConfig, 'branch'>;
   batches: Array<{
@@ -279,8 +279,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
 function validateGraph(input: CreatePlanInput): void {
   if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
   if (!input.objective.trim()) throw new Error('OBJECTIVE_REQUIRED');
-  if (input.analysisSummary !== undefined && !input.analysisSummary.trim())
-    throw new Error('PLAN_ANALYSIS_REQUIRED');
+  if (!input.analysisSummary.trim()) throw new Error('PLAN_ANALYSIS_REQUIRED');
   if (!input.repository.path.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
   if (input.delivery) {
     if (!input.delivery.branch.trim()) throw new Error('DELIVERY_BRANCH_REQUIRED');
@@ -417,10 +416,7 @@ export class PlanRepository {
       });
       this.appendEvent(planId, 'PLAN_CREATED', {
         batches: input.batches.length,
-        analysisSummary: (input.analysisSummary ?? input.objective).slice(
-          0,
-          PLAN_LIMITS.repairEvidenceCharacters,
-        ),
+        analysisSummary: input.analysisSummary.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
       });
       this.#db.exec('COMMIT');
     } catch (error) {
