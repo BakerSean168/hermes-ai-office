@@ -80,11 +80,11 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
       'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
-      'AI Office anchors this frozen snapshot at the implementation original source revision and overlays the Git-visible implementation tree. A detached HEAD or apparent uncommitted changes in this review copy are expected snapshot representation, not evidence that the implementation workspace was left dirty.',
+      'AI Office freezes the implementation workspace at its current HEAD. Committed implementation work therefore stays committed and a clean implementation remains clean in the review snapshot. The original implementation source revision is preserved at refs/ai-office/review-base for comparison. Any dirty files in the snapshot represent genuine uncommitted implementation changes.',
       'Review implementation correctness and locally verifiable acceptance criteria only. Do not fail because the delivery branch, pull request, remote checks, merge, or post-merge verification is not present yet; AI Office performs those delivery gates only after this review passes.',
       'Do not classify read-only permission errors as implementation defects.',
       'If dependency installation, compilation, tests, or build outputs require writes, copy the complete review snapshot to a fresh temporary directory under /tmp, make only that disposable copy writable, run verification there, and discard it afterward.',
-      'Run setup, dependency installation, tests, typecheck, build, and cleanup as short separate terminal tool invocations; do not combine the whole verification workflow into one long compound shell command.',
+      'Before returning a verdict, independently inspect repository evidence and execute at least one focused verification command. Do not return FAIL merely because verification has not yet been attempted. Run setup, dependency installation, tests, typecheck, build, and cleanup as short separate terminal tool invocations; do not combine the whole verification workflow into one long compound shell command.',
       'Use the read-only snapshot as the evidence source and ensure the disposable verification copy represents the same Git-visible implementation working tree.',
       'Report concrete defects with severity and evidence; otherwise explicitly approve.',
     ],
@@ -469,6 +469,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       try {
         let repositoryPath = input.repository.path;
         let baseRevision = input.repository.baseRevision;
+        let reviewBaseRevision: string | undefined;
 
         if (effectiveInput.phase === 'IMPLEMENT_FIX') {
           if (!fixLineage) throw new Error('PREVIOUS_EXECUTION_NOT_FIXABLE');
@@ -483,16 +484,18 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             const previous = this.#requirePreviousImplementation(effectiveInput);
             if (!previous.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
             repositoryPath = this.#workspace.hostPathForWorkspaceRef(previous.workspaceRef);
-            // Anchor review snapshots at the implementation's original source revision,
-            // then overlay the implementation tree. This keeps committed worker changes
-            // visible as reviewable Git diff instead of disappearing behind a moved HEAD.
-            baseRevision = previous.sourceRevision ?? 'HEAD';
+            // Freeze the implementation workspace at its current HEAD. Committed worker changes stay
+            // committed in the review snapshot; only genuinely uncommitted changes appear dirty.
+            // Preserve the original implementation source as a dedicated comparison ref.
+            baseRevision = 'HEAD';
+            reviewBaseRevision = previous.sourceRevision;
           }
           const provisioned = await this.#workspace.provision({
             executionId: record.executionId,
             repositoryPath,
             baseRevision,
             workspaceMode: record.workspaceMode,
+            reviewBaseRevision,
           });
           record = this.#links.attachWorkspace(record.executionId, {
             workspaceRef: provisioned.executionPath,

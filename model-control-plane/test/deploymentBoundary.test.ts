@@ -71,4 +71,10 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.match(adapter, /child\.stdin\.end\(spec\.input\)/);
   assert.doesNotMatch(adapter, /lastMessage,\s*reviewPrompt/);
   assert.doesNotMatch(adapter, /'-p',\s*reviewPrompt/);
+  assert.match(adapter, /sandbox_mode = \"workspace-write\"/);
+  assert.match(adapter, /'--sandbox',\s*'workspace-write'/);
+  assert.match(adapter, /refs\/ai-office\/review-base..HEAD/);
+  assert.match(adapter, /reviewer completed without independent repository command activity/);
+  assert.match(adapter, /item\?\.type === 'command_execution'/);
+  assert.doesNotMatch(adapter, /sandbox_mode = \"read-only\"/);
 });
