@@ -8,8 +8,12 @@ failed=0
 check_pattern() {
   local label="$1"
   local pattern="$2"
+  local allowed_pattern="${3:-}"
   local matches
   matches="$(git grep -n -I -E "$pattern" -- . 2>/dev/null || true)"
+  if [[ -n "$allowed_pattern" && -n "$matches" ]]; then
+    matches="$(printf '%s\n' "$matches" | grep -v -E "$allowed_pattern" || true)"
+  fi
   if [[ -n "$matches" ]]; then
     echo "::error::$label must not be committed to the public repository" >&2
     printf '%s\n' "$matches" >&2
@@ -23,7 +27,10 @@ check_pattern "Tailscale MagicDNS hostnames" '[A-Za-z0-9-]+\.tail[A-Za-z0-9-]+\.
 
 # Tailscale IPv4 node addresses use the carrier-grade NAT range. Keep concrete
 # node addresses in deployment-local configuration rather than source control.
-check_pattern "Tailscale IPv4 addresses" '100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}'
+check_pattern \
+  "Tailscale IPv4 addresses" \
+  '100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}' \
+  '100\.100\.100\.100'
 
 # A committed private-key body is always a release blocker.
 check_pattern "private key material" 'BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY'
