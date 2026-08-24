@@ -69,9 +69,11 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       return;
     }
     if (request.url?.includes('/events/search')) {
+      assert.doesNotMatch(request.url, /[?&]kind=/);
       response.end(
         JSON.stringify({
           items: [
+            { kind: 'ConversationStateUpdateEvent', key: 'execution_status', value: 'error' },
             {
               kind: 'ConversationErrorEvent',
               code: 'LLMServiceUnavailableError',
