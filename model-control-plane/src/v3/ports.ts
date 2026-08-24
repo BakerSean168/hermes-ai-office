@@ -2,6 +2,7 @@ import type {
   DevelopmentExecutionSnapshot,
   DevelopmentPhase,
   ExecutionSelection,
+  ExecutionFailure,
   ExecutionStatus,
   RouteUsageSummary,
   SourceHealthState,
@@ -22,6 +23,7 @@ export interface ExecutionHostSnapshot {
   conversationId: string;
   status: ExecutionStatus;
   finalText?: string;
+  error?: ExecutionFailure;
   startedAt?: string;
   updatedAt?: string;
   usage?: UsageSummary | null;

@@ -39,6 +39,9 @@ interface ExecutionLinkRow {
   attempt: number | null;
   command_key: string | null;
   result_text: string | null;
+  error_code: string | null;
+  error_detail: string | null;
+  error_retryable: number | null;
   usage_json: string | null;
   observed_routes_json: string | null;
   selection_reasons_json: string | null;
@@ -77,6 +80,9 @@ export function ensureV3Schema(db: DatabaseSync): void {
       attempt INTEGER,
       command_key TEXT,
       result_text TEXT,
+      error_code TEXT,
+      error_detail TEXT,
+      error_retryable INTEGER,
       usage_json TEXT,
       observed_routes_json TEXT,
       selection_reasons_json TEXT,
@@ -104,6 +110,15 @@ export function ensureV3Schema(db: DatabaseSync): void {
   }
   if (!columns.has('result_text')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN result_text TEXT');
+  }
+  if (!columns.has('error_code')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN error_code TEXT');
+  }
+  if (!columns.has('error_detail')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN error_detail TEXT');
+  }
+  if (!columns.has('error_retryable')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN error_retryable INTEGER');
   }
   if (!columns.has('selection_reasons_json')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN selection_reasons_json TEXT');
@@ -193,6 +208,9 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     attempt: row.attempt ?? undefined,
     commandKey: row.command_key ?? undefined,
     resultText: row.result_text ?? undefined,
+    errorCode: row.error_code ?? undefined,
+    errorDetail: row.error_detail ?? undefined,
+    errorRetryable: row.error_retryable == null ? undefined : Boolean(row.error_retryable),
     observedUsage: parsedJson<UsageSummary>(row.usage_json),
     observedRoutes: parsedJson<RouteUsageSummary[]>(row.observed_routes_json),
     selectionReasons: selectionReasons(row.selection_reasons_json),
@@ -373,6 +391,28 @@ export class ExecutionLinkRepository {
          WHERE execution_id=? AND result_text IS NULL`,
       )
       .run(resultText, Date.now(), executionId);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
+  attachFailure(
+    executionId: string,
+    failure: { code: string; detail?: string; retryable: boolean },
+  ): ExecutionLinkRecord {
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+           SET error_code=?,error_detail=?,error_retryable=?,updated_at=?
+         WHERE execution_id=? AND error_code IS NULL`,
+      )
+      .run(
+        failure.code,
+        failure.detail ?? null,
+        failure.retryable ? 1 : 0,
+        Date.now(),
+        executionId,
+      );
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;

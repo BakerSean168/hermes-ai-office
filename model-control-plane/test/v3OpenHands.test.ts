@@ -68,8 +68,22 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       response.end('{"response":"PLAN_OK"}');
       return;
     }
+    if (request.url?.includes('/events/search')) {
+      response.end(
+        JSON.stringify({
+          items: [
+            {
+              kind: 'ConversationErrorEvent',
+              code: 'LLMServiceUnavailableError',
+              detail: 'Error code: 503 - No available channel for model',
+            },
+          ],
+        }),
+      );
+      return;
+    }
     if (request.url?.startsWith('/api/conversations/')) {
-      status = status === 'paused' ? status : 'finished';
+      status = status === 'paused' || status === 'error' ? status : 'finished';
       response.end(
         JSON.stringify({
           id: '11111111-1111-4111-8111-111111111111',
@@ -369,6 +383,15 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       reasoningOutput: 5,
       costUsd: 0.12,
       calls: 2,
+    });
+
+    status = 'error';
+    const failed = await host.getExecution(created.conversationId);
+    assert.equal(failed.status, 'FAILED');
+    assert.deepEqual(failed.error, {
+      code: 'LLMServiceUnavailableError',
+      detail: 'Error code: 503 - No available channel for model',
+      retryable: true,
     });
   } finally {
     await new Promise<void>((resolve, reject) =>

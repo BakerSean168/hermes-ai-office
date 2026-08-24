@@ -63,6 +63,13 @@ class PlanHost implements ExecutionHostPort {
     if (!snapshot) throw new Error('missing fake execution');
     snapshot.status = 'STUCK';
   }
+
+  fail(conversationId: string, error: { code: string; detail?: string; retryable: boolean }) {
+    const snapshot = this.executions.get(conversationId);
+    if (!snapshot) throw new Error('missing fake execution');
+    snapshot.status = 'FAILED';
+    snapshot.error = error;
+  }
 }
 
 let integrationFailuresRemaining = 0;
@@ -248,12 +255,31 @@ test('a durable plan survives worker timeout, failed review, integration failure
     assert.equal(fallbackReview.phase, 'VERIFY_REVIEW');
     assert.equal(fallbackReview.selection.backend, 'openhands-builtin');
 
-    host.succeed(fallbackReview.refs.openhandsConversationId, 'FAIL\nMissing negative-path test.');
+    host.fail(fallbackReview.refs.openhandsConversationId, {
+      code: 'LLMServiceUnavailableError',
+      detail: 'Error code: 503 - No available channel',
+      retryable: true,
+    });
     await runtime.v3.reconcilePlans();
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const fix = body.batches[0].workItems[0].executions[4];
+    const retriedFallbackReview = body.batches[0].workItems[0].executions[4];
+    const failedFallbackReview = body.batches[0].workItems[0].executions[3];
+    assert.equal(retriedFallbackReview.phase, 'VERIFY_REVIEW');
+    assert.equal(retriedFallbackReview.selection.backend, 'openhands-builtin');
+    assert.equal(failedFallbackReview.error.code, 'LLMServiceUnavailableError');
+    assert.equal(failedFallbackReview.error.retryable, true);
+
+    host.succeed(
+      retriedFallbackReview.refs.openhandsConversationId,
+      'FAIL\nMissing negative-path test.',
+    );
+    await runtime.v3.reconcilePlans();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const fix = body.batches[0].workItems[0].executions[5];
     assert.equal(fix.phase, 'IMPLEMENT_FIX');
     assert.match(host.lastCreateInput?.objective ?? '', /commit all intended fixes to Git/);
 
@@ -262,7 +288,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    const secondReview = body.batches[0].workItems[0].executions[5];
+    const secondReview = body.batches[0].workItems[0].executions[6];
     assert.equal(secondReview.phase, 'VERIFY_REVIEW');
 
     host.succeed(

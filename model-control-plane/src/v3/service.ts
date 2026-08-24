@@ -586,6 +586,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (hostFinalText && TERMINAL.has(effectiveStatus) && !record.resultText) {
       record = this.#links.attachResultText(record.executionId, hostFinalText);
     }
+    if (hostSnapshot?.error && TERMINAL.has(effectiveStatus) && !record.errorCode) {
+      record = this.#links.attachFailure(record.executionId, hostSnapshot.error);
+    }
     const observed = await this.#observability.getExecutionSummary(executionId);
     if (observed.usage || observed.routeUsage) {
       record = this.#links.attachObservation(executionId, observed.usage, observed.routeUsage);
@@ -612,6 +615,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
               git: { branch: record.gitBranch ?? null },
             }
           : null,
+      error: record.errorCode
+        ? {
+            code: record.errorCode,
+            ...(record.errorDetail ? { detail: record.errorDetail } : {}),
+            retryable: record.errorRetryable === true,
+          }
+        : null,
       timing: (() => {
         const startedAt = new Date(record.startedAt ?? record.createdAt).toISOString();
         const endedAt = ended
