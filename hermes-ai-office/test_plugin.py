@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import unittest
 from unittest import mock
 
@@ -43,9 +44,19 @@ class PluginTest(unittest.TestCase):
                 "ai_office_continue_execution",
                 "ai_office_cancel_execution",
                 "ai_office_list_active",
+                "ai_office_create_plan",
+                "ai_office_get_plan",
+                "ai_office_list_plans",
             },
         )
         self.assertNotIn("ai_office_resolve_execution", ctx.tools)
+
+    def test_manifest_indexes_every_registered_tool(self) -> None:
+        ctx = FakeContext()
+        plugin.register(ctx)
+        manifest = PLUGIN_PATH.with_name("plugin.yaml").read_text(encoding="utf-8")
+        manifest_tools = set(re.findall(r"^  - (ai_office_[a-z_]+)$", manifest, re.MULTILINE))
+        self.assertEqual(manifest_tools, set(ctx.tools))
 
     def test_run_phase_requires_repository_for_initial_writer(self) -> None:
         result = json.loads(
@@ -187,11 +198,113 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(result["providers"][0]["providerKey"], "opencode-go")
         request.assert_called_once_with("/api/v3/development/model-registry", timeout=5.0)
 
+    def test_create_plan_uses_content_identity_and_durable_plan_api(self) -> None:
+        args = {
+            "project_key": "pixel-agents",
+            "objective": "Add a small endpoint.",
+            "repository_path": "/repo/pixel-agents",
+            "delivery": {
+                "branch": "feat/durable-delivery",
+                "target_branch": "main",
+                "auto_merge": True,
+                "merge_method": "merge",
+            },
+            "batches": [
+                {
+                    "key": "batch-1",
+                    "title": "Endpoint",
+                    "work_items": [
+                        {
+                            "key": "item-1",
+                            "title": "Implement endpoint",
+                            "objective": "Implement and test it.",
+                            "acceptance_criteria": ["Focused test passes."],
+                        }
+                    ],
+                }
+            ],
+        }
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            return_value={"planId": "plan-1", "status": "RUNNING"},
+        ) as request:
+            first = json.loads(plugin._create_development_plan_tool(args, tool_call_id="call-a"))
+            first_key = request.call_args.kwargs["idempotency_key"]
+            second = json.loads(plugin._create_development_plan_tool(args, tool_call_id="call-b"))
+            second_key = request.call_args.kwargs["idempotency_key"]
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(first_key, second_key)
+        self.assertEqual(request.call_args.args[0], "/api/v3/development/plans")
+        payload = request.call_args.kwargs["payload"]
+        self.assertEqual(payload["delivery"]["branch"], "feat/durable-delivery")
+        self.assertTrue(payload["delivery"]["autoMerge"])
+
+    def test_create_plan_requires_explicit_auto_merge_authorization(self) -> None:
+        result = json.loads(
+            plugin._create_development_plan_tool(
+                {
+                    "objective": "Ship it.",
+                    "repository_path": "/repo/project",
+                    "delivery": {"branch": "feat/ship", "auto_merge": False},
+                    "batches": [
+                        {
+                            "key": "batch",
+                            "title": "Batch",
+                            "work_items": [
+                                {"key": "item", "title": "Item", "objective": "Implement."}
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertIn("explicitly true", result["message"])
+
+    def test_get_plan_compacts_execution_results_for_hermes_context(self) -> None:
+        plan = {
+            "planId": "plan-1",
+            "status": "SUCCEEDED",
+            "currentRevision": "abc123",
+            "batches": [
+                {
+                    "key": "batch-1",
+                    "status": "SUCCEEDED",
+                    "workItems": [
+                        {
+                            "key": "item-1",
+                            "status": "SUCCEEDED",
+                            "executions": [
+                                {
+                                    "executionId": "exec-1",
+                                    "phase": "VERIFY_REVIEW",
+                                    "status": "SUCCEEDED",
+                                    "selection": {"backend": "codex-review-headless"},
+                                    "result": {"finalText": "PASS\n" + ("evidence " * 2000)},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "events": [],
+        }
+        with mock.patch.object(plugin, "_control_plane_request", return_value=plan):
+            raw = plugin._get_development_plan_tool({"plan_id": "plan-1"})
+        result = json.loads(raw)
+        execution = result["batches"][0]["workItems"][0]["executions"][0]
+        self.assertEqual(execution["verdict"], "PASS")
+        self.assertNotIn("result", execution)
+        self.assertLess(len(raw), 2000)
+
     def test_pre_llm_development_guidance_is_v3_only(self) -> None:
         result = plugin._on_pre_llm_call(user_message="帮我实现并审查这个功能")
         assert result is not None
         text = result["context"]
-        self.assertIn("ai_office_run_phase", text)
+        self.assertIn("ai_office_create_plan", text)
+        self.assertIn("ai_office_get_plan", text)
         self.assertIn("strict first-line PASS/FAIL", text)
         self.assertIn("LiteLLM", text)
         self.assertNotIn("Employee", text)

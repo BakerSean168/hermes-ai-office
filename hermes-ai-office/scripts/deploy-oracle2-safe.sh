@@ -176,6 +176,7 @@ def snapshot(root: Path):
 s = snapshot(src)
 l = snapshot(live)
 changed = sorted(k for k in set(s) | set(l) if s.get(k) != l.get(k))
+legacy_backups = sorted(live.parent.glob("hermes-ai-office.bak-*"))
 
 def non_runtime(path: str) -> bool:
     if path.startswith("dashboard/") or path.startswith("contracts/") or path.startswith("scripts/") or path.startswith("deploy/"):
@@ -186,7 +187,7 @@ def non_runtime(path: str) -> bool:
         return True
     return False
 
-runtime = any(not non_runtime(p) for p in changed)
+runtime = any(not non_runtime(p) for p in changed) or bool(legacy_backups)
 dashboard = any(p.startswith("dashboard/") for p in changed)
 dashboard_backend = any(
     p == "dashboard/plugin_api.py" or p == "dashboard/manifest.json" or p.startswith("contracts/")
@@ -207,6 +208,8 @@ print(f"class={kind}")
 print(f"changed_count={len(changed)}")
 for p in changed:
     print(p)
+for p in legacy_backups:
+    print(f"legacy-backup:{p.name}")
 PY
 }
 
@@ -262,6 +265,19 @@ sync_profile_links() {
     log "WARNING: profile plugin-link reconciliation failed" >&2
     return 1
   fi
+}
+
+quarantine_legacy_plugin_backups() {
+  local plugin_dir backup quarantine_dir
+  plugin_dir="$(dirname "$LIVE")"
+  quarantine_dir="${STATE_DIR}/legacy-plugin-backups"
+  shopt -s nullglob
+  for backup in "${plugin_dir}"/hermes-ai-office.bak-*; do
+    mkdir -p "$quarantine_dir"
+    mv "$backup" "${quarantine_dir}/$(basename "$backup")"
+    log "quarantined legacy plugin backup outside discovery root: $backup"
+  done
+  shopt -u nullglob
 }
 
 write_pending() {
@@ -383,6 +399,7 @@ apply_pending_runtime() {
 
   sync_tree "$STAGE" "$LIVE"
   chown -R "${LIVE_UID}:${LIVE_GID}" "$LIVE"
+  quarantine_legacy_plugin_backups
   sync_profile_links
   rescan_dashboard
 

@@ -175,6 +175,34 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(result["calls"], 3)
         self.assertAlmostEqual(result["costUsd"], 0.03)
 
+    def test_plan_progress_is_projected_separately_from_platform_readiness(self) -> None:
+        plans, summary = api._plans(
+            [
+                {
+                    "planId": "plan-1",
+                    "projectKey": "pixel-agents",
+                    "objective": "Complete the workflow",
+                    "status": "RUNNING",
+                    "currentRevision": "abc123",
+                    "batches": [
+                        {
+                            "key": "batch-1",
+                            "title": "Core",
+                            "status": "RUNNING",
+                            "workItems": [
+                                {"status": "SUCCEEDED"},
+                                {"status": "RUNNING"},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        )
+        self.assertEqual(summary, {"total": 1, "active": 1, "blocked": 0, "succeeded": 0})
+        self.assertEqual(plans[0]["workItems"], {"total": 2, "succeeded": 1})
+        self.assertEqual(plans[0]["currentBatch"]["key"], "batch-1")
+        self.assertNotIn("readiness", plans[0])
+
     def test_contract_is_the_single_dashboard_shape_source(self) -> None:
         version = CONTRACT["properties"]["schemaVersion"]["const"]
         self.assertEqual(api._DASHBOARD_SCHEMA_VERSION, version)

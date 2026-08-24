@@ -14,11 +14,13 @@
     "analytics",
     "runtime",
     "readiness",
-    "registry"
+    "registry",
+    "plans",
+    "planSummary"
   ],
   "properties": {
     "schemaVersion": {
-      "const": 3
+      "const": 4
     },
     "generatedAt": {
       "type": "string",
@@ -50,6 +52,15 @@
     },
     "registry": {
       "$ref": "#/$defs/Registry"
+    },
+    "plans": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Plan"
+      }
+    },
+    "planSummary": {
+      "$ref": "#/$defs/PlanSummary"
     }
   },
   "$defs": {
@@ -589,6 +600,61 @@
             "$ref": "#/$defs/AnalyticsRow"
           }
         }
+      }
+    },
+    "Plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "workItems", "currentBatch"],
+      "properties": {
+        "planId": {"type": "string", "minLength": 1},
+        "projectKey": {"type": "string", "minLength": 1},
+        "objective": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "minLength": 1},
+        "currentRevision": {"type": "string", "minLength": 1},
+        "blockedReason": {"type": ["string", "null"]},
+        "deliveryStage": {"type": ["string", "null"]},
+        "pullRequestUrl": {"type": ["string", "null"]},
+        "mergeRevision": {"type": ["string", "null"]},
+        "createdAt": {"type": ["integer", "number", "null"]},
+        "updatedAt": {"type": ["integer", "number", "null"]},
+        "batches": {"$ref": "#/$defs/ProgressCount"},
+        "workItems": {"$ref": "#/$defs/ProgressCount"},
+        "currentBatch": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["key", "title", "status"],
+              "properties": {
+                "key": {"type": ["string", "null"]},
+                "title": {"type": ["string", "null"]},
+                "status": {"type": ["string", "null"]}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "ProgressCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "succeeded"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "succeeded": {"type": "integer", "minimum": 0}
+      }
+    },
+    "PlanSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "active", "blocked", "succeeded"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "active": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "succeeded": {"type": "integer", "minimum": 0}
       }
     },
     "RuntimeSummary": {

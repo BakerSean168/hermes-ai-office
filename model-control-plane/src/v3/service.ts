@@ -14,6 +14,8 @@ import type {
   StartDevelopmentExecutionInput,
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
+import type { PlanDeliveryPort } from './delivery.js';
+import { PlanRepository, type CreatePlanInput, type WorkItemRecord } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
@@ -63,12 +65,14 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Implement the approved objective in the isolated workspace.',
       'Run focused tests or checks that are proportionate to the change.',
       'Do not silently broaden scope beyond the objective.',
+      'Before finishing, commit all intended changes to Git with a meaningful commit message and leave the workspace clean; deterministic batch integration rejects uncommitted changes.',
       'Finish with changed files, validation evidence, and any remaining risk.',
     ],
     IMPLEMENT_FIX: [
       'Address only the review or verification findings supplied in context.',
       'Preserve already-correct implementation work.',
       'Run focused regression checks before finishing.',
+      'Before finishing, commit all intended fixes to Git with a meaningful commit message and leave the workspace clean; deterministic batch integration rejects uncommitted changes.',
     ],
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
@@ -118,6 +122,44 @@ function selectionFromRecord(record: ExecutionLinkRecord): ExecutionSelection {
   };
 }
 
+function durableSnapshot(record: ExecutionLinkRecord): DevelopmentExecutionSnapshot {
+  const ended = TERMINAL.has(record.statusCache);
+  return {
+    executionId: record.executionId,
+    projectKey: record.projectKey,
+    phase: record.phase,
+    objectiveSummary: record.objectiveSummary,
+    status: record.statusCache,
+    selection: selectionFromRecord(record),
+    result: record.resultText
+      ? {
+          finalText: record.resultText,
+          workspaceRef: record.workspaceRef,
+          git: { branch: record.gitBranch ?? null },
+        }
+      : null,
+    timing: {
+      startedAt: new Date(record.startedAt ?? record.createdAt).toISOString(),
+      endedAt: ended ? new Date(record.endedAt ?? record.updatedAt).toISOString() : undefined,
+      durationMs: ended
+        ? Math.max(0, (record.endedAt ?? record.updatedAt) - (record.startedAt ?? record.createdAt))
+        : undefined,
+    },
+    usage: record.observedUsage ?? null,
+    refs: {
+      openhandsConversationId: record.openhandsConversationId,
+      langfuseTraceId: record.langfuseTraceId,
+      upstream: { routeUsage: record.observedRoutes ?? [] },
+    },
+    sourceHealth: {
+      openhands: 'UNCONFIGURED',
+      litellm: 'UNCONFIGURED',
+      observability: 'UNCONFIGURED',
+      langfuse: 'UNCONFIGURED',
+    },
+  };
+}
+
 export class UnconfiguredObservability implements ObservabilityPort {
   readonly source = 'UNCONFIGURED' as const;
   async health(): Promise<'UNCONFIGURED'> {
@@ -135,8 +177,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #gateway?: ModelGatewayPort;
   readonly #observability: ObservabilityPort;
+  readonly #plans: PlanRepository;
+  readonly #delivery?: PlanDeliveryPort;
   readonly #backendAvailability: Readonly<Record<string, boolean>>;
   #writerAdmissionTail: Promise<void> = Promise.resolve();
+  #planReconcileTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
     policy: DevelopmentPolicy;
@@ -145,6 +190,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     workspace: WorkspaceProvisioningPort;
     gateway?: ModelGatewayPort;
     observability?: ObservabilityPort;
+    plans: PlanRepository;
+    delivery?: PlanDeliveryPort;
     backendAvailability?: Readonly<Record<string, boolean>>;
   }) {
     this.#policy = options.policy;
@@ -153,6 +200,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     this.#workspace = options.workspace;
     this.#gateway = options.gateway;
     this.#observability = options.observability ?? new UnconfiguredObservability();
+    this.#plans = options.plans;
+    this.#delivery = options.delivery;
     this.#backendAvailability = options.backendAvailability ?? {};
   }
 
@@ -362,7 +411,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       throw new Error('REPOSITORY_PATH_REQUIRED');
     }
 
-    const existing = this.#links.findByIdempotencyKey(idempotencyKey);
+    const existing = input.plan
+      ? this.#links.findByCommandKey(input.plan.commandKey)
+      : this.#links.findByIdempotencyKey(idempotencyKey);
     let fixLineage: {
       review: ExecutionLinkRecord;
       implementation: ExecutionLinkRecord;
@@ -395,6 +446,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         selection,
         hermes: input.hermes,
         previousExecutionId: effectiveInput.context?.previousExecutionId,
+        plan: effectiveInput.plan,
       });
 
     let reservation: ReturnType<ExecutionLinkRepository['reserve']>;
@@ -402,7 +454,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       reservation = { record: existing, created: false };
     } else if (WRITER_PHASES.has(input.phase)) {
       reservation = await this.#withWriterAdmission(async () => {
-        const raced = this.#links.findByIdempotencyKey(idempotencyKey);
+        const raced = effectiveInput.plan
+          ? this.#links.findByCommandKey(effectiveInput.plan.commandKey)
+          : this.#links.findByIdempotencyKey(idempotencyKey);
         if (raced) return { record: raced, created: false };
         const candidates = await this.#reconcileWriterCandidates();
         if (effectiveInput.phase === 'IMPLEMENT_FIX') {
@@ -621,6 +675,481 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         langfuse: this.#observability.source === 'LANGFUSE' ? observabilityHealth : 'UNCONFIGURED',
       },
     };
+  }
+
+  async createPlan(input: CreatePlanInput, commandKey: string) {
+    if (!commandKey.trim()) throw new Error('IDEMPOTENCY_KEY_REQUIRED');
+    const { plan, created } = this.#plans.create(input, commandKey);
+    if (created) await this.reconcilePlans(plan.planId);
+    return (await this.getPlan(plan.planId))!;
+  }
+
+  async getPlan(planId: string, hydrateExecutions = true) {
+    const plan = this.#plans.get(planId);
+    if (!plan) return null;
+    const batches = [];
+    for (const batch of this.#plans.batches(planId)) {
+      const workItems = [];
+      for (const item of this.#plans.workItems(batch.batchId)) {
+        const executions = [];
+        for (const executionId of this.#plans.executionIds(item.workItemId)) {
+          const snapshot = hydrateExecutions
+            ? await this.get(executionId)
+            : (() => {
+                const record = this.#links.get(executionId);
+                return record ? durableSnapshot(record) : null;
+              })();
+          if (snapshot) executions.push(snapshot);
+        }
+        workItems.push({ ...item, executions });
+      }
+      batches.push({ ...batch, workItems });
+    }
+    return {
+      ...plan,
+      batches,
+      events: this.#plans.events(planId),
+    };
+  }
+
+  async listPlans(limit = 100) {
+    const items = [];
+    for (const plan of this.#plans.list(limit)) {
+      const projection = await this.getPlan(plan.planId, false);
+      if (projection) items.push(projection);
+    }
+    return items;
+  }
+
+  async #launchPlanPhase(
+    plan: ReturnType<PlanRepository['get']> extends infer Value ? Exclude<Value, null> : never,
+    batch: ReturnType<PlanRepository['batches']>[number],
+    item: WorkItemRecord,
+    phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
+    previousExecutionId: string | undefined,
+    attempt: number,
+    overrideBackend?: string,
+  ) {
+    const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
+    const snapshot = await this.start(
+      {
+        phase,
+        objective:
+          phase === 'VERIFY_REVIEW'
+            ? `Independently review ${item.title}: ${item.objective}`
+            : item.objective,
+        projectKey: plan.projectKey,
+        repository: {
+          path: phase === 'IMPLEMENT' ? plan.repositoryPath : '',
+          baseRevision:
+            phase === 'IMPLEMENT' ? (batch.baseRevision ?? plan.currentRevision) : undefined,
+        },
+        context: {
+          previousExecutionId,
+          acceptanceCriteria: item.acceptanceCriteria,
+        },
+        override: overrideBackend ? { backend: overrideBackend } : undefined,
+        await: false,
+        plan: {
+          planId: plan.planId,
+          batchId: batch.batchId,
+          workItemId: item.workItemId,
+          attempt,
+          commandKey,
+        },
+      },
+      commandKey,
+    );
+    this.#plans.setWorkItemStatus(item.workItemId, 'RUNNING');
+    this.#plans.appendEvent(
+      plan.planId,
+      'EXECUTION_STARTED',
+      { phase, attempt },
+      { batchId: batch.batchId, workItemId: item.workItemId, executionId: snapshot.executionId },
+    );
+    return snapshot;
+  }
+
+  async #reconcileWorkItem(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    batch: ReturnType<PlanRepository['batches']>[number],
+    item: WorkItemRecord,
+  ): Promise<void> {
+    const executionIds = this.#plans.executionIds(item.workItemId);
+    if (executionIds.length === 0) {
+      await this.#launchPlanPhase(plan, batch, item, 'IMPLEMENT', undefined, 1);
+      return;
+    }
+    const records = executionIds
+      .map((executionId) => this.#links.get(executionId))
+      .filter((record): record is ExecutionLinkRecord => Boolean(record));
+    const latest = records.at(-1);
+    if (!latest) return;
+    const snapshot = await this.get(latest.executionId);
+    if (!snapshot || !TERMINAL.has(snapshot.status)) return;
+
+    if (snapshot.status !== 'SUCCEEDED') {
+      const sameParentAttempts = records.filter(
+        (record) =>
+          record.phase === latest.phase &&
+          record.previousExecutionId === latest.previousExecutionId,
+      ).length;
+      const totalPhaseAttempts = records.filter((record) => record.phase === latest.phase).length;
+      if (sameParentAttempts < 2) {
+        await this.#launchPlanPhase(
+          plan,
+          batch,
+          item,
+          latest.phase as 'IMPLEMENT' | 'VERIFY_REVIEW',
+          latest.previousExecutionId,
+          totalPhaseAttempts + 1,
+          latest.phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+        );
+        return;
+      }
+      const reason = `${latest.phase}_${snapshot.status}`;
+      this.#plans.setWorkItemStatus(item.workItemId, 'BLOCKED', reason);
+      this.#plans.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
+      this.#plans.setPlanStatus(plan.planId, 'BLOCKED', reason);
+      this.#plans.appendEvent(
+        plan.planId,
+        'WORK_ITEM_BLOCKED',
+        { reason },
+        {
+          batchId: batch.batchId,
+          workItemId: item.workItemId,
+          executionId: latest.executionId,
+        },
+      );
+      return;
+    }
+
+    if (latest.phase === 'IMPLEMENT' || latest.phase === 'IMPLEMENT_FIX') {
+      const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
+      await this.#launchPlanPhase(
+        plan,
+        batch,
+        item,
+        'VERIFY_REVIEW',
+        latest.executionId,
+        reviewAttempt,
+      );
+      return;
+    }
+
+    const verdict = reviewVerdict(snapshot.result?.finalText ?? '');
+    if (verdict === 'BLOCKING') {
+      const fixAttempt = records.filter((record) => record.phase === 'IMPLEMENT_FIX').length + 1;
+      if (fixAttempt > 3) {
+        const reason = 'REVIEW_FIX_LIMIT_EXCEEDED';
+        this.#plans.setWorkItemStatus(item.workItemId, 'BLOCKED', reason);
+        this.#plans.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
+        this.#plans.setPlanStatus(plan.planId, 'BLOCKED', reason);
+        return;
+      }
+      await this.#launchPlanPhase(
+        plan,
+        batch,
+        item,
+        'IMPLEMENT_FIX',
+        latest.executionId,
+        fixAttempt,
+      );
+      return;
+    }
+    if (verdict === 'UNKNOWN') {
+      const sameParentReviews = records.filter(
+        (record) =>
+          record.phase === 'VERIFY_REVIEW' &&
+          record.previousExecutionId === latest.previousExecutionId,
+      ).length;
+      if (sameParentReviews < 2) {
+        const reviewAttempt =
+          records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
+        await this.#launchPlanPhase(
+          plan,
+          batch,
+          item,
+          'VERIFY_REVIEW',
+          latest.previousExecutionId,
+          reviewAttempt,
+          'openhands-builtin',
+        );
+        return;
+      }
+      const reason = 'REVIEW_VERDICT_UNKNOWN';
+      this.#plans.setWorkItemStatus(item.workItemId, 'BLOCKED', reason);
+      this.#plans.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
+      this.#plans.setPlanStatus(plan.planId, 'BLOCKED', reason);
+      return;
+    }
+    this.#plans.setWorkItemStatus(item.workItemId, 'SUCCEEDED');
+    this.#plans.appendEvent(
+      plan.planId,
+      'WORK_ITEM_VERIFIED',
+      {},
+      {
+        batchId: batch.batchId,
+        workItemId: item.workItemId,
+        executionId: latest.executionId,
+      },
+    );
+  }
+
+  async #integrateBatch(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    batch: ReturnType<PlanRepository['batches']>[number],
+    items: WorkItemRecord[],
+  ): Promise<void> {
+    const implementations = items.map((item) => {
+      const records = this.#plans
+        .executionIds(item.workItemId)
+        .map((executionId) => this.#links.get(executionId))
+        .filter((record): record is ExecutionLinkRecord => Boolean(record));
+      const implementation = [...records]
+        .reverse()
+        .find((record) => record.phase === 'IMPLEMENT' || record.phase === 'IMPLEMENT_FIX');
+      if (!implementation?.workspaceRef || !implementation.sourceRevision) {
+        throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+      }
+      return {
+        workspaceRef: implementation.workspaceRef,
+        sourceRevision: implementation.sourceRevision,
+        executionId: implementation.executionId,
+      };
+    });
+    try {
+      const integrated = this.#workspace.integrateBatch
+        ? await this.#workspace.integrateBatch({
+            planId: plan.planId,
+            batchKey: batch.key,
+            repositoryPath: plan.repositoryPath,
+            baseRevision: batch.baseRevision ?? plan.currentRevision,
+            implementations,
+          })
+        : {
+            revision: `integrated:${implementations.map((item) => item.executionId).join('+')}`,
+            ref: `refs/ai-office/plans/${plan.planId}/batches/${batch.key}`,
+          };
+      this.#plans.setBatchStatus(batch.batchId, 'SUCCEEDED', {
+        integratedRevision: integrated.revision,
+        integrationRef: integrated.ref,
+      });
+      this.#plans.appendEvent(
+        plan.planId,
+        'BATCH_INTEGRATED',
+        { revision: integrated.revision, ref: integrated.ref },
+        { batchId: batch.batchId },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'BATCH_INTEGRATION_FAILED';
+      const reason = message.split(':', 1)[0] ?? 'BATCH_INTEGRATION_FAILED';
+      this.#plans.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
+      this.#plans.setPlanStatus(plan.planId, 'BLOCKED', reason);
+      this.#plans.appendEvent(
+        plan.planId,
+        'BATCH_INTEGRATION_BLOCKED',
+        { reason, message: message.slice(0, 2_000) },
+        { batchId: batch.batchId },
+      );
+    }
+  }
+
+  async #reconcilePlan(planId: string): Promise<void> {
+    const plan = this.#plans.get(planId);
+    if (!plan || !['PENDING', 'RUNNING'].includes(plan.status)) return;
+    if (plan.status === 'PENDING') this.#plans.setPlanStatus(plan.planId, 'RUNNING');
+    const batches = this.#plans.batches(plan.planId);
+    if (batches.every((batch) => batch.status === 'SUCCEEDED')) {
+      if (!plan.delivery) {
+        this.#plans.setPlanStatus(plan.planId, 'SUCCEEDED');
+        this.#plans.appendEvent(plan.planId, 'PLAN_SUCCEEDED', { revision: plan.currentRevision });
+        return;
+      }
+      if (!this.#delivery) {
+        this.#plans.setDeliveryState(plan.planId, {
+          stage: 'BLOCKED',
+          evidence: { reason: 'DELIVERY_ADAPTER_UNCONFIGURED' },
+        });
+        this.#plans.setPlanStatus(plan.planId, 'BLOCKED', 'DELIVERY_ADAPTER_UNCONFIGURED');
+        this.#plans.appendEvent(plan.planId, 'PLAN_DELIVERY_BLOCKED', {
+          reason: 'DELIVERY_ADAPTER_UNCONFIGURED',
+        });
+        return;
+      }
+      const result = await this.#delivery.reconcile({
+        planId: plan.planId,
+        repositoryPath: plan.repositoryPath,
+        objective: plan.objective,
+        revision: plan.currentRevision,
+        config: plan.delivery,
+      });
+      this.#plans.setDeliveryState(plan.planId, {
+        stage: result.stage,
+        evidence: result.evidence,
+        pullRequestUrl: result.pullRequestUrl,
+        mergeRevision: result.outcome === 'SUCCEEDED' ? result.mergeRevision : undefined,
+      });
+      if (result.outcome === 'NEEDS_FIX') {
+        const repair = this.#plans.addDeliveryRepairBatch(plan.planId, result.evidence);
+        if (!repair) {
+          this.#plans.setDeliveryState(plan.planId, {
+            stage: 'BLOCKED',
+            evidence: result.evidence,
+            pullRequestUrl: result.pullRequestUrl,
+          });
+          this.#plans.setPlanStatus(plan.planId, 'BLOCKED', 'DELIVERY_FIX_LIMIT_EXCEEDED');
+          this.#plans.appendEvent(plan.planId, 'PLAN_DELIVERY_BLOCKED', {
+            reason: 'DELIVERY_FIX_LIMIT_EXCEEDED',
+            ...result.evidence,
+          });
+        } else {
+          this.#plans.setDeliveryState(plan.planId, {
+            stage: 'PENDING',
+            evidence: result.evidence,
+            pullRequestUrl: result.pullRequestUrl,
+          });
+          this.#plans.appendEvent(plan.planId, 'PLAN_DELIVERY_REPAIR_SCHEDULED', {
+            batchId: repair.batchId,
+            ...result.evidence,
+          });
+        }
+      } else if (result.outcome === 'BLOCKED') {
+        this.#plans.setPlanStatus(plan.planId, 'BLOCKED', result.reason);
+        this.#plans.appendEvent(plan.planId, 'PLAN_DELIVERY_BLOCKED', {
+          reason: result.reason,
+          ...result.evidence,
+        });
+      } else if (result.outcome === 'SUCCEEDED') {
+        this.#plans.setPlanStatus(plan.planId, 'SUCCEEDED');
+        this.#plans.appendEvent(plan.planId, 'PLAN_SUCCEEDED', {
+          integratedRevision: plan.currentRevision,
+          mergeRevision: result.mergeRevision,
+          pullRequestUrl: result.pullRequestUrl,
+          postMergeChecks: result.evidence,
+        });
+      } else if (plan.deliveryStage !== result.stage) {
+        this.#plans.appendEvent(plan.planId, 'PLAN_DELIVERY_WAITING', {
+          stage: result.stage,
+          ...result.evidence,
+        });
+      }
+      return;
+    }
+    const succeededKeys = new Set(
+      batches.filter((batch) => batch.status === 'SUCCEEDED').map((batch) => batch.key),
+    );
+    const batch = batches.find(
+      (candidate) =>
+        ['PENDING', 'RUNNING'].includes(candidate.status) &&
+        candidate.dependsOn.every((dependency) => succeededKeys.has(dependency)),
+    );
+    if (!batch) return;
+    if (batch.status === 'PENDING') {
+      this.#plans.setBatchStatus(batch.batchId, 'RUNNING', { baseRevision: plan.currentRevision });
+      this.#plans.appendEvent(
+        plan.planId,
+        'BATCH_STARTED',
+        { baseRevision: plan.currentRevision },
+        {
+          batchId: batch.batchId,
+        },
+      );
+    }
+    const currentBatch = this.#plans
+      .batches(plan.planId)
+      .find((item) => item.batchId === batch.batchId)!;
+    const items = this.#plans.workItems(batch.batchId);
+    for (const item of items) {
+      if (item.status !== 'SUCCEEDED') {
+        try {
+          await this.#reconcileWorkItem(plan, currentBatch, item);
+        } catch (error) {
+          const code = error instanceof Error ? (error.message.split(':', 1)[0] ?? '') : '';
+          if (!code.includes('CONCURRENCY') && !code.includes('LEASE_CONFLICT')) throw error;
+        }
+      }
+    }
+    const refreshed = this.#plans.workItems(batch.batchId);
+    if (refreshed.every((item) => item.status === 'SUCCEEDED')) {
+      await this.#integrateBatch(plan, currentBatch, refreshed);
+    }
+  }
+
+  async reconcilePlans(planId?: string, recoverBlocked = false): Promise<void> {
+    let release!: () => void;
+    const predecessor = this.#planReconcileTail;
+    this.#planReconcileTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await predecessor;
+    try {
+      if (planId && recoverBlocked) {
+        const blocked = this.#plans.get(planId);
+        if (blocked?.status === 'BLOCKED') {
+          const batch = this.#plans
+            .batches(planId)
+            .find((candidate) => candidate.status === 'BLOCKED');
+          if (!batch && blocked.delivery?.autoMerge && blocked.deliveryStage === 'BLOCKED') {
+            this.#plans.setPlanStatus(planId, 'RUNNING');
+            this.#plans.setDeliveryState(planId, { stage: 'PENDING' });
+            this.#plans.appendEvent(planId, 'PLAN_DELIVERY_RECOVERY_REQUESTED', {
+              previousReason: blocked.blockedReason,
+            });
+          } else if (batch) {
+            const items = this.#plans.workItems(batch.batchId);
+            if (items.every((item) => item.status === 'SUCCEEDED')) {
+              this.#plans.setPlanStatus(planId, 'RUNNING');
+              this.#plans.setBatchStatus(batch.batchId, 'RUNNING');
+              this.#plans.appendEvent(
+                planId,
+                'BATCH_INTEGRATION_RECOVERY_REQUESTED',
+                { previousReason: blocked.blockedReason },
+                { batchId: batch.batchId },
+              );
+            } else {
+              const retryable = items.filter((item) => item.status === 'BLOCKED');
+              this.#plans.setPlanStatus(planId, 'RUNNING');
+              this.#plans.setBatchStatus(batch.batchId, 'RUNNING');
+              for (const item of retryable) {
+                const records = this.#plans
+                  .executionIds(item.workItemId)
+                  .map((executionId) => this.#links.get(executionId))
+                  .filter((record): record is ExecutionLinkRecord => Boolean(record));
+                const latest = records.at(-1);
+                if (
+                  !latest ||
+                  !['IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(latest.phase)
+                ) {
+                  continue;
+                }
+                const phase = latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW';
+                const attempt = records.filter((record) => record.phase === phase).length + 1;
+                this.#plans.setWorkItemStatus(item.workItemId, 'RUNNING');
+                this.#plans.appendEvent(
+                  planId,
+                  'WORK_ITEM_RECOVERY_REQUESTED',
+                  { previousReason: item.blockedReason, phase, attempt },
+                  { batchId: batch.batchId, workItemId: item.workItemId },
+                );
+                await this.#launchPlanPhase(
+                  blocked,
+                  batch,
+                  item,
+                  phase,
+                  latest.previousExecutionId,
+                  attempt,
+                  phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+                );
+              }
+            }
+          }
+        }
+      }
+      for (const plan of this.#plans.active(planId)) await this.#reconcilePlan(plan.planId);
+    } finally {
+      release();
+    }
   }
 
   async continue(

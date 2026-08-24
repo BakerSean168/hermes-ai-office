@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { openDb } from './db.mjs';
 import { registerV3Routes } from './v3/api.js';
 import { ExecutionLinkRepository } from './v3/correlation.js';
+import { GitHubPlanDelivery, type PlanDeliveryPort } from './v3/delivery.js';
 import {
   LiteLlmModelGateway,
   LiteLlmModelRegistry,
@@ -18,6 +19,7 @@ import type {
   ObservabilityPort,
 } from './v3/ports.js';
 import { DevelopmentPolicy } from './v3/policy.js';
+import { PlanRepository } from './v3/plans.js';
 import { loadV3ReadinessEvidence } from './v3/readiness.js';
 import { DevelopmentExecutionService, UnconfiguredObservability } from './v3/service.js';
 import { WorkspaceProvisioner, type WorkspaceProvisioningPort } from './v3/workspace.js';
@@ -34,6 +36,7 @@ export interface BuildControlPlaneOptions {
   v3ModelRegistry?: ModelRegistryPort;
   v3Observability?: ObservabilityPort;
   v3Workspace?: WorkspaceProvisioningPort;
+  v3Delivery?: PlanDeliveryPort;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
@@ -134,6 +137,8 @@ export async function buildControlPlane(
   const v3 = new DevelopmentExecutionService({
     policy,
     links: new ExecutionLinkRepository(db),
+    plans: new PlanRepository(db),
+    delivery: options.v3Delivery ?? new GitHubPlanDelivery({ home: env.MODEL_CP_V3_DELIVERY_HOME }),
     host: executionHost,
     workspace,
     gateway: modelGateway,
@@ -145,6 +150,15 @@ export async function buildControlPlane(
       path.resolve(here, '../config/v3-readiness-evidence.yaml'),
   );
   registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry);
+  const reconcileInterval = setInterval(
+    () => {
+      void v3
+        .reconcilePlans()
+        .catch((error) => app.log.error(error, 'V3 plan reconciliation failed'));
+    },
+    Number(env.MODEL_CP_V3_RECONCILE_INTERVAL_MS ?? 5_000),
+  );
+  reconcileInterval.unref();
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -156,6 +170,7 @@ export async function buildControlPlane(
   }));
 
   app.addHook('onClose', async () => {
+    clearInterval(reconcileInterval);
     db.close();
   });
 

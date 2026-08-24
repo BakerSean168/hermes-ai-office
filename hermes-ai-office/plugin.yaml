@@ -1,8 +1,11 @@
 name: hermes-ai-office
-version: '1.0.0'
+version: '1.1.0'
 description: Thin Hermes development-execution facade backed by OpenHands and LiteLLM.
 provides_tools:
   - ai_office_list_providers
+  - ai_office_create_plan
+  - ai_office_get_plan
+  - ai_office_list_plans
   - ai_office_run_phase
   - ai_office_get_execution
   - ai_office_continue_execution

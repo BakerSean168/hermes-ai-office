@@ -125,6 +125,8 @@ export interface HermesKanban {
   tasks: HermesKanbanTask[];
   links: HermesKanbanLink[];
   runs: HermesKanbanRun[];
+  events?: Array<Record<string, unknown>>;
+  plans?: Array<Record<string, unknown>>;
 }
 
 // ── Spawn wire types (hermes-office-bridge /api/spawns) ───────

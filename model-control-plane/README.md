@@ -6,10 +6,14 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 
 - `ORCHESTRATE` supervisor execution plus phase policy and backend selection;
 - causal execution lineage;
+- durable plans, validated dependency batches, and stable work-item identities;
+- automatic IMPLEMENT → VERIFY_REVIEW → IMPLEMENT_FIX reconciliation;
 - isolated implementation workspaces and read-only review snapshots;
 - strict PASS/FAIL review governance;
 - single-writer leases;
-- deterministic FINALIZE;
+- deterministic reviewed batch integration into durable Git refs;
+- explicitly authorized branch delivery, pull-request checks, merge, and
+  post-merge verification;
 - durable execution timing, result, LiteLLM usage, and per-deployment route usage;
 - readiness evidence.
 
@@ -24,6 +28,10 @@ Coding backends are defined in policy independently from runtime readiness. Open
 - `GET /api/v3/development/runtime-summary`
 - `GET /api/v3/development/readiness`
 - `GET /api/v3/development/model-registry`
+- `GET /api/v3/development/plans`
+- `GET /api/v3/development/plans/:planId`
+- `POST /api/v3/development/plans`
+- `POST /api/v3/development/plans/:planId/reconcile`
 - `GET /api/v3/development/executions`
 - `GET /api/v3/development/executions/:executionId`
 - `POST /api/v3/development/executions`
@@ -31,6 +39,12 @@ Coding backends are defined in policy independently from runtime readiness. Open
 - `POST /api/v3/development/executions/:executionId/cancel`
 
 `GET /api/v3/development/executions?limit=5000&hydrate=1` backfills missing historical LiteLLM observations into durable execution correlation state.
+
+Plan creation is the normal multi-step protocol. The coordinator persists the graph before launching work, retries transport failures once, applies strict independent review gates, integrates only clean committed implementations, and starts dependent batches from the preceding integrated revision. When plan creation explicitly authorizes delivery, the coordinator also pushes the integrated revision, creates or reuses a pull request, waits for checks, creates a bounded reviewed repair batch for failed pre-merge checks, merges through GitHub branch protection, and verifies checks on the merge revision. Explicit plan reconcile recovers a blocked infrastructure attempt after the underlying fault is repaired.
+
+Delivery is opt-in and fail-closed. `delivery.autoMerge` must be explicitly true;
+without that authorization AI Office never pushes or merges. A delivery plan is
+not `SUCCEEDED` merely because implementation or local integration completed.
 
 ## Local validation
 

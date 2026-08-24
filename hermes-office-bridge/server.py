@@ -23,6 +23,9 @@ import urllib.request
 HOST = "127.0.0.1"
 PORT = 8787
 UPSTREAM = "http://127.0.0.1:9119"
+AI_OFFICE_CONTROL_PLANE = os.environ.get(
+    "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8321"
+).rstrip("/")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 KANBAN_DB = "/opt/data/kanban.db"
 KANBAN_DB_URI = "file:%s?mode=ro" % KANBAN_DB
@@ -299,13 +302,128 @@ def read_kanban():
         ]
         con.close()
         events.reverse()  # 最近 100 条按时间正序返回
-        return {"tasks": tasks, "links": links, "runs": runs, "events": events}
+        return _merge_ai_office_plans({"tasks": tasks, "links": links, "runs": runs, "events": events})
     except Exception:  # noqa: BLE001
         try:
             con.close()
         except Exception:  # noqa: BLE001
             pass
-        return empty
+        return _merge_ai_office_plans(empty)
+
+
+def _merge_ai_office_plans(kanban):
+    """Project durable V3 plans into the same read-only graph Pixel Office consumes."""
+    try:
+        request = urllib.request.Request(
+            AI_OFFICE_CONTROL_PLANE + "/api/v3/development/plans?limit=100",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=2) as response:
+            payload = json.load(response)
+        plans = payload.get("items") if isinstance(payload, dict) else []
+        status_map = {
+            "PENDING": "todo",
+            "RUNNING": "running",
+            "BLOCKED": "blocked",
+            "SUCCEEDED": "done",
+            "CANCELLED": "cancelled",
+        }
+        projected_tasks = []
+        projected_links = []
+        projected_runs = []
+        projected_events = []
+        for plan in plans if isinstance(plans, list) else []:
+            if not isinstance(plan, dict):
+                continue
+            plan_id = "ai-office:" + str(plan.get("planId") or "")
+            if plan_id == "ai-office:":
+                continue
+            project_key = str(plan.get("projectKey") or "ai-office")
+            projected_tasks.append(
+                {
+                    "id": plan_id,
+                    "title": str(plan.get("objective") or plan.get("planId")),
+                    "assignee": project_key,
+                    "status": status_map.get(str(plan.get("status") or ""), "todo"),
+                    "priority": "plan",
+                    "workspace_path": str(plan.get("repositoryPath") or ""),
+                    "created_at": plan.get("createdAt"),
+                    "started_at": plan.get("createdAt"),
+                    "completed_at": plan.get("updatedAt") if plan.get("status") == "SUCCEEDED" else None,
+                }
+            )
+            batch_ids = {}
+            for batch in plan.get("batches") or []:
+                if not isinstance(batch, dict):
+                    continue
+                batch_id = "ai-office:" + str(batch.get("batchId") or "")
+                batch_ids[str(batch.get("key") or "")] = batch_id
+                projected_tasks.append(
+                    {
+                        "id": batch_id,
+                        "title": str(batch.get("title") or batch.get("key")),
+                        "assignee": project_key,
+                        "status": status_map.get(str(batch.get("status") or ""), "todo"),
+                        "priority": "batch",
+                        "workspace_path": str(plan.get("repositoryPath") or ""),
+                        "created_at": batch.get("createdAt"),
+                        "started_at": batch.get("createdAt"),
+                        "completed_at": batch.get("updatedAt") if batch.get("status") == "SUCCEEDED" else None,
+                    }
+                )
+                projected_links.append({"parent_id": plan_id, "child_id": batch_id})
+                for item in batch.get("workItems") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    item_id = "ai-office:" + str(item.get("workItemId") or "")
+                    projected_tasks.append(
+                        {
+                            "id": item_id,
+                            "title": str(item.get("title") or item.get("key")),
+                            "assignee": project_key,
+                            "status": status_map.get(str(item.get("status") or ""), "todo"),
+                            "priority": "work-item",
+                            "workspace_path": str(plan.get("repositoryPath") or ""),
+                            "created_at": item.get("createdAt"),
+                            "started_at": item.get("createdAt"),
+                            "completed_at": item.get("updatedAt") if item.get("status") == "SUCCEEDED" else None,
+                        }
+                    )
+                    projected_links.append({"parent_id": batch_id, "child_id": item_id})
+                    for execution in item.get("executions") or []:
+                        if not isinstance(execution, dict) or execution.get("status") in {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}:
+                            continue
+                        projected_runs.append(
+                            {
+                                "id": str(execution.get("executionId") or ""),
+                                "task_id": item_id,
+                                "profile": project_key,
+                                "status": str(execution.get("status") or "RUNNING").lower(),
+                                "worker_pid": None,
+                                "last_heartbeat_at": None,
+                                "started_at": (execution.get("timing") or {}).get("startedAt"),
+                            }
+                        )
+            for event in (plan.get("events") or [])[-100:]:
+                if isinstance(event, dict):
+                    projected_events.append(
+                        {
+                            "id": "ai-office:%s" % event.get("eventId"),
+                            "task_id": "ai-office:" + str(event.get("workItemId") or event.get("batchId") or plan.get("planId")),
+                            "kind": str(event.get("type") or "plan_event"),
+                            "payload": json.dumps(event.get("detail") or {}, ensure_ascii=False),
+                            "created_at": event.get("createdAt"),
+                        }
+                    )
+        return {
+            "tasks": list(kanban.get("tasks") or []) + projected_tasks,
+            "links": list(kanban.get("links") or []) + projected_links,
+            "runs": list(kanban.get("runs") or []) + projected_runs,
+            "events": (list(kanban.get("events") or []) + projected_events)[-500:],
+            "plans": plans if isinstance(plans, list) else [],
+        }
+    except Exception:  # noqa: BLE001
+        return {**kanban, "plans": []}
 
 
 

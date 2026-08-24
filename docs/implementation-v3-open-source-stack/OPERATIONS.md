@@ -15,6 +15,11 @@
 4. Verify `/api/v3/health`, model registry, readiness, and execution list.
 5. Deploy the Hermes plugin/dashboard through the safe AI Office deploy script.
 
+The GCP execution host must have authenticated `git` and `gh` access for any
+plan that explicitly requests remote delivery. Verify `gh auth status` before
+starting such a plan. A missing or rejected credential leaves the durable plan
+running and retryable; it does not make an observer timeout authoritative.
+
 The Hermes Gateway is not a dependency of the model-control-plane restart.
 
 ## Historical database
