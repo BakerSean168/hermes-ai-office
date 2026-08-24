@@ -303,8 +303,9 @@ function codexCommand(session, prompt, evidence) {
       '--json',
       '-o',
       lastMessage,
-      reviewPrompt,
+      '-',
     ],
+    input: reviewPrompt,
     env: {
       ...process.env,
       CODEX_API_KEY: LITELLM_API_KEY,
@@ -320,7 +321,6 @@ function claudeCommand(session, prompt, evidence) {
     command: CLAUDE_BIN,
     args: [
       '-p',
-      reviewPrompt,
       '--bare',
       '--model',
       session.model,
@@ -335,6 +335,7 @@ function claudeCommand(session, prompt, evidence) {
       '--disallowed-tools',
       'Edit,Write,NotebookEdit',
     ],
+    input: reviewPrompt,
     env: {
       ...process.env,
       ANTHROPIC_API_KEY: LITELLM_API_KEY,
@@ -371,9 +372,11 @@ function runChild(session, spec) {
     const child = spawn(spec.command, spec.args, {
       cwd: session.cwd,
       env: spec.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     session.child = child;
+    child.stdin.on('error', () => {});
+    child.stdin.end(spec.input);
 
     const append = (current, chunk) => {
       const next = current + chunk.toString('utf8');

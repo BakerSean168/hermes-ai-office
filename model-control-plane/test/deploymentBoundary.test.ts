@@ -57,3 +57,18 @@ test('OpenCode logical models correlate LiteLLM spend by execution ID', () => {
     assert.equal(models[model].options.user, '{env:HERMES_V3_EXECUTION_ID}');
   }
 });
+
+test('headless reviewers stream frozen evidence over stdin instead of process arguments', () => {
+  const adapter = fs.readFileSync(
+    path.join(root, 'openhands_tools/headless_review_acp.mjs'),
+    'utf8',
+  );
+
+  assert.match(adapter, /lastMessage,\s*'-',\s*\],\s*input: reviewPrompt/);
+  assert.match(adapter, /command: CLAUDE_BIN,\s*args: \[\s*'-p',\s*'--bare'/);
+  assert.equal(adapter.match(/input: reviewPrompt/g)?.length, 2);
+  assert.match(adapter, /stdio: \['pipe', 'pipe', 'pipe'\]/);
+  assert.match(adapter, /child\.stdin\.end\(spec\.input\)/);
+  assert.doesNotMatch(adapter, /lastMessage,\s*reviewPrompt/);
+  assert.doesNotMatch(adapter, /'-p',\s*reviewPrompt/);
+});
