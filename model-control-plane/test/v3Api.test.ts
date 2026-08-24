@@ -211,6 +211,14 @@ test('V3 review prompt preserves read-only evidence and directs write-requiring 
       lastObjective,
       /Do not classify read-only permission errors as implementation defects/,
     );
+    assert.match(
+      lastObjective,
+      /apparent uncommitted changes in this review copy are expected snapshot representation/,
+    );
+    assert.match(
+      lastObjective,
+      /Do not fail because the delivery branch, pull request, remote checks, merge, or post-merge verification is not present yet/,
+    );
     assert.match(lastObjective, /short separate terminal tool invocations/);
   } finally {
     await runtime.app.close();
