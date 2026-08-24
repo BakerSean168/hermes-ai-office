@@ -31,6 +31,7 @@ export interface WorkspaceProvisioningPort {
     repositoryPath: string;
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
+    reviewBaseRevision?: string;
   }): Promise<ProvisionedWorkspace>;
   integrateBatch(input: {
     planId: string;
@@ -162,6 +163,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     repositoryPath: string;
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
+    reviewBaseRevision?: string;
   }): Promise<ProvisionedWorkspace> {
     const requested = path.resolve(input.repositoryPath);
     if (!this.#allowedRepositoryRoots.some((root) => inside(requested, root))) {
@@ -222,6 +224,19 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         await git(stagingRepo, ['checkout', '-B', branch, resolvedRevision], sourceOwner);
       } else {
         await git(stagingRepo, ['checkout', '--detach', resolvedRevision], sourceOwner);
+      }
+
+      if (input.workspaceMode === 'review_snapshot' && input.reviewBaseRevision?.trim()) {
+        const resolvedReviewBase = await git(
+          stagingRepo,
+          ['rev-parse', '--verify', input.reviewBaseRevision.trim()],
+          sourceOwner,
+        );
+        await git(
+          stagingRepo,
+          ['update-ref', 'refs/ai-office/review-base', resolvedReviewBase],
+          sourceOwner,
+        );
       }
 
       if (input.workspaceMode === 'review_snapshot') {

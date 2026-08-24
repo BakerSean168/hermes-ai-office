@@ -79,7 +79,7 @@ test('review snapshot freezes Git-visible implementation working tree without ig
   }
 });
 
-test('review snapshot can anchor committed implementation content at the original source revision', async () => {
+test('review snapshot preserves committed implementation HEAD and records original source base', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-committed-review-'));
   const source = path.join(root, 'source');
   const workspaceRoot = path.join(root, 'workspaces');
@@ -109,20 +109,30 @@ test('review snapshot can anchor committed implementation content at the origina
     const snapshot = await provisioner.provision({
       executionId: 'review-committed-1',
       repositoryPath: source,
-      baseRevision: base,
+      baseRevision: 'HEAD',
       workspaceMode: 'review_snapshot',
+      reviewBaseRevision: base,
     });
     snapshotRoot = snapshot.hostPath;
 
-    assert.equal(snapshot.sourceRevision, base);
-    assert.equal(git(snapshot.hostPath, 'rev-parse', 'HEAD'), base);
+    assert.equal(snapshot.sourceRevision, implementationHead);
+    assert.equal(git(snapshot.hostPath, 'rev-parse', 'HEAD'), implementationHead);
+    assert.equal(git(snapshot.hostPath, 'rev-parse', 'refs/ai-office/review-base'), base);
     assert.equal(
       fs.readFileSync(path.join(snapshot.hostPath, 'tracked.txt'), 'utf8'),
       'committed implementation\n',
     );
 
     execFileSync('chmod', ['-R', 'u+w', snapshot.hostPath]);
-    const diff = git(snapshot.hostPath, 'diff', '--no-ext-diff', 'HEAD', '--', 'tracked.txt');
+    assert.equal(git(snapshot.hostPath, 'status', '--short'), '');
+    const diff = git(
+      snapshot.hostPath,
+      'diff',
+      '--no-ext-diff',
+      'refs/ai-office/review-base..HEAD',
+      '--',
+      'tracked.txt',
+    );
     assert.match(diff, /-base/);
     assert.match(diff, /\+committed implementation/);
   } finally {

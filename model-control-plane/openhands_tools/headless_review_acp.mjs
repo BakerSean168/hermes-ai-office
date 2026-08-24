@@ -93,17 +93,55 @@ function isInside(child, parent) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function optionalGit(cwd, args) {
+  const result = spawnSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    timeout: 60_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0) return '';
+  return result.stdout.trim();
+}
+
 function collectEvidence(cwd) {
   const sections = [];
+  const implementationHead = git(cwd, ['rev-parse', 'HEAD']).trim();
+  const reviewBase = optionalGit(cwd, ['rev-parse', '--verify', 'refs/ai-office/review-base']);
+
+  sections.push(`IMPLEMENTATION HEAD:\n${implementationHead}`);
+  if (reviewBase) {
+    sections.push(`ORIGINAL IMPLEMENTATION BASE (refs/ai-office/review-base):\n${reviewBase}`);
+    sections.push(
+      `COMMITTED IMPLEMENTATION DIFF AGAINST REVIEW BASE:\n${
+        git(cwd, [
+          'diff',
+          '--no-ext-diff',
+          '--unified=60',
+          'refs/ai-office/review-base..HEAD',
+          '--',
+          '.',
+        ]) || '(no committed implementation diff)\n'
+      }`,
+    );
+    sections.push(
+      `COMMITTED DIFF CHECK:\n${
+        git(cwd, ['diff', '--check', 'refs/ai-office/review-base..HEAD', '--', '.']) ||
+        'PASS (git diff --check exited 0)\n'
+      }`,
+    );
+  }
+
   sections.push(`GIT STATUS:\n${git(cwd, ['status', '--short']) || '(clean)\n'}`);
   sections.push(
-    `GIT DIFF AGAINST FROZEN BASE HEAD:\n${
-      git(cwd, ['diff', '--no-ext-diff', '--unified=80', 'HEAD', '--', '.']) ||
-      '(no tracked diff)\n'
+    `UNCOMMITTED IMPLEMENTATION DIFF AGAINST HEAD:\n${
+      git(cwd, ['diff', '--no-ext-diff', '--unified=60', 'HEAD', '--', '.']) ||
+      '(no tracked uncommitted diff)\n'
     }`,
   );
   sections.push(
-    `GIT DIFF CHECK:\n${git(cwd, ['diff', '--check', 'HEAD', '--', '.']) || 'PASS (git diff --check exited 0)\n'}`,
+    `UNCOMMITTED DIFF CHECK:\n${
+      git(cwd, ['diff', '--check', 'HEAD', '--', '.']) || 'PASS (git diff --check exited 0)\n'
+    }`,
   );
 
   const untracked = git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])
@@ -133,7 +171,7 @@ function collectEvidence(cwd) {
 
   const combined = sections.join('\n\n');
   if (combined.length <= EVIDENCE_LIMIT) return combined;
-  return `${combined.slice(0, EVIDENCE_LIMIT)}\n\n[EVIDENCE TRUNCATED AT ${EVIDENCE_LIMIT} CHARACTERS; inspect the read-only snapshot for additional context.]`;
+  return `${combined.slice(0, EVIDENCE_LIMIT)}\n\n[EVIDENCE TRUNCATED AT ${EVIDENCE_LIMIT} CHARACTERS; inspect the physically read-only snapshot for additional context.]`;
 }
 
 function promptText(blocks) {
@@ -256,6 +294,22 @@ function parseClaudeResult(stdout) {
   throw new Error('CLAUDE_STRUCTURED_REVIEW_MISSING');
 }
 
+function codexIndependentActivity(stdout) {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const item = event?.item;
+      if (item?.type === 'command_execution' || item?.type === 'mcp_tool_call') {
+        return true;
+      }
+    } catch {
+      // Ignore non-JSON event lines.
+    }
+  }
+  return false;
+}
+
 function codexCommand(session, prompt, evidence) {
   const sessionDir = safeSessionDirectory(session.id);
   const codexHome = path.join(sessionDir, 'codex-home');
@@ -272,7 +326,7 @@ function codexCommand(session, prompt, evidence) {
       'model_reasoning_effort = "high"',
       'model_verbosity = "high"',
       'approval_policy = "never"',
-      'sandbox_mode = "read-only"',
+      'sandbox_mode = "workspace-write"',
       '[model_providers.hermes-litellm]',
       'name = "Hermes LiteLLM"',
       `base_url = ${JSON.stringify(baseUrl)}`,
@@ -287,7 +341,7 @@ function codexCommand(session, prompt, evidence) {
     { mode: 0o600 },
   );
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
-  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nReturn only the requested structured review verdict. Treat the frozen evidence as authoritative; inspect additional files only when needed. Do not modify the repository.`;
+  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   return {
     command: CODEX_BIN,
     args: [
@@ -295,7 +349,7 @@ function codexCommand(session, prompt, evidence) {
       '--ephemeral',
       '--ignore-rules',
       '--sandbox',
-      'read-only',
+      'workspace-write',
       '--model',
       session.model,
       '--output-schema',
@@ -312,11 +366,12 @@ function codexCommand(session, prompt, evidence) {
       CODEX_HOME: codexHome,
     },
     parse: (stdout) => parseCodexResult(sessionDir, stdout),
+    hasIndependentActivity: codexIndependentActivity,
   };
 }
 
 function claudeCommand(session, prompt, evidence) {
-  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nReturn only the requested structured review verdict. Treat the frozen evidence as authoritative; inspect additional files only when needed. Do not modify the repository.`;
+  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   return {
     command: CLAUDE_BIN,
     args: [
@@ -548,6 +603,30 @@ class HeadlessReviewAgent {
               type: 'text',
               text: `REVIEW_TRANSPORT_ERROR\n${reason}${detail ? `\n${detail}` : ''}`,
             },
+          },
+        });
+        return { stopReason: 'end_turn' };
+      }
+
+      if (
+        typeof spec.hasIndependentActivity === 'function' &&
+        !spec.hasIndependentActivity(result.stdout)
+      ) {
+        const reason = 'reviewer completed without independent repository command activity';
+        await cx.notify(acp.methods.client.session.update, {
+          sessionId: session.id,
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId,
+            status: 'failed',
+            rawOutput: { error: reason },
+          },
+        });
+        await cx.notify(acp.methods.client.session.update, {
+          sessionId: session.id,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `REVIEW_TRANSPORT_ERROR\n${reason}` },
           },
         });
         return { stopReason: 'end_turn' };

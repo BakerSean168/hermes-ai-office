@@ -211,14 +211,13 @@ test('V3 review prompt preserves read-only evidence and directs write-requiring 
       lastObjective,
       /Do not classify read-only permission errors as implementation defects/,
     );
-    assert.match(
-      lastObjective,
-      /apparent uncommitted changes in this review copy are expected snapshot representation/,
-    );
+    assert.match(lastObjective, /freezes the implementation workspace at its current HEAD/);
+    assert.match(lastObjective, /refs\/ai-office\/review-base/);
     assert.match(
       lastObjective,
       /Do not fail because the delivery branch, pull request, remote checks, merge, or post-merge verification is not present yet/,
     );
+    assert.match(lastObjective, /at least one focused verification command/);
     assert.match(lastObjective, /short separate terminal tool invocations/);
   } finally {
     await runtime.app.close();
@@ -1453,11 +1452,12 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
   }
 });
 
-test('V3 review snapshot is anchored at the implementation original source revision', async () => {
+test('V3 review snapshot freezes current implementation HEAD and preserves original source ref', async () => {
   const host = new FakeHost();
   const provisions: Array<{
     phaseWorkspace: string;
     baseRevision?: string;
+    reviewBaseRevision?: string;
     repositoryPath: string;
   }> = [];
   const anchoredWorkspace: WorkspaceProvisioningPort = {
@@ -1472,6 +1472,7 @@ test('V3 review snapshot is anchored at the implementation original source revis
       provisions.push({
         phaseWorkspace: input.workspaceMode,
         baseRevision: input.baseRevision,
+        reviewBaseRevision: input.reviewBaseRevision,
         repositoryPath: input.repositoryPath,
       });
       return {
@@ -1539,7 +1540,8 @@ test('V3 review snapshot is anchored at the implementation original source revis
 
     const reviewProvision = provisions.find((item) => item.phaseWorkspace === 'review_snapshot');
     assert.ok(reviewProvision);
-    assert.equal(reviewProvision.baseRevision, 'source-base-revision-123');
+    assert.equal(reviewProvision.baseRevision, 'HEAD');
+    assert.equal(reviewProvision.reviewBaseRevision, 'source-base-revision-123');
     assert.match(reviewProvision.repositoryPath, /^\/host\/workspace\//);
   } finally {
     await runtime.app.close();
