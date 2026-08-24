@@ -15,6 +15,7 @@ import type { WorkspaceProvisioningPort } from '../src/v3/workspace.js';
 
 class PlanHost implements ExecutionHostPort {
   readonly executions: Map<string, ExecutionHostSnapshot>;
+  readonly getBarriers = new Map<string, Promise<void>>();
   creates = 0;
   gets = 0;
   lastCreateInput?: ExecutionHostCreateInput;
@@ -39,9 +40,14 @@ class PlanHost implements ExecutionHostPort {
 
   async getExecution(conversationId: string) {
     this.gets += 1;
+    await this.getBarriers.get(conversationId);
     const snapshot = this.executions.get(conversationId);
     if (!snapshot) throw new Error('missing fake execution');
     return snapshot;
+  }
+
+  blockGet(conversationId: string, barrier: Promise<void>) {
+    this.getBarriers.set(conversationId, barrier);
   }
 
   async cancelExecution(conversationId: string) {
@@ -71,6 +77,67 @@ class PlanHost implements ExecutionHostPort {
     snapshot.error = error;
   }
 }
+
+test('plan reconciliation is serialized per plan without blocking unrelated plans', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-queues-'));
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const create = (projectKey: string) =>
+      runtime.v3.createPlan(
+        {
+          projectKey,
+          objective: `Implement ${projectKey}.`,
+          analysisSummary: 'One independently verifiable work item.',
+          repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+          batches: [
+            {
+              key: 'batch',
+              title: 'Batch',
+              workItems: [{ key: 'item', title: 'Item', objective: 'Implement the item.' }],
+            },
+          ],
+        },
+        `create-${projectKey}`,
+      );
+    const first = await create('slow-plan');
+    const second = await create('independent-plan');
+    const firstConversation =
+      first.batches[0]?.workItems[0]?.executions[0]?.refs.openhandsConversationId;
+    assert.ok(firstConversation);
+    let release!: () => void;
+    host.blockGet(
+      firstConversation,
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    const stalled = runtime.v3.reconcilePlans(first.planId);
+    const timeout = new Promise<never>((_, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('unrelated plan reconciliation blocked')),
+        250,
+      );
+      timer.unref();
+    });
+    await Promise.race([runtime.v3.reconcilePlans(second.planId), timeout]);
+    release();
+    await stalled;
+  } finally {
+    await runtime.app.close();
+  }
+});
 
 let integrationFailuresRemaining = 0;
 let integrationCount = 0;
@@ -214,6 +281,20 @@ test('a durable plan survives worker timeout, failed review, integration failure
     });
     assert.equal(created.statusCode, 201);
     const planId = created.json().planId as string;
+
+    const getsBeforeProjection = host.gets;
+    const durableProjection = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/plans/${planId}`,
+    });
+    assert.equal(durableProjection.statusCode, 200);
+    assert.equal(host.gets, getsBeforeProjection);
+    const hydratedProjection = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/plans/${planId}?hydrate=true`,
+    });
+    assert.equal(hydratedProjection.statusCode, 200);
+    assert.equal(host.gets, getsBeforeProjection + 1);
 
     await runtime.v3.reconcilePlans();
     let plan = await runtime.app.inject({
@@ -413,7 +494,15 @@ test('review fix limits count finding cycles and explicit recovery launches the 
       method: 'POST',
       url: `/api/v3/development/plans/${planId}/reconcile`,
     });
-    assert.equal(recovered.json().status, 'RUNNING');
+    assert.equal(recovered.statusCode, 202);
+    assert.deepEqual(recovered.json(), {
+      planId,
+      accepted: true,
+      status: 'BLOCKED',
+      statusUrl: `/api/v3/development/plans/${planId}`,
+    });
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await body()).status, 'RUNNING');
     assert.equal((await latest()).phase, 'IMPLEMENT_FIX');
     assert.match(JSON.stringify((await body()).events), /WORK_ITEM_RECOVERY_REQUESTED/);
   } finally {

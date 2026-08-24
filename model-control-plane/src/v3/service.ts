@@ -659,7 +659,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#planOrchestrator.createPlan(input, commandKey);
   }
 
-  getPlan(planId: string, hydrateExecutions = true) {
+  getPlan(planId: string, hydrateExecutions = false) {
     return this.#planOrchestrator.getPlan(planId, hydrateExecutions);
   }
 

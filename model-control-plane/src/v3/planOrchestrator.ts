@@ -84,7 +84,7 @@ export class DurablePlanOrchestrator {
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #delivery?: PlanDeliveryPort;
   readonly #executions: PlanExecutionPort;
-  #planReconcileTail: Promise<void> = Promise.resolve();
+  readonly #planReconcileTails = new Map<string, Promise<void>>();
 
   constructor(options: {
     repository: PlanRepository;
@@ -107,7 +107,7 @@ export class DurablePlanOrchestrator {
     return (await this.getPlan(plan.planId))!;
   }
 
-  async getPlan(planId: string, hydrateExecutions = true) {
+  async getPlan(planId: string, hydrateExecutions = false) {
     const plan = this.#repository.get(planId);
     if (!plan) return null;
     const batches = [];
@@ -551,88 +551,101 @@ export class DurablePlanOrchestrator {
     }
   }
 
-  async reconcilePlans(planId?: string, recoverBlocked = false): Promise<void> {
-    let release!: () => void;
-    const predecessor = this.#planReconcileTail;
-    this.#planReconcileTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await predecessor;
-    try {
-      if (planId && recoverBlocked) {
-        const blocked = this.#repository.get(planId);
-        if (blocked?.status === 'BLOCKED') {
-          const batch = this.#repository
-            .batches(planId)
-            .find((candidate) => candidate.status === 'BLOCKED');
-          if (!batch && blocked.delivery?.autoMerge && blocked.deliveryStage === 'BLOCKED') {
-            this.#repository.setPlanStatus(planId, 'RUNNING');
-            this.#repository.setDeliveryState(planId, { stage: 'PENDING' });
-            this.#repository.appendEvent(planId, 'PLAN_DELIVERY_RECOVERY_REQUESTED', {
-              previousReason: blocked.blockedReason,
-            });
-          } else if (batch) {
-            const items = this.#repository.workItems(batch.batchId);
-            if (items.every((item) => item.status === 'SUCCEEDED')) {
-              this.#repository.setPlanStatus(planId, 'RUNNING');
-              this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
-              this.#repository.appendEvent(
-                planId,
-                'BATCH_INTEGRATION_RECOVERY_REQUESTED',
-                { previousReason: blocked.blockedReason },
-                { batchId: batch.batchId },
-              );
-            } else {
-              const retryable = items.filter((item) => item.status === 'BLOCKED');
-              this.#repository.setPlanStatus(planId, 'RUNNING');
-              this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
-              for (const item of retryable) {
-                const records = this.#repository
-                  .executionIds(item.workItemId)
-                  .map((executionId) => this.#links.get(executionId))
-                  .filter((record): record is ExecutionLinkRecord => Boolean(record));
-                const latest = records.at(-1);
-                if (
-                  !latest ||
-                  !['IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(latest.phase)
-                ) {
-                  continue;
-                }
-                const recoverReviewLimit =
-                  item.blockedReason === 'REVIEW_FIX_LIMIT_EXCEEDED' &&
-                  latest.phase === 'VERIFY_REVIEW' &&
-                  reviewVerdict(latest.resultText ?? '') === 'BLOCKING';
-                const phase = recoverReviewLimit
-                  ? 'IMPLEMENT_FIX'
-                  : (latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW');
-                const previousExecutionId = recoverReviewLimit
-                  ? latest.executionId
-                  : latest.previousExecutionId;
-                const attempt = records.filter((record) => record.phase === phase).length + 1;
-                this.#repository.setWorkItemStatus(item.workItemId, 'RUNNING');
-                this.#repository.appendEvent(
-                  planId,
-                  'WORK_ITEM_RECOVERY_REQUESTED',
-                  { previousReason: item.blockedReason, phase, attempt },
-                  { batchId: batch.batchId, workItemId: item.workItemId },
-                );
-                await this.#launchPlanPhase(
-                  blocked,
-                  batch,
-                  item,
-                  phase,
-                  previousExecutionId,
-                  attempt,
-                  phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
-                );
-              }
-            }
-          }
-        }
-      }
-      for (const plan of this.#repository.active(planId)) await this.#reconcilePlan(plan.planId);
-    } finally {
-      release();
+  async #recoverBlockedPlan(planId: string): Promise<void> {
+    const blocked = this.#repository.get(planId);
+    if (blocked?.status !== 'BLOCKED') return;
+    const batch = this.#repository
+      .batches(planId)
+      .find((candidate) => candidate.status === 'BLOCKED');
+    if (!batch && blocked.delivery?.autoMerge && blocked.deliveryStage === 'BLOCKED') {
+      this.#repository.setPlanStatus(planId, 'RUNNING');
+      this.#repository.setDeliveryState(planId, { stage: 'PENDING' });
+      this.#repository.appendEvent(planId, 'PLAN_DELIVERY_RECOVERY_REQUESTED', {
+        previousReason: blocked.blockedReason,
+      });
+      return;
     }
+    if (!batch) return;
+    const items = this.#repository.workItems(batch.batchId);
+    if (items.every((item) => item.status === 'SUCCEEDED')) {
+      this.#repository.setPlanStatus(planId, 'RUNNING');
+      this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
+      this.#repository.appendEvent(
+        planId,
+        'BATCH_INTEGRATION_RECOVERY_REQUESTED',
+        { previousReason: blocked.blockedReason },
+        { batchId: batch.batchId },
+      );
+      return;
+    }
+    const retryable = items.filter((item) => item.status === 'BLOCKED');
+    this.#repository.setPlanStatus(planId, 'RUNNING');
+    this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
+    for (const item of retryable) {
+      const records = this.#repository
+        .executionIds(item.workItemId)
+        .map((executionId) => this.#links.get(executionId))
+        .filter((record): record is ExecutionLinkRecord => Boolean(record));
+      const latest = records.at(-1);
+      if (!latest || !['IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(latest.phase)) {
+        continue;
+      }
+      const recoverReviewLimit =
+        item.blockedReason === 'REVIEW_FIX_LIMIT_EXCEEDED' &&
+        latest.phase === 'VERIFY_REVIEW' &&
+        reviewVerdict(latest.resultText ?? '') === 'BLOCKING';
+      const phase = recoverReviewLimit
+        ? 'IMPLEMENT_FIX'
+        : (latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW');
+      const previousExecutionId = recoverReviewLimit
+        ? latest.executionId
+        : latest.previousExecutionId;
+      const attempt = records.filter((record) => record.phase === phase).length + 1;
+      this.#repository.setWorkItemStatus(item.workItemId, 'RUNNING');
+      this.#repository.appendEvent(
+        planId,
+        'WORK_ITEM_RECOVERY_REQUESTED',
+        { previousReason: item.blockedReason, phase, attempt },
+        { batchId: batch.batchId, workItemId: item.workItemId },
+      );
+      await this.#launchPlanPhase(
+        blocked,
+        batch,
+        item,
+        phase,
+        previousExecutionId,
+        attempt,
+        phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+      );
+    }
+  }
+
+  #enqueuePlanReconciliation(planId: string, recoverBlocked: boolean): Promise<void> {
+    const predecessor = this.#planReconcileTails.get(planId) ?? Promise.resolve();
+    const current = predecessor
+      .catch(() => undefined)
+      .then(async () => {
+        if (recoverBlocked) await this.#recoverBlockedPlan(planId);
+        await this.#reconcilePlan(planId);
+      });
+    this.#planReconcileTails.set(planId, current);
+    void current
+      .finally(() => {
+        if (this.#planReconcileTails.get(planId) === current) {
+          this.#planReconcileTails.delete(planId);
+        }
+      })
+      .catch(() => undefined);
+    return current;
+  }
+
+  async reconcilePlans(planId?: string, recoverBlocked = false): Promise<void> {
+    if (planId) {
+      await this.#enqueuePlanReconciliation(planId, recoverBlocked);
+      return;
+    }
+    await Promise.all(
+      this.#repository.active().map((plan) => this.#enqueuePlanReconciliation(plan.planId, false)),
+    );
   }
 }
