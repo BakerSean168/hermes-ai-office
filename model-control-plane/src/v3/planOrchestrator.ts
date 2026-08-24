@@ -13,6 +13,8 @@ import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
+export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW';
+
 interface PlanExecutionPort {
   start(
     input: StartDevelopmentExecutionInput,
@@ -551,7 +553,10 @@ export class DurablePlanOrchestrator {
     }
   }
 
-  async #recoverBlockedPlan(planId: string): Promise<void> {
+  async #recoverBlockedPlan(
+    planId: string,
+    recoveryMode: PlanRecoveryMode = 'AUTO',
+  ): Promise<void> {
     const blocked = this.#repository.get(planId);
     if (blocked?.status !== 'BLOCKED') return;
     const batch = this.#repository
@@ -579,6 +584,58 @@ export class DurablePlanOrchestrator {
       return;
     }
     const retryable = items.filter((item) => item.status === 'BLOCKED');
+
+    if (recoveryMode === 'RETRY_REVIEW') {
+      const targets = retryable.map((item) => {
+        const records = this.#repository
+          .executionIds(item.workItemId)
+          .map((executionId) => this.#links.get(executionId))
+          .filter((record): record is ExecutionLinkRecord => Boolean(record));
+        const implementation = [...records]
+          .reverse()
+          .find(
+            (record) =>
+              ['IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
+              record.statusCache === 'SUCCEEDED' &&
+              Boolean(record.workspaceRef),
+          );
+        return { item, records, implementation };
+      });
+      if (targets.some((target) => !target.implementation)) {
+        throw new Error('PLAN_REVIEW_RECOVERY_IMPLEMENTATION_MISSING');
+      }
+
+      this.#repository.setPlanStatus(planId, 'RUNNING');
+      this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
+      for (const target of targets) {
+        const implementation = target.implementation!;
+        const attempt =
+          target.records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
+        this.#repository.setWorkItemStatus(target.item.workItemId, 'RUNNING');
+        this.#repository.appendEvent(
+          planId,
+          'WORK_ITEM_RECOVERY_REQUESTED',
+          {
+            previousReason: target.item.blockedReason,
+            recoveryMode,
+            phase: 'VERIFY_REVIEW',
+            attempt,
+            implementationExecutionId: implementation.executionId,
+          },
+          { batchId: batch.batchId, workItemId: target.item.workItemId },
+        );
+        await this.#launchPlanPhase(
+          blocked,
+          batch,
+          target.item,
+          'VERIFY_REVIEW',
+          implementation.executionId,
+          attempt,
+        );
+      }
+      return;
+    }
+
     this.#repository.setPlanStatus(planId, 'RUNNING');
     this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
     for (const item of retryable) {
@@ -620,12 +677,16 @@ export class DurablePlanOrchestrator {
     }
   }
 
-  #enqueuePlanReconciliation(planId: string, recoverBlocked: boolean): Promise<void> {
+  #enqueuePlanReconciliation(
+    planId: string,
+    recoverBlocked: boolean,
+    recoveryMode: PlanRecoveryMode = 'AUTO',
+  ): Promise<void> {
     const predecessor = this.#planReconcileTails.get(planId) ?? Promise.resolve();
     const current = predecessor
       .catch(() => undefined)
       .then(async () => {
-        if (recoverBlocked) await this.#recoverBlockedPlan(planId);
+        if (recoverBlocked) await this.#recoverBlockedPlan(planId, recoveryMode);
         await this.#reconcilePlan(planId);
       });
     this.#planReconcileTails.set(planId, current);
@@ -639,9 +700,13 @@ export class DurablePlanOrchestrator {
     return current;
   }
 
-  async reconcilePlans(planId?: string, recoverBlocked = false): Promise<void> {
+  async reconcilePlans(
+    planId?: string,
+    recoverBlocked = false,
+    recoveryMode: PlanRecoveryMode = 'AUTO',
+  ): Promise<void> {
     if (planId) {
-      await this.#enqueuePlanReconciliation(planId, recoverBlocked);
+      await this.#enqueuePlanReconciliation(planId, recoverBlocked, recoveryMode);
       return;
     }
     await Promise.all(

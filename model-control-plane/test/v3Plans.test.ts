@@ -421,7 +421,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
   }
 });
 
-test('review fix limits count finding cycles and explicit recovery launches the blocked fix', async () => {
+test('review fix limits support review-only recovery before an explicitly authorized extra fix', async () => {
   const host = new PlanHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
@@ -487,6 +487,41 @@ test('review fix limits count finding cycles and explicit recovery launches the 
     await runtime.v3.reconcilePlans(planId);
 
     host.succeed((await latest()).refs.openhandsConversationId, 'FAIL\nCycle four.');
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await body()).blockedReason, 'REVIEW_FIX_LIMIT_EXCEEDED');
+    const fixCountBeforeReviewRetry = (await body()).batches[0].workItems[0].executions.filter(
+      (execution: { phase: string }) => execution.phase === 'IMPLEMENT_FIX',
+    ).length;
+
+    const invalidRecovery = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/reconcile`,
+      payload: { mode: 'invented' },
+    });
+    assert.equal(invalidRecovery.statusCode, 400);
+    assert.equal(invalidRecovery.json().error.code, 'PLAN_RECOVERY_MODE_INVALID');
+
+    const reviewRetry = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/reconcile`,
+      payload: { mode: 'retry_review' },
+    });
+    assert.equal(reviewRetry.statusCode, 202);
+    await runtime.v3.reconcilePlans(planId);
+    assert.equal((await body()).status, 'RUNNING');
+    assert.equal((await latest()).phase, 'VERIFY_REVIEW');
+    assert.equal(
+      (await body()).batches[0].workItems[0].executions.filter(
+        (execution: { phase: string }) => execution.phase === 'IMPLEMENT_FIX',
+      ).length,
+      fixCountBeforeReviewRetry,
+    );
+    assert.match(JSON.stringify((await body()).events), /RETRY_REVIEW/);
+
+    host.succeed(
+      (await latest()).refs.openhandsConversationId,
+      'FAIL\nReview-only recovery found a real defect.',
+    );
     await runtime.v3.reconcilePlans(planId);
     assert.equal((await body()).blockedReason, 'REVIEW_FIX_LIMIT_EXCEEDED');
 
