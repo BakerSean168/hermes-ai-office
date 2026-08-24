@@ -358,10 +358,12 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
     if (status === 'FAILED' || status === 'STUCK') {
       try {
         const events = await this.#json(
-          `/api/conversations/${encodeURIComponent(conversationId)}/events/search?limit=1&kind=ConversationErrorEvent&sort_order=TIMESTAMP_DESC`,
+          `/api/conversations/${encodeURIComponent(conversationId)}/events/search?limit=20&sort_order=TIMESTAMP_DESC`,
         );
         const items = Array.isArray(events.items) ? events.items : [];
-        error = executionFailure(items[0]);
+        error = executionFailure(
+          items.find((item) => asRecord(item).kind === 'ConversationErrorEvent'),
+        );
       } catch {
         // Keep the terminal host state even when diagnostic event retrieval is unavailable.
       }
