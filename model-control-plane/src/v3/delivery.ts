@@ -149,7 +149,21 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     }
   }
 
-  async #findPullRequest(input: PlanDeliveryRequest): Promise<PullRequestView | undefined> {
+  async #repository(input: PlanDeliveryRequest): Promise<string> {
+    const remoteUrl = await this.#run(input.repositoryPath, 'git', [
+      'remote',
+      'get-url',
+      input.config.remote,
+    ]);
+    const match = remoteUrl.match(/github\.com(?::|\/)([^/]+\/[^/]+?)(?:\.git)?$/i);
+    if (!match?.[1]) throw new Error('DELIVERY_GITHUB_REMOTE_REQUIRED');
+    return match[1];
+  }
+
+  async #findPullRequest(
+    input: PlanDeliveryRequest,
+    repository: string,
+  ): Promise<PullRequestView | undefined> {
     const fields = 'number,url,state,mergeStateStatus,mergeCommit,statusCheckRollup';
     const output = await this.#run(input.repositoryPath, 'gh', [
       'pr',
@@ -158,6 +172,8 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       'all',
       '--head',
       input.config.branch,
+      '--repo',
+      repository,
       '--limit',
       '1',
       '--json',
@@ -166,8 +182,8 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     return (JSON.parse(output) as PullRequestView[])[0];
   }
 
-  async #pullRequest(input: PlanDeliveryRequest): Promise<PullRequestView> {
-    const pullRequest = await this.#findPullRequest(input);
+  async #pullRequest(input: PlanDeliveryRequest, repository: string): Promise<PullRequestView> {
+    const pullRequest = await this.#findPullRequest(input, repository);
     if (pullRequest) return pullRequest;
     await this.#run(input.repositoryPath, 'gh', [
       'pr',
@@ -176,23 +192,18 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       input.config.branch,
       '--base',
       input.config.targetBranch,
+      '--repo',
+      repository,
       '--title',
       input.objective.slice(0, 240),
       '--body',
       `Durable AI Office plan: ${input.planId}`,
     ]);
-    return this.#pullRequest(input);
+    return this.#pullRequest(input, repository);
   }
 
   async #postMergeChecks(input: PlanDeliveryRequest, revision: string): Promise<CheckSummary> {
-    const repository = await this.#run(input.repositoryPath, 'gh', [
-      'repo',
-      'view',
-      '--json',
-      'nameWithOwner',
-      '--jq',
-      '.nameWithOwner',
-    ]);
+    const repository = await this.#repository(input);
     const checkRunsOutput = await this.#run(input.repositoryPath, 'gh', [
       'api',
       `repos/${repository}/commits/${revision}/check-runs`,
@@ -225,15 +236,16 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
       };
     }
 
+    const repository = await this.#repository(input);
     let pullRequest: PullRequestView | undefined;
-    pullRequest = await this.#findPullRequest(input);
+    pullRequest = await this.#findPullRequest(input, repository);
     if (pullRequest?.state !== 'MERGED') {
       await this.#run(input.repositoryPath, 'git', [
         'push',
         input.config.remote,
         `${input.revision}:refs/heads/${input.config.branch}`,
       ]);
-      pullRequest = await this.#pullRequest(input);
+      pullRequest = await this.#pullRequest(input, repository);
     }
     if (!pullRequest) throw new Error('DELIVERY_PULL_REQUEST_NOT_FOUND');
     if (pullRequest.state === 'CLOSED') {
@@ -270,6 +282,8 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           'pr',
           'merge',
           String(pullRequest.number),
+          '--repo',
+          repository,
           `--${input.config.mergeMethod}`,
           '--delete-branch',
         ]);
@@ -290,7 +304,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           },
         };
       }
-      pullRequest = await this.#pullRequest(input);
+      pullRequest = await this.#pullRequest(input, repository);
     }
 
     const mergeRevision = pullRequest.mergeCommit?.oid;
