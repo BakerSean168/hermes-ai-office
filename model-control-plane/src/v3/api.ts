@@ -155,7 +155,7 @@ export function registerV3Routes(
     return { items: await service.listPlans(Number(query.limit ?? PLAN_LIMITS.listResults)) };
   });
 
-  app.post<{ Params: { planId: string } }>(
+  app.post<{ Params: { planId: string }; Body?: { mode?: string } }>(
     '/api/v3/development/plans/:planId/reconcile',
     async (request, reply) => {
       const plan = await service.getPlan(request.params.planId, false);
@@ -163,8 +163,16 @@ export function registerV3Routes(
         reply.code(404);
         return { error: { code: 'PLAN_NOT_FOUND' } };
       }
+      const requestedMode = String(request.body?.mode ?? 'auto')
+        .trim()
+        .toLowerCase();
+      if (!['auto', 'retry_review'].includes(requestedMode)) {
+        reply.code(400);
+        return { error: { code: 'PLAN_RECOVERY_MODE_INVALID' } };
+      }
+      const recoveryMode = requestedMode === 'retry_review' ? 'RETRY_REVIEW' : 'AUTO';
       void service
-        .reconcilePlans(request.params.planId, true)
+        .reconcilePlans(request.params.planId, true, recoveryMode)
         .catch((error) => request.log.error(error, 'V3 requested plan reconciliation failed'));
       reply.code(202);
       return {

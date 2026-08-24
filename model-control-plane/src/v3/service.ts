@@ -15,7 +15,7 @@ import type {
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
-import { DurablePlanOrchestrator } from './planOrchestrator.js';
+import { DurablePlanOrchestrator, type PlanRecoveryMode } from './planOrchestrator.js';
 import { PlanRepository, type CreatePlanInput } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
@@ -674,8 +674,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#planOrchestrator.cancelPlan(planId);
   }
 
-  reconcilePlans(planId?: string, recoverBlocked = false) {
-    return this.#planOrchestrator.reconcilePlans(planId, recoverBlocked);
+  reconcilePlans(planId?: string, recoverBlocked = false, recoveryMode: PlanRecoveryMode = 'AUTO') {
+    return this.#planOrchestrator.reconcilePlans(planId, recoverBlocked, recoveryMode);
   }
 
   async cancel(executionId: string): Promise<DevelopmentExecutionSnapshot | null> {
