@@ -905,3 +905,134 @@ test('plan cancellation remains durable when an execution host cannot cancel a w
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('delivery repair exhaustion requires an explicit one-at-a-time retry_delivery authorization', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-delivery-retry-'));
+  const host = new PlanHost();
+  const failedQualityGate: PlanDeliveryResult = {
+    outcome: 'NEEDS_FIX',
+    stage: 'CHECKS',
+    reason: 'DELIVERY_CHECKS_FAILED',
+    pullRequestUrl: 'https://github.test/example/repo/pull/99',
+    evidence: { failed: ['Repository quality gate'], pending: [], passed: ['commit-lint'] },
+  };
+  const delivery = new PlanDelivery([
+    failedQualityGate,
+    failedQualityGate,
+    failedQualityGate,
+    failedQualityGate,
+    failedQualityGate,
+  ]);
+  integrationFailuresRemaining = 0;
+  integrationCount = 0;
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3Delivery: delivery,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  const body = async () =>
+    (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+  let planId = '';
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'delivery-retry-plan' },
+      payload: {
+        projectKey: 'example',
+        objective: 'Exercise explicit delivery recovery.',
+        analysisSummary: 'One reviewed batch is delivered through bounded repair attempts.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        delivery: {
+          branch: 'feature/retry-delivery',
+          targetBranch: 'main',
+          autoMerge: true,
+          mergeMethod: 'merge',
+        },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    planId = created.json().planId as string;
+
+    let current = created.json();
+    const implementation = current.batches[0].workItems[0].executions[0];
+    host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+    current = await body();
+    const review = current.batches[0].workItems[0].executions.at(-1);
+    host.succeed(review.refs.openhandsConversationId, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(planId);
+    await runtime.v3.reconcilePlans(planId);
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      current = await body();
+      assert.equal(current.batches[attempt].key, `delivery-fix-${attempt}`);
+      await runtime.v3.reconcilePlans(planId);
+      current = await body();
+      const repairImplementation = current.batches[attempt].workItems[0].executions[0];
+      host.succeed(repairImplementation.refs.openhandsConversationId, `FIXED ${attempt}`);
+      await runtime.v3.reconcilePlans(planId);
+      current = await body();
+      const repairReview = current.batches[attempt].workItems[0].executions.at(-1);
+      host.succeed(repairReview.refs.openhandsConversationId, `PASS\nRepair ${attempt} verified.`);
+      await runtime.v3.reconcilePlans(planId);
+      await runtime.v3.reconcilePlans(planId);
+    }
+
+    current = await body();
+    assert.equal(current.status, 'BLOCKED');
+    assert.equal(current.blockedReason, 'DELIVERY_FIX_LIMIT_EXCEEDED');
+    assert.equal(current.batches.length, 4);
+
+    await runtime.v3.reconcilePlans(planId, true, 'AUTO');
+    current = await body();
+    assert.equal(current.status, 'BLOCKED');
+    assert.equal(
+      current.events.filter(
+        (event: { type: string }) => event.type === 'PLAN_DELIVERY_REPAIR_RETRY_AUTHORIZED',
+      ).length,
+      0,
+    );
+
+    const authorized = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/reconcile`,
+      payload: { mode: 'retry_delivery' },
+    });
+    assert.equal(authorized.statusCode, 202);
+    await runtime.v3.reconcilePlans(planId);
+
+    current = await body();
+    assert.equal(current.status, 'RUNNING');
+    assert.equal(current.batches.length, 5);
+    assert.equal(current.batches[4].key, 'delivery-fix-4');
+    const authorizations = current.events.filter(
+      (event: { type: string }) => event.type === 'PLAN_DELIVERY_REPAIR_RETRY_AUTHORIZED',
+    );
+    assert.equal(authorizations.length, 1);
+    assert.deepEqual(authorizations[0].detail, {
+      previousReason: 'DELIVERY_FIX_LIMIT_EXCEEDED',
+      authorizedAttempt: 4,
+    });
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

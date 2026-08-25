@@ -13,7 +13,7 @@ import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
-export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW';
+export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
 
 interface PlanExecutionPort {
   start(
@@ -565,14 +565,26 @@ export class DurablePlanOrchestrator {
   ): Promise<void> {
     const blocked = this.#repository.get(planId);
     if (blocked?.status !== 'BLOCKED') return;
-    const batch = this.#repository
-      .batches(planId)
-      .find((candidate) => candidate.status === 'BLOCKED');
+    const batches = this.#repository.batches(planId);
+    const batch = batches.find((candidate) => candidate.status === 'BLOCKED');
     if (!batch && blocked.delivery?.autoMerge && blocked.deliveryStage === 'BLOCKED') {
+      const deliveryFixLimitExceeded = blocked.blockedReason === 'DELIVERY_FIX_LIMIT_EXCEEDED';
+      if (deliveryFixLimitExceeded && recoveryMode !== 'RETRY_DELIVERY') return;
+      if (!deliveryFixLimitExceeded && recoveryMode === 'RETRY_DELIVERY') return;
+      if (deliveryFixLimitExceeded) {
+        const repairAttempts = batches.filter((candidate) =>
+          candidate.key.startsWith('delivery-fix-'),
+        ).length;
+        this.#repository.appendEvent(planId, 'PLAN_DELIVERY_REPAIR_RETRY_AUTHORIZED', {
+          previousReason: blocked.blockedReason,
+          authorizedAttempt: repairAttempts + 1,
+        });
+      }
       this.#repository.setPlanStatus(planId, 'RUNNING');
       this.#repository.setDeliveryState(planId, { stage: 'PENDING' });
       this.#repository.appendEvent(planId, 'PLAN_DELIVERY_RECOVERY_REQUESTED', {
         previousReason: blocked.blockedReason,
+        recoveryMode,
       });
       return;
     }

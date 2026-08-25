@@ -546,7 +546,16 @@ export class PlanRepository {
     const batches = this.batches(planId);
     const repairAttempt =
       batches.filter((batch) => batch.key.startsWith('delivery-fix-')).length + 1;
-    if (repairAttempt > PLAN_LIMITS.deliveryRepairAttempts) return null;
+    const authorizedExtraAttempts = Number(
+      (
+        this.#db
+          .prepare(
+            "SELECT COUNT(*) AS count FROM v3_plan_events WHERE plan_id=? AND event_type='PLAN_DELIVERY_REPAIR_RETRY_AUTHORIZED'",
+          )
+          .get(planId) as { count: number }
+      ).count,
+    );
+    if (repairAttempt > PLAN_LIMITS.deliveryRepairAttempts + authorizedExtraAttempts) return null;
     const existing = batches.find((batch) => batch.key === `delivery-fix-${repairAttempt}`);
     if (existing) return existing;
     const predecessor = batches.at(-1);
@@ -554,7 +563,8 @@ export class PlanRepository {
     const now = Date.now();
     const batchId = `batch_${randomUUID()}`;
     const itemId = `work_${randomUUID()}`;
-    const reason = typeof evidence.reason === 'string' ? evidence.reason : 'DELIVERY_REPAIR_REQUIRED';
+    const reason =
+      typeof evidence.reason === 'string' ? evidence.reason : 'DELIVERY_REPAIR_REQUIRED';
     const mergeConflict = reason === 'DELIVERY_MERGE_CONFLICT';
     const batchTitle = mergeConflict
       ? `Resolve delivery merge conflict (attempt ${repairAttempt})`
