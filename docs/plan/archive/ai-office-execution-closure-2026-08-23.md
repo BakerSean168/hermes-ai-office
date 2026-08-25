@@ -1,6 +1,6 @@
 # AI Office Execution Closure
 
-Status: IN PROGRESS  
+Status: COMPLETE  
 Owner: AI Office V3 Control Plane  
 Base revision: `1ceb18f`  
 Project key: `pixel-agents`  
@@ -184,7 +184,7 @@ Acceptance:
 
 ### Batch 6 — Remote delivery and closeout proof
 
-Status: IN PROGRESS  
+Status: COMPLETE  
 Dependencies: Batch 3, Batch 5  
 Complexity: HIGH  
 Risk: HIGH  
@@ -222,5 +222,12 @@ Acceptance:
 - Hermes created production smoke plan `plan_2ad7ccb6-9b1c-473d-836f-66e1676256c2` through `ai_office_create_plan`.
 - Both dependent batches completed IMPLEMENT, independent Codex review, and deterministic integration.
 - Final integrated revision `095209fad47a8554ab834d5658ca38933bc9d89c` passes all five repository tests.
-- Batch 6 remains open until the production BS-PROD-012 delivery records remote
-  checks, merge revision, and active-plan closeout evidence.
+- Production proof plan `plan_5ae46a70-cd67-4914-930e-3d38b9489a1f` completed through the durable control plane.
+- BodySense PR #119 was delivered and merged; the plan recorded integrated revision
+  `398adda9032313cdd6a2c90defa009e066600df3` and merge revision
+  `dfcf52c3a8cfcba44b39775d1b1f9351d4d9db79`.
+- Post-merge checks passed, including Repository quality gate, commit-lint,
+  PostgreSQL 16/18 migration paths, Browser longitudinal health E2E, and release-please.
+- Explicit bounded delivery recovery shipped in AI Office PR #37 and its full CI/E2E
+  matrix passed before merge.
+- Batch 6 and this execution-closure plan are complete.
