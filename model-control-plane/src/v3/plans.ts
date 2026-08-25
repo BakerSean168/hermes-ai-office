@@ -554,6 +554,28 @@ export class PlanRepository {
     const now = Date.now();
     const batchId = `batch_${randomUUID()}`;
     const itemId = `work_${randomUUID()}`;
+    const reason = typeof evidence.reason === 'string' ? evidence.reason : 'DELIVERY_REPAIR_REQUIRED';
+    const mergeConflict = reason === 'DELIVERY_MERGE_CONFLICT';
+    const batchTitle = mergeConflict
+      ? `Resolve delivery merge conflict (attempt ${repairAttempt})`
+      : `Repair remote checks (attempt ${repairAttempt})`;
+    const itemTitle = mergeConflict
+      ? `Resolve delivery merge conflict (attempt ${repairAttempt})`
+      : `Repair failed remote checks (attempt ${repairAttempt})`;
+    const objective = mergeConflict
+      ? `Resolve only the merge conflict preventing this verified delivery. Fetch the current target branch, reconcile it into the repair workspace without discarding previously reviewed plan behavior, resolve conflicts according to repository contracts, and run focused regression checks. Conflict evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`
+      : `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`;
+    const acceptanceCriteria = mergeConflict
+      ? [
+          'The repair commit incorporates the current target branch without unresolved conflicts.',
+          'Previously reviewed plan behavior is preserved and focused regression tests pass.',
+          'The repair is committed and independently reviewed.',
+        ]
+      : [
+          'The previously failing remote checks pass.',
+          'Focused regression tests pass locally.',
+          'The repair is committed and independently reviewed.',
+        ];
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#db
@@ -566,7 +588,7 @@ export class PlanRepository {
           batchId,
           planId,
           `delivery-fix-${repairAttempt}`,
-          `Repair remote checks (attempt ${repairAttempt})`,
+          batchTitle,
           batches.length,
           JSON.stringify([predecessor.key]),
           'PENDING',
@@ -584,13 +606,9 @@ export class PlanRepository {
           planId,
           batchId,
           `delivery-fix-${repairAttempt}`,
-          `Repair failed remote checks (attempt ${repairAttempt})`,
-          `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`,
-          JSON.stringify([
-            'The previously failing remote checks pass.',
-            'Focused regression tests pass locally.',
-            'The repair is committed and independently reviewed.',
-          ]),
+          itemTitle,
+          objective,
+          JSON.stringify(acceptanceCriteria),
           0,
           'PENDING',
           now,
