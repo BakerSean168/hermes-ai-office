@@ -184,11 +184,15 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const trusted = safeDirectory(hostPath);
     const ref = writerBaselineRef(input.executionId);
     try {
-      const existing = await git(hostPath, [...trusted, 'rev-parse', '--verify', ref]);
+      const existing = await git(
+        hostPath,
+        [...trusted, 'rev-parse', '--verify', ref],
+        this.#executionOwner,
+      );
       return { startRevision: existing };
     } catch {
-      const head = await git(hostPath, [...trusted, 'rev-parse', 'HEAD']);
-      await git(hostPath, [...trusted, 'update-ref', ref, head]);
+      const head = await git(hostPath, [...trusted, 'rev-parse', 'HEAD'], this.#executionOwner);
+      await git(hostPath, [...trusted, 'update-ref', ref, head], this.#executionOwner);
       return { startRevision: head };
     }
   }
@@ -202,12 +206,24 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const ref = writerBaselineRef(input.executionId);
     let startRevision: string;
     try {
-      startRevision = await git(hostPath, [...trusted, 'rev-parse', '--verify', ref]);
+      startRevision = await git(
+        hostPath,
+        [...trusted, 'rev-parse', '--verify', ref],
+        this.#executionOwner,
+      );
     } catch {
       throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
     }
-    const headRevision = await git(hostPath, [...trusted, 'rev-parse', 'HEAD']);
-    const dirty = await git(hostPath, [...trusted, 'status', '--porcelain']);
+    const headRevision = await git(
+      hostPath,
+      [...trusted, 'rev-parse', 'HEAD'],
+      this.#executionOwner,
+    );
+    const dirty = await git(
+      hostPath,
+      [...trusted, 'status', '--porcelain'],
+      this.#executionOwner,
+    );
     if (dirty) throw new Error('WRITER_COMPLETION_DIRTY');
     if (headRevision === startRevision) throw new Error('WRITER_COMPLETION_NO_COMMIT');
     return { startRevision, headRevision };
