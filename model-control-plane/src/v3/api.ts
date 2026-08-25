@@ -166,11 +166,16 @@ export function registerV3Routes(
       const requestedMode = String(request.body?.mode ?? 'auto')
         .trim()
         .toLowerCase();
-      if (!['auto', 'retry_review'].includes(requestedMode)) {
+      if (!['auto', 'retry_review', 'retry_delivery'].includes(requestedMode)) {
         reply.code(400);
         return { error: { code: 'PLAN_RECOVERY_MODE_INVALID' } };
       }
-      const recoveryMode = requestedMode === 'retry_review' ? 'RETRY_REVIEW' : 'AUTO';
+      const recoveryMode =
+        requestedMode === 'retry_review'
+          ? 'RETRY_REVIEW'
+          : requestedMode === 'retry_delivery'
+            ? 'RETRY_DELIVERY'
+            : 'AUTO';
       void service
         .reconcilePlans(request.params.planId, true, recoveryMode)
         .catch((error) => request.log.error(error, 'V3 requested plan reconciliation failed'));
