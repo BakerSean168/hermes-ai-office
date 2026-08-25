@@ -480,8 +480,9 @@ export class DurablePlanOrchestrator {
           });
           this.#repository.setPlanStatus(plan.planId, 'BLOCKED', 'DELIVERY_FIX_LIMIT_EXCEEDED');
           this.#repository.appendEvent(plan.planId, 'PLAN_DELIVERY_BLOCKED', {
-            reason: 'DELIVERY_FIX_LIMIT_EXCEEDED',
             ...repairEvidence,
+            repairReason: result.reason,
+            reason: 'DELIVERY_FIX_LIMIT_EXCEEDED',
           });
         } else {
           this.#repository.setDeliveryState(plan.planId, {
