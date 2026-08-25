@@ -182,7 +182,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
 
   #builtInTools(input: ExecutionHostCreateInput): JsonRecord[] {
     const tools = [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }];
-    if (['INVESTIGATE_PLAN', 'VERIFY_REVIEW', 'ORCHESTRATE'].includes(input.phase)) {
+    if (['INVESTIGATE_PLAN', 'ORCHESTRATE'].includes(input.phase)) {
       tools.push({ name: 'task_tool_set' });
     }
     if (input.phase === 'ORCHESTRATE') tools.push({ name: 'ai_office_worker' });
@@ -195,7 +195,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       file_editor: 'openhands.tools.file_editor.definition',
       task_tracker: 'openhands.tools.task_tracker.definition',
     };
-    if (['INVESTIGATE_PLAN', 'VERIFY_REVIEW', 'ORCHESTRATE'].includes(input.phase)) {
+    if (['INVESTIGATE_PLAN', 'ORCHESTRATE'].includes(input.phase)) {
       modules.task_tool_set = 'openhands.tools.task.definition';
     }
     if (input.phase === 'ORCHESTRATE') {

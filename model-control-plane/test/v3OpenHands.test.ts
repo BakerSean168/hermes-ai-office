@@ -187,6 +187,33 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       'hermes_ai_office_tools.worker',
     );
 
+    await host.createExecution({
+      executionId: 'exec_review_builtin_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review directly without nested subagents.',
+      repositoryPath: '/workspace/executions/exec_review_builtin_1/repo',
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_review_builtin_1', phase: 'VERIFY_REVIEW' },
+    });
+    const builtinReviewBody = createBody as any;
+    assert.deepEqual(
+      builtinReviewBody.agent.tools.map((tool: any) => tool.name),
+      ['terminal', 'file_editor', 'task_tracker'],
+    );
+    assert.deepEqual(builtinReviewBody.tool_module_qualnames, {
+      terminal: 'openhands.tools.terminal.definition',
+      file_editor: 'openhands.tools.file_editor.definition',
+      task_tracker: 'openhands.tools.task_tracker.definition',
+    });
+
     const acpCreated = await host.createExecution({
       executionId: 'exec_acp_1',
       projectKey: 'pixel-agents',
