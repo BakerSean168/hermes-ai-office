@@ -1,5 +1,5 @@
 version: 1
-recorded_at: '2026-08-23T01:22:51Z'
+recorded_at: '2026-08-25T10:50:00Z'
 
 representative_workflows:
   required: 10
@@ -18,22 +18,35 @@ representative_workflows:
         - exec_539e4472-6d7d-4dc8-9581-e2d3751d59bf
         - exec_07abcd45-2fa9-4c47-99d5-0dbafdde1c7f
         - exec_28b5972d-094b-4160-958d-13d20f8d8ce0
+    - key: bodysense-bs-prod-012-production-delivery
+      project_key: bodysense
+      description: Real BS-PROD-012 off-host PostgreSQL DR delivery that survived review/fix loops, delivery merge conflict repair, remote CI repair, provider transport failure, pull-request merge, and exact-merge post-merge verification.
+      execution_ids:
+        - exec_e54a8887-d02c-4552-bb18-0497ccf4ae58
+        - exec_cfd301ae-387b-4fb9-82a2-b477eedc8b6d
+        - exec_b63a3d69-a88d-4ca4-adae-4ddbce6a05f0
+        - exec_9a1b515d-e0ee-4c2f-a163-4ca4d4e0d6ed
+        - exec_da5fcaee-9fa3-4c09-a61a-1c0316078f4d
+        - exec_ee822f14-2089-40f7-ac74-05b617c00f1d
 
 observability_execution_ids:
-  - exec_bcc256ad-ca17-441b-bc9e-83821568098c
-  - exec_6016ebe8-5fd0-4194-8f04-47739f7dd374
-  - exec_e450c740-af93-4d34-8d15-1aeb76f59be3
+  - exec_e54a8887-d02c-4552-bb18-0497ccf4ae58
+  - exec_cfd301ae-387b-4fb9-82a2-b477eedc8b6d
+  - exec_ee822f14-2089-40f7-ac74-05b617c00f1d
 
 provider_fallback:
   verified: true
-  kind: litellm_order_fallback
-  logical_model: implementation-efficient
-  policy: free_then_subscription_then_metered
+  kind: review_transport_provider_recovery
+  logical_model: gpt-5.6-sol
+  failed_provider: worldclaw
+  recovered_provider: ark717
+  failed_transport_retries: 4
+  operator_recovery_mode: retry_review
   correlation_preserved: true
 
 gateway_reconnect:
   verified: true
-  execution_id: exec_e450c740-af93-4d34-8d15-1aeb76f59be3
+  execution_id: exec_d5aac17c-f118-4af0-963f-bbbb4d6dd14c
   worker_survived: true
   source_checkout_clean: true
 
@@ -48,6 +61,7 @@ workspace_isolation:
   review_snapshot_read_only: true
   implementation_source_checkout_clean: true
   single_writer_lease_tested: true
+  committed_head_snapshot_fidelity_verified: true
 
 operator_recovery:
   verified: true
@@ -55,13 +69,15 @@ operator_recovery:
   controls:
     - get
     - list
-    - continue_paused
+    - reconcile
+    - retry_review
+    - retry_delivery
     - cancel
 
 fix_loop:
   verified: true
-  implementation_execution_id: exec_663c5cca-3e34-413c-ab51-b50dce726f82
-  blocking_review_execution_id: exec_a483b59c-240c-4d52-baf6-4477062d2d5c
-  fix_execution_id: exec_5c3ccb06-9592-4bf8-a50c-5ef4f64b6c5a
-  final_review_execution_id: exec_38fefa63-fa89-45b9-a8b2-4e50b75b650b
+  implementation_execution_id: exec_e54a8887-d02c-4552-bb18-0497ccf4ae58
+  blocking_review_execution_id: exec_cfd301ae-387b-4fb9-82a2-b477eedc8b6d
+  fix_execution_id: exec_b63a3d69-a88d-4ca4-adae-4ddbce6a05f0
+  final_review_execution_id: exec_9a1b515d-e0ee-4c2f-a163-4ca4d4e0d6ed
   source_checkout_clean: true

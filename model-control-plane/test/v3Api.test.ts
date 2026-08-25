@@ -1496,9 +1496,14 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
     const body = response.json();
     assert.equal(body.status, 'NOT_READY');
     assert.equal(body.ready, false);
-    assert.equal(body.gates.representativeWorkflows.current, 2);
+    assert.equal(body.gates.representativeWorkflows.current, 3);
     assert.equal(body.gates.representativeWorkflows.required, 10);
     assert.equal(body.gates.representativeWorkflows.pass, false);
+    assert.deepEqual(body.gates.corePhaseCoverage.phases, {
+      ORCHESTRATE: false,
+      IMPLEMENT: false,
+      VERIFY_REVIEW: false,
+    });
     assert.equal(body.gates.providerFallback.pass, true);
     assert.equal(body.gates.gatewayReconnect.pass, true);
     assert.equal(body.gates.reviewVerdict.pass, true);

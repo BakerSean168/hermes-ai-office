@@ -191,12 +191,13 @@ export async function buildV3ReadinessReport(
   const statuses = executions.map((item) => item.status);
   const phaseCounts = countBy(phases);
   const statusCounts = countBy(statuses);
-  const requiredCorePhases: DevelopmentPhase[] = [
-    'INVESTIGATE_PLAN',
-    'IMPLEMENT',
-    'VERIFY_REVIEW',
-    'FINALIZE',
-  ];
+  // Durable plans are orchestrated through ORCHESTRATE and integrate/finalize
+  // deterministically inside the control plane. INVESTIGATE_PLAN remains an
+  // optional read-only phase, while FINALIZE is not emitted as a worker
+  // execution by the durable-plan path. Readiness therefore measures the
+  // model-backed core path and leaves repair coverage to the dedicated fix-loop
+  // gate below.
+  const requiredCorePhases: DevelopmentPhase[] = ['ORCHESTRATE', 'IMPLEMENT', 'VERIFY_REVIEW'];
   const phaseCoverage = Object.fromEntries(
     requiredCorePhases.map((phase) => [phase, (phaseCounts[phase] ?? 0) > 0]),
   );
