@@ -626,10 +626,16 @@ test('a delivery-authorized plan is not complete until remote and post-merge che
   const delivery = new PlanDelivery([
     {
       outcome: 'NEEDS_FIX',
-      stage: 'CHECKS',
-      reason: 'DELIVERY_CHECKS_FAILED',
+      stage: 'MERGE',
+      reason: 'DELIVERY_MERGE_CONFLICT',
       pullRequestUrl: 'https://github.test/example/repo/pull/42',
-      evidence: { failed: ['ci'] },
+      evidence: {
+        mergeStateStatus: 'DIRTY',
+        mergeable: 'CONFLICTING',
+        branch: 'feature/ship',
+        targetBranch: 'main',
+        expectedRevision: 'integrated-1',
+      },
     },
     {
       outcome: 'WAITING',
@@ -731,6 +737,19 @@ test('a delivery-authorized plan is not complete until remote and post-merge che
     assert.equal(body.status, 'RUNNING');
     assert.equal(body.batches[1].key, 'delivery-fix-1');
     assert.equal(body.batches[1].status, 'PENDING');
+    assert.match(body.batches[1].title, /merge conflict/i);
+    assert.match(body.batches[1].workItems[0].title, /merge conflict/i);
+    assert.match(body.batches[1].workItems[0].objective, /target branch/i);
+    assert.match(body.batches[1].workItems[0].objective, /DELIVERY_MERGE_CONFLICT/);
+    assert.deepEqual(body.deliveryEvidence, {
+      reason: 'DELIVERY_MERGE_CONFLICT',
+      stage: 'MERGE',
+      mergeStateStatus: 'DIRTY',
+      mergeable: 'CONFLICTING',
+      branch: 'feature/ship',
+      targetBranch: 'main',
+      expectedRevision: 'integrated-1',
+    });
 
     await runtime.v3.reconcilePlans(planId);
     body = (

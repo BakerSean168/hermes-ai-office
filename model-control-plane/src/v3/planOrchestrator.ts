@@ -466,27 +466,32 @@ export class DurablePlanOrchestrator {
         mergeRevision: result.outcome === 'SUCCEEDED' ? result.mergeRevision : undefined,
       });
       if (result.outcome === 'NEEDS_FIX') {
-        const repair = this.#repository.addDeliveryRepairBatch(plan.planId, result.evidence);
+        const repairEvidence = {
+          reason: result.reason,
+          stage: result.stage,
+          ...result.evidence,
+        };
+        const repair = this.#repository.addDeliveryRepairBatch(plan.planId, repairEvidence);
         if (!repair) {
           this.#repository.setDeliveryState(plan.planId, {
             stage: 'BLOCKED',
-            evidence: result.evidence,
+            evidence: repairEvidence,
             pullRequestUrl: result.pullRequestUrl,
           });
           this.#repository.setPlanStatus(plan.planId, 'BLOCKED', 'DELIVERY_FIX_LIMIT_EXCEEDED');
           this.#repository.appendEvent(plan.planId, 'PLAN_DELIVERY_BLOCKED', {
             reason: 'DELIVERY_FIX_LIMIT_EXCEEDED',
-            ...result.evidence,
+            ...repairEvidence,
           });
         } else {
           this.#repository.setDeliveryState(plan.planId, {
             stage: 'PENDING',
-            evidence: result.evidence,
+            evidence: repairEvidence,
             pullRequestUrl: result.pullRequestUrl,
           });
           this.#repository.appendEvent(plan.planId, 'PLAN_DELIVERY_REPAIR_SCHEDULED', {
             batchId: repair.batchId,
-            ...result.evidence,
+            ...repairEvidence,
           });
         }
       } else if (result.outcome === 'BLOCKED') {

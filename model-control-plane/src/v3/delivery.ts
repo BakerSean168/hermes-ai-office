@@ -33,8 +33,8 @@ export interface PlanDeliveryRequest {
 export type PlanDeliveryResult =
   | {
       outcome: 'NEEDS_FIX';
-      stage: 'CHECKS';
-      reason: 'DELIVERY_CHECKS_FAILED';
+      stage: 'CHECKS' | 'MERGE';
+      reason: 'DELIVERY_CHECKS_FAILED' | 'DELIVERY_MERGE_CONFLICT';
       pullRequestUrl: string;
       evidence: Record<string, unknown>;
     }
@@ -68,6 +68,7 @@ interface PullRequestView {
   url: string;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   mergeStateStatus?: string;
+  mergeable?: string;
   headRefOid?: string;
   baseRefName?: string;
   mergeCommit?: { oid?: string } | null;
@@ -182,7 +183,7 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     repository: string,
   ): Promise<PullRequestView | undefined> {
     const fields =
-      'number,url,state,mergeStateStatus,mergeCommit,statusCheckRollup,headRefOid,baseRefName';
+      'number,url,state,mergeStateStatus,mergeable,mergeCommit,statusCheckRollup,headRefOid,baseRefName';
     const output = await this.#run(input.repositoryPath, 'gh', [
       'pr',
       'list',
@@ -297,6 +298,25 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
           evidence: {
             expectedRevision: input.revision,
             observedRevision: pullRequest.headRefOid,
+          },
+        };
+      }
+      const mergeStateStatus = pullRequest.mergeStateStatus?.toUpperCase();
+      const mergeable = pullRequest.mergeable?.toUpperCase();
+      if (mergeStateStatus === 'DIRTY' || mergeable === 'CONFLICTING') {
+        return {
+          outcome: 'NEEDS_FIX',
+          stage: 'MERGE',
+          reason: 'DELIVERY_MERGE_CONFLICT',
+          pullRequestUrl: pullRequest.url,
+          evidence: {
+            reason: 'DELIVERY_MERGE_CONFLICT',
+            mergeStateStatus: pullRequest.mergeStateStatus,
+            mergeable: pullRequest.mergeable,
+            branch: input.config.branch,
+            targetBranch: input.config.targetBranch,
+            expectedRevision: input.revision,
+            pullRequestNumber: pullRequest.number,
           },
         };
       }
