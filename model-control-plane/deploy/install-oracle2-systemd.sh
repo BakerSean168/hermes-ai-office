@@ -7,6 +7,8 @@ dropin_src="$repo_root/model-control-plane/deploy/hermes-model-control-plane.ser
 unit_dst="/etc/systemd/system/hermes-model-control-plane.service"
 dropin_dir="/etc/systemd/system/hermes-model-control-plane.service.d"
 runtime_env="/srv/hermes-personal/secrets/model-control-plane-v3.env"
+providerctl_src="$repo_root/model-control-plane/deploy/litellm/providerctl.py"
+providerctl_dst="/usr/local/sbin/hermes-litellm-providerctl"
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
   echo "run as root: sudo $0" >&2
@@ -16,6 +18,7 @@ fi
 install -m 0644 "$unit_src" "$unit_dst"
 install -d -m 0755 "$dropin_dir"
 install -m 0644 "$dropin_src" "$dropin_dir/v3-production.conf"
+install -m 0755 "$providerctl_src" "$providerctl_dst"
 # v3-shadow.conf was the pre-cutover host-only drop-in. The repository-owned
 # production drop-in supersedes it so reinstall/upgrade behavior is deterministic.
 rm -f "$dropin_dir/v3-shadow.conf"
