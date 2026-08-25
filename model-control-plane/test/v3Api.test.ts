@@ -61,6 +61,12 @@ const workspace: WorkspaceProvisioningPort = {
   hostPathForWorkspaceRef(workspaceRef) {
     return `/host${workspaceRef}`;
   },
+  async prepareWriterExecution() {
+    return { startRevision: 'writer-start' };
+  },
+  async verifyWriterCompletion() {
+    return { startRevision: 'writer-start', headRevision: 'writer-head' };
+  },
   async provision(input) {
     return {
       hostPath: `/tmp/${input.executionId}`,
@@ -150,6 +156,58 @@ test('V3 API provides an idempotent production execution facade', async () => {
 
     const legacyHealth = await runtime.app.inject({ method: 'GET', url: '/api/v2/health' });
     assert.equal(legacyHealth.statusCode, 404);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('V3 writer completion fails closed when the agent returns success without a new commit', async () => {
+  const host = new FakeHost();
+  const noCommitWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyWriterCompletion() {
+      throw new Error('WRITER_COMPLETION_NO_COMMIT');
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: noCommitWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': false,
+    },
+  });
+
+  try {
+    const started = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'writer-no-commit' },
+      payload: {
+        phase: 'IMPLEMENT',
+        objective: 'Implement a real committed change.',
+        projectKey: 'writer-gate-project',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+    assert.equal(started.statusCode, 201);
+    const executionId = started.json().executionId as string;
+
+    host.finalText = 'Planned the change but did not edit or commit it.';
+    host.status = 'SUCCEEDED';
+    const observed = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(observed.statusCode, 200);
+    const body = observed.json();
+    assert.equal(body.status, 'FAILED');
+    assert.equal(body.error.code, 'WRITER_COMPLETION_NO_COMMIT');
+    assert.equal(body.error.retryable, false);
+    assert.match(body.result.finalText, /did not edit or commit/);
   } finally {
     await runtime.app.close();
   }

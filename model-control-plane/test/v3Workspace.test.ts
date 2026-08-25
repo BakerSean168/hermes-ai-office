@@ -197,3 +197,76 @@ test('batch integration creates a durable repository ref without changing the so
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('writer completion requires a clean commit that advances the durable execution baseline', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-writer-completion-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'writer-implementation',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const prepared = await provisioner.prepareWriterExecution({
+      executionId: 'writer-execution-1',
+      workspaceRef: implementation.executionPath,
+    });
+    assert.equal(prepared.startRevision, base);
+
+    await assert.rejects(
+      provisioner.verifyWriterCompletion({
+        executionId: 'writer-execution-1',
+        workspaceRef: implementation.executionPath,
+      }),
+      /WRITER_COMPLETION_NO_COMMIT/,
+    );
+
+    fs.writeFileSync(path.join(implementation.hostPath, 'tracked.txt'), 'dirty\n');
+    await assert.rejects(
+      provisioner.verifyWriterCompletion({
+        executionId: 'writer-execution-1',
+        workspaceRef: implementation.executionPath,
+      }),
+      /WRITER_COMPLETION_DIRTY/,
+    );
+
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    git(implementation.hostPath, 'add', 'tracked.txt');
+    git(implementation.hostPath, 'commit', '-m', 'advance writer');
+    const head = git(implementation.hostPath, 'rev-parse', 'HEAD');
+    assert.notEqual(head, base);
+
+    const verified = await provisioner.verifyWriterCompletion({
+      executionId: 'writer-execution-1',
+      workspaceRef: implementation.executionPath,
+    });
+    assert.deepEqual(verified, { startRevision: base, headRevision: head });
+
+    // Re-preparing the same durable execution must never move the baseline forward.
+    const preparedAgain = await provisioner.prepareWriterExecution({
+      executionId: 'writer-execution-1',
+      workspaceRef: implementation.executionPath,
+    });
+    assert.equal(preparedAgain.startRevision, base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
