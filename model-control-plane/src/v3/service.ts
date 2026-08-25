@@ -74,6 +74,7 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Preserve already-correct implementation work.',
       'Run focused regression checks before finishing.',
       'Before finishing, commit all intended fixes to Git with a meaningful commit message and leave the workspace clean; deterministic batch integration rejects uncommitted changes.',
+      'A planning-only or no-op result is not a successful fix: this writer execution must advance Git HEAD with a new commit before review can begin.',
     ],
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
@@ -512,6 +513,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
 
     if (!record.openhandsConversationId) {
       try {
+        if (WRITER_PHASES.has(record.phase)) {
+          if (!record.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
+          await this.#workspace.prepareWriterExecution({
+            executionId: record.executionId,
+            workspaceRef: record.workspaceRef,
+          });
+        }
         const created = await this.#host.createExecution({
           executionId: record.executionId,
           projectKey: record.projectKey,
@@ -577,11 +585,32 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     const preserveCancelled = record.statusCache === 'CANCELLED';
     if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveCancelled) {
       const observedAt = hostSnapshot.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
-      record = this.#links.updateStatus(
-        record.executionId,
-        hostSnapshot.status,
-        Number.isFinite(observedAt) ? observedAt : undefined,
-      );
+      const observedAtMs = Number.isFinite(observedAt) ? observedAt : undefined;
+      if (
+        hostSnapshot.status === 'SUCCEEDED' &&
+        WRITER_PHASES.has(record.phase) &&
+        !TERMINAL.has(record.statusCache)
+      ) {
+        try {
+          if (!record.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
+          await this.#workspace.verifyWriterCompletion({
+            executionId: record.executionId,
+            workspaceRef: record.workspaceRef,
+          });
+          record = this.#links.updateStatus(record.executionId, 'SUCCEEDED', observedAtMs);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          const code = detail.split(':', 1)[0] || 'WRITER_COMPLETION_INVALID';
+          record = this.#links.updateStatus(record.executionId, 'FAILED', observedAtMs);
+          record = this.#links.attachFailure(record.executionId, {
+            code,
+            detail: detail.slice(0, 2_000),
+            retryable: false,
+          });
+        }
+      } else {
+        record = this.#links.updateStatus(record.executionId, hostSnapshot.status, observedAtMs);
+      }
     }
     const effectiveStatus = TERMINAL.has(record.statusCache)
       ? record.statusCache

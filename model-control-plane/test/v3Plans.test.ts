@@ -149,6 +149,12 @@ const workspace: WorkspaceProvisioningPort = {
   hostPathForWorkspaceRef(workspaceRef) {
     return `/host${workspaceRef}`;
   },
+  async prepareWriterExecution() {
+    return { startRevision: 'writer-start' };
+  },
+  async verifyWriterCompletion() {
+    return { startRevision: 'writer-start', headRevision: 'writer-head' };
+  },
   async provision(input) {
     return {
       hostPath: `/tmp/${input.executionId}`,
@@ -170,6 +176,75 @@ const workspace: WorkspaceProvisioningPort = {
     };
   },
 };
+
+test('durable plans retry a writer instead of reviewing a no-commit success', async () => {
+  const host = new PlanHost();
+  const noCommitWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyWriterCompletion() {
+      throw new Error('WRITER_COMPLETION_NO_COMMIT');
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: noCommitWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'writer-no-commit-plan' },
+      payload: {
+        projectKey: 'writer-gate-plan',
+        objective: 'Require a real implementation commit before review.',
+        analysisSummary: 'One work item characterizes writer completion.',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement a real change.' }],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstWriter = body.batches[0].workItems[0].executions[0];
+    assert.equal(firstWriter.phase, 'IMPLEMENT');
+
+    host.succeed(firstWriter.refs.openhandsConversationId, 'Planned only; no commit produced.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const executions = body.batches[0].workItems[0].executions;
+    assert.equal(executions.length, 2);
+    assert.equal(executions[0].status, 'FAILED');
+    assert.equal(executions[0].error.code, 'WRITER_COMPLETION_NO_COMMIT');
+    assert.equal(executions[1].phase, 'IMPLEMENT');
+    assert.equal(
+      executions.some((execution: { phase: string }) => execution.phase === 'VERIFY_REVIEW'),
+      false,
+    );
+    assert.equal(host.creates, 2);
+  } finally {
+    await runtime.app.close();
+  }
+});
 
 class PlanDelivery implements PlanDeliveryPort {
   readonly results: PlanDeliveryResult[];

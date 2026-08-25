@@ -23,9 +23,22 @@ export interface ProvisionedWorkspace {
   sourceRevision: string;
 }
 
+export interface WriterCompletionEvidence {
+  startRevision: string;
+  headRevision: string;
+}
+
 export interface WorkspaceProvisioningPort {
   hostPathForExecution(executionId: string): string;
   hostPathForWorkspaceRef(workspaceRef: string): string;
+  prepareWriterExecution(input: {
+    executionId: string;
+    workspaceRef: string;
+  }): Promise<{ startRevision: string }>;
+  verifyWriterCompletion(input: {
+    executionId: string;
+    workspaceRef: string;
+  }): Promise<WriterCompletionEvidence>;
   provision(input: {
     executionId: string;
     repositoryPath: string;
@@ -50,6 +63,11 @@ interface UnixIdentity {
 function inside(child: string, parent: string): boolean {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function writerBaselineRef(executionId: string): string {
+  const safe = executionId.replace(/[^a-zA-Z0-9._-]/g, '_');
+  return `refs/ai-office/writers/${safe}/start`;
 }
 
 function safeDirectory(directory: string): string[] {
@@ -156,6 +174,43 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const hostPath = path.resolve(this.#hostRoot, ...relative.split('/'));
     if (!inside(hostPath, this.#hostRoot)) throw new Error('V3_WORKSPACE_REF_NOT_ALLOWED');
     return hostPath;
+  }
+
+  async prepareWriterExecution(input: {
+    executionId: string;
+    workspaceRef: string;
+  }): Promise<{ startRevision: string }> {
+    const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
+    const trusted = safeDirectory(hostPath);
+    const ref = writerBaselineRef(input.executionId);
+    try {
+      const existing = await git(hostPath, [...trusted, 'rev-parse', '--verify', ref]);
+      return { startRevision: existing };
+    } catch {
+      const head = await git(hostPath, [...trusted, 'rev-parse', 'HEAD']);
+      await git(hostPath, [...trusted, 'update-ref', ref, head]);
+      return { startRevision: head };
+    }
+  }
+
+  async verifyWriterCompletion(input: {
+    executionId: string;
+    workspaceRef: string;
+  }): Promise<WriterCompletionEvidence> {
+    const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
+    const trusted = safeDirectory(hostPath);
+    const ref = writerBaselineRef(input.executionId);
+    let startRevision: string;
+    try {
+      startRevision = await git(hostPath, [...trusted, 'rev-parse', '--verify', ref]);
+    } catch {
+      throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
+    }
+    const headRevision = await git(hostPath, [...trusted, 'rev-parse', 'HEAD']);
+    const dirty = await git(hostPath, [...trusted, 'status', '--porcelain']);
+    if (dirty) throw new Error('WRITER_COMPLETION_DIRTY');
+    if (headRevision === startRevision) throw new Error('WRITER_COMPLETION_NO_COMMIT');
+    return { startRevision, headRevision };
   }
 
   async provision(input: {
