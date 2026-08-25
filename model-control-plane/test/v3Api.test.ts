@@ -218,6 +218,7 @@ test('V3 review prompt preserves read-only evidence and directs write-requiring 
       /Do not fail because the delivery branch, pull request, remote checks, merge, or post-merge verification is not present yet/,
     );
     assert.match(lastObjective, /at least one focused verification command/);
+    assert.match(lastObjective, /do not delegate VERIFY_REVIEW to nested task subagents/);
     assert.match(lastObjective, /short separate terminal tool invocations/);
   } finally {
     await runtime.app.close();

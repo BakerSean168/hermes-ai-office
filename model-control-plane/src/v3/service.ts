@@ -77,6 +77,7 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
     ],
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
+      'Perform review directly in this execution; do not delegate VERIFY_REVIEW to nested task subagents.',
       'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
       'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
