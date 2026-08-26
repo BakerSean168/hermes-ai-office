@@ -327,6 +327,78 @@ export function ensurePlanSchema(db: DatabaseSync): void {
   }
 }
 
+function validGitHubRepository(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value.trim());
+}
+
+function validGitRef(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const ref = value.trim();
+  return Boolean(
+    ref &&
+      /^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(ref) &&
+      !ref.includes('..') &&
+      !ref.includes('@{') &&
+      !ref.endsWith('/') &&
+      !ref.endsWith('.'),
+  );
+}
+
+function validGitHubPullRequestUrl(value: unknown, repository: string, number: number): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const url = new URL(value.trim());
+    const path = url.pathname.replace(/\/$/, '');
+    return (
+      url.protocol === 'https:' &&
+      url.hostname.toLowerCase() === 'github.com' &&
+      path === `/${repository}/pull/${number}` &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateGitHubOrigin(input: CreatePlanInput): void {
+  if (input.source?.kind !== 'EXTERNAL_CHANGE' || input.source.origin == null) return;
+  const origin = input.source.origin as unknown as Record<string, unknown>;
+  if (!origin || typeof origin !== 'object' || Array.isArray(origin)) {
+    throw new Error('PLAN_SOURCE_ORIGIN_INVALID');
+  }
+  if (origin.kind !== 'GITHUB_PULL_REQUEST') throw new Error('PLAN_SOURCE_ORIGIN_INVALID');
+  if (!validGitHubRepository(origin.repository)) {
+    throw new Error('GITHUB_PR_SOURCE_REPOSITORY_INVALID');
+  }
+  if (!Number.isInteger(origin.pullRequestNumber) || Number(origin.pullRequestNumber) < 1) {
+    throw new Error('GITHUB_PR_SOURCE_NUMBER_INVALID');
+  }
+  const pullRequestNumber = Number(origin.pullRequestNumber);
+  const repository = String(origin.repository).trim();
+  if (!validGitHubPullRequestUrl(origin.pullRequestUrl, repository, pullRequestNumber)) {
+    throw new Error('GITHUB_PR_SOURCE_URL_INVALID');
+  }
+  if (typeof origin.title !== 'string' || !origin.title.trim()) {
+    throw new Error('GITHUB_PR_SOURCE_TITLE_REQUIRED');
+  }
+  if (origin.author != null && (typeof origin.author !== 'string' || !origin.author.trim())) {
+    throw new Error('GITHUB_PR_SOURCE_AUTHOR_INVALID');
+  }
+  if (!validGitRef(origin.headRef)) throw new Error('GITHUB_PR_SOURCE_HEAD_REF_INVALID');
+  if (!validGitRef(origin.baseRef)) throw new Error('GITHUB_PR_SOURCE_BASE_REF_INVALID');
+  if (!validGitHubRepository(origin.headRepository)) {
+    throw new Error('GITHUB_PR_SOURCE_HEAD_REPOSITORY_INVALID');
+  }
+  if (origin.producer != null && !['JULES', 'UNKNOWN'].includes(String(origin.producer))) {
+    throw new Error('GITHUB_PR_SOURCE_PRODUCER_INVALID');
+  }
+  const baseRevision = input.repository.baseRevision?.trim() ?? '';
+  if (!/^[0-9a-f]{40}$/i.test(baseRevision)) {
+    throw new Error('GITHUB_PR_BASE_REVISION_INVALID');
+  }
+}
+
 function validateGraph(input: CreatePlanInput): void {
   if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
   if (!input.objective.trim()) throw new Error('OBJECTIVE_REQUIRED');
@@ -335,7 +407,10 @@ function validateGraph(input: CreatePlanInput): void {
   if (input.source && !['TASK', 'EXTERNAL_CHANGE'].includes(input.source.kind)) {
     throw new Error('PLAN_SOURCE_KIND_INVALID');
   }
-  if (input.source?.kind === 'EXTERNAL_CHANGE' && !input.source.revision.trim()) {
+  if (
+    input.source?.kind === 'EXTERNAL_CHANGE' &&
+    (typeof input.source.revision !== 'string' || !input.source.revision.trim())
+  ) {
     throw new Error('EXTERNAL_CHANGE_REVISION_REQUIRED');
   }
   if (
@@ -345,6 +420,7 @@ function validateGraph(input: CreatePlanInput): void {
   ) {
     throw new Error('GITHUB_PR_SOURCE_REVISION_INVALID');
   }
+  validateGitHubOrigin(input);
   if (input.delivery) {
     if (!input.delivery.branch.trim()) throw new Error('DELIVERY_BRANCH_REQUIRED');
     if (input.delivery.autoMerge !== true)

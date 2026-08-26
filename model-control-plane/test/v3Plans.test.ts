@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
@@ -1216,6 +1217,74 @@ test('GitHub-origin external plans require an immutable 40-hex head revision', a
   }
 });
 
+test('GitHub-origin external plans validate every durable PR identity field', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'codex-review-headless': true },
+  });
+  const baseSource = {
+    kind: 'EXTERNAL_CHANGE',
+    revision: '1111111111111111111111111111111111111111',
+    origin: {
+      kind: 'GITHUB_PULL_REQUEST',
+      repository: 'example/project',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://github.com/example/project/pull/42',
+      title: 'External proposal',
+      author: 'jules',
+      headRef: 'jules/fix-42',
+      baseRef: 'main',
+      headRepository: 'example/project',
+      producer: 'JULES',
+    },
+  } as const;
+  const create = (source: unknown, key: string, baseRevision = '2222222222222222222222222222222222222222') =>
+    runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Validate durable GitHub identity.',
+        analysisSummary: 'Malformed GitHub provenance must fail before plan persistence.',
+        repository: { path: '/tmp/repository', baseRevision },
+        source: source as never,
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+          },
+        ],
+      },
+      key,
+    );
+  try {
+    const cases: Array<[string, (source: any) => void, RegExp]> = [
+      ['repository', (source) => (source.origin.repository = ''), /GITHUB_PR_SOURCE_REPOSITORY_INVALID/],
+      ['number', (source) => (source.origin.pullRequestNumber = 0), /GITHUB_PR_SOURCE_NUMBER_INVALID/],
+      ['url', (source) => (source.origin.pullRequestUrl = 'https://example.test/pull/42'), /GITHUB_PR_SOURCE_URL_INVALID/],
+      ['title', (source) => (source.origin.title = ''), /GITHUB_PR_SOURCE_TITLE_REQUIRED/],
+      ['head-ref', (source) => (source.origin.headRef = '../escape'), /GITHUB_PR_SOURCE_HEAD_REF_INVALID/],
+      ['base-ref', (source) => (source.origin.baseRef = ''), /GITHUB_PR_SOURCE_BASE_REF_INVALID/],
+      ['head-repository', (source) => (source.origin.headRepository = 'not-a-repo'), /GITHUB_PR_SOURCE_HEAD_REPOSITORY_INVALID/],
+      ['producer', (source) => (source.origin.producer = 'OTHER'), /GITHUB_PR_SOURCE_PRODUCER_INVALID/],
+    ];
+    for (const [name, mutate, expected] of cases) {
+      const source = structuredClone(baseSource) as any;
+      mutate(source);
+      await assert.rejects(() => create(source, `github-origin-invalid-${name}`), expected);
+    }
+    await assert.rejects(
+      () => create(structuredClone(baseSource), 'github-origin-invalid-base', 'main'),
+      /GITHUB_PR_BASE_REVISION_INVALID/,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('external change plans adopt the existing revision, review first, and repair only after a blocking review', async () => {
   const host = new PlanHost();
   integrationCount = 0;
@@ -1609,6 +1678,100 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
     );
   } finally {
     await runtime.app.close();
+  }
+});
+
+test('repair publication keeps the force-with-lease anchored to the intake head after a crash residue is persisted', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-pr-publication-crash-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const ORIGINAL = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const REPAIRED = '3333333333333333333333333333333333333333';
+  const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3PullRequestRepairPublisher: {
+      async publish(input) {
+        publications.push(input);
+        return {
+          previousRevision: input.expectedHeadRevision,
+          publishedRevision: REPAIRED,
+          auditRef: `refs/ai-office/external/github/pr-42/repairs/${input.planId}/${REPAIRED}`,
+        };
+      },
+    },
+    v3GovernanceStatus: {
+      async publish(input) {
+        return { revision: input.expectedHeadRevision, state: 'pending', stale: false, published: true };
+      },
+    },
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Recover repair publication after a crash window.',
+        analysisSummary: 'The durable repair SHA may outlive the work-item state transition.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: ORIGINAL,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review and repair.' }],
+          },
+        ],
+      },
+      'github-repair-crash-window',
+    );
+
+    // Simulate the durable state left by a process crash after publication succeeded
+    // and externalHeadRevision was persisted, but before the work item was marked verified.
+    const db = new DatabaseSync(dbFile);
+    db.prepare('UPDATE v3_plans SET external_head_revision=? WHERE plan_id=?').run(REPAIRED, plan.planId);
+    db.close();
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'FAIL\nRepair required.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const fix = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(fix.refs.openhandsConversationId!, 'FIXED');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(secondReview.refs.openhandsConversationId!, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    assert.equal(publications.length, 1);
+    assert.equal(publications[0]!.expectedHeadRevision, ORIGINAL);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

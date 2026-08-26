@@ -434,7 +434,10 @@ export class DurablePlanOrchestrator {
           pullRequestNumber: plan.source.origin.pullRequestNumber,
           headRepository: plan.source.origin.headRepository,
           headRef: plan.source.origin.headRef,
-          expectedHeadRevision: plan.externalHeadRevision ?? plan.source.revision,
+          // The force-with-lease baseline is the immutable PR head accepted at intake.
+          // externalHeadRevision records what Hermes has published, but must never move the lease
+          // baseline forward; keeping the original revision makes post-push crash replay idempotent.
+          expectedHeadRevision: plan.source.revision,
         });
         this.#repository.setExternalHeadRevision(plan.planId, publication.publishedRevision);
         this.#repository.appendEvent(
