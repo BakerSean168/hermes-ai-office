@@ -503,6 +503,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       reservation = reserve();
     }
     let record = reservation.record;
+    const persistedSelection = selectionFromRecord(record);
+    if (effectiveInput.context?.changeOrigin === 'EXTERNAL') {
+      this.#assertExternalBackendAllowed(persistedSelection.backend);
+    }
 
     if (input.phase === 'FINALIZE') {
       if (record.statusCache !== 'SUCCEEDED' || !record.resultText) {
@@ -590,7 +594,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           phase: record.phase,
           objective: phasePrompt(effectiveInput),
           repositoryPath: record.workspaceRef!,
-          selection: selectionFromRecord(record),
+          selection: persistedSelection,
           correlationMetadata: {
             execution_id: record.executionId,
             project_key: record.projectKey,

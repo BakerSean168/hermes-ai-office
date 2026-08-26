@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
+import { openDb } from '../src/db.mjs';
+import { ExecutionLinkRepository } from '../src/v3/correlation.js';
 import type {
   ExecutionHostPort,
   ExecutionHostSnapshot,
@@ -90,6 +95,62 @@ const gateway: ModelGatewayPort = {
     };
   },
 };
+
+test('external replay revalidates the persisted backend selection from pre-gate crash residue', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'external-backend-residue-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const db = openDb(dbFile);
+  const links = new ExecutionLinkRepository(db);
+  links.reserve({
+    idempotencyKey: 'legacy-external-antigravity-review',
+    projectKey: 'digital-biome',
+    phase: 'VERIFY_REVIEW',
+    objectiveSummary: 'Legacy external review reservation.',
+    selection: {
+      backend: 'antigravity-review',
+      modelClass: 'gemini-3.1-pro-high',
+      transportMode: 'PROVIDER_NATIVE',
+      workspaceMode: 'review_snapshot',
+      sessionPolicy: 'fresh_required',
+      reasons: ['legacy:before-untrusted-external-gate'],
+    },
+  });
+  db.close();
+
+  const host = new FakeHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'codex-review-headless': true,
+      'openhands-builtin': true,
+      'antigravity-review': true,
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runtime.v3.start(
+          {
+            phase: 'VERIFY_REVIEW',
+            objective: 'Replay an external review after upgrade.',
+            projectKey: 'digital-biome',
+            repository: { path: '' },
+            context: { changeOrigin: 'EXTERNAL' },
+            await: false,
+          },
+          'legacy-external-antigravity-review',
+        ),
+      /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+    );
+    assert.equal(host.creates, 0);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('V3 API provides an idempotent production execution facade', async () => {
   const host = new FakeHost();
