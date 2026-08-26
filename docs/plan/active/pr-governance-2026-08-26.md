@@ -91,7 +91,7 @@ Status: COMPLETE
 
 - Resolve PR identity through GitHub.
 - Fetch `refs/pull/<n>/head` and current base branch into dedicated AI Office refs.
-- Verify PR head again after fetch and verify current remote base with `ls-remote`.
+- Verify PR head SHA, head ref, and head repository again after fetch, and verify the fetched current base branch against `ls-remote`.
 - Reject races with `GITHUB_PR_CHANGED_DURING_INTAKE`.
 - Use `repo + PR number + head SHA` as the natural durable idempotency key.
 - Keep PR prose out of the reviewer objective.

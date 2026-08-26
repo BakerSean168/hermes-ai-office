@@ -88,6 +88,36 @@ test('GitHub PR intake fails closed when the fetched refs no longer match the AP
   );
 });
 
+test('GitHub PR intake fails closed when the PR head ref changes without changing its SHA', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-pr-head-ref-race-'));
+  let apiCalls = 0;
+  const runner: GitHubIntakeCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'gh api repos/example/project/pulls/42') {
+      apiCalls += 1;
+      if (apiCalls === 1) return apiResponse();
+      const changed = JSON.parse(apiResponse());
+      changed.head.ref = 'jules/renamed-fix-42';
+      return JSON.stringify(changed);
+    }
+    if (key.startsWith('git fetch --no-tags origin ')) return '';
+    if (key.endsWith('/head')) return HEAD;
+    if (key.endsWith('/base')) return BASE;
+    if (key === 'git ls-remote origin refs/heads/main') return `${BASE}\trefs/heads/main`;
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestIntake({ commandRunner: runner }).resolve({
+        repositoryPath,
+        pullRequestNumber: 42,
+      }),
+    /GITHUB_PR_CHANGED_DURING_INTAKE/,
+  );
+});
+
 test('GitHub PR intake rejects closed pull requests before fetching repository refs', async () => {
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-pr-closed-'));
   let fetched = false;

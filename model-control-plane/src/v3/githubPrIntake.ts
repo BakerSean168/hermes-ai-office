@@ -200,6 +200,7 @@ export class GitHubPullRequestIntake implements GitHubPullRequestIntakePort {
       finalPullRequest.state !== 'open' ||
       finalPullRequest.number !== input.pullRequestNumber ||
       finalPullRequest.head?.sha?.trim() !== headRevision ||
+      finalPullRequest.head?.ref?.trim() !== headRef ||
       finalPullRequest.head?.repo?.full_name?.trim() !== headRepository ||
       finalPullRequest.base?.ref?.trim() !== baseRef ||
       observedHead.trim() !== headRevision ||
