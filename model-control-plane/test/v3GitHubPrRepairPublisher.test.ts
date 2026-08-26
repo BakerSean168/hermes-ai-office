@@ -76,6 +76,9 @@ test('GitHub PR repair publication refuses to overwrite a concurrently updated h
   const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
     const key = `${command} ${args.join(' ')}`;
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key.includes('status --porcelain')) return '';
+    if (key.endsWith('rev-parse HEAD')) return REPAIRED;
+    if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
     if (key === 'gh api repos/example/project/pulls/42') {
       return pull('4444444444444444444444444444444444444444');
     }
@@ -124,4 +127,42 @@ test('GitHub PR repair publication fails closed for fork heads', async () => {
     /GITHUB_PR_REPAIR_CROSS_REPOSITORY_UNSUPPORTED/,
   );
   assert.equal(commands, 0);
+});
+
+test('GitHub PR repair publication is crash-idempotent when the exact reviewed repair was already pushed', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-replay-repo-'));
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-replay-workspace-'));
+  const commands: string[] = [];
+  const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    commands.push(key);
+    if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key.includes('status --porcelain')) return '';
+    if (key.endsWith('rev-parse HEAD')) return REPAIRED;
+    if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
+    if (key === 'gh api repos/example/project/pulls/42') return pull(REPAIRED);
+    if (key.startsWith('git fetch --no-tags origin +refs/heads/jules/fix-42:refs/ai-office/external/')) {
+      return '';
+    }
+    if (key.includes('rev-parse --verify refs/ai-office/external/github/pr-42/repairs/')) {
+      return REPAIRED;
+    }
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  const result = await new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+    planId: 'plan_replay',
+    repositoryPath,
+    workspacePath,
+    repository: 'example/project',
+    pullRequestNumber: 42,
+    headRepository: 'example/project',
+    headRef: 'jules/fix-42',
+    expectedHeadRevision: ORIGINAL,
+  });
+
+  assert.equal(result.previousRevision, ORIGINAL);
+  assert.equal(result.publishedRevision, REPAIRED);
+  assert.equal(commands.some((command) => command.startsWith('git push ')), false);
+  assert.ok(commands.some((command) => command.startsWith('git fetch --no-tags origin ')));
 });

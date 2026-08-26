@@ -105,6 +105,7 @@ Status: COMPLETE
 - Require the repair HEAD to be a clean descendant of the previously governed PR head.
 - Import the reviewed repair through a durable `refs/ai-office/external/.../repairs/...` audit ref.
 - Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten.
+- Treat an already-visible exact reviewed repair as a successful crash replay, rebuilding the audit ref instead of misclassifying the control plane's own prior push as an external race.
 - Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
 - Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.
 

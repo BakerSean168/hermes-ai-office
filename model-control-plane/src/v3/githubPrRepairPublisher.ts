@@ -167,28 +167,6 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
       throw new Error('GITHUB_PR_REPAIR_REPOSITORY_MISMATCH');
     }
 
-    const pullRaw = await this.#run(
-      repositoryPath,
-      'gh',
-      ['api', `repos/${input.repository}/pulls/${input.pullRequestNumber}`],
-      owner,
-    );
-    let pullRequest: PullRequestApiView;
-    try {
-      pullRequest = JSON.parse(pullRaw) as PullRequestApiView;
-    } catch {
-      throw new Error('GITHUB_PR_REPAIR_RESPONSE_INVALID');
-    }
-    if (pullRequest.state !== 'open') throw new Error('GITHUB_PR_REPAIR_NOT_OPEN');
-    if (
-      pullRequest.number !== input.pullRequestNumber ||
-      pullRequest.head?.sha?.trim() !== input.expectedHeadRevision ||
-      pullRequest.head?.ref?.trim() !== input.headRef ||
-      pullRequest.head?.repo?.full_name?.trim() !== input.headRepository
-    ) {
-      throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
-    }
-
     const trustedWorkspace = ['-c', `safe.directory=${workspacePath}`];
     const dirty = await this.#run(workspacePath, 'git', [
       ...trustedWorkspace,
@@ -215,10 +193,67 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
       throw new Error('GITHUB_PR_REPAIR_NOT_DESCENDANT');
     }
 
-    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-pr-repair-'));
-    const bundle = path.join(tempRoot, 'repair.bundle');
     const safePlan = input.planId.replace(/[^A-Za-z0-9._-]/g, '_');
     const auditRef = `refs/ai-office/external/github/pr-${input.pullRequestNumber}/repairs/${safePlan}/${publishedRevision}`;
+    const pullRaw = await this.#run(
+      repositoryPath,
+      'gh',
+      ['api', `repos/${input.repository}/pulls/${input.pullRequestNumber}`],
+      owner,
+    );
+    let pullRequest: PullRequestApiView;
+    try {
+      pullRequest = JSON.parse(pullRaw) as PullRequestApiView;
+    } catch {
+      throw new Error('GITHUB_PR_REPAIR_RESPONSE_INVALID');
+    }
+    if (pullRequest.state !== 'open') throw new Error('GITHUB_PR_REPAIR_NOT_OPEN');
+    if (
+      pullRequest.number !== input.pullRequestNumber ||
+      pullRequest.head?.ref?.trim() !== input.headRef ||
+      pullRequest.head?.repo?.full_name?.trim() !== input.headRepository
+    ) {
+      throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
+    }
+    const currentHeadRevision = pullRequest.head?.sha?.trim() ?? '';
+    validateSha(currentHeadRevision);
+
+    if (currentHeadRevision === publishedRevision) {
+      // Crash-idempotent replay: the previous attempt may have pushed the exact
+      // reviewed repair and crashed before persisting externalHeadRevision. Rebuild
+      // the local audit ref from the remote head and accept only that exact commit.
+      await this.#run(
+        repositoryPath,
+        'git',
+        [
+          'fetch',
+          '--no-tags',
+          remote,
+          `+refs/heads/${input.headRef}:${auditRef}`,
+        ],
+        owner,
+      );
+      const observedAudit = await this.#run(
+        repositoryPath,
+        'git',
+        ['rev-parse', '--verify', auditRef],
+        owner,
+      );
+      if (observedAudit.trim() !== publishedRevision) {
+        throw new Error('GITHUB_PR_REPAIR_REMOTE_VERIFICATION_FAILED');
+      }
+      return {
+        previousRevision: input.expectedHeadRevision,
+        publishedRevision,
+        auditRef,
+      };
+    }
+    if (currentHeadRevision !== input.expectedHeadRevision) {
+      throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
+    }
+
+    const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-pr-repair-'));
+    const bundle = path.join(tempRoot, 'repair.bundle');
     try {
       await this.#run(workspacePath, 'git', [
         ...trustedWorkspace,
