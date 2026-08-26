@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 
+import type { GitHubPullRequestIntakePort } from './githubPrIntake.js';
 import type { DevelopmentPolicy } from './policy.js';
 import type { ModelRegistryPort } from './ports.js';
 import { PLAN_LIMITS } from './planConstants.js';
@@ -15,7 +16,8 @@ import {
 
 function errorStatus(code: string): number {
   if (code.endsWith('_NOT_FOUND') || code === 'EXECUTION_NOT_FOUND') return 404;
-  if (code.includes('UNAVAILABLE')) return 503;
+  if (code.includes('UNAVAILABLE') || code.includes('UNCONFIGURED')) return 503;
+  if (code === 'GITHUB_PR_COMMAND_FAILED') return 502;
   if (
     code.endsWith('_REQUIRED') ||
     code.endsWith('_INVALID') ||
@@ -25,6 +27,9 @@ function errorStatus(code: string): number {
     return 400;
   if (
     code.includes('CONCURRENCY') ||
+    code.includes('CHANGED_DURING') ||
+    code.includes('MISMATCH') ||
+    code.endsWith('_NOT_OPEN') ||
     code.includes('LEASE_CONFLICT') ||
     code.includes('NOT_CONTINUABLE')
   )
@@ -51,6 +56,7 @@ export function registerV3Routes(
   policy: DevelopmentPolicy,
   readinessEvidence?: V3ReadinessEvidence,
   modelRegistry?: ModelRegistryPort,
+  pullRequestIntake?: GitHubPullRequestIntakePort,
 ): void {
   app.get('/api/v3/health', async () => ({
     status: 'ok',
@@ -60,6 +66,99 @@ export function registerV3Routes(
   }));
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
+
+  app.post('/api/v3/development/external-changes/github', async (request, reply) => {
+    if (!pullRequestIntake) {
+      reply.code(503);
+      return { error: { code: 'GITHUB_PR_INTAKE_UNCONFIGURED' } };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const repository =
+      body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
+        ? (body.repository as Record<string, unknown>)
+        : {};
+    const pullRequest =
+      body.pullRequest && typeof body.pullRequest === 'object' && !Array.isArray(body.pullRequest)
+        ? (body.pullRequest as Record<string, unknown>)
+        : {};
+    const projectKey = String(body.projectKey ?? '').trim();
+    const repositoryPath = String(repository.path ?? '').trim();
+    const pullRequestNumber = Number(pullRequest.number);
+    if (!projectKey) {
+      reply.code(400);
+      return { error: { code: 'PROJECT_KEY_REQUIRED' } };
+    }
+    if (!repositoryPath) {
+      reply.code(400);
+      return { error: { code: 'REPOSITORY_PATH_REQUIRED' } };
+    }
+
+    try {
+      const source = await pullRequestIntake.resolve({
+        repositoryPath,
+        pullRequestNumber,
+        remote: repository.remote ? String(repository.remote) : undefined,
+      });
+      const reviewBackend = body.reviewBackend ? String(body.reviewBackend).trim() : undefined;
+      const repairBackend = body.repairBackend ? String(body.repairBackend).trim() : undefined;
+      for (const backend of [reviewBackend, repairBackend].filter(Boolean) as string[]) {
+        if (!policy.backend(backend)?.enabled) throw new Error('GITHUB_PR_BACKEND_INVALID');
+      }
+      const acceptanceCriteria = [
+        'The claimed problem is supported by repository evidence; otherwise return INVALID without starting a repair writer.',
+        'The proposed change preserves existing public contracts and architecture boundaries.',
+        'Focused verification covers the behavior changed by the pull request.',
+        ...(Array.isArray(body.acceptanceCriteria) ? body.acceptanceCriteria.map(String) : []),
+      ];
+      const plan = await service.createPlan(
+        {
+          projectKey,
+          objective: `Govern GitHub pull request ${source.repository}#${source.number} at its exact head revision.`,
+          analysisSummary:
+            'GitHub PR intake resolved and fetched exact base/head revisions. Pull-request prose is retained only as metadata; repository evidence is authoritative.',
+          repository: { path: repositoryPath, baseRevision: source.baseRevision },
+          source: {
+            kind: 'EXTERNAL_CHANGE',
+            revision: source.headRevision,
+            reviewBackend,
+            repairBackend,
+            origin: {
+              kind: 'GITHUB_PULL_REQUEST',
+              repository: source.repository,
+              pullRequestNumber: source.number,
+              pullRequestUrl: source.url,
+              title: source.title,
+              author: source.author,
+              headRef: source.headRef,
+              baseRef: source.baseRef,
+            },
+          },
+          batches: [
+            {
+              key: 'external-pr',
+              title: 'Validate external pull request',
+              workItems: [
+                {
+                  key: 'external-pr-change',
+                  title: 'Validate and review external change',
+                  objective:
+                    'Independently verify whether the claimed problem exists, then review the exact Git diff for correctness, regressions, contract preservation, and architectural quality.',
+                  acceptanceCriteria,
+                },
+              ],
+            },
+          ],
+        },
+        `github-pr:${source.repository}:${source.number}:${source.headRevision}`,
+      );
+      reply.code(201);
+      return plan;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
 
   app.post('/api/v3/development/plans', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;

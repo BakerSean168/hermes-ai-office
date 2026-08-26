@@ -14,6 +14,16 @@ export type PlanSource =
       revision: string;
       reviewBackend?: string;
       repairBackend?: string;
+      origin?: {
+        kind: 'GITHUB_PULL_REQUEST';
+        repository: string;
+        pullRequestNumber: number;
+        pullRequestUrl: string;
+        title: string;
+        author?: string;
+        headRef: string;
+        baseRef: string;
+      };
     };
 
 export interface CreatePlanInput {

@@ -8,6 +8,10 @@ import { registerV3Routes } from './v3/api.js';
 import { ExecutionLinkRepository } from './v3/correlation.js';
 import { GitHubPlanDelivery, type PlanDeliveryPort } from './v3/delivery.js';
 import {
+  GitHubPullRequestIntake,
+  type GitHubPullRequestIntakePort,
+} from './v3/githubPrIntake.js';
+import {
   LiteLlmModelGateway,
   LiteLlmModelRegistry,
   LiteLlmSpendObservability,
@@ -41,6 +45,7 @@ export interface BuildControlPlaneOptions {
   v3Observability?: ObservabilityPort;
   v3Workspace?: WorkspaceProvisioningPort;
   v3Delivery?: PlanDeliveryPort;
+  v3PullRequestIntake?: GitHubPullRequestIntakePort;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
@@ -184,7 +189,12 @@ export async function buildControlPlane(
     env.MODEL_CP_V3_READINESS_EVIDENCE_FILE ??
       path.resolve(here, '../config/v3-readiness-evidence.yaml'),
   );
-  registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry);
+  const pullRequestIntake =
+    options.v3PullRequestIntake ??
+    new GitHubPullRequestIntake({
+      home: env.MODEL_CP_V3_GITHUB_HOME ?? env.MODEL_CP_V3_DELIVERY_HOME,
+    });
+  registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry, pullRequestIntake);
   const reconcileInterval = setInterval(
     () => {
       void v3
