@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
 import type { PlanDeliveryPort, PlanDeliveryResult } from '../src/v3/delivery.js';
+import type { GitHubGovernanceStatusPort } from '../src/v3/githubGovernanceStatus.js';
 import type { GitHubPullRequestRepairPublisherPort } from '../src/v3/githubPrRepairPublisher.js';
 import type {
   ExecutionHostCreateInput,
@@ -1351,6 +1352,104 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
         (event: Record<string, unknown>) => event.type === 'EXTERNAL_CHANGE_REPAIR_PUBLISHED',
       ),
     );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('terminal GitHub governance status is retried durably after a transient reporting failure', async () => {
+  const host = new PlanHost();
+  const HEAD = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const calls: Array<{ planStatus: string; revision: string }> = [];
+  let failFirstSuccess = true;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      calls.push({ planStatus: input.planStatus, revision: input.expectedHeadRevision });
+      if (input.planStatus === 'SUCCEEDED' && failFirstSuccess) {
+        failFirstSuccess = false;
+        throw new Error('simulated GitHub outage');
+      }
+      return {
+        revision: input.expectedHeadRevision,
+        state: input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale: false,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3GovernanceStatus: governanceStatus,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Publish durable GitHub governance state.',
+        analysisSummary: 'Review-only GitHub PR path.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: HEAD,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Approve only after independent verification.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-governance-durable-status',
+    );
+    assert.equal(plan.governanceStatusRequired, true);
+    assert.equal(calls.at(-1)?.planStatus, 'RUNNING');
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'PASS\nThe external change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.governanceStatusPlanStatus, 'RUNNING');
+    assert.equal(calls.filter((call) => call.planStatus === 'SUCCEEDED').length, 1);
+
+    // No plan ID: proves a terminal plan with a stale reporting fingerprint is
+    // still selected by PlanRepository.active() and retried by the periodic path.
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.governanceStatusRevision, HEAD);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
+    assert.equal(calls.filter((call) => call.planStatus === 'SUCCEEDED').length, 2);
   } finally {
     await runtime.app.close();
   }

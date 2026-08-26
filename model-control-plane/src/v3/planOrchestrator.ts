@@ -1,5 +1,6 @@
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
+import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
 import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import { PlanRepository, type CreatePlanInput, type WorkItemRecord } from './plans.js';
 import { PLAN_LIMITS } from './planConstants.js';
@@ -87,6 +88,7 @@ export class DurablePlanOrchestrator {
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #delivery?: PlanDeliveryPort;
   readonly #pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+  readonly #governanceStatus?: GitHubGovernanceStatusPort;
   readonly #executions: PlanExecutionPort;
   readonly #planReconcileTails = new Map<string, Promise<void>>();
 
@@ -96,6 +98,7 @@ export class DurablePlanOrchestrator {
     workspace: WorkspaceProvisioningPort;
     delivery?: PlanDeliveryPort;
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+    governanceStatus?: GitHubGovernanceStatusPort;
     executions: PlanExecutionPort;
   }) {
     this.#repository = options.repository;
@@ -103,6 +106,7 @@ export class DurablePlanOrchestrator {
     this.#workspace = options.workspace;
     this.#delivery = options.delivery;
     this.#pullRequestRepairPublisher = options.pullRequestRepairPublisher;
+    this.#governanceStatus = options.governanceStatus;
     this.#executions = options.executions;
   }
 
@@ -806,6 +810,39 @@ export class DurablePlanOrchestrator {
     }
   }
 
+  async #reconcileGovernanceStatus(planId: string): Promise<void> {
+    const plan = this.#repository.get(planId);
+    if (!plan?.governanceStatusRequired) return;
+    if (plan.source.kind !== 'EXTERNAL_CHANGE' || plan.source.origin?.kind !== 'GITHUB_PULL_REQUEST') {
+      return;
+    }
+    if (!this.#governanceStatus) return;
+    const revision = plan.externalHeadRevision ?? plan.source.revision;
+    if (
+      plan.governanceStatusRevision === revision &&
+      plan.governanceStatusPlanStatus === plan.status
+    ) {
+      return;
+    }
+    try {
+      await this.#governanceStatus.publish({
+        repositoryPath: plan.repositoryPath,
+        repository: plan.source.origin.repository,
+        pullRequestNumber: plan.source.origin.pullRequestNumber,
+        pullRequestUrl: plan.source.origin.pullRequestUrl,
+        expectedHeadRevision: revision,
+        planId: plan.planId,
+        planStatus: plan.status,
+        blockedReason: plan.blockedReason,
+      });
+      this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
+    } catch {
+      // Reporting is a durable side effect, not plan truth. Leave the publication
+      // fingerprint stale so the periodic reconciler retries it without rolling
+      // back a completed review or making plan creation fail on a transient GitHub error.
+    }
+  }
+
   #enqueuePlanReconciliation(
     planId: string,
     recoverBlocked: boolean,
@@ -817,6 +854,7 @@ export class DurablePlanOrchestrator {
       .then(async () => {
         if (recoverBlocked) await this.#recoverBlockedPlan(planId, recoveryMode);
         await this.#reconcilePlan(planId);
+        await this.#reconcileGovernanceStatus(planId);
       });
     this.#planReconcileTails.set(planId, current);
     void current

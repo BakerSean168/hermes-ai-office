@@ -108,14 +108,16 @@ Status: COMPLETE
 - Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
 - Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.
 
-### P3 — GitHub governance checks
+### P3 — GitHub governance status
 
-Status: NEXT
+Status: COMPLETE
 
-- Publish one exact-head aggregate check first: `Hermes / PR Governance`.
-- Project durable plan/review state into queued/in-progress/success/failure/neutral conclusions.
-- Include bounded findings/evidence links without exposing secrets or raw prompts.
-- Never mark a stale head SHA green after a synchronize event.
+- Publish one exact-head aggregate commit-status context: `Hermes / PR Governance`.
+- Map durable plan state to `pending / success / failure / error` without exposing prompts or secrets.
+- Persist the last published `(head SHA, plan status)` fingerprint so restarts do not duplicate unchanged status updates.
+- Keep terminal plans eligible for periodic reconciliation until their final GitHub status is durably published.
+- Re-read the pull request before publishing; if its head moved, mark the reviewed SHA `error` rather than ever publishing stale `success`.
+- Use commit statuses for the first rollout because current GitHub Check Run writes require GitHub App authentication; the reporter remains an adapter so a later GitHub App can replace this transport without changing plan truth.
 - Keep branch protection activation as a separate operator decision.
 
 ### P4 — Event ingestion and Jules adapter

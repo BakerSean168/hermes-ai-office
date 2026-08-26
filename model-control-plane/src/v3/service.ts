@@ -15,6 +15,7 @@ import type {
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
+import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
 import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import { DurablePlanOrchestrator, type PlanRecoveryMode } from './planOrchestrator.js';
 import { PlanRepository, type CreatePlanInput } from './plans.js';
@@ -164,6 +165,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     plans: PlanRepository;
     delivery?: PlanDeliveryPort;
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+    governanceStatus?: GitHubGovernanceStatusPort;
     backendAvailability?: Readonly<Record<string, boolean>>;
   }) {
     this.#policy = options.policy;
@@ -178,6 +180,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       workspace: options.workspace,
       delivery: options.delivery,
       pullRequestRepairPublisher: options.pullRequestRepairPublisher,
+      governanceStatus: options.governanceStatus,
       executions: this,
     });
     this.#backendAvailability = options.backendAvailability ?? {};

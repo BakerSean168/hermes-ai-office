@@ -7,6 +7,7 @@ import { openDb } from './db.mjs';
 import { registerV3Routes } from './v3/api.js';
 import { ExecutionLinkRepository } from './v3/correlation.js';
 import { GitHubPlanDelivery, type PlanDeliveryPort } from './v3/delivery.js';
+import { GitHubGovernanceStatus, type GitHubGovernanceStatusPort } from './v3/githubGovernanceStatus.js';
 import { GitHubPullRequestRepairPublisher, type GitHubPullRequestRepairPublisherPort } from './v3/githubPrRepairPublisher.js';
 import {
   GitHubPullRequestIntake,
@@ -48,6 +49,7 @@ export interface BuildControlPlaneOptions {
   v3Delivery?: PlanDeliveryPort;
   v3PullRequestIntake?: GitHubPullRequestIntakePort;
   v3PullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+  v3GovernanceStatus?: GitHubGovernanceStatusPort;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
@@ -184,6 +186,11 @@ export async function buildControlPlane(
     pullRequestRepairPublisher:
       options.v3PullRequestRepairPublisher ??
       new GitHubPullRequestRepairPublisher({
+        home: env.MODEL_CP_V3_GITHUB_HOME ?? env.MODEL_CP_V3_DELIVERY_HOME,
+      }),
+    governanceStatus:
+      options.v3GovernanceStatus ??
+      new GitHubGovernanceStatus({
         home: env.MODEL_CP_V3_GITHUB_HOME ?? env.MODEL_CP_V3_DELIVERY_HOME,
       }),
     host: executionHost,

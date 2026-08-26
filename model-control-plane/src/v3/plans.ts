@@ -57,6 +57,9 @@ export interface PlanRecord {
   currentRevision: string;
   source: PlanSource;
   externalHeadRevision?: string;
+  governanceStatusRequired: boolean;
+  governanceStatusRevision?: string;
+  governanceStatusPlanStatus?: PlanStatus;
   delivery?: PlanDeliveryConfig;
   deliveryStage?: DeliveryStage;
   deliveryEvidence?: Record<string, unknown>;
@@ -109,6 +112,9 @@ interface PlanRow {
   current_revision: string;
   source_json: string | null;
   external_head_revision: string | null;
+  governance_status_required: number;
+  governance_status_revision: string | null;
+  governance_status_plan_status: string | null;
   delivery_json: string | null;
   delivery_stage: string | null;
   delivery_evidence_json: string | null;
@@ -176,6 +182,11 @@ function planFromRow(row: PlanRow): PlanRecord {
       ? (JSON.parse(row.source_json) as PlanSource)
       : { kind: 'TASK' },
     externalHeadRevision: row.external_head_revision ?? undefined,
+    governanceStatusRequired: Boolean(row.governance_status_required),
+    governanceStatusRevision: row.governance_status_revision ?? undefined,
+    governanceStatusPlanStatus: row.governance_status_plan_status
+      ? (row.governance_status_plan_status as PlanStatus)
+      : undefined,
     delivery,
     deliveryStage: row.delivery_stage ? (row.delivery_stage as DeliveryStage) : undefined,
     deliveryEvidence: row.delivery_evidence_json
@@ -237,6 +248,9 @@ export function ensurePlanSchema(db: DatabaseSync): void {
       current_revision TEXT NOT NULL,
       source_json TEXT,
       external_head_revision TEXT,
+      governance_status_required INTEGER NOT NULL DEFAULT 0,
+      governance_status_revision TEXT,
+      governance_status_plan_status TEXT,
       delivery_json TEXT,
       delivery_stage TEXT,
       delivery_evidence_json TEXT,
@@ -299,6 +313,9 @@ export function ensurePlanSchema(db: DatabaseSync): void {
   for (const [name, type] of [
     ['source_json', 'TEXT'],
     ['external_head_revision', 'TEXT'],
+    ['governance_status_required', 'INTEGER NOT NULL DEFAULT 0'],
+    ['governance_status_revision', 'TEXT'],
+    ['governance_status_plan_status', 'TEXT'],
     ['delivery_json', 'TEXT'],
     ['delivery_stage', 'TEXT'],
     ['delivery_evidence_json', 'TEXT'],
@@ -396,8 +413,9 @@ export class PlanRepository {
         .prepare(
           `INSERT INTO v3_plans
            (plan_id,command_key,project_key,objective,repository_path,base_revision,current_revision,
-            source_json,external_head_revision,delivery_json,delivery_stage,status,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            source_json,external_head_revision,governance_status_required,governance_status_revision,
+            governance_status_plan_status,delivery_json,delivery_stage,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           planId,
@@ -409,6 +427,9 @@ export class PlanRepository {
           baseRevision,
           JSON.stringify(source),
           source.kind === 'EXTERNAL_CHANGE' ? source.revision : null,
+          source.kind === 'EXTERNAL_CHANGE' && source.origin?.kind === 'GITHUB_PULL_REQUEST' ? 1 : 0,
+          null,
+          null,
           delivery ? JSON.stringify(delivery) : null,
           delivery ? 'PENDING' : null,
           'PENDING',
@@ -484,13 +505,22 @@ export class PlanRepository {
   }
 
   active(planId?: string): PlanRecord[] {
+    const pendingGovernanceStatus = `(
+      governance_status_required=1 AND (
+        governance_status_revision IS NULL OR
+        governance_status_revision IS NOT external_head_revision OR
+        governance_status_plan_status IS NOT status
+      )
+    )`;
     const rows = planId
       ? (this.#db
-          .prepare("SELECT * FROM v3_plans WHERE plan_id=? AND status IN ('PENDING','RUNNING')")
+          .prepare(
+            `SELECT * FROM v3_plans WHERE plan_id=? AND (status IN ('PENDING','RUNNING') OR ${pendingGovernanceStatus})`,
+          )
           .all(planId) as unknown as PlanRow[])
       : (this.#db
           .prepare(
-            "SELECT * FROM v3_plans WHERE status IN ('PENDING','RUNNING') ORDER BY created_at",
+            `SELECT * FROM v3_plans WHERE status IN ('PENDING','RUNNING') OR ${pendingGovernanceStatus} ORDER BY created_at`,
           )
           .all() as unknown as PlanRow[]);
     return rows.map(planFromRow);
@@ -533,6 +563,23 @@ export class PlanRepository {
     this.#db
       .prepare('UPDATE v3_plans SET external_head_revision=?,updated_at=? WHERE plan_id=?')
       .run(revision, Date.now(), planId);
+  }
+
+  setGovernanceStatusPublished(
+    planId: string,
+    revision: string,
+    planStatus: PlanStatus,
+  ): void {
+    if (!/^[0-9a-f]{40}$/i.test(revision)) {
+      throw new Error('GOVERNANCE_STATUS_REVISION_INVALID');
+    }
+    this.#db
+      .prepare(
+        `UPDATE v3_plans
+            SET governance_status_revision=?,governance_status_plan_status=?,updated_at=?
+          WHERE plan_id=?`,
+      )
+      .run(revision, planStatus, Date.now(), planId);
   }
 
   setPlanStatus(planId: string, status: PlanStatus, blockedReason?: string): void {

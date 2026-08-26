@@ -26,6 +26,8 @@ The initial cutover enables OpenCode, DSH, and OpenHands builtin. Codex, Claude 
 
 Antigravity is a deliberate provider-native exception to the LiteLLM-managed model path. It is registered as an opt-in external adapter only; ordinary task routing is unchanged. Review uses `gemini-3.1-pro-high`, repair uses `gemini-3.7-flash-high`, and both remain disabled at runtime until explicitly added to `MODEL_CP_V3_ENABLED_BACKENDS`. The adapter sends objectives over stdin using Antigravity stream-JSON, constrains review results with JSON Schema, stores only durable execution metadata/output, and runs the CLI as the authenticated `dev` identity inside a private mount namespace that hides unrelated homes and sibling AI Office workspaces. The control-plane service performs the mount setup as root and drops privileges before `agy` starts.
 
+GitHub PR governance uses the canonical repository owner's `gh` authentication. Immutable intake and repair publication require normal repository access; the aggregate `Hermes / PR Governance` commit-status reporter additionally requires commit-status write permission (`repo`/`repo:status` for classic OAuth, or fine-grained Commit statuses: write). Check Runs are intentionally not used in this rollout because GitHub restricts Check Run writes to GitHub Apps. Status publication is durable and retried from plan state; branch-protection enforcement remains an explicit rollout step.
+
 ## Install
 
 Build the Control Plane and OpenHands image, install ACP tooling, provide the root-owned runtime env files under `/srv/hermes-personal/secrets`, then run:
