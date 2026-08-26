@@ -108,6 +108,7 @@ Status: COMPLETE
 - Treat an already-visible exact reviewed repair as a successful crash replay, rebuilding the audit ref instead of misclassifying the control plane's own prior push as an external race.
 - Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
 - Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.
+- HARDENED: if GitHub PR metadata temporarily lags immediately after our repair push, do not persist a terminal governance fingerprint until the PR API observes the repaired head; genuine third-party synchronize heads still close the stale plan with `error`.
 
 ### P3 — GitHub governance status
 

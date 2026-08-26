@@ -29,6 +29,7 @@ export interface GitHubGovernanceStatusResult {
   revision: string;
   state: 'pending' | 'success' | 'failure' | 'error';
   stale: boolean;
+  observedHeadRevision?: string;
 }
 
 export interface GitHubGovernanceStatusPort {
@@ -181,6 +182,7 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
       revision: input.expectedHeadRevision,
       state: desired.state,
       stale,
+      observedHeadRevision: currentHead || undefined,
     };
   }
 }

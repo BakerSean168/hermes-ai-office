@@ -825,7 +825,7 @@ export class DurablePlanOrchestrator {
       return;
     }
     try {
-      await this.#governanceStatus.publish({
+      const publication = await this.#governanceStatus.publish({
         repositoryPath: plan.repositoryPath,
         repository: plan.source.origin.repository,
         pullRequestNumber: plan.source.origin.pullRequestNumber,
@@ -835,7 +835,14 @@ export class DurablePlanOrchestrator {
         planStatus: plan.status,
         blockedReason: plan.blockedReason,
       });
-      this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
+      const repairHeadPropagationLag =
+        publication.stale &&
+        plan.externalHeadRevision !== undefined &&
+        plan.externalHeadRevision !== plan.source.revision &&
+        publication.observedHeadRevision === plan.source.revision;
+      if (!repairHeadPropagationLag) {
+        this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
+      }
     } catch {
       // Reporting is a durable side effect, not plan truth. Leave the publication
       // fingerprint stale so the periodic reconciler retries it without rolling

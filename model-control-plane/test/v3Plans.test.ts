@@ -1262,6 +1262,28 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
   const ORIGINAL = '1111111111111111111111111111111111111111';
   const REPAIRED = '3333333333333333333333333333333333333333';
   const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
+  const governanceCalls: Array<{ revision: string; planStatus: string; stale: boolean }> = [];
+  let repairHeadStillPropagating = true;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      const stale =
+        input.expectedHeadRevision === REPAIRED &&
+        input.planStatus === 'SUCCEEDED' &&
+        repairHeadStillPropagating;
+      if (stale) repairHeadStillPropagating = false;
+      governanceCalls.push({
+        revision: input.expectedHeadRevision,
+        planStatus: input.planStatus,
+        stale,
+      });
+      return {
+        revision: input.expectedHeadRevision,
+        state: stale ? 'error' : input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale,
+        observedHeadRevision: stale ? ORIGINAL : input.expectedHeadRevision,
+      };
+    },
+  };
   const publisher: GitHubPullRequestRepairPublisherPort = {
     async publish(input) {
       publications.push(input);
@@ -1278,6 +1300,7 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
     v3ExecutionHost: host,
     v3Workspace: workspace,
     v3PullRequestRepairPublisher: publisher,
+    v3GovernanceStatus: governanceStatus,
     v3BackendAvailability: {
       'openhands-builtin': true,
       'opencode-acp': true,
@@ -1347,6 +1370,32 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
     assert.equal(publications[0]!.headRef, 'jules/fix-42');
     assert.match(publications[0]!.workspacePath, /^\/host\/workspace\//);
     assert.equal(body.externalHeadRevision, REPAIRED);
+    assert.equal(body.status, 'RUNNING');
+
+    // The next plan reconciliation observes the integrated batch, transitions the
+    // plan to SUCCEEDED, and attempts the repaired-head governance publication.
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(governanceCalls.at(-1)?.revision, REPAIRED);
+    assert.equal(governanceCalls.at(-1)?.stale, true);
+    assert.equal(body.governanceStatusRevision, REPAIRED);
+    assert.notEqual(body.governanceStatusPlanStatus, 'SUCCEEDED');
+
+    // A stale PR API read immediately after our own repair push is propagation lag,
+    // not a durable publication. The periodic path must retry and only fingerprint
+    // the repaired head after GitHub observes that exact revision.
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(
+      governanceCalls.filter(
+        (call) => call.revision === REPAIRED && call.planStatus === 'SUCCEEDED',
+      ).length,
+      2,
+    );
+    assert.equal(governanceCalls.at(-1)?.stale, false);
+    assert.equal(body.governanceStatusRevision, REPAIRED);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
     assert.ok(
       body.events.some(
         (event: Record<string, unknown>) => event.type === 'EXTERNAL_CHANGE_REPAIR_PUBLISHED',

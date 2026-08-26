@@ -54,7 +54,12 @@ test('GitHub governance status publishes pending and success on the exact PR hea
   const reporter = new GitHubGovernanceStatus({ commandRunner: state.runner });
 
   const pending = await reporter.publish({ ...input(state.repositoryPath), planStatus: 'RUNNING' });
-  assert.deepEqual(pending, { revision: HEAD, state: 'pending', stale: false });
+  assert.deepEqual(pending, {
+    revision: HEAD,
+    state: 'pending',
+    stale: false,
+    observedHeadRevision: HEAD,
+  });
   assert.ok(
     state.commands.some(
       (command) =>
@@ -65,7 +70,12 @@ test('GitHub governance status publishes pending and success on the exact PR hea
   );
 
   const success = await reporter.publish({ ...input(state.repositoryPath), planStatus: 'SUCCEEDED' });
-  assert.deepEqual(success, { revision: HEAD, state: 'success', stale: false });
+  assert.deepEqual(success, {
+    revision: HEAD,
+    state: 'success',
+    stale: false,
+    observedHeadRevision: HEAD,
+  });
   assert.ok(state.commands.some((command) => command.includes('state=success')));
 });
 
@@ -75,7 +85,12 @@ test('GitHub governance status never marks a stale reviewed SHA green after PR s
   const reporter = new GitHubGovernanceStatus({ commandRunner: state.runner });
 
   const result = await reporter.publish({ ...input(state.repositoryPath), planStatus: 'SUCCEEDED' });
-  assert.deepEqual(result, { revision: HEAD, state: 'error', stale: true });
+  assert.deepEqual(result, {
+    revision: HEAD,
+    state: 'error',
+    stale: true,
+    observedHeadRevision: NEW_HEAD,
+  });
   const post = state.commands.find((command) => command.includes('gh api -X POST')) ?? '';
   assert.match(post, /state=error/);
   assert.match(post, /review is stale because the pull request head changed/);
