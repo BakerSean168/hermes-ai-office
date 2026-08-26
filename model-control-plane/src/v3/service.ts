@@ -229,7 +229,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         reviewSnapshot.result?.finalText?.trim() ||
         '';
     }
-    const verdict = reviewVerdict(reviewResult);
+    const verdict = reviewVerdict(reviewResult, {
+      allowInvalid: input.context?.changeOrigin === 'EXTERNAL',
+    });
     if (verdict === 'APPROVED') throw new Error('PREVIOUS_EXECUTION_REVIEW_ALREADY_APPROVED');
     if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
@@ -340,7 +342,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       throw new Error('PREVIOUS_EXECUTION_NOT_FINALIZABLE');
     }
     const evidence = previous.result?.finalText?.trim() || '';
-    const verdict = reviewVerdict(evidence);
+    const verdict = reviewVerdict(evidence, {
+      allowInvalid: input.context?.changeOrigin === 'EXTERNAL',
+    });
     if (verdict === 'BLOCKING') throw new Error('PREVIOUS_EXECUTION_REVIEW_BLOCKING');
     if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');

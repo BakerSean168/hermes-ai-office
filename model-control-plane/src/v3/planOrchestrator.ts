@@ -186,6 +186,17 @@ export class DurablePlanOrchestrator {
     return this.getPlan(planId);
   }
 
+  #retryBackendForPhase(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    phase: 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
+  ): string | undefined {
+    if (plan.source.kind === 'EXTERNAL_CHANGE') {
+      if (phase === 'VERIFY_REVIEW') return plan.source.reviewBackend ?? 'openhands-builtin';
+      if (phase === 'IMPLEMENT_FIX') return plan.source.repairBackend;
+    }
+    return phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined;
+  }
+
   async #launchPlanPhase(
     plan: ReturnType<PlanRepository['get']> extends infer Value ? Exclude<Value, null> : never,
     batch: ReturnType<PlanRepository['batches']>[number],
@@ -197,8 +208,8 @@ export class DurablePlanOrchestrator {
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
     const previous = previousExecutionId ? this.#links.get(previousExecutionId) : null;
-    const externalReview =
-      phase === 'VERIFY_REVIEW' && plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0;
+    const externalChangeEntry = plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0;
+    const externalReview = phase === 'VERIFY_REVIEW' && externalChangeEntry;
     const isRepositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT';
     const snapshot = await this.#executions.start(
       {
@@ -223,7 +234,7 @@ export class DurablePlanOrchestrator {
           previousExecutionId,
           acceptanceCriteria: item.acceptanceCriteria,
           reviewBaseRevision: phase === 'ADOPT_CHANGE' ? plan.baseRevision : undefined,
-          changeOrigin: externalReview ? 'EXTERNAL' : undefined,
+          changeOrigin: externalChangeEntry ? 'EXTERNAL' : undefined,
         },
         override: overrideBackend ? { backend: overrideBackend } : undefined,
         await: false,
@@ -285,7 +296,10 @@ export class DurablePlanOrchestrator {
           latest.phase as 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
           latest.previousExecutionId,
           totalPhaseAttempts + 1,
-          latest.phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+          this.#retryBackendForPhase(
+            plan,
+            latest.phase as 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
+          ),
         );
         return;
       }
@@ -312,13 +326,17 @@ export class DurablePlanOrchestrator {
       return;
     }
 
-    const verdict = reviewVerdict(snapshot.result?.finalText ?? '');
+    const verdict = reviewVerdict(snapshot.result?.finalText ?? '', {
+      allowInvalid: plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0,
+    });
     if (verdict === 'INVALID') {
-      const reason =
-        plan.source.kind === 'EXTERNAL_CHANGE'
-          ? 'EXTERNAL_CHANGE_INVALID'
-          : 'REVIEW_VERDICT_INVALID_FOR_TASK';
-      this.#blockWorkItem(plan.planId, batch.batchId, item.workItemId, reason, latest.executionId);
+      this.#blockWorkItem(
+        plan.planId,
+        batch.batchId,
+        item.workItemId,
+        'EXTERNAL_CHANGE_INVALID',
+        latest.executionId,
+      );
       return;
     }
     if (verdict === 'BLOCKING') {
@@ -367,7 +385,7 @@ export class DurablePlanOrchestrator {
           'VERIFY_REVIEW',
           latest.previousExecutionId,
           reviewAttempt,
-          'openhands-builtin',
+          this.#retryBackendForPhase(plan, 'VERIFY_REVIEW'),
         );
         return;
       }
@@ -806,7 +824,7 @@ export class DurablePlanOrchestrator {
         phase,
         previousExecutionId,
         attempt,
-        phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+        this.#retryBackendForPhase(blocked, phase),
       );
     }
   }

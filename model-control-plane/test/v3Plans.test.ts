@@ -1038,6 +1038,57 @@ test('delivery repair exhaustion requires an explicit one-at-a-time retry_delive
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+test('normal TASK review keeps legacy INVALID-as-UNKNOWN retry semantics', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'compat-task',
+        objective: 'Preserve the pre-existing TASK review contract.',
+        analysisSummary: 'INVALID was not a TASK verdict before external-change governance.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+      'task-invalid-compatibility',
+    );
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const implementation = body.batches[0]!.workItems[0]!.executions[0]!;
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(review.phase, 'VERIFY_REVIEW');
+
+    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nLegacy reviewer emitted an unsupported token.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const retried = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(retried.phase, 'VERIFY_REVIEW');
+    assert.notEqual(retried.executionId, review.executionId);
+    assert.equal(retried.selection.backend, 'openhands-builtin');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('GitHub-origin external plans require an immutable 40-hex head revision', async () => {
   const host = new PlanHost();
   const runtime = await buildControlPlane({
@@ -1298,14 +1349,39 @@ test('external change plans can opt into Antigravity review and repair without c
     assert.equal(review.selection.transportMode, 'PROVIDER_NATIVE');
     assert.equal(review.selection.modelClass, 'gemini-3.1-pro-high');
 
-    host.succeed(review.refs.openhandsConversationId!, 'FAIL\nOne blocking defect remains.');
+    host.timeout(review.refs.openhandsConversationId!);
     await runtime.v3.reconcilePlans(plan.planId);
     body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const repair = body.batches[0]!.workItems[0]!.executions[2]!;
+    const retriedReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(retriedReview.phase, 'VERIFY_REVIEW');
+    assert.equal(retriedReview.selection.backend, 'antigravity-review');
+
+    host.succeed(retriedReview.refs.openhandsConversationId!, 'FAIL\nOne blocking defect remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const repair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
     assert.equal(repair.phase, 'IMPLEMENT_FIX');
     assert.equal(repair.selection.backend, 'antigravity-worker');
     assert.equal(repair.selection.transportMode, 'PROVIDER_NATIVE');
     assert.equal(repair.selection.modelClass, 'gemini-3.7-flash-high');
+
+    host.timeout(repair.refs.openhandsConversationId!);
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const retriedRepair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(retriedRepair.phase, 'IMPLEMENT_FIX');
+    assert.equal(retriedRepair.selection.backend, 'antigravity-worker');
+
+    host.timeout(retriedRepair.refs.openhandsConversationId!);
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'BLOCKED');
+
+    await runtime.v3.reconcilePlans(plan.planId, true, 'AUTO');
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const recoveredRepair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(recoveredRepair.phase, 'IMPLEMENT_FIX');
+    assert.equal(recoveredRepair.selection.backend, 'antigravity-worker');
   } finally {
     await runtime.app.close();
   }
