@@ -108,9 +108,12 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.ok(
     wrapper.includes('mount --bind "$stash/workspace" "$workspace_root/$workspace_relative"'),
   );
+  assert.ok(wrapper.includes('cd "$workspace_root/$workspace_relative"'));
   assert.match(wrapper, /--clear-groups/);
+  assert.match(wrapper, /--bounding-set=-all/);
   assert.match(wrapper, /--no-new-privs/);
   assert.doesNotMatch(adapter, /execFileSync/);
+  assert.doesNotMatch(adapter, /groupCanWriteAndTraverse/);
   assert.match(adapter, /await execFileAsync\('\/usr\/bin\/chgrp'/);
   assert.match(adapter, /await execFileAsync\('\/usr\/bin\/chmod'/);
 });

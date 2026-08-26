@@ -73,6 +73,10 @@ workspace_relative="${workspace#"$workspace_root"/}"
 mount -t tmpfs -o mode=0755 tmpfs "$workspace_root"
 mkdir -p "$(dirname "$workspace_root/$workspace_relative")" "$workspace_root/$workspace_relative"
 mount --bind "$stash/workspace" "$workspace_root/$workspace_relative"
+# The process entered this mount namespace with cwd pointing at the pre-overmount
+# workspace dentry. Re-enter the rebound path explicitly so relative `..` traversal
+# cannot retain a reference into the hidden host workspace tree.
+cd "$workspace_root/$workspace_relative"
 
 # Give tool subprocesses disposable scratch without exposing host /tmp. During
 # local smoke tests the workspace root can itself live under /tmp, in which case
@@ -97,5 +101,6 @@ exec /usr/bin/setpriv \
   --reuid="$uid" \
   --regid="$gid" \
   --clear-groups \
+  --bounding-set=-all \
   --no-new-privs \
   -- "$home/.local/bin/agy" "$@"

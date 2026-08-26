@@ -33,6 +33,27 @@ function apiResponse(state = 'open') {
   });
 }
 
+test('GitHub PR intake rejects lookalike non-GitHub remotes before contacting GitHub APIs', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-pr-lookalike-'));
+  let apiCalled = false;
+  const runner: GitHubIntakeCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'https://evilgithub.com/example/project.git';
+    if (command === 'gh') apiCalled = true;
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestIntake({ commandRunner: runner }).resolve({
+        repositoryPath,
+        pullRequestNumber: 42,
+      }),
+    /GITHUB_PR_GITHUB_REMOTE_REQUIRED/,
+  );
+  assert.equal(apiCalled, false);
+});
+
 test('GitHub PR intake freezes exact base/head refs without checking out or mutating the worktree', async () => {
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-pr-intake-'));
   const commands: string[] = [];

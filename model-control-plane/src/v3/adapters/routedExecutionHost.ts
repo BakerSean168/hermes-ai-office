@@ -20,7 +20,19 @@ export class RoutedExecutionHost implements ExecutionHostPort {
   }
 
   async health() {
-    return this.#defaultHost.health();
+    const hosts = [
+      this.#defaultHost,
+      ...Object.values(this.#byBackend),
+      ...Object.values(this.#byConversationPrefix),
+    ];
+    const uniqueHosts = [...new Set(hosts)];
+    const states = await Promise.all(uniqueHosts.map((host) => host.health()));
+    if (states.every((state) => state === 'OK')) return 'OK' as const;
+    if (states.every((state) => state === 'UNCONFIGURED')) return 'UNCONFIGURED' as const;
+    if (states.every((state) => state === 'UNAVAILABLE' || state === 'UNCONFIGURED')) {
+      return 'UNAVAILABLE' as const;
+    }
+    return 'DEGRADED' as const;
   }
 
   createExecution(input: ExecutionHostCreateInput): Promise<ExecutionHostSnapshot> {

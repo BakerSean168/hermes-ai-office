@@ -83,6 +83,44 @@ async function terminal(host: AntigravityExecutionHost, conversationId: string) 
   throw new Error('fake Antigravity execution did not terminate');
 }
 
+test('Antigravity mount sandbox rejects root or mismatched consumer identities at construction', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-identity-'));
+  const workspaceRoot = path.join(directory, 'workspaces');
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  const wrapper = path.join(directory, 'wrapper.sh');
+  fs.writeFileSync(wrapper, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const binary = fakeAgy(directory);
+  const owner = fs.statSync(directory);
+
+  assert.throws(
+    () =>
+      new AntigravityExecutionHost({
+        binary,
+        stateRoot: path.join(directory, 'state-root'),
+        workspaceHostRoot: workspaceRoot,
+        home: directory,
+        uid: 0,
+        gid: 0,
+        sandboxWrapper: wrapper,
+      }),
+    /ANTIGRAVITY_SANDBOX_NON_ROOT_IDENTITY_REQUIRED/,
+  );
+
+  assert.throws(
+    () =>
+      new AntigravityExecutionHost({
+        binary,
+        stateRoot: path.join(directory, 'state-mismatch'),
+        workspaceHostRoot: workspaceRoot,
+        home: directory,
+        uid: owner.uid,
+        gid: owner.gid + 1,
+        sandboxWrapper: wrapper,
+      }),
+    /ANTIGRAVITY_SANDBOX_HOME_OWNER_MISMATCH/,
+  );
+});
+
 test('Antigravity adapter sends the objective only through stdin and normalizes structured review output', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-host-'));
   const workspaceRoot = path.join(directory, 'workspaces');
@@ -132,9 +170,12 @@ test('Antigravity adapter cancellation is durable and terminates the detached pr
 
 class StubHost implements ExecutionHostPort {
   creates = 0;
-  constructor(readonly prefix: string) {}
+  constructor(
+    readonly prefix: string,
+    readonly healthState: 'OK' | 'DEGRADED' | 'UNAVAILABLE' | 'UNCONFIGURED' = 'OK',
+  ) {}
   async health() {
-    return 'OK' as const;
+    return this.healthState;
   }
   async createExecution(): Promise<ExecutionHostSnapshot> {
     this.creates += 1;
@@ -147,6 +188,18 @@ class StubHost implements ExecutionHostPort {
     return { conversationId, status: 'CANCELLED' };
   }
 }
+
+test('routed execution host reports degraded health when an enabled routed backend is unavailable', async () => {
+  const openhands = new StubHost('openhands', 'OK');
+  const antigravity = new StubHost('antigravity', 'UNAVAILABLE');
+  const host = new RoutedExecutionHost({
+    defaultHost: openhands,
+    byBackend: { 'antigravity-review': antigravity, 'antigravity-worker': antigravity },
+    byConversationPrefix: { 'antigravity:': antigravity },
+  });
+
+  assert.equal(await host.health(), 'DEGRADED');
+});
 
 test('routed execution host isolates Antigravity backend routing from existing OpenHands routing', async () => {
   const openhands = new StubHost('openhands');

@@ -76,9 +76,11 @@ function validateSha(value: string, role: 'HEAD' | 'BASE'): void {
 }
 
 function repositoryFromRemote(remoteUrl: string): string {
-  const match = remoteUrl
-    .trim()
-    .match(/github\.com(?::|\/)([^/\s]+\/[^/\s]+?)(?:\.git)?$/i);
+  const value = remoteUrl.trim();
+  const match =
+    value.match(/^git@github\.com:([^/\s]+\/[^/\s]+?)(?:\.git)?$/i) ??
+    value.match(/^ssh:\/\/git@github\.com\/([^/\s]+\/[^/\s]+?)(?:\.git)?$/i) ??
+    value.match(/^https:\/\/github\.com\/([^/\s]+\/[^/\s]+?)(?:\.git)?$/i);
   if (!match?.[1]) throw new Error('GITHUB_PR_GITHUB_REMOTE_REQUIRED');
   return match[1];
 }

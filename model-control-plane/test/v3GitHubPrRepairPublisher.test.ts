@@ -24,6 +24,34 @@ function pull(head = ORIGINAL) {
   });
 }
 
+test('GitHub PR repair publication rejects lookalike non-GitHub remotes before GitHub or push operations', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-lookalike-repo-'));
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-lookalike-workspace-'));
+  let githubOrPushCalled = false;
+  const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'ssh://git@evilgithub.com/example/project.git';
+    if (command === 'gh' || (command === 'git' && args[0] === 'push')) githubOrPushCalled = true;
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+        planId: 'plan_lookalike',
+        repositoryPath,
+        workspacePath,
+        repository: 'example/project',
+        pullRequestNumber: 42,
+        headRepository: 'example/project',
+        headRef: 'jules/fix-42',
+        expectedHeadRevision: ORIGINAL,
+      }),
+    /GITHUB_PR_REPAIR_GITHUB_REMOTE_REQUIRED/,
+  );
+  assert.equal(githubOrPushCalled, false);
+});
+
 test('GitHub PR repair publication pushes the reviewed descendant with an exact-head lease', async () => {
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-repo-'));
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-workspace-'));

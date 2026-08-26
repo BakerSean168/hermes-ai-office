@@ -192,6 +192,21 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     this.#user = options.user ?? path.basename(this.#home);
     this.#printTimeout = options.printTimeout ?? '20m';
     this.#sandboxWrapper = options.sandboxWrapper ? path.resolve(options.sandboxWrapper) : undefined;
+    if (this.#sandboxWrapper) {
+      if (
+        !Number.isInteger(this.#uid) ||
+        !Number.isInteger(this.#gid) ||
+        (this.#uid ?? 0) <= 0 ||
+        (this.#gid ?? 0) <= 0
+      ) {
+        throw new Error('ANTIGRAVITY_SANDBOX_NON_ROOT_IDENTITY_REQUIRED');
+      }
+      const homeStat = fs.statSync(this.#home, { throwIfNoEntry: false });
+      if (!homeStat?.isDirectory()) throw new Error('ANTIGRAVITY_SANDBOX_HOME_NOT_FOUND');
+      if (homeStat.uid !== this.#uid || homeStat.gid !== this.#gid) {
+        throw new Error('ANTIGRAVITY_SANDBOX_HOME_OWNER_MISMATCH');
+      }
+    }
     fs.mkdirSync(this.#stateRoot, { recursive: true, mode: 0o700 });
   }
 
@@ -220,12 +235,10 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
 
   async #grantNativeWriterAccess(cwd: string): Promise<void> {
     if (this.#gid == null) return;
-    const stat = fs.statSync(cwd);
-    const groupCanWriteAndTraverse = (stat.mode & 0o030) === 0o030;
-    if (stat.gid === this.#gid && groupCanWriteAndTraverse) return;
-    // OpenHands remains the owning UID. Grant only the authenticated native-agent
-    // group write access so either execution host can verify/repair the same bounded
-    // workspace without running Antigravity as root or copying consumer credentials.
+    // OpenHands remains the owning UID. Reconcile the complete tree before every
+    // native writer admission: checking only the root directory is insufficient
+    // because OpenHands may have created nested files with its own primary GID
+    // since the previous Antigravity run.
     await execFileAsync('/usr/bin/chgrp', ['-R', String(this.#gid), cwd], { timeout: 120_000 });
     await execFileAsync('/usr/bin/chmod', ['-R', 'g+rwX', cwd], { timeout: 120_000 });
   }
