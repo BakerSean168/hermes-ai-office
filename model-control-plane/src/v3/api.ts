@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
 
 import type { GitHubPullRequestIntakePort } from './githubPrIntake.js';
+import type { JulesApiPort } from './jules.js';
 import type { DevelopmentPolicy } from './policy.js';
 import type { ModelRegistryPort } from './ports.js';
 import { PLAN_LIMITS } from './planConstants.js';
@@ -59,6 +60,7 @@ export function registerV3Routes(
   modelRegistry?: ModelRegistryPort,
   pullRequestIntake?: GitHubPullRequestIntakePort,
   githubEventToken?: string,
+  jules?: JulesApiPort,
 ): void {
   app.get('/api/v3/health', async () => ({
     status: 'ok',
@@ -68,6 +70,67 @@ export function registerV3Routes(
   }));
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
+
+  app.get('/api/v3/development/jules/source', async (request, reply) => {
+    if (!jules) {
+      reply.code(503);
+      return { error: { code: 'JULES_API_UNCONFIGURED' } };
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    try {
+      const source = await jules.findSource(String(query.repository ?? ''));
+      if (!source) {
+        reply.code(404);
+        return { error: { code: 'JULES_SOURCE_NOT_FOUND' } };
+      }
+      return source;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  app.post('/api/v3/development/jules/sessions', async (request, reply) => {
+    if (!jules) {
+      reply.code(503);
+      return { error: { code: 'JULES_API_UNCONFIGURED' } };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    try {
+      const session = await jules.createSession({
+        repository: String(body.repository ?? ''),
+        startingBranch: String(body.startingBranch ?? ''),
+        prompt: String(body.prompt ?? ''),
+        title: body.title ? String(body.title) : undefined,
+        requirePlanApproval: body.requirePlanApproval === true,
+        autoCreatePullRequest: body.autoCreatePullRequest === true,
+      });
+      reply.code(201);
+      return session;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  app.get<{ Params: { sessionId: string } }>(
+    '/api/v3/development/jules/sessions/:sessionId',
+    async (request, reply) => {
+      if (!jules) {
+        reply.code(503);
+        return { error: { code: 'JULES_API_UNCONFIGURED' } };
+      }
+      try {
+        return await jules.getSession(`sessions/${request.params.sessionId}`);
+      } catch (error) {
+        const code = errorCode(error);
+        reply.code(errorStatus(code));
+        return { error: { code } };
+      }
+    },
+  );
 
   const createGitHubGovernancePlan = async (input: {
     projectKey: string;

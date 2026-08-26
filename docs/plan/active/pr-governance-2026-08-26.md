@@ -127,8 +127,10 @@ Status: IN PROGRESS
 - COMPLETE: add a constant-time shared-token authenticated event bridge for a trusted ingress that has already normalized GitHub delivery.
 - COMPLETE: map `pull_request.opened`, `reopened`, and `synchronize` to the exact same immutable P2 intake contract; duplicates are idempotent and stale event heads coalesce to the current GitHub head.
 - COMPLETE: detect `google-labs-jules[bot]` from authoritative GitHub PR metadata and record `producer=JULES` only as provenance; PR prose remains untrusted metadata.
-- NEXT: keep the alpha Jules REST API behind a narrow adapter for source discovery/session creation rather than leaking its request schema into orchestration code.
+- COMPLETE: isolate the alpha Jules REST API behind a narrow adapter for source discovery, session creation, and session lookup; `AUTO_CREATE_PR` is sent only when explicitly requested.
+- COMPLETE: expose optional local control-plane Jules routes that fail closed with `JULES_API_UNCONFIGURED` when no root-owned API-key env file is provisioned.
 - PENDING DEPLOYMENT: connect a real GitHub webhook-verifying ingress to the normalized bridge and provision `MODEL_CP_V3_GITHUB_EVENT_TOKEN`.
+- PENDING DEPLOYMENT: provision a Jules API key under `MODEL_CP_V3_JULES_ENV_FILE` only if Hermes should create Jules sessions directly; Jules-owned Scheduled Tasks can continue producing PRs without this credential.
 
 ### P5 — Governed rollout
 

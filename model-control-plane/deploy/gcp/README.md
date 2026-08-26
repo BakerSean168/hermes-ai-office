@@ -30,6 +30,8 @@ GitHub PR governance uses the canonical repository owner's `gh` authentication. 
 
 The control plane also exposes a normalized GitHub PR event bridge for trusted ingress only. Set `MODEL_CP_V3_GITHUB_EVENT_TOKEN` on the execution plane and send it as `x-hermes-event-token`; the comparison is constant-time. This is not a substitute for verifying GitHub webhook signatures at the public ingress. The bridge accepts only `pull_request` actions `opened`, `reopened`, and `synchronize`, then re-resolves GitHub state through the immutable intake adapter before creating or reusing a governance plan.
 
+Jules REST integration is optional and remains behind `JulesApiPort` because the upstream API is alpha. To enable Hermes-created sessions, provision a root-owned env file containing `JULES_API_KEY` and set `MODEL_CP_V3_JULES_ENV_FILE`; otherwise Jules routes return 503 and no credential is read. Session creation never requests `AUTO_CREATE_PR` implicitly: callers must set `autoCreatePullRequest: true`. Jules Scheduled Tasks do not require this adapter; their resulting GitHub PRs can enter governance through the event bridge independently.
+
 ## Install
 
 Build the Control Plane and OpenHands image, install ACP tooling, provide the root-owned runtime env files under `/srv/hermes-personal/secrets`, then run:

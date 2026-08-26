@@ -9,6 +9,7 @@ import { ExecutionLinkRepository } from './v3/correlation.js';
 import { GitHubPlanDelivery, type PlanDeliveryPort } from './v3/delivery.js';
 import { GitHubGovernanceStatus, type GitHubGovernanceStatusPort } from './v3/githubGovernanceStatus.js';
 import { GitHubPullRequestRepairPublisher, type GitHubPullRequestRepairPublisherPort } from './v3/githubPrRepairPublisher.js';
+import { JulesApiClient, type JulesApiPort } from './v3/jules.js';
 import {
   GitHubPullRequestIntake,
   type GitHubPullRequestIntakePort,
@@ -51,6 +52,7 @@ export interface BuildControlPlaneOptions {
   v3PullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
   v3GovernanceStatus?: GitHubGovernanceStatusPort;
   v3GitHubEventToken?: string;
+  v3Jules?: JulesApiPort;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
@@ -209,6 +211,16 @@ export async function buildControlPlane(
     new GitHubPullRequestIntake({
       home: env.MODEL_CP_V3_GITHUB_HOME ?? env.MODEL_CP_V3_DELIVERY_HOME,
     });
+  const julesEnvFile = env.MODEL_CP_V3_JULES_ENV_FILE?.trim();
+  const jules =
+    options.v3Jules ??
+    (julesEnvFile && fs.existsSync(julesEnvFile)
+      ? new JulesApiClient({
+          secrets: new EnvFileValueProvider(julesEnvFile),
+          baseUrl: env.MODEL_CP_V3_JULES_BASE_URL,
+          apiKeyName: env.MODEL_CP_V3_JULES_API_KEY_NAME ?? 'JULES_API_KEY',
+        })
+      : undefined);
   registerV3Routes(
     app,
     v3,
@@ -217,6 +229,7 @@ export async function buildControlPlane(
     modelRegistry,
     pullRequestIntake,
     options.v3GitHubEventToken ?? env.MODEL_CP_V3_GITHUB_EVENT_TOKEN,
+    jules,
   );
   const reconcileInterval = setInterval(
     () => {
