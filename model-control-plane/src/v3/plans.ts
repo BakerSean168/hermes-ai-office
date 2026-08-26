@@ -399,6 +399,33 @@ function validateGitHubOrigin(input: CreatePlanInput): void {
   }
 }
 
+function normalizePlanSource(source: PlanSource | undefined): PlanSource {
+  if (!source || source.kind === 'TASK') return { kind: 'TASK' };
+  const reviewBackend = source.reviewBackend?.trim();
+  const repairBackend = source.repairBackend?.trim();
+  const origin = source.origin
+    ? {
+        kind: 'GITHUB_PULL_REQUEST' as const,
+        repository: source.origin.repository.trim(),
+        pullRequestNumber: source.origin.pullRequestNumber,
+        pullRequestUrl: source.origin.pullRequestUrl.trim(),
+        title: source.origin.title.trim(),
+        ...(source.origin.author?.trim() ? { author: source.origin.author.trim() } : {}),
+        headRef: source.origin.headRef.trim(),
+        baseRef: source.origin.baseRef.trim(),
+        headRepository: source.origin.headRepository.trim(),
+        ...(source.origin.producer ? { producer: source.origin.producer } : {}),
+      }
+    : undefined;
+  return {
+    kind: 'EXTERNAL_CHANGE',
+    revision: source.revision.trim(),
+    ...(reviewBackend ? { reviewBackend } : {}),
+    ...(repairBackend ? { repairBackend } : {}),
+    ...(origin ? { origin } : {}),
+  };
+}
+
 function validateGraph(input: CreatePlanInput): void {
   if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
   if (!input.objective.trim()) throw new Error('OBJECTIVE_REQUIRED');
@@ -481,7 +508,7 @@ export class PlanRepository {
     const now = Date.now();
     const planId = `plan_${randomUUID()}`;
     const baseRevision = input.repository.baseRevision?.trim() || 'HEAD';
-    const source: PlanSource = input.source ?? { kind: 'TASK' };
+    const source = normalizePlanSource(input.source);
     const delivery = input.delivery
       ? {
           remote: input.delivery.remote?.trim() || 'origin',

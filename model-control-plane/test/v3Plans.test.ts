@@ -1280,8 +1280,102 @@ test('GitHub-origin external plans validate every durable PR identity field', as
       () => create(structuredClone(baseSource), 'github-origin-invalid-base', 'main'),
       /GITHUB_PR_BASE_REVISION_INVALID/,
     );
+
+
+    const canonicalSource = structuredClone(baseSource) as any;
+    canonicalSource.revision = `  ${baseSource.revision}  `;
+    canonicalSource.origin.repository = '  example/project  ';
+    canonicalSource.origin.pullRequestUrl = '  https://github.com/example/project/pull/42  ';
+    canonicalSource.origin.title = '  External proposal  ';
+    canonicalSource.origin.author = '  jules  ';
+    canonicalSource.origin.headRef = '  jules/fix-42  ';
+    canonicalSource.origin.baseRef = '  main  ';
+    canonicalSource.origin.headRepository = '  example/project  ';
+    const canonical = await create(canonicalSource, 'github-origin-canonicalized');
+    assert.equal(canonical.source.kind, 'EXTERNAL_CHANGE');
+    if (canonical.source.kind !== 'EXTERNAL_CHANGE') throw new Error('expected external source');
+    assert.equal(canonical.source.revision, baseSource.revision);
+    assert.equal(canonical.externalHeadRevision, baseSource.revision);
+    assert.equal(canonical.source.origin?.repository, 'example/project');
+    assert.equal(canonical.source.origin?.pullRequestUrl, 'https://github.com/example/project/pull/42');
+    assert.equal(canonical.source.origin?.title, 'External proposal');
+    assert.equal(canonical.source.origin?.author, 'jules');
+    assert.equal(canonical.source.origin?.headRef, 'jules/fix-42');
+    assert.equal(canonical.source.origin?.baseRef, 'main');
+    assert.equal(canonical.source.origin?.headRepository, 'example/project');
   } finally {
     await runtime.app.close();
+  }
+});
+
+test('ADOPT_CHANGE replays the same deterministic execution after a restart crash residue', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-adopt-restart-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const HEAD = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const host = new PlanHost();
+  let planId = '';
+  let adoptExecutionId = '';
+
+  const build = () =>
+    buildControlPlane({
+      dbFile,
+      logger: false,
+      v3ExecutionHost: host,
+      v3Workspace: workspace,
+      v3BackendAvailability: {
+        'openhands-builtin': true,
+        'codex-review-headless': true,
+      },
+    });
+
+  const first = await build();
+  try {
+    const plan = await first.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Recover deterministic external adoption after restart.',
+        analysisSummary: 'Simulate a crash between durable reservation and internal completion.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: { kind: 'EXTERNAL_CHANGE', revision: HEAD },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external change',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+          },
+        ],
+      },
+      'adopt-restart-crash',
+    );
+    planId = plan.planId;
+    adoptExecutionId = plan.batches[0]!.workItems[0]!.executions[0]!.executionId;
+    assert.equal(plan.batches[0]!.workItems[0]!.executions[0]!.phase, 'ADOPT_CHANGE');
+    assert.equal(plan.batches[0]!.workItems[0]!.executions[0]!.status, 'SUCCEEDED');
+  } finally {
+    await first.app.close();
+  }
+
+  const db = new DatabaseSync(dbFile);
+  db.prepare(
+    `UPDATE v3_execution_links
+        SET status_cache='STARTING',result_text=NULL,started_at=NULL,ended_at=NULL
+      WHERE execution_id=?`,
+  ).run(adoptExecutionId);
+  db.close();
+
+  const restarted = await build();
+  try {
+    await restarted.v3.reconcilePlans(planId);
+    const recovered = (await restarted.v3.getPlan(planId, true))!;
+    const executions = recovered.batches[0]!.workItems[0]!.executions;
+    assert.equal(executions.length, 1, 'deterministic adoption must reuse the same command key');
+    assert.equal(executions[0]!.executionId, adoptExecutionId);
+    assert.equal(executions[0]!.status, 'SUCCEEDED');
+    assert.match(executions[0]!.result?.finalText ?? '', /^ADOPTED_CHANGE/);
+  } finally {
+    await restarted.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

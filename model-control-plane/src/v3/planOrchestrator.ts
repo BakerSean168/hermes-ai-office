@@ -207,6 +207,7 @@ export class DurablePlanOrchestrator {
     previousExecutionId: string | undefined,
     attempt: number,
     overrideBackend?: string,
+    replayExisting = false,
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
     const previous = previousExecutionId ? this.#links.get(previousExecutionId) : null;
@@ -253,7 +254,7 @@ export class DurablePlanOrchestrator {
     this.#repository.setWorkItemStatus(item.workItemId, 'RUNNING');
     this.#repository.appendEvent(
       plan.planId,
-      'EXECUTION_STARTED',
+      replayExisting ? 'EXECUTION_REPLAYED' : 'EXECUTION_STARTED',
       { phase, attempt },
       { batchId: batch.batchId, workItemId: item.workItemId, executionId: snapshot.executionId },
     );
@@ -277,6 +278,23 @@ export class DurablePlanOrchestrator {
       .filter((record): record is ExecutionLinkRecord => Boolean(record));
     const latest = records.at(-1);
     if (!latest) return;
+    if (
+      latest.phase === 'ADOPT_CHANGE' &&
+      !PLAN_TERMINAL_EXECUTION_STATUSES.has(latest.statusCache) &&
+      !latest.openhandsConversationId
+    ) {
+      await this.#launchPlanPhase(
+        plan,
+        batch,
+        item,
+        'ADOPT_CHANGE',
+        latest.previousExecutionId,
+        latest.attempt ?? records.filter((record) => record.phase === 'ADOPT_CHANGE').length,
+        undefined,
+        true,
+      );
+      return;
+    }
     const snapshot = await this.#executions.get(latest.executionId);
     if (!snapshot || !PLAN_TERMINAL_EXECUTION_STATUSES.has(snapshot.status)) return;
 
