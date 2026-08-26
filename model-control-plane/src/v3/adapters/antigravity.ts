@@ -171,6 +171,15 @@ function isAlive(pid: number): boolean {
   }
 }
 
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isAlive(pid);
+}
+
 export class AntigravityExecutionHost implements ExecutionHostPort {
   readonly #binary: string;
   readonly #stateRoot: string;
@@ -312,6 +321,10 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
       command = '/usr/bin/unshare';
       commandArgs = [
         '--mount',
+        '--pid',
+        '--fork',
+        '--kill-child=SIGKILL',
+        '--mount-proc',
         '--propagation',
         'private',
         '--',
@@ -347,7 +360,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
       uid: spawnUid,
       gid: spawnGid,
       env: {
-        PATH: '/home/dev/.local/bin:/usr/local/bin:/usr/bin:/bin',
+        PATH: '/usr/local/bin:/usr/bin:/bin',
         HOME: this.#home,
         USER: this.#user,
         LOGNAME: this.#user,
@@ -517,6 +530,14 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
         } catch {
           // A concurrent exit is equivalent to cancellation from product state.
         }
+      }
+      if (!(await waitForExit(meta.pid, 2_000)) && isAlive(meta.pid)) {
+        try {
+          process.kill(meta.pid, 'SIGKILL');
+        } catch {
+          // A concurrent namespace teardown is equivalent to cancellation.
+        }
+        await waitForExit(meta.pid, 1_000);
       }
     }
     return this.getExecution(conversationId);

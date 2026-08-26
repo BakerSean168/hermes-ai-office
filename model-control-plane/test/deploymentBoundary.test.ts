@@ -93,6 +93,8 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.equal(policy.backends['antigravity-review'].supports.provider_native, true);
   assert.equal(policy.backends['antigravity-worker'].supports.provider_native, true);
   assert.equal(policy.backends['antigravity-worker'].supports.write, true);
+  assert.equal(policy.backends['antigravity-review'].supports.untrusted_external, false);
+  assert.equal(policy.backends['antigravity-worker'].supports.untrusted_external, false);
   assert.doesNotMatch(
     policy.phases.VERIFY_REVIEW.backend_candidates.join(','),
     /antigravity/,
@@ -109,6 +111,13 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.ok(
     wrapper.includes('mount --bind "$stash/workspace" "$workspace_root/$workspace_relative"'),
   );
+  assert.match(wrapper, /^#!\/bin\/bash\n/);
+  assert.doesNotMatch(wrapper, /^#!\/usr\/bin\/env bash/m);
+  assert.match(adapter, /'--pid'/);
+  assert.match(adapter, /'--fork'/);
+  assert.match(adapter, /'--kill-child=SIGKILL'/);
+  assert.match(adapter, /'--mount-proc'/);
+  assert.match(adapter, /PATH: '\/usr\/local\/bin:\/usr\/bin:\/bin'/);
   assert.ok(wrapper.includes('cd "$workspace_root/$workspace_relative"'));
   assert.match(wrapper, /--workspace-gid/);
   assert.match(wrapper, /mount -t tmpfs -o .*size=64m.*tmpfs "\$stash\/auth"/);

@@ -208,6 +208,17 @@ test('V3 writer completion fails closed when the agent returns success without a
     assert.equal(body.error.code, 'WRITER_COMPLETION_NO_COMMIT');
     assert.equal(body.error.retryable, false);
     assert.match(body.result.finalText, /did not edit or commit/);
+
+
+    // The host keeps reporting its own SUCCEEDED terminal state. A deterministic
+    // writer-completion rejection is product truth and must never be resurrected.
+    const replayedObservation = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(replayedObservation.statusCode, 200);
+    assert.equal(replayedObservation.json().status, 'FAILED');
+    assert.equal(replayedObservation.json().error.code, 'WRITER_COMPLETION_NO_COMMIT');
   } finally {
     await runtime.app.close();
   }

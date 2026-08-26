@@ -18,6 +18,7 @@ interface BackendSupportsConfig {
   litellm_managed?: boolean | 'conditional';
   provider_native?: boolean;
   write?: boolean;
+  untrusted_external?: boolean;
 }
 
 export type ManagedEnvironmentSource =

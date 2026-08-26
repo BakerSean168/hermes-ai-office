@@ -165,6 +165,8 @@ test('development policy exposes bounded writer concurrency caps', () => {
 
 test('Antigravity is provider-native and opt-in without changing default phase routing', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
+  assert.equal(policy.backend('antigravity-review')?.supports?.untrusted_external, false);
+  assert.equal(policy.backend('antigravity-worker')?.supports?.untrusted_external, false);
   const defaultReview = policy.select('VERIFY_REVIEW', {}, allAvailable);
   assert.equal(defaultReview.backend, 'codex-review-headless');
   assert.equal(defaultReview.transportMode, 'LITELLM_MANAGED');

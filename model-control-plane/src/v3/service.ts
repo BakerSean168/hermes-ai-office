@@ -381,6 +381,15 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#links.completeInternal(record.executionId, finalText);
   }
 
+  #assertExternalBackendAllowed(backendName: string | undefined): void {
+    if (!backendName) return;
+    const backend = this.#policy.backend(backendName);
+    if (!backend?.enabled) throw new Error('EXTERNAL_CHANGE_BACKEND_INVALID');
+    if (backend.supports?.untrusted_external === false) {
+      throw new Error('EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED');
+    }
+  }
+
   async runtimeSummary() {
     const [openhands, gateway, observability] = await Promise.all([
       this.#host.health(),
@@ -444,6 +453,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       this.#backendAvailability,
       effectiveInput.hints ?? {},
     );
+    if (effectiveInput.context?.changeOrigin === 'EXTERNAL') {
+      this.#assertExternalBackendAllowed(selection.backend);
+    }
     const reserve = () =>
       this.#links.reserve({
         idempotencyKey,
@@ -630,12 +642,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     let hostSnapshot = record.openhandsConversationId
       ? await this.#host.getExecution(record.openhandsConversationId)
       : null;
-    // Once the execution host accepts cancellation, product state is monotonic.
-    // OpenHands implements cancel through an asynchronous pause primitive, so an
-    // immediate follow-up GET may transiently still report RUNNING. Never let
-    // that transport race resurrect a cancelled AI Office execution.
-    const preserveCancelled = record.statusCache === 'CANCELLED';
-    if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveCancelled) {
+    // Durable terminal product state is monotonic. In particular, a writer may be
+    // rejected after the host reports SUCCEEDED because deterministic Git completion
+    // verification failed. A later stale host snapshot must never resurrect that
+    // FAILED/STUCK/CANCELLED execution and bypass the product integrity gate.
+    const preserveTerminal = TERMINAL.has(record.statusCache);
+    if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveTerminal) {
       const observedAt = hostSnapshot.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
       const observedAtMs = Number.isFinite(observedAt) ? observedAt : undefined;
       if (
@@ -741,6 +753,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   }
 
   createPlan(input: CreatePlanInput, commandKey: string) {
+    if (input.source?.kind === 'EXTERNAL_CHANGE') {
+      this.#assertExternalBackendAllowed(input.source.reviewBackend);
+      this.#assertExternalBackendAllowed(input.source.repairBackend);
+    }
     return this.#planOrchestrator.createPlan(input, commandKey);
   }
 

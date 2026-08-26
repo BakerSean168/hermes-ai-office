@@ -49,7 +49,7 @@ this plan.
 1. Existing TASK plans remain IMPLEMENT-first and all existing regression tests pass.
 2. External changes have first-class provenance instead of a fake IMPLEMENT execution.
 3. External review distinguishes `INVALID` problem claims from valid problems with bad repairs.
-4. Antigravity is an opt-in provider-native backend and never becomes a hidden default.
+4. Antigravity is an opt-in provider-native backend for trusted task input only and never becomes a hidden default; untrusted `EXTERNAL_CHANGE` plans must reject it before persistence.
 5. Consumer Antigravity auth is not copied into AI Office secrets or exposed to sibling workspaces.
 6. Native review/repair is isolated to one bounded workspace and runs as the authenticated non-root user.
 7. GitHub PR intake resolves the exact head revision and a current target-base revision without changing the canonical worktree.
@@ -78,15 +78,15 @@ Status: COMPLETE
 Commit: `79e6580`
 
 - Add explicit `PROVIDER_NATIVE` transport.
-- Add opt-in Antigravity review/repair backends.
+- Add opt-in Antigravity review/repair backends for trusted task input; GitHub/Jules external-change governance remains on untrusted-input-safe Codex/Claude/OpenHands paths.
 - Stream objectives through stdin; constrain review output with JSON Schema.
 - Persist normalized terminal status and reported usage.
-- Run `agy` as the authenticated `dev` identity inside a private mount namespace; sandbox construction rejects root or a UID/GID that does not match the configured home owner, `setpriv` clears bounding, inheritable, and ambient capability sets, and after masking the workspace root the wrapper explicitly re-enters the rebound workspace path so inherited cwd cannot retain access to hidden sibling workspaces.
-- Copy only the minimum Antigravity consumer-auth/config files into a per-execution private tmpfs; host auth state, prior conversations, brain state, and caches are not mounted writable or exposed to the native agent.
+- Run `agy` as the authenticated `dev` identity inside a private mount + PID namespace; sandbox construction rejects root or a UID/GID that does not match the configured home owner, `setpriv` clears bounding, inheritable, and ambient capability sets, the root launch PATH excludes user-writable directories, and after masking the workspace root the wrapper explicitly re-enters the rebound workspace path so inherited cwd cannot retain access to hidden sibling workspaces. `unshare --pid --fork --kill-child=SIGKILL --mount-proc` makes cancellation contain even `setsid` descendants.
+- Copy only the minimum Antigravity consumer-auth/config files into a per-execution private tmpfs; host auth state, prior conversations, brain state, and caches are not mounted writable and sibling workspaces cannot access them. Current `agy` 1.1.21 keeps provider auth and model-controlled file tools in the same process, and attack probes confirmed those tools can read the private OAuth copy, so this is **not** treated as a secret-safe boundary for untrusted repository input.
 - Use an OpenHands-compatible shared workspace GID for native writers and re-normalize the terminal writer tree to group-writable permissions before another backend may reuse it; recursive permission reconciliation runs asynchronously so large workspaces cannot block the control-plane event loop.
-- Reject `supports.write=false` backends at policy selection time for `IMPLEMENT` / `IMPLEMENT_FIX`, including explicit operator overrides.
+- Reject `supports.write=false` backends at policy selection time for `IMPLEMENT` / `IMPLEMENT_FIX`, including explicit operator overrides. Mark both Antigravity backends `untrusted_external: false`; `DevelopmentExecutionService` rejects them for `EXTERNAL_CHANGE` both before durable plan persistence and again at execution selection.
 - Aggregate routed execution-host health: a healthy default OpenHands host plus an unavailable enabled Antigravity host reports `DEGRADED` rather than hiding the unavailable backend.
-- Real reviewer and writer smoke tests passed on GCP Dev; the latest real adapter probe verified `UID=1001`, shared workspace `GID=10001`, successful Gemini execution, host OAuth/conversation state unchanged, and terminal handoff files normalized to `1001:10001` with group-write permission.
+- Real reviewer/writer/cancellation smoke tests passed on GCP Dev: trusted native execution verified `UID=1001`, shared workspace `GID=10001`, successful Gemini execution, unchanged host OAuth/conversation state, terminal handoff files normalized to `1001:10001` with group-write permission, and a deliberately `setsid`-detached child could not survive cancellation or write its delayed sentinel. Separate adversarial probes established the trusted-input-only OAuth limitation above.
 
 ### P2 — GitHub PR immutable intake
 

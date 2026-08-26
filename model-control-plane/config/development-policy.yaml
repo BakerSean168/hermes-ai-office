@@ -94,6 +94,7 @@ backends:
       litellm_managed: false
       provider_native: true
       write: false
+      untrusted_external: false
 
   antigravity-worker:
     kind: external_adapter
@@ -103,6 +104,7 @@ backends:
       litellm_managed: false
       provider_native: true
       write: true
+      untrusted_external: false
 
   control-plane-change-adopter:
     kind: internal

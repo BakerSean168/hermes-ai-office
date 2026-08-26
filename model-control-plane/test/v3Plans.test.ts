@@ -1533,7 +1533,7 @@ test('an invalid external change is blocked without launching a repair writer', 
   }
 });
 
-test('external change plans can opt into Antigravity review and repair without changing task defaults', async () => {
+test('external change plans reject trusted-input-only Antigravity backends before persistence', async () => {
   const host = new PlanHost();
   const runtime = await buildControlPlane({
     dbFile: ':memory:',
@@ -1550,76 +1550,47 @@ test('external change plans can opt into Antigravity review and repair without c
   });
 
   try {
-    const plan = await runtime.v3.createPlan(
+    for (const source of [
       {
-        projectKey: 'digital-biome',
-        objective: 'Review and repair an external PR with Antigravity.',
-        analysisSummary: 'External review uses explicit provider-native routing.',
-        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
-        source: {
-          kind: 'EXTERNAL_CHANGE',
-          revision: 'external-head-revision',
-          reviewBackend: 'antigravity-review',
-          repairBackend: 'antigravity-worker',
-        },
-        batches: [
-          {
-            key: 'external-pr',
-            title: 'Review external PR',
-            workItems: [
-              {
-                key: 'external-pr-change',
-                title: 'Validate external PR',
-                objective: 'Verify the defect and implementation quality.',
-              },
-            ],
-          },
-        ],
+        kind: 'EXTERNAL_CHANGE' as const,
+        revision: 'external-head-revision',
+        reviewBackend: 'antigravity-review',
       },
-      'external-antigravity-routing',
-    );
-
-    await runtime.v3.reconcilePlans(plan.planId);
-    let body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const review = body.batches[0]!.workItems[0]!.executions[1]!;
-    assert.equal(review.phase, 'VERIFY_REVIEW');
-    assert.equal(review.selection.backend, 'antigravity-review');
-    assert.equal(review.selection.transportMode, 'PROVIDER_NATIVE');
-    assert.equal(review.selection.modelClass, 'gemini-3.1-pro-high');
-
-    host.timeout(review.refs.openhandsConversationId!);
-    await runtime.v3.reconcilePlans(plan.planId);
-    body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const retriedReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
-    assert.equal(retriedReview.phase, 'VERIFY_REVIEW');
-    assert.equal(retriedReview.selection.backend, 'antigravity-review');
-
-    host.succeed(retriedReview.refs.openhandsConversationId!, 'FAIL\nOne blocking defect remains.');
-    await runtime.v3.reconcilePlans(plan.planId);
-    body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const repair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
-    assert.equal(repair.phase, 'IMPLEMENT_FIX');
-    assert.equal(repair.selection.backend, 'antigravity-worker');
-    assert.equal(repair.selection.transportMode, 'PROVIDER_NATIVE');
-    assert.equal(repair.selection.modelClass, 'gemini-3.7-flash-high');
-
-    host.timeout(repair.refs.openhandsConversationId!);
-    await runtime.v3.reconcilePlans(plan.planId);
-    body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const retriedRepair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
-    assert.equal(retriedRepair.phase, 'IMPLEMENT_FIX');
-    assert.equal(retriedRepair.selection.backend, 'antigravity-worker');
-
-    host.timeout(retriedRepair.refs.openhandsConversationId!);
-    await runtime.v3.reconcilePlans(plan.planId);
-    body = (await runtime.v3.getPlan(plan.planId, true))!;
-    assert.equal(body.status, 'BLOCKED');
-
-    await runtime.v3.reconcilePlans(plan.planId, true, 'AUTO');
-    body = (await runtime.v3.getPlan(plan.planId, true))!;
-    const recoveredRepair = body.batches[0]!.workItems[0]!.executions.at(-1)!;
-    assert.equal(recoveredRepair.phase, 'IMPLEMENT_FIX');
-    assert.equal(recoveredRepair.selection.backend, 'antigravity-worker');
+      {
+        kind: 'EXTERNAL_CHANGE' as const,
+        revision: 'external-head-revision',
+        repairBackend: 'antigravity-worker',
+      },
+    ]) {
+      assert.throws(
+        () =>
+          runtime.v3.createPlan(
+            {
+              projectKey: 'digital-biome',
+              objective: 'Never expose provider-native consumer auth to untrusted PR input.',
+              analysisSummary: 'External PR governance must use an untrusted-input-safe backend.',
+              repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+              source,
+              batches: [
+                {
+                  key: 'external-pr',
+                  title: 'Review external PR',
+                  workItems: [
+                    {
+                      key: 'external-pr-change',
+                      title: 'Validate external PR',
+                      objective: 'Verify the defect and implementation quality.',
+                    },
+                  ],
+                },
+              ],
+            },
+            `external-antigravity-rejected-${source.reviewBackend ?? source.repairBackend}`,
+          ),
+        /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+      );
+    }
+    assert.equal((await runtime.v3.listPlans()).length, 0, 'unsafe plans must not be persisted');
   } finally {
     await runtime.app.close();
   }
@@ -1730,7 +1701,21 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
 
     body = (await runtime.v3.getPlan(plan.planId, true))!;
     const secondReview = body.batches[0]!.workItems[0]!.executions[3]!;
-    host.succeed(secondReview.refs.openhandsConversationId!, 'PASS\nThe repaired change is valid.');
+    host.succeed(secondReview.refs.openhandsConversationId!, 'FAIL\nOne more blocking defect remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    assert.equal(publications.length, 0, 'a failed re-review must never publish an intermediate repair');
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondFix = body.batches[0]!.workItems[0]!.executions[4]!;
+    assert.equal(secondFix.phase, 'IMPLEMENT_FIX');
+    host.succeed(secondFix.refs.openhandsConversationId!, 'FIXED AGAIN');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const thirdReview = body.batches[0]!.workItems[0]!.executions[5]!;
+    assert.equal(thirdReview.phase, 'VERIFY_REVIEW');
+    assert.equal(publications.length, 0, 'repair publication occurs only after the final passing review');
+    host.succeed(thirdReview.refs.openhandsConversationId!, 'PASS\nThe final repaired change is valid.');
     await runtime.v3.reconcilePlans(plan.planId);
 
     body = (await runtime.v3.getPlan(plan.planId, true))!;
