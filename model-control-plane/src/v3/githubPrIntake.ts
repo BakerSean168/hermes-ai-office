@@ -27,6 +27,7 @@ export interface GitHubPullRequestSnapshot {
   baseRevision: string;
   headRef: string;
   baseRef: string;
+  headRepository: string;
   fetchedHeadRef: string;
   fetchedBaseRef: string;
 }
@@ -47,7 +48,7 @@ interface PullRequestApiView {
   state?: string;
   title?: string;
   user?: { login?: string } | null;
-  head?: { sha?: string; ref?: string } | null;
+  head?: { sha?: string; ref?: string; repo?: { full_name?: string } | null } | null;
   base?: { sha?: string; ref?: string } | null;
 }
 
@@ -157,10 +158,14 @@ export class GitHubPullRequestIntake implements GitHubPullRequestIntakePort {
 
     const headRevision = pullRequest.head?.sha?.trim() ?? '';
     const headRef = pullRequest.head?.ref?.trim() ?? '';
+    const headRepository = pullRequest.head?.repo?.full_name?.trim() ?? '';
     const baseRef = pullRequest.base?.ref?.trim() ?? '';
     validateSha(headRevision, 'HEAD');
     validateBranch(headRef, 'HEAD');
     validateBranch(baseRef, 'BASE');
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(headRepository)) {
+      throw new Error('GITHUB_PR_HEAD_REPOSITORY_INVALID');
+    }
 
     const refPrefix = `refs/ai-office/external/github/pr-${input.pullRequestNumber}`;
     const fetchedHeadRef = `${refPrefix}/head`;
@@ -195,6 +200,7 @@ export class GitHubPullRequestIntake implements GitHubPullRequestIntakePort {
       finalPullRequest.state !== 'open' ||
       finalPullRequest.number !== input.pullRequestNumber ||
       finalPullRequest.head?.sha?.trim() !== headRevision ||
+      finalPullRequest.head?.repo?.full_name?.trim() !== headRepository ||
       finalPullRequest.base?.ref?.trim() !== baseRef ||
       observedHead.trim() !== headRevision ||
       observedBase.trim() !== remoteBaseRevision
@@ -216,6 +222,7 @@ export class GitHubPullRequestIntake implements GitHubPullRequestIntakePort {
       baseRevision,
       headRef,
       baseRef,
+      headRepository,
       fetchedHeadRef,
       fetchedBaseRef,
     };

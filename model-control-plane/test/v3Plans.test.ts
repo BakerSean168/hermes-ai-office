@@ -6,6 +6,7 @@ import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
 import type { PlanDeliveryPort, PlanDeliveryResult } from '../src/v3/delivery.js';
+import type { GitHubPullRequestRepairPublisherPort } from '../src/v3/githubPrRepairPublisher.js';
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
@@ -1250,6 +1251,106 @@ test('external change plans can opt into Antigravity review and repair without c
     assert.equal(repair.selection.backend, 'antigravity-worker');
     assert.equal(repair.selection.transportMode, 'PROVIDER_NATIVE');
     assert.equal(repair.selection.modelClass, 'gemini-3.7-flash-high');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('a reviewed GitHub PR repair is published to the PR head before the plan can verify successfully', async () => {
+  const host = new PlanHost();
+  const ORIGINAL = '1111111111111111111111111111111111111111';
+  const REPAIRED = '3333333333333333333333333333333333333333';
+  const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
+  const publisher: GitHubPullRequestRepairPublisherPort = {
+    async publish(input) {
+      publications.push(input);
+      return {
+        previousRevision: input.expectedHeadRevision,
+        publishedRevision: REPAIRED,
+        auditRef: `refs/ai-office/external/github/pr-42/repairs/${input.planId}/${REPAIRED}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3PullRequestRepairPublisher: publisher,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Repair a GitHub PR only after independent review.',
+        analysisSummary: 'GitHub-origin external change.',
+        repository: { path: '/tmp/repository', baseRevision: '2222222222222222222222222222222222222222' },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: ORIGINAL,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Verify and repair only confirmed blocking defects.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-repair-publication',
+    );
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'FAIL\nA blocking regression remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const fix = body.batches[0]!.workItems[0]!.executions[2]!;
+    host.succeed(fix.refs.openhandsConversationId!, 'FIXED');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[0]!.workItems[0]!.executions[3]!;
+    host.succeed(secondReview.refs.openhandsConversationId!, 'PASS\nThe repaired change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(publications.length, 1);
+    assert.equal(publications[0]!.expectedHeadRevision, ORIGINAL);
+    assert.equal(publications[0]!.repository, 'example/project');
+    assert.equal(publications[0]!.headRef, 'jules/fix-42');
+    assert.match(publications[0]!.workspacePath, /^\/host\/workspace\//);
+    assert.equal(body.externalHeadRevision, REPAIRED);
+    assert.ok(
+      body.events.some(
+        (event: Record<string, unknown>) => event.type === 'EXTERNAL_CHANGE_REPAIR_PUBLISHED',
+      ),
+    );
   } finally {
     await runtime.app.close();
   }

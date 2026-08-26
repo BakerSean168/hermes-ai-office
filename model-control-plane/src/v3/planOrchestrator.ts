@@ -1,5 +1,6 @@
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
+import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import { PlanRepository, type CreatePlanInput, type WorkItemRecord } from './plans.js';
 import { PLAN_LIMITS } from './planConstants.js';
 import { reviewVerdict } from './reviewVerdict.js';
@@ -85,6 +86,7 @@ export class DurablePlanOrchestrator {
   readonly #links: ExecutionLinkRepository;
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #delivery?: PlanDeliveryPort;
+  readonly #pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
   readonly #executions: PlanExecutionPort;
   readonly #planReconcileTails = new Map<string, Promise<void>>();
 
@@ -93,12 +95,14 @@ export class DurablePlanOrchestrator {
     links: ExecutionLinkRepository;
     workspace: WorkspaceProvisioningPort;
     delivery?: PlanDeliveryPort;
+    pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
     executions: PlanExecutionPort;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
     this.#workspace = options.workspace;
     this.#delivery = options.delivery;
+    this.#pullRequestRepairPublisher = options.pullRequestRepairPublisher;
     this.#executions = options.executions;
   }
 
@@ -366,6 +370,77 @@ export class DurablePlanOrchestrator {
       this.#blockWorkItem(plan.planId, batch.batchId, item.workItemId, reason, latest.executionId);
       return;
     }
+    const reviewedImplementation = latest.previousExecutionId
+      ? this.#links.get(latest.previousExecutionId)
+      : null;
+    if (
+      plan.source.kind === 'EXTERNAL_CHANGE' &&
+      plan.source.origin?.kind === 'GITHUB_PULL_REQUEST' &&
+      reviewedImplementation?.phase === 'IMPLEMENT_FIX'
+    ) {
+      if (!this.#pullRequestRepairPublisher) {
+        this.#blockWorkItem(
+          plan.planId,
+          batch.batchId,
+          item.workItemId,
+          'GITHUB_PR_REPAIR_PUBLISHER_UNCONFIGURED',
+          latest.executionId,
+        );
+        return;
+      }
+      if (!reviewedImplementation.workspaceRef) {
+        this.#blockWorkItem(
+          plan.planId,
+          batch.batchId,
+          item.workItemId,
+          'GITHUB_PR_REPAIR_WORKSPACE_MISSING',
+          latest.executionId,
+        );
+        return;
+      }
+      try {
+        const publication = await this.#pullRequestRepairPublisher.publish({
+          planId: plan.planId,
+          repositoryPath: plan.repositoryPath,
+          workspacePath: this.#workspace.hostPathForWorkspaceRef(
+            reviewedImplementation.workspaceRef,
+          ),
+          repository: plan.source.origin.repository,
+          pullRequestNumber: plan.source.origin.pullRequestNumber,
+          headRepository: plan.source.origin.headRepository,
+          headRef: plan.source.origin.headRef,
+          expectedHeadRevision: plan.externalHeadRevision ?? plan.source.revision,
+        });
+        this.#repository.setExternalHeadRevision(plan.planId, publication.publishedRevision);
+        this.#repository.appendEvent(
+          plan.planId,
+          'EXTERNAL_CHANGE_REPAIR_PUBLISHED',
+          {
+            previousRevision: publication.previousRevision,
+            publishedRevision: publication.publishedRevision,
+            auditRef: publication.auditRef,
+            pullRequestUrl: plan.source.origin.pullRequestUrl,
+          },
+          {
+            batchId: batch.batchId,
+            workItemId: item.workItemId,
+            executionId: reviewedImplementation.executionId,
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const reason = message.split(':', 1)[0] || 'GITHUB_PR_REPAIR_PUBLICATION_FAILED';
+        this.#blockWorkItem(
+          plan.planId,
+          batch.batchId,
+          item.workItemId,
+          reason,
+          latest.executionId,
+        );
+        return;
+      }
+    }
+
     this.#repository.setWorkItemStatus(item.workItemId, 'SUCCEEDED');
     this.#repository.appendEvent(
       plan.planId,

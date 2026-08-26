@@ -131,6 +131,7 @@ export function registerV3Routes(
               author: source.author,
               headRef: source.headRef,
               baseRef: source.baseRef,
+              headRepository: source.headRepository,
             },
           },
           batches: [

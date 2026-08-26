@@ -23,6 +23,7 @@ export type PlanSource =
         author?: string;
         headRef: string;
         baseRef: string;
+        headRepository: string;
       };
     };
 
@@ -55,6 +56,7 @@ export interface PlanRecord {
   baseRevision: string;
   currentRevision: string;
   source: PlanSource;
+  externalHeadRevision?: string;
   delivery?: PlanDeliveryConfig;
   deliveryStage?: DeliveryStage;
   deliveryEvidence?: Record<string, unknown>;
@@ -106,6 +108,7 @@ interface PlanRow {
   base_revision: string;
   current_revision: string;
   source_json: string | null;
+  external_head_revision: string | null;
   delivery_json: string | null;
   delivery_stage: string | null;
   delivery_evidence_json: string | null;
@@ -172,6 +175,7 @@ function planFromRow(row: PlanRow): PlanRecord {
     source: row.source_json
       ? (JSON.parse(row.source_json) as PlanSource)
       : { kind: 'TASK' },
+    externalHeadRevision: row.external_head_revision ?? undefined,
     delivery,
     deliveryStage: row.delivery_stage ? (row.delivery_stage as DeliveryStage) : undefined,
     deliveryEvidence: row.delivery_evidence_json
@@ -232,6 +236,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
       base_revision TEXT NOT NULL,
       current_revision TEXT NOT NULL,
       source_json TEXT,
+      external_head_revision TEXT,
       delivery_json TEXT,
       delivery_stage TEXT,
       delivery_evidence_json TEXT,
@@ -293,6 +298,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
   );
   for (const [name, type] of [
     ['source_json', 'TEXT'],
+    ['external_head_revision', 'TEXT'],
     ['delivery_json', 'TEXT'],
     ['delivery_stage', 'TEXT'],
     ['delivery_evidence_json', 'TEXT'],
@@ -390,8 +396,8 @@ export class PlanRepository {
         .prepare(
           `INSERT INTO v3_plans
            (plan_id,command_key,project_key,objective,repository_path,base_revision,current_revision,
-            source_json,delivery_json,delivery_stage,status,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+            source_json,external_head_revision,delivery_json,delivery_stage,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           planId,
@@ -402,6 +408,7 @@ export class PlanRepository {
           baseRevision,
           baseRevision,
           JSON.stringify(source),
+          source.kind === 'EXTERNAL_CHANGE' ? source.revision : null,
           delivery ? JSON.stringify(delivery) : null,
           delivery ? 'PENDING' : null,
           'PENDING',
@@ -518,6 +525,14 @@ export class PlanRepository {
         )
         .all(workItemId) as unknown as Array<{ execution_id: string }>
     ).map((row) => row.execution_id);
+  }
+
+
+  setExternalHeadRevision(planId: string, revision: string): void {
+    if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error('EXTERNAL_HEAD_REVISION_INVALID');
+    this.#db
+      .prepare('UPDATE v3_plans SET external_head_revision=?,updated_at=? WHERE plan_id=?')
+      .run(revision, Date.now(), planId);
   }
 
   setPlanStatus(planId: string, status: PlanStatus, blockedReason?: string): void {

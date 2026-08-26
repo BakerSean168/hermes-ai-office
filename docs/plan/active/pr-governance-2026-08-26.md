@@ -97,6 +97,17 @@ Status: COMPLETE
 - Keep PR prose out of the reviewer objective.
 - Real Digital Biome PR #31 intake smoke passed without changing its worktree.
 
+### P2.5 — Publish reviewed repairs back to the PR head
+
+Status: COMPLETE
+
+- A passing re-review of `IMPLEMENT_FIX` is not enough by itself; the reviewed repair must be published back to the same PR branch before governance can pass.
+- Require the repair HEAD to be a clean descendant of the previously governed PR head.
+- Import the reviewed repair through a durable `refs/ai-office/external/.../repairs/...` audit ref.
+- Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten.
+- Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
+- Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.
+
 ### P3 — GitHub governance checks
 
 Status: NEXT
