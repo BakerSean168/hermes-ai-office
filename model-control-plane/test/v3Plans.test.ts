@@ -18,6 +18,8 @@ import type { WorkspaceProvisioningPort } from '../src/v3/workspace.js';
 class PlanHost implements ExecutionHostPort {
   readonly executions: Map<string, ExecutionHostSnapshot>;
   readonly getBarriers = new Map<string, Promise<void>>();
+  nextCreateBarrier?: Promise<void>;
+  nextCreateEntered?: () => void;
   creates = 0;
   gets = 0;
   lastCreateInput?: ExecutionHostCreateInput;
@@ -32,6 +34,12 @@ class PlanHost implements ExecutionHostPort {
   }
 
   async createExecution(input: ExecutionHostCreateInput) {
+    const barrier = this.nextCreateBarrier;
+    const entered = this.nextCreateEntered;
+    this.nextCreateBarrier = undefined;
+    this.nextCreateEntered = undefined;
+    entered?.();
+    if (barrier) await barrier;
     this.creates += 1;
     this.lastCreateInput = input;
     const conversationId = `conversation-${this.creates}`;
@@ -50,6 +58,11 @@ class PlanHost implements ExecutionHostPort {
 
   blockGet(conversationId: string, barrier: Promise<void>) {
     this.getBarriers.set(conversationId, barrier);
+  }
+
+  blockNextCreate(barrier: Promise<void>, entered: () => void) {
+    this.nextCreateBarrier = barrier;
+    this.nextCreateEntered = entered;
   }
 
   async cancelExecution(conversationId: string) {
@@ -852,6 +865,68 @@ test('plan-scoped cancellation stops active workers and survives repeated reques
   } finally {
     await runtime.app.close();
     fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('plan cancellation is serialized with reconciliation so a late worker start cannot resurrect a cancelled plan', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'openhands-builtin': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'cancel-race',
+        objective: 'Never resurrect work after plan cancellation.',
+        analysisSummary: 'Cancellation races a review worker launch.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+      'cancel-race-plan',
+    );
+    const implementation = plan.batches[0]!.workItems[0]!.executions[0]!;
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+
+    let releaseCreate!: () => void;
+    let markCreateEntered!: () => void;
+    const createEntered = new Promise<void>((resolve) => {
+      markCreateEntered = resolve;
+    });
+    host.blockNextCreate(
+      new Promise<void>((resolve) => {
+        releaseCreate = resolve;
+      }),
+      markCreateEntered,
+    );
+
+    const reconcile = runtime.v3.reconcilePlans(plan.planId);
+    await createEntered;
+    const cancellation = runtime.v3.cancelPlan(plan.planId);
+    releaseCreate();
+    await Promise.all([reconcile, cancellation]);
+
+    const body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.workItems[0]!.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.workItems[0]!.executions.at(-1)!.status, 'CANCELLED');
+    assert.equal(host.executions.get('conversation-2')?.status, 'PAUSED');
+  } finally {
+    await runtime.app.close();
   }
 });
 
