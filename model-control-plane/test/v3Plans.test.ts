@@ -1119,6 +1119,8 @@ test('external change plans adopt the existing revision, review first, and repai
     ).json();
     const secondReview = body.batches[0].workItems[0].executions[3];
     assert.equal(secondReview.phase, 'VERIFY_REVIEW');
+    assert.match(host.lastCreateInput?.objective ?? '', /This is an external change review/);
+    assert.match(host.lastCreateInput?.objective ?? '', /PASS, FAIL, or INVALID/);
 
     host.succeed(secondReview.refs.openhandsConversationId, 'PASS\nProblem validity and contract preservation verified.');
     await runtime.v3.reconcilePlans(planId);
@@ -1278,9 +1280,10 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
       });
       return {
         revision: input.expectedHeadRevision,
-        state: stale ? 'error' : input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        state: stale ? 'pending' : input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
         stale,
         observedHeadRevision: stale ? ORIGINAL : input.expectedHeadRevision,
+        published: !stale,
       };
     },
   };

@@ -103,6 +103,47 @@ test('GitHub PR repair publication refuses to overwrite a concurrently updated h
   assert.equal(pushed, false);
 });
 
+test('GitHub PR repair publication classifies a force-with-lease race as a changed PR head', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-lease-race-repo-'));
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-lease-race-workspace-'));
+  const concurrentHead = '4444444444444444444444444444444444444444';
+  let pushAttempted = false;
+  const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key.includes('status --porcelain')) return '';
+    if (key.endsWith('rev-parse HEAD')) return REPAIRED;
+    if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
+    if (key === 'gh api repos/example/project/pulls/42') return pull(ORIGINAL);
+    if (key.includes('bundle create ')) return '';
+    if (key.startsWith('git fetch ') && key.includes('refs/ai-office/external/github/pr-42/repairs/')) return '';
+    if (key.startsWith('git push --force-with-lease=')) {
+      pushAttempted = true;
+      throw new Error('stale info');
+    }
+    if (key === 'git ls-remote origin refs/heads/jules/fix-42') {
+      return `${concurrentHead}\trefs/heads/jules/fix-42`;
+    }
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+        planId: 'plan_lease_race',
+        repositoryPath,
+        workspacePath,
+        repository: 'example/project',
+        pullRequestNumber: 42,
+        headRepository: 'example/project',
+        headRef: 'jules/fix-42',
+        expectedHeadRevision: ORIGINAL,
+      }),
+    /GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION/,
+  );
+  assert.equal(pushAttempted, true);
+});
+
 test('GitHub PR repair publication fails closed for fork heads', async () => {
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-fork-repo-'));
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-fork-workspace-'));

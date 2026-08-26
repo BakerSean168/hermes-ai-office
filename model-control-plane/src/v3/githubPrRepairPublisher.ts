@@ -272,24 +272,54 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
         ['fetch', bundle, `+HEAD:${auditRef}`],
         owner,
       );
-      await this.#run(
-        repositoryPath,
-        'git',
-        [
-          'push',
-          `--force-with-lease=refs/heads/${input.headRef}:${input.expectedHeadRevision}`,
-          remote,
-          `${auditRef}:refs/heads/${input.headRef}`,
-        ],
-        owner,
-      );
-      const remoteHead = await this.#run(
-        repositoryPath,
-        'git',
-        ['ls-remote', remote, `refs/heads/${input.headRef}`],
-        owner,
-      );
-      if ((remoteHead.trim().split(/\s+/, 1)[0] ?? '') !== publishedRevision) {
+      let observedRemoteRevision = '';
+      try {
+        await this.#run(
+          repositoryPath,
+          'git',
+          [
+            'push',
+            `--force-with-lease=refs/heads/${input.headRef}:${input.expectedHeadRevision}`,
+            remote,
+            `${auditRef}:refs/heads/${input.headRef}`,
+          ],
+          owner,
+        );
+      } catch (pushError) {
+        try {
+          const remoteHead = await this.#run(
+            repositoryPath,
+            'git',
+            ['ls-remote', remote, `refs/heads/${input.headRef}`],
+            owner,
+          );
+          observedRemoteRevision = remoteHead.trim().split(/\s+/, 1)[0] ?? '';
+        } catch {
+          // Preserve the original transport error if the post-failure probe is also unavailable.
+        }
+        if (observedRemoteRevision === publishedRevision) {
+          // The server may have accepted the exact reviewed repair even if the client lost the
+          // final push response. Remote verification is authoritative and makes this attempt
+          // crash/transport-idempotent without a second force push.
+        } else if (
+          observedRemoteRevision &&
+          observedRemoteRevision !== input.expectedHeadRevision
+        ) {
+          throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
+        } else {
+          throw pushError;
+        }
+      }
+      if (!observedRemoteRevision) {
+        const remoteHead = await this.#run(
+          repositoryPath,
+          'git',
+          ['ls-remote', remote, `refs/heads/${input.headRef}`],
+          owner,
+        );
+        observedRemoteRevision = remoteHead.trim().split(/\s+/, 1)[0] ?? '';
+      }
+      if (observedRemoteRevision !== publishedRevision) {
         throw new Error('GITHUB_PR_REPAIR_REMOTE_VERIFICATION_FAILED');
       }
     } finally {

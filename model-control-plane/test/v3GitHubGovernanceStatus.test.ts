@@ -59,6 +59,7 @@ test('GitHub governance status publishes pending and success on the exact PR hea
     state: 'pending',
     stale: false,
     observedHeadRevision: HEAD,
+    published: true,
   });
   assert.ok(
     state.commands.some(
@@ -75,6 +76,7 @@ test('GitHub governance status publishes pending and success on the exact PR hea
     state: 'success',
     stale: false,
     observedHeadRevision: HEAD,
+    published: true,
   });
   assert.ok(state.commands.some((command) => command.includes('state=success')));
 });
@@ -90,11 +92,33 @@ test('GitHub governance status never marks a stale reviewed SHA green after PR s
     state: 'error',
     stale: true,
     observedHeadRevision: NEW_HEAD,
+    published: true,
   });
   const post = state.commands.find((command) => command.includes('gh api -X POST')) ?? '';
   assert.match(post, /state=error/);
   assert.match(post, /review is stale because the pull request head changed/);
   assert.doesNotMatch(post, /state=success/);
+});
+
+test('GitHub governance status defers publication while the control-plane repair head is propagating', async () => {
+  const state = fixture();
+  const reporter = new GitHubGovernanceStatus({ commandRunner: state.runner });
+
+  const result = await reporter.publish({
+    ...input(state.repositoryPath),
+    expectedHeadRevision: NEW_HEAD,
+    previousHeadRevision: HEAD,
+    planStatus: 'RUNNING',
+  });
+
+  assert.deepEqual(result, {
+    revision: NEW_HEAD,
+    state: 'pending',
+    stale: true,
+    observedHeadRevision: HEAD,
+    published: false,
+  });
+  assert.equal(state.commands.some((command) => command.includes('gh api -X POST')), false);
 });
 
 test('GitHub governance status maps blocking and cancelled plans to non-green commit statuses', async () => {

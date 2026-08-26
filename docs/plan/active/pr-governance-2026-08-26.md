@@ -65,7 +65,7 @@ this plan.
 ### P0 — Review-first external change state
 
 Status: COMPLETE
-Commit: `204c6f8`
+Commit: `fb13606`
 
 - Add deterministic `ADOPT_CHANGE`.
 - Persist additive `EXTERNAL_CHANGE` source metadata.
@@ -75,14 +75,14 @@ Commit: `204c6f8`
 ### P1 — Provider-native Antigravity backend
 
 Status: COMPLETE
-Commit: `6ad0a88`
+Commit: `79e6580`
 
 - Add explicit `PROVIDER_NATIVE` transport.
 - Add opt-in Antigravity review/repair backends.
 - Stream objectives through stdin; constrain review output with JSON Schema.
 - Persist normalized terminal status and reported usage.
 - Run `agy` as the authenticated `dev` identity inside a private mount namespace.
-- Preserve OpenHands ownership while granting the bounded writer workspace group access when required.
+- Preserve OpenHands ownership while granting the bounded writer workspace group access when required; recursive permission grants run asynchronously so large workspaces cannot block the control-plane event loop.
 - Real reviewer and writer smoke tests passed on GCP Dev.
 
 ### P2 — GitHub PR immutable intake
@@ -104,11 +104,12 @@ Status: COMPLETE
 - A passing re-review of `IMPLEMENT_FIX` is not enough by itself; the reviewed repair must be published back to the same PR branch before governance can pass.
 - Require the repair HEAD to be a clean descendant of the previously governed PR head.
 - Import the reviewed repair through a durable `refs/ai-office/external/.../repairs/...` audit ref.
-- Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten.
+- Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten; if the lease races after the API precheck, re-read the remote head and classify a third-party update as `GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION`.
 - Treat an already-visible exact reviewed repair as a successful crash replay, rebuilding the audit ref instead of misclassifying the control plane's own prior push as an external race.
 - Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
 - Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.
-- HARDENED: if GitHub PR metadata temporarily lags immediately after our repair push, do not persist a terminal governance fingerprint until the PR API observes the repaired head; genuine third-party synchronize heads still close the stale plan with `error`.
+- HARDENED: if GitHub PR metadata temporarily lags immediately after our repair push, defer the status write entirely and do not persist a terminal governance fingerprint until the PR API observes the repaired head; genuine third-party synchronize heads still close the stale plan with `error`.
+- HARDENED: every fresh review in the external-change entry batch retains `PASS / FAIL / INVALID` semantics, including the review after `IMPLEMENT_FIX`, so a later reviewer can still overturn an unsupported problem claim.
 
 ### P3 — GitHub governance status
 

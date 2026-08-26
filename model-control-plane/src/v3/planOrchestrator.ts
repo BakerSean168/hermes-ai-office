@@ -197,7 +197,8 @@ export class DurablePlanOrchestrator {
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
     const previous = previousExecutionId ? this.#links.get(previousExecutionId) : null;
-    const externalReview = phase === 'VERIFY_REVIEW' && previous?.phase === 'ADOPT_CHANGE';
+    const externalReview =
+      phase === 'VERIFY_REVIEW' && plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0;
     const isRepositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT';
     const snapshot = await this.#executions.start(
       {
@@ -831,16 +832,15 @@ export class DurablePlanOrchestrator {
         pullRequestNumber: plan.source.origin.pullRequestNumber,
         pullRequestUrl: plan.source.origin.pullRequestUrl,
         expectedHeadRevision: revision,
+        previousHeadRevision:
+          plan.externalHeadRevision && plan.externalHeadRevision !== plan.source.revision
+            ? plan.source.revision
+            : undefined,
         planId: plan.planId,
         planStatus: plan.status,
         blockedReason: plan.blockedReason,
       });
-      const repairHeadPropagationLag =
-        publication.stale &&
-        plan.externalHeadRevision !== undefined &&
-        plan.externalHeadRevision !== plan.source.revision &&
-        publication.observedHeadRevision === plan.source.revision;
-      if (!repairHeadPropagationLag) {
+      if (publication.published !== false) {
         this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
       }
     } catch {

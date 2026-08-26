@@ -1,6 +1,7 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type {
   ExecutionHostCreateInput,
@@ -8,6 +9,8 @@ import type {
   ExecutionHostSnapshot,
 } from '../ports.js';
 import type { ExecutionFailure, UsageSummary } from '../types.js';
+
+const execFileAsync = promisify(execFile);
 
 interface JsonRecord {
   [key: string]: unknown;
@@ -215,7 +218,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     return parsed;
   }
 
-  #grantNativeWriterAccess(cwd: string): void {
+  async #grantNativeWriterAccess(cwd: string): Promise<void> {
     if (this.#gid == null) return;
     const stat = fs.statSync(cwd);
     const groupCanWriteAndTraverse = (stat.mode & 0o030) === 0o030;
@@ -223,8 +226,8 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     // OpenHands remains the owning UID. Grant only the authenticated native-agent
     // group write access so either execution host can verify/repair the same bounded
     // workspace without running Antigravity as root or copying consumer credentials.
-    execFileSync('/usr/bin/chgrp', ['-R', String(this.#gid), cwd], { timeout: 120_000 });
-    execFileSync('/usr/bin/chmod', ['-R', 'g+rwX', cwd], { timeout: 120_000 });
+    await execFileAsync('/usr/bin/chgrp', ['-R', String(this.#gid), cwd], { timeout: 120_000 });
+    await execFileAsync('/usr/bin/chmod', ['-R', 'g+rwX', cwd], { timeout: 120_000 });
   }
 
   async health(): Promise<'OK' | 'UNAVAILABLE'> {
@@ -254,7 +257,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     const cwd = this.#workspacePath(input.repositoryPath);
     const cwdStat = fs.statSync(cwd, { throwIfNoEntry: false });
     if (!cwdStat?.isDirectory()) throw new Error('ANTIGRAVITY_WORKSPACE_NOT_FOUND');
-    if (input.phase !== 'VERIFY_REVIEW') this.#grantNativeWriterAccess(cwd);
+    if (input.phase !== 'VERIFY_REVIEW') await this.#grantNativeWriterAccess(cwd);
 
     const stdoutFile = path.join(directory, 'stdout.ndjson');
     const stderrFile = path.join(directory, 'stderr.log');

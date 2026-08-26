@@ -85,6 +85,7 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   const policy = parse(policyRaw) as any;
   const unit = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-model-control-plane.service'), 'utf8');
   const wrapper = fs.readFileSync(path.join(root, 'scripts/run-antigravity-sandbox.sh'), 'utf8');
+  const adapter = fs.readFileSync(path.join(root, 'src/v3/adapters/antigravity.ts'), 'utf8');
   const app = fs.readFileSync(path.join(root, 'src/app.ts'), 'utf8');
 
   assert.equal(policy.backends['antigravity-review'].kind, 'external_adapter');
@@ -109,4 +110,7 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   );
   assert.match(wrapper, /--clear-groups/);
   assert.match(wrapper, /--no-new-privs/);
+  assert.doesNotMatch(adapter, /execFileSync/);
+  assert.match(adapter, /await execFileAsync\('\/usr\/bin\/chgrp'/);
+  assert.match(adapter, /await execFileAsync\('\/usr\/bin\/chmod'/);
 });

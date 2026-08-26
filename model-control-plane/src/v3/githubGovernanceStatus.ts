@@ -20,6 +20,7 @@ export interface GitHubGovernanceStatusInput {
   pullRequestNumber: number;
   pullRequestUrl: string;
   expectedHeadRevision: string;
+  previousHeadRevision?: string;
   planId: string;
   planStatus: PlanStatus;
   blockedReason?: string;
@@ -30,6 +31,7 @@ export interface GitHubGovernanceStatusResult {
   state: 'pending' | 'success' | 'failure' | 'error';
   stale: boolean;
   observedHeadRevision?: string;
+  published?: boolean;
 }
 
 export interface GitHubGovernanceStatusPort {
@@ -131,6 +133,7 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
   async publish(input: GitHubGovernanceStatusInput): Promise<GitHubGovernanceStatusResult> {
     validateRepository(input.repository);
     validateSha(input.expectedHeadRevision);
+    if (input.previousHeadRevision) validateSha(input.previousHeadRevision);
     if (!Number.isInteger(input.pullRequestNumber) || input.pullRequestNumber < 1) {
       throw new Error('GITHUB_GOVERNANCE_PR_NUMBER_INVALID');
     }
@@ -152,6 +155,22 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
     }
 
     const currentHead = pullRequest.head?.sha?.trim() ?? '';
+    const repairHeadPropagationLag =
+      pullRequest.number === input.pullRequestNumber &&
+      pullRequest.state === 'open' &&
+      input.previousHeadRevision !== undefined &&
+      input.previousHeadRevision !== input.expectedHeadRevision &&
+      currentHead === input.previousHeadRevision;
+    if (repairHeadPropagationLag) {
+      return {
+        revision: input.expectedHeadRevision,
+        state: 'pending',
+        stale: true,
+        observedHeadRevision: currentHead || undefined,
+        published: false,
+      };
+    }
+
     const stale =
       pullRequest.number !== input.pullRequestNumber ||
       pullRequest.state !== 'open' ||
@@ -183,6 +202,7 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
       state: desired.state,
       stale,
       observedHeadRevision: currentHead || undefined,
+      published: true,
     };
   }
 }
