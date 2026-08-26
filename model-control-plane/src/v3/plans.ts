@@ -9,7 +9,12 @@ export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | '
 
 export type PlanSource =
   | { kind: 'TASK' }
-  | { kind: 'EXTERNAL_CHANGE'; revision: string };
+  | {
+      kind: 'EXTERNAL_CHANGE';
+      revision: string;
+      reviewBackend?: string;
+      repairBackend?: string;
+    };
 
 export interface CreatePlanInput {
   projectKey: string;

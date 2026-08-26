@@ -95,6 +95,8 @@ export function registerV3Routes(
             ? {
                 kind: String(source.kind ?? '').toUpperCase() as 'TASK' | 'EXTERNAL_CHANGE',
                 ...(source.revision ? { revision: String(source.revision) } : {}),
+                ...(source.reviewBackend ? { reviewBackend: String(source.reviewBackend) } : {}),
+                ...(source.repairBackend ? { repairBackend: String(source.repairBackend) } : {}),
               } as import('./plans.js').PlanSource
             : undefined,
           delivery: delivery

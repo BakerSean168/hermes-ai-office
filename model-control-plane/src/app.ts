@@ -1,4 +1,5 @@
 import Fastify, { type FastifyInstance } from 'fastify';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,7 +12,9 @@ import {
   LiteLlmModelRegistry,
   LiteLlmSpendObservability,
 } from './v3/adapters/liteLlm.js';
+import { AntigravityExecutionHost } from './v3/adapters/antigravity.js';
 import { EnvFileValueProvider, OpenHandsExecutionHost } from './v3/adapters/openHands.js';
+import { RoutedExecutionHost } from './v3/adapters/routedExecutionHost.js';
 import type {
   ExecutionHostPort,
   ModelGatewayPort,
@@ -68,13 +71,50 @@ export async function buildControlPlane(
   const openHandsEnv =
     env.MODEL_CP_V3_OPENHANDS_ENV_FILE ?? '/srv/hermes-personal/secrets/openhands-v3.env';
   const executionSecrets = new EnvFileValueProvider(openHandsEnv);
+  const configuredBackends = new Set(
+    (env.MODEL_CP_V3_ENABLED_BACKENDS ?? 'opencode-acp,openhands-builtin')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
   const executionHost =
     options.v3ExecutionHost ??
-    new OpenHandsExecutionHost({
-      baseUrl: env.MODEL_CP_V3_OPENHANDS_URL ?? 'http://127.0.0.1:18000',
-      secrets: executionSecrets,
-      policy,
-    });
+    (() => {
+      const openHandsHost = new OpenHandsExecutionHost({
+        baseUrl: env.MODEL_CP_V3_OPENHANDS_URL ?? 'http://127.0.0.1:18000',
+        secrets: executionSecrets,
+        policy,
+      });
+      const antigravityEnabled =
+        configuredBackends.has('antigravity-review') || configuredBackends.has('antigravity-worker');
+      if (!antigravityEnabled) return openHandsHost;
+      const antigravityHome = env.MODEL_CP_V3_ANTIGRAVITY_HOME ?? '/home/dev';
+      const antigravityOwner = fs.statSync(antigravityHome);
+      const antigravityHost = new AntigravityExecutionHost({
+        binary: env.MODEL_CP_V3_ANTIGRAVITY_BIN ?? '/home/dev/.local/bin/agy',
+        stateRoot:
+          env.MODEL_CP_V3_ANTIGRAVITY_STATE_ROOT ??
+          '/srv/hermes-personal/data/model-control-plane/antigravity',
+        workspaceHostRoot: env.MODEL_CP_V3_WORKSPACE_ROOT ?? '/opt/data/hermes-ai-office-v3/workspaces',
+        workspaceExecutionRoot: env.MODEL_CP_V3_OPENHANDS_WORKSPACE_ROOT ?? '/workspace',
+        home: antigravityHome,
+        uid: Number(env.MODEL_CP_V3_ANTIGRAVITY_UID ?? antigravityOwner.uid),
+        gid: Number(env.MODEL_CP_V3_ANTIGRAVITY_GID ?? antigravityOwner.gid),
+        user: env.MODEL_CP_V3_ANTIGRAVITY_USER ?? 'dev',
+        printTimeout: env.MODEL_CP_V3_ANTIGRAVITY_PRINT_TIMEOUT ?? '20m',
+        sandboxWrapper:
+          env.MODEL_CP_V3_ANTIGRAVITY_SANDBOX_WRAPPER ??
+          path.resolve(here, '../scripts/run-antigravity-sandbox.sh'),
+      });
+      return new RoutedExecutionHost({
+        defaultHost: openHandsHost,
+        byBackend: {
+          'antigravity-review': antigravityHost,
+          'antigravity-worker': antigravityHost,
+        },
+        byConversationPrefix: { 'antigravity:': antigravityHost },
+      });
+    })();
   const modelGateway =
     options.v3ModelGateway ??
     new LiteLlmModelGateway({
@@ -120,12 +160,6 @@ export async function buildControlPlane(
         gid: Number(env.MODEL_CP_V3_OPENHANDS_GID ?? 10001),
       },
     });
-  const configuredBackends = new Set(
-    (env.MODEL_CP_V3_ENABLED_BACKENDS ?? 'opencode-acp,openhands-builtin')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean),
-  );
   const backendAvailability =
     options.v3BackendAvailability ??
     Object.fromEntries(

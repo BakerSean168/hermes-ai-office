@@ -60,6 +60,7 @@ phases:
     model_class: implementation-efficient
     transport_preference:
       - LITELLM_MANAGED
+      - PROVIDER_NATIVE
     workspace_mode: reuse_implementation_workspace
     session_policy: resume_preferred
 
@@ -71,6 +72,7 @@ phases:
     model_class: gpt-5.6-sol
     transport_preference:
       - LITELLM_MANAGED
+      - PROVIDER_NATIVE
     workspace_mode: review_snapshot
     session_policy: fresh_required
 
@@ -84,6 +86,24 @@ phases:
     session_policy: fresh
 
 backends:
+  antigravity-review:
+    kind: external_adapter
+    enabled: true
+    default_model: gemini-3.1-pro-high
+    supports:
+      litellm_managed: false
+      provider_native: true
+      write: false
+
+  antigravity-worker:
+    kind: external_adapter
+    enabled: true
+    default_model: gemini-3.7-flash-high
+    supports:
+      litellm_managed: false
+      provider_native: true
+      write: true
+
   control-plane-change-adopter:
     kind: internal
     enabled: true

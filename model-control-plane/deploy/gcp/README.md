@@ -10,6 +10,7 @@ Hermes on Oracle2
   -> GCP Control Plane 127.0.0.1:8320
   -> OpenHands 127.0.0.1:18000
   -> isolated ACP worker workspace
+  -> optional provider-native Antigravity worker (mount namespace + consumer auth)
   -> Oracle2 LiteLLM over tailnet HTTPS
 ```
 
@@ -22,6 +23,8 @@ A backend can be present in `config/development-policy.yaml` without being produ
 Current production review order is `codex-review-headless -> claude-code-review-headless -> openhands-builtin`, all on the `gpt-5.6-sol` logical model. The headless adapters deliberately keep OpenHands/ACP as the worker contract while invoking the native Codex/Claude one-shot CLIs so a third-party interactive ACP wrapper cannot leave a completed review turn hanging. Premium review is fail-closed: `gpt-5.6-sol` must not cross-fallback to an implementation-tier model such as GLM.
 
 The initial cutover enables OpenCode, DSH, and OpenHands builtin. Codex, Claude Code, and ZCode remain registered candidates until their ACP/runtime compatibility smoke is fully green.
+
+Antigravity is a deliberate provider-native exception to the LiteLLM-managed model path. It is registered as an opt-in external adapter only; ordinary task routing is unchanged. Review uses `gemini-3.1-pro-high`, repair uses `gemini-3.7-flash-high`, and both remain disabled at runtime until explicitly added to `MODEL_CP_V3_ENABLED_BACKENDS`. The adapter sends objectives over stdin using Antigravity stream-JSON, constrains review results with JSON Schema, stores only durable execution metadata/output, and runs the CLI as the authenticated `dev` identity inside a private mount namespace that hides unrelated homes and sibling AI Office workspaces. The control-plane service performs the mount setup as root and drops privileges before `agy` starts.
 
 ## Install
 

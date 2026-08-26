@@ -16,6 +16,7 @@ import {
 
 interface BackendSupportsConfig {
   litellm_managed?: boolean | 'conditional';
+  provider_native?: boolean;
   write?: boolean;
 }
 
@@ -32,6 +33,7 @@ export interface BackendPolicyConfig {
   enabled: boolean;
   command?: string[];
   acp_server?: string;
+  default_model?: string;
   managed_model_prefix?: string;
   managed_env?: Record<string, ManagedEnvironmentSource>;
   static_env?: Record<string, string>;
@@ -63,6 +65,7 @@ function isDevelopmentPhase(value: string): value is DevelopmentPhase {
 function supportsTransport(backend: BackendPolicyConfig, mode: TransportMode): boolean {
   if (mode === 'INTERNAL') return backend.kind === 'internal';
   if (backend.kind === 'internal') return false;
+  if (mode === 'PROVIDER_NATIVE') return backend.supports?.provider_native === true;
   return backend.supports?.litellm_managed !== false;
 }
 
@@ -207,7 +210,7 @@ export class DevelopmentPolicy {
 
     return {
       backend: backendName,
-      modelClass: override.modelClass?.trim() || phasePolicy.model_class,
+      modelClass: override.modelClass?.trim() || backend.default_model?.trim() || phasePolicy.model_class,
       transportMode,
       workspaceMode: phasePolicy.workspace_mode,
       sessionPolicy: phasePolicy.session_policy,

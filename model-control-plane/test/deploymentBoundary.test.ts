@@ -6,7 +6,7 @@ import { parse } from 'yaml';
 
 const root = path.resolve(import.meta.dirname, '..');
 
-test('LiteLLM is the only provider/model authority and exposes stable logical aliases', () => {
+test('LiteLLM remains the managed model authority and exposes stable logical aliases', () => {
   const raw = fs.readFileSync(path.join(root, 'deploy/litellm/config.yaml'), 'utf8');
   const config = parse(raw) as any;
   assert.deepEqual(config.model_list, []);
@@ -77,4 +77,36 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.match(adapter, /reviewer completed without independent repository command activity/);
   assert.match(adapter, /item\?\.type === 'command_execution'/);
   assert.doesNotMatch(adapter, /sandbox_mode = \"read-only\"/);
+});
+
+
+test('provider-native Antigravity remains opt-in and executes behind the mount sandbox boundary', () => {
+  const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
+  const policy = parse(policyRaw) as any;
+  const unit = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-model-control-plane.service'), 'utf8');
+  const wrapper = fs.readFileSync(path.join(root, 'scripts/run-antigravity-sandbox.sh'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'src/app.ts'), 'utf8');
+
+  assert.equal(policy.backends['antigravity-review'].kind, 'external_adapter');
+  assert.equal(policy.backends['antigravity-review'].supports.provider_native, true);
+  assert.equal(policy.backends['antigravity-worker'].supports.provider_native, true);
+  assert.equal(policy.backends['antigravity-worker'].supports.write, true);
+  assert.doesNotMatch(
+    policy.phases.VERIFY_REVIEW.backend_candidates.join(','),
+    /antigravity/,
+  );
+  assert.doesNotMatch(
+    policy.phases.IMPLEMENT_FIX.backend_candidates.join(','),
+    /antigravity/,
+  );
+  assert.doesNotMatch(unit, /antigravity-review|antigravity-worker/);
+  assert.ok(app.includes("configuredBackends.has('antigravity-review')"));
+  assert.ok(app.includes('if (!antigravityEnabled) return openHandsHost'));
+  assert.ok(wrapper.includes('mount -t tmpfs -o mode=0755 tmpfs /home'));
+  assert.ok(wrapper.includes('mount -t tmpfs -o mode=0755 tmpfs "$workspace_root"'));
+  assert.ok(
+    wrapper.includes('mount --bind "$stash/workspace" "$workspace_root/$workspace_relative"'),
+  );
+  assert.match(wrapper, /--clear-groups/);
+  assert.match(wrapper, /--no-new-privs/);
 });

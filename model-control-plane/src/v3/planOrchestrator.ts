@@ -245,7 +245,8 @@ export class DurablePlanOrchestrator {
   ): Promise<void> {
     const executionIds = this.#repository.executionIds(item.workItemId);
     if (executionIds.length === 0) {
-      const initialPhase = plan.source.kind === 'EXTERNAL_CHANGE' ? 'ADOPT_CHANGE' : 'IMPLEMENT';
+      const initialPhase =
+        plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0 ? 'ADOPT_CHANGE' : 'IMPLEMENT';
       await this.#launchPlanPhase(plan, batch, item, initialPhase, undefined, 1);
       return;
     }
@@ -297,6 +298,7 @@ export class DurablePlanOrchestrator {
         'VERIFY_REVIEW',
         latest.executionId,
         reviewAttempt,
+        plan.source.kind === 'EXTERNAL_CHANGE' ? plan.source.reviewBackend : undefined,
       );
       return;
     }
@@ -336,6 +338,7 @@ export class DurablePlanOrchestrator {
         'IMPLEMENT_FIX',
         latest.executionId,
         fixAttempt,
+        plan.source.kind === 'EXTERNAL_CHANGE' ? plan.source.repairBackend : undefined,
       );
       return;
     }
@@ -678,6 +681,7 @@ export class DurablePlanOrchestrator {
           'VERIFY_REVIEW',
           implementation.executionId,
           attempt,
+          blocked.source.kind === 'EXTERNAL_CHANGE' ? blocked.source.reviewBackend : undefined,
         );
       }
       return;

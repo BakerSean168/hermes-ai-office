@@ -1187,3 +1187,70 @@ test('an invalid external change is blocked without launching a repair writer', 
     await runtime.app.close();
   }
 });
+
+test('external change plans can opt into Antigravity review and repair without changing task defaults', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'antigravity-review': true,
+      'antigravity-worker': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Review and repair an external PR with Antigravity.',
+        analysisSummary: 'External review uses explicit provider-native routing.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: 'external-head-revision',
+          reviewBackend: 'antigravity-review',
+          repairBackend: 'antigravity-worker',
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Verify the defect and implementation quality.',
+              },
+            ],
+          },
+        ],
+      },
+      'external-antigravity-routing',
+    );
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    assert.equal(review.phase, 'VERIFY_REVIEW');
+    assert.equal(review.selection.backend, 'antigravity-review');
+    assert.equal(review.selection.transportMode, 'PROVIDER_NATIVE');
+    assert.equal(review.selection.modelClass, 'gemini-3.1-pro-high');
+
+    host.succeed(review.refs.openhandsConversationId!, 'FAIL\nOne blocking defect remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const repair = body.batches[0]!.workItems[0]!.executions[2]!;
+    assert.equal(repair.phase, 'IMPLEMENT_FIX');
+    assert.equal(repair.selection.backend, 'antigravity-worker');
+    assert.equal(repair.selection.transportMode, 'PROVIDER_NATIVE');
+    assert.equal(repair.selection.modelClass, 'gemini-3.7-flash-high');
+  } finally {
+    await runtime.app.close();
+  }
+});
