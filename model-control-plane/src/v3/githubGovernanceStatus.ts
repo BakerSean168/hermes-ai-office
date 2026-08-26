@@ -149,17 +149,40 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
       throw new Error('GITHUB_GOVERNANCE_REPOSITORY_NOT_FOUND');
     }
 
-    const raw = await this.#run(repositoryPath, 'gh', [
-      'api',
-      `repos/${input.repository}/pulls/${input.pullRequestNumber}`,
-    ]);
-    let pullRequest: PullRequestApiView;
-    try {
-      pullRequest = JSON.parse(raw) as PullRequestApiView;
-    } catch {
-      throw new Error('GITHUB_GOVERNANCE_RESPONSE_INVALID');
-    }
+    const readPullRequest = async (): Promise<PullRequestApiView> => {
+      const raw = await this.#run(repositoryPath, 'gh', [
+        'api',
+        `repos/${input.repository}/pulls/${input.pullRequestNumber}`,
+      ]);
+      try {
+        return JSON.parse(raw) as PullRequestApiView;
+      } catch {
+        throw new Error('GITHUB_GOVERNANCE_RESPONSE_INVALID');
+      }
+    };
+    const postStatus = async (
+      revision: string,
+      state: GitHubGovernanceStatusResult['state'],
+      description: string,
+    ): Promise<void> => {
+      validateSha(revision);
+      await this.#run(repositoryPath, 'gh', [
+        'api',
+        '-X',
+        'POST',
+        `repos/${input.repository}/statuses/${revision}`,
+        '-f',
+        `state=${state}`,
+        '-f',
+        `context=${GITHUB_GOVERNANCE_STATUS_CONTEXT}`,
+        '-f',
+        `description=${description.slice(0, 140)}`,
+        '-f',
+        `target_url=${input.pullRequestUrl}`,
+      ]);
+    };
 
+    const pullRequest = await readPullRequest();
     const currentHead = pullRequest.head?.sha?.trim() ?? '';
     const repairAgeMs =
       input.repairPublishedAt == null ? Number.POSITIVE_INFINITY : this.#now() - input.repairPublishedAt;
@@ -192,26 +215,59 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
         }
       : desiredStatus(input.planStatus, input.blockedReason);
 
-    await this.#run(repositoryPath, 'gh', [
-      'api',
-      '-X',
-      'POST',
-      `repos/${input.repository}/statuses/${input.expectedHeadRevision}`,
-      '-f',
-      `state=${desired.state}`,
-      '-f',
-      `context=${GITHUB_GOVERNANCE_STATUS_CONTEXT}`,
-      '-f',
-      `description=${desired.description.slice(0, 140)}`,
-      '-f',
-      `target_url=${input.pullRequestUrl}`,
-    ]);
+    await postStatus(input.expectedHeadRevision, desired.state, desired.description);
+
+    // Commit-status writes are not conditional on the PR head. Re-read the PR after
+    // posting so a synchronize racing between the first read and POST can never leave
+    // a green status as the durable observation for a stale review.
+    const afterPost = await readPullRequest();
+    const afterHead = afterPost.head?.sha?.trim() ?? '';
+    const stillExact =
+      afterPost.number === input.pullRequestNumber &&
+      afterPost.state === 'open' &&
+      afterHead === input.expectedHeadRevision;
+    if (stillExact) {
+      return {
+        revision: input.expectedHeadRevision,
+        state: desired.state,
+        stale,
+        observedHeadRevision: afterHead || undefined,
+        published: true,
+      };
+    }
+
+    const staleDescription = 'Hermes review is stale because the pull request head changed.';
+    if (desired.state !== 'error') {
+      await postStatus(input.expectedHeadRevision, 'error', staleDescription);
+    }
+
+    if (
+      afterPost.number === input.pullRequestNumber &&
+      afterPost.state === 'open' &&
+      afterHead
+    ) {
+      validateSha(afterHead);
+      await postStatus(
+        afterHead,
+        'error',
+        'Hermes governance has not verified this pull request head.',
+      );
+      const confirmed = await readPullRequest();
+      const confirmedHead = confirmed.head?.sha?.trim() ?? '';
+      if (
+        confirmed.number !== input.pullRequestNumber ||
+        confirmed.state !== 'open' ||
+        confirmedHead !== afterHead
+      ) {
+        throw new Error('GITHUB_GOVERNANCE_HEAD_UNSTABLE');
+      }
+    }
 
     return {
       revision: input.expectedHeadRevision,
-      state: desired.state,
-      stale,
-      observedHeadRevision: currentHead || undefined,
+      state: 'error',
+      stale: true,
+      observedHeadRevision: afterHead || undefined,
       published: true,
     };
   }

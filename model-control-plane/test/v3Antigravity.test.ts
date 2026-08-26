@@ -96,6 +96,26 @@ async function terminal(host: AntigravityExecutionHost, conversationId: string) 
   throw new Error('fake Antigravity execution did not terminate');
 }
 
+test('Antigravity mount sandbox rejects homes outside the masked /home root', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-home-boundary-'));
+  const stat = fs.statSync(directory);
+  assert.throws(
+    () =>
+      new AntigravityExecutionHost({
+        binary: fakeAgy(directory),
+        stateRoot: path.join(directory, 'state'),
+        workspaceHostRoot: path.join(directory, 'workspaces'),
+        workspaceExecutionRoot: '/workspace',
+        home: directory,
+        uid: stat.uid,
+        gid: stat.gid,
+        workspaceGid: stat.gid,
+        sandboxWrapper: '/bin/true',
+      }),
+    /ANTIGRAVITY_SANDBOX_HOME_OUTSIDE_MASKED_ROOT/,
+  );
+});
+
 test('Antigravity mount sandbox rejects root or mismatched consumer identities at construction', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-identity-'));
   const workspaceRoot = path.join(directory, 'workspaces');
@@ -103,7 +123,8 @@ test('Antigravity mount sandbox rejects root or mismatched consumer identities a
   const wrapper = path.join(directory, 'wrapper.sh');
   fs.writeFileSync(wrapper, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const binary = fakeAgy(directory);
-  const owner = fs.statSync(directory);
+  const maskedHome = fs.mkdtempSync(path.join('/home/dev', 'antigravity-identity-home-'));
+  const owner = fs.statSync(maskedHome);
 
   assert.throws(
     () =>
@@ -125,13 +146,14 @@ test('Antigravity mount sandbox rejects root or mismatched consumer identities a
         binary,
         stateRoot: path.join(directory, 'state-mismatch'),
         workspaceHostRoot: workspaceRoot,
-        home: directory,
+        home: maskedHome,
         uid: owner.uid,
         gid: owner.gid + 1,
         sandboxWrapper: wrapper,
       }),
     /ANTIGRAVITY_SANDBOX_HOME_OWNER_MISMATCH/,
   );
+  fs.rmSync(maskedHome, { recursive: true, force: true });
 });
 
 test('Antigravity adapter sends the objective only through stdin and normalizes structured review output', async () => {

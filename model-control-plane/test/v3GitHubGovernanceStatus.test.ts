@@ -12,6 +12,7 @@ import {
 
 const HEAD = '1111111111111111111111111111111111111111';
 const NEW_HEAD = '2222222222222222222222222222222222222222';
+const THIRD_HEAD = '3333333333333333333333333333333333333333';
 
 function pull(head = HEAD, state = 'open') {
   return JSON.stringify({ number: 42, state, head: { sha: head } });
@@ -79,6 +80,59 @@ test('GitHub governance status publishes pending and success on the exact PR hea
     published: true,
   });
   assert.ok(state.commands.some((command) => command.includes('state=success')));
+});
+
+test('GitHub governance status rechecks the PR head after posting and fails closed on a publish race', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-governance-post-race-'));
+  const commands: string[] = [];
+  let reads = 0;
+  const runner: GitHubGovernanceCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    commands.push(key);
+    if (key === 'gh api repos/example/project/pulls/42') {
+      reads += 1;
+      return reads === 1 ? pull(HEAD) : pull(NEW_HEAD);
+    }
+    if (key.startsWith('gh api -X POST repos/example/project/statuses/')) return '{}';
+    throw new Error(`unexpected command: ${key}`);
+  };
+  const reporter = new GitHubGovernanceStatus({ commandRunner: runner });
+
+  const result = await reporter.publish({ ...input(repositoryPath), planStatus: 'SUCCEEDED' });
+  assert.deepEqual(result, {
+    revision: HEAD,
+    state: 'error',
+    stale: true,
+    observedHeadRevision: NEW_HEAD,
+    published: true,
+  });
+  assert.ok(commands.some((command) => command.includes(`statuses/${HEAD}`) && command.includes('state=success')));
+  assert.ok(commands.some((command) => command.includes(`statuses/${HEAD}`) && command.includes('state=error')));
+  assert.ok(commands.some((command) => command.includes(`statuses/${NEW_HEAD}`) && command.includes('state=error')));
+  assert.ok(reads >= 3, 'the fail-closed status write must itself be verified against the current PR head');
+});
+
+test('GitHub governance status leaves reconciliation retryable when the PR head keeps moving during fail-closed publication', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'github-governance-unstable-head-'));
+  let reads = 0;
+  const runner: GitHubGovernanceCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'gh api repos/example/project/pulls/42') {
+      reads += 1;
+      if (reads === 1) return pull(HEAD);
+      if (reads === 2) return pull(NEW_HEAD);
+      return pull(THIRD_HEAD);
+    }
+    if (key.startsWith('gh api -X POST repos/example/project/statuses/')) return '{}';
+    throw new Error(`unexpected command: ${key}`);
+  };
+  const reporter = new GitHubGovernanceStatus({ commandRunner: runner });
+
+  await assert.rejects(
+    () => reporter.publish({ ...input(repositoryPath), planStatus: 'SUCCEEDED' }),
+    /GITHUB_GOVERNANCE_HEAD_UNSTABLE/,
+  );
+  assert.equal(reads, 3);
 });
 
 test('GitHub governance status never marks a stale reviewed SHA green after PR synchronize', async () => {

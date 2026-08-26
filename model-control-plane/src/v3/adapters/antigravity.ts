@@ -216,6 +216,10 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
       ) {
         throw new Error('ANTIGRAVITY_SANDBOX_NON_ROOT_IDENTITY_REQUIRED');
       }
+      const maskedHomeRoot = path.resolve('/home');
+      if (this.#home === maskedHomeRoot || !inside(this.#home, maskedHomeRoot)) {
+        throw new Error('ANTIGRAVITY_SANDBOX_HOME_OUTSIDE_MASKED_ROOT');
+      }
       const homeStat = fs.statSync(this.#home, { throwIfNoEntry: false });
       if (!homeStat?.isDirectory()) throw new Error('ANTIGRAVITY_SANDBOX_HOME_NOT_FOUND');
       if (homeStat.uid !== this.#uid || homeStat.gid !== this.#gid) {

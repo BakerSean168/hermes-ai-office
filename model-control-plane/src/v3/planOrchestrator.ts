@@ -211,7 +211,7 @@ export class DurablePlanOrchestrator {
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
     const previous = previousExecutionId ? this.#links.get(previousExecutionId) : null;
-    const externalChangeEntry = plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0;
+    const externalChangeEntry = plan.source.kind === 'EXTERNAL_CHANGE';
     const externalReview = phase === 'VERIFY_REVIEW' && externalChangeEntry;
     const isRepositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT';
     const snapshot = await this.#executions.start(

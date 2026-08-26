@@ -1379,6 +1379,88 @@ test('ADOPT_CHANGE replays the same deterministic execution after a restart cras
   }
 });
 
+test('legacy multi-batch external plans keep the untrusted-input trust boundary beyond batch zero', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'external-multibatch-trust-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'antigravity-worker': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Preserve external trust across every legacy batch.',
+        analysisSummary: 'A pre-gate durable plan may contain more than one batch.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'first',
+            title: 'First external batch',
+            workItems: [{ key: 'first-item', title: 'First', objective: 'Review external change.' }],
+          },
+          {
+            key: 'second',
+            title: 'Legacy follow-up batch',
+            dependsOn: ['first'],
+            workItems: [{ key: 'second-item', title: 'Second', objective: 'Apply follow-up.' }],
+          },
+        ],
+      },
+      'external-multibatch-trust',
+    );
+    const db = new DatabaseSync(dbFile);
+    db.prepare('UPDATE v3_plans SET source_json=? WHERE plan_id=?').run(
+      JSON.stringify({ ...plan.source, repairBackend: 'antigravity-worker' }),
+      plan.planId,
+    );
+    db.close();
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'PASS\nFirst batch verified.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    let secondExecutions = body.batches[1]!.workItems[0]!.executions;
+    if (secondExecutions.length === 0) {
+      await runtime.v3.reconcilePlans(plan.planId);
+      body = (await runtime.v3.getPlan(plan.planId, true))!;
+      secondExecutions = body.batches[1]!.workItems[0]!.executions;
+    }
+    const implementation = secondExecutions.at(-1)!;
+    assert.equal(implementation.phase, 'IMPLEMENT');
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[1]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(secondReview.phase, 'VERIFY_REVIEW');
+    host.succeed(secondReview.refs.openhandsConversationId!, 'FAIL\nBlocking defect.');
+    await assert.rejects(
+      () => runtime.v3.reconcilePlans(plan.planId),
+      /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+    );
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.batches[1]!.workItems[0]!.executions.at(-1)!.phase, 'VERIFY_REVIEW');
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('external change plans adopt the existing revision, review first, and repair only after a blocking review', async () => {
   const host = new PlanHost();
   integrationCount = 0;
