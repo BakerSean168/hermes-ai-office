@@ -62,6 +62,8 @@ function isDevelopmentPhase(value: string): value is DevelopmentPhase {
   return DEVELOPMENT_PHASES.includes(value as DevelopmentPhase);
 }
 
+const WRITER_PHASES = new Set<DevelopmentPhase>(['IMPLEMENT', 'IMPLEMENT_FIX']);
+
 function supportsTransport(backend: BackendPolicyConfig, mode: TransportMode): boolean {
   if (mode === 'INTERNAL') return backend.kind === 'internal';
   if (backend.kind === 'internal') return false;
@@ -198,6 +200,7 @@ export class DevelopmentPolicy {
       const backend = this.config.backends[name];
       if (!backend?.enabled) return false;
       if (availability[name] === false) return false;
+      if (WRITER_PHASES.has(phase) && backend.supports?.write !== true) return false;
       return true;
     });
     if (!backendName) throw new Error('POLICY_NO_ELIGIBLE_BACKEND');

@@ -110,6 +110,14 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
     wrapper.includes('mount --bind "$stash/workspace" "$workspace_root/$workspace_relative"'),
   );
   assert.ok(wrapper.includes('cd "$workspace_root/$workspace_relative"'));
+  assert.match(wrapper, /--workspace-gid/);
+  assert.match(wrapper, /mount -t tmpfs -o .*size=64m.*tmpfs "\$stash\/auth"/);
+  assert.match(wrapper, /auth_files=\(/);
+  assert.match(wrapper, /antigravity-oauth-token/);
+  assert.match(wrapper, /cp -p -- "\$src" "\$stash\/auth\/\$rel"/);
+  assert.doesNotMatch(wrapper, /mount --bind "\$auth"/);
+  assert.match(wrapper, /umask 0002/);
+  assert.match(app, /MODEL_CP_V3_ANTIGRAVITY_WORKSPACE_GID/);
   assert.match(wrapper, /--clear-groups/);
   assert.match(wrapper, /--bounding-set=-all/);
   assert.match(wrapper, /--inh-caps=-all/);

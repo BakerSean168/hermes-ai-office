@@ -133,6 +133,20 @@ test('development policy rejects an unavailable explicit backend', () => {
   );
 });
 
+test('writer phases reject read-only backends even when explicitly overridden', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  for (const phase of ['IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
+    assert.throws(
+      () => policy.select(phase, { backend: 'antigravity-review' }, allAvailable),
+      /POLICY_NO_ELIGIBLE_BACKEND/,
+    );
+  }
+  assert.equal(
+    policy.select('IMPLEMENT_FIX', { backend: 'antigravity-worker' }, allAvailable).backend,
+    'antigravity-worker',
+  );
+});
+
 test('FINALIZE uses the deterministic internal finalizer', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   const selected = policy.select('FINALIZE', {}, {});

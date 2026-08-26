@@ -21,6 +21,7 @@ interface AntigravityExecutionMeta {
   pid: number;
   model: string;
   phase: string;
+  workspaceHostPath?: string;
   startedAt: string;
 }
 
@@ -32,6 +33,7 @@ export interface AntigravityExecutionHostOptions {
   home: string;
   uid?: number;
   gid?: number;
+  workspaceGid?: number;
   user?: string;
   printTimeout?: string;
   sandboxWrapper?: string;
@@ -177,6 +179,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
   readonly #home: string;
   readonly #uid?: number;
   readonly #gid?: number;
+  readonly #workspaceGid?: number;
   readonly #user: string;
   readonly #printTimeout: string;
   readonly #sandboxWrapper?: string;
@@ -189,6 +192,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     this.#home = path.resolve(options.home);
     this.#uid = options.uid;
     this.#gid = options.gid;
+    this.#workspaceGid = options.workspaceGid ?? options.gid;
     this.#user = options.user ?? path.basename(this.#home);
     this.#printTimeout = options.printTimeout ?? '20m';
     this.#sandboxWrapper = options.sandboxWrapper ? path.resolve(options.sandboxWrapper) : undefined;
@@ -196,8 +200,10 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
       if (
         !Number.isInteger(this.#uid) ||
         !Number.isInteger(this.#gid) ||
+        !Number.isInteger(this.#workspaceGid) ||
         (this.#uid ?? 0) <= 0 ||
-        (this.#gid ?? 0) <= 0
+        (this.#gid ?? 0) <= 0 ||
+        (this.#workspaceGid ?? 0) <= 0
       ) {
         throw new Error('ANTIGRAVITY_SANDBOX_NON_ROOT_IDENTITY_REQUIRED');
       }
@@ -234,12 +240,14 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
   }
 
   async #grantNativeWriterAccess(cwd: string): Promise<void> {
-    if (this.#gid == null) return;
+    if (this.#workspaceGid == null) return;
     // OpenHands remains the owning UID. Reconcile the complete tree before every
-    // native writer admission: checking only the root directory is insufficient
-    // because OpenHands may have created nested files with its own primary GID
-    // since the previous Antigravity run.
-    await execFileAsync('/usr/bin/chgrp', ['-R', String(this.#gid), cwd], { timeout: 120_000 });
+    // native writer admission so both execution hosts share the same workspace GID.
+    // Antigravity keeps the consumer UID that owns its auth while new files inherit
+    // the OpenHands-compatible primary group selected by workspaceGid.
+    await execFileAsync('/usr/bin/chgrp', ['-R', String(this.#workspaceGid), cwd], {
+      timeout: 120_000,
+    });
     await execFileAsync('/usr/bin/chmod', ['-R', 'g+rwX', cwd], { timeout: 120_000 });
   }
 
@@ -296,9 +304,11 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     let command = this.#binary;
     let commandArgs = args;
     let spawnUid = this.#uid;
-    let spawnGid = this.#gid;
+    let spawnGid = input.phase === 'VERIFY_REVIEW' ? this.#gid : this.#workspaceGid;
     if (this.#sandboxWrapper) {
-      if (this.#uid == null || this.#gid == null) throw new Error('ANTIGRAVITY_SANDBOX_IDENTITY_REQUIRED');
+      if (this.#uid == null || this.#gid == null || this.#workspaceGid == null) {
+        throw new Error('ANTIGRAVITY_SANDBOX_IDENTITY_REQUIRED');
+      }
       command = '/usr/bin/unshare';
       commandArgs = [
         '--mount',
@@ -318,6 +328,8 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
         String(this.#uid),
         '--gid',
         String(this.#gid),
+        '--workspace-gid',
+        String(this.#workspaceGid),
         '--user',
         this.#user,
         '--',
@@ -363,6 +375,7 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
       pid: child.pid,
       model: input.selection.modelClass,
       phase: input.phase,
+      workspaceHostPath: cwd,
       startedAt,
     };
     fs.writeFileSync(path.join(directory, 'meta.json'), JSON.stringify(meta), { mode: 0o600 });
@@ -406,6 +419,25 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     if (result) {
       const status = String(result.status ?? '').toUpperCase();
       if (status === 'SUCCESS') {
+        if (meta.phase !== 'VERIFY_REVIEW' && meta.workspaceHostPath) {
+          try {
+            await this.#grantNativeWriterAccess(meta.workspaceHostPath);
+          } catch (error) {
+            return {
+              conversationId,
+              status: 'FAILED',
+              error: {
+                code: 'ANTIGRAVITY_WORKSPACE_PERMISSION_RECONCILE_FAILED',
+                detail: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+                retryable: true,
+              },
+              startedAt: meta.startedAt,
+              updatedAt: new Date().toISOString(),
+              currentModelId: meta.model,
+              upstream: { provider: 'antigravity-cli', model: meta.model },
+            };
+          }
+        }
         return {
           conversationId,
           status: 'SUCCEEDED',

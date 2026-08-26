@@ -12,11 +12,12 @@ import type {
   ExecutionHostSnapshot,
 } from '../src/v3/ports.js';
 
-function fakeAgy(directory: string, mode: 'review' | 'wait' = 'review'): string {
+function fakeAgy(directory: string, mode: 'review' | 'wait' | 'writer' = 'review'): string {
   const file = path.join(directory, `fake-agy-${mode}.mjs`);
   fs.writeFileSync(
     file,
     `#!/usr/bin/env node
+import fs from 'node:fs';
 let input = '';
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => { input += chunk; });
@@ -29,7 +30,19 @@ process.stdin.on('end', () => {
   ${
     mode === 'wait'
       ? `setTimeout(() => {}, 10_000);`
-      : `console.log(JSON.stringify({
+      : mode === 'writer'
+        ? `fs.writeFileSync('handoff.txt', 'HANDOFF', { mode: 0o644 });
+           console.log(JSON.stringify({
+             event: 'result',
+             result: {
+               conversation_id: 'fake-conversation',
+               status: 'SUCCESS',
+               response: 'writer completed',
+               num_turns: 1,
+               usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
+             }
+           }));`
+        : `console.log(JSON.stringify({
           event: 'result',
           result: {
             conversation_id: 'fake-conversation',
@@ -148,6 +161,30 @@ test('Antigravity adapter sends the objective only through stdin and normalizes 
   assert.equal(finished.usage?.input, 100);
   assert.equal(finished.usage?.cachedInput, 10);
   assert.equal(finished.currentModelId, 'gemini-3.1-pro-high');
+});
+
+test('Antigravity writer terminal reconciliation leaves files writable by the shared workspace group', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-writer-perms-'));
+  const workspaceRoot = path.join(directory, 'workspaces');
+  const workspace = path.join(workspaceRoot, 'executions', 'exec_ant_fix', 'repo');
+  fs.mkdirSync(workspace, { recursive: true });
+  const gid = fs.statSync(directory).gid;
+  const host = new AntigravityExecutionHost({
+    binary: fakeAgy(directory, 'writer'),
+    stateRoot: path.join(directory, 'state'),
+    workspaceHostRoot: workspaceRoot,
+    workspaceExecutionRoot: '/workspace',
+    home: directory,
+    gid,
+    workspaceGid: gid,
+  });
+
+  const created = await host.createExecution(input('IMPLEMENT_FIX', 'antigravity-worker'));
+  const finished = await terminal(host, created.conversationId);
+  assert.equal(finished.status, 'SUCCEEDED');
+  const stat = fs.statSync(path.join(workspace, 'handoff.txt'));
+  assert.equal(stat.gid, gid);
+  assert.notEqual(stat.mode & 0o020, 0, 'shared group must retain write permission for handoff');
 });
 
 test('Antigravity adapter cancellation is durable and terminates the detached process group', async () => {

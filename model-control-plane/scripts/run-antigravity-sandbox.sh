@@ -7,6 +7,7 @@ home=''
 binary=''
 uid=''
 gid=''
+workspace_gid=''
 user=''
 
 while (($#)); do
@@ -17,13 +18,14 @@ while (($#)); do
     --binary) binary="$2"; shift 2 ;;
     --uid) uid="$2"; shift 2 ;;
     --gid) gid="$2"; shift 2 ;;
+    --workspace-gid) workspace_gid="$2"; shift 2 ;;
     --user) user="$2"; shift 2 ;;
     --) shift; break ;;
     *) echo "unknown sandbox argument: $1" >&2; exit 64 ;;
   esac
 done
 
-for value in workspace_root workspace home binary uid gid user; do
+for value in workspace_root workspace home binary uid gid workspace_gid user; do
   if [[ -z ${!value} ]]; then
     echo "missing sandbox argument: $value" >&2
     exit 64
@@ -53,12 +55,43 @@ stash="$(mktemp -d /run/hermes-antigravity.XXXXXX)"
 mkdir -p "$stash/workspace" "$stash/auth"
 touch "$stash/agy"
 mount --bind "$workspace" "$stash/workspace"
-mount --bind "$auth" "$stash/auth"
+
+# Build a private writable Antigravity state from the minimum consumer-auth files.
+# The host credential directory is never mounted into the agent namespace, so token
+# refreshes/conversation caches can mutate only this short-lived tmpfs copy.
+mount -t tmpfs -o "mode=0700,uid=$uid,gid=$gid,size=64m" tmpfs "$stash/auth"
+auth_files=(
+  antigravity-oauth-token
+  installation_id
+  jetski_state.pbtxt
+  settings.json
+  cache/default_project_id.txt
+  cache/onboarding.json
+)
+for rel in "${auth_files[@]}"; do
+  src="$auth/$rel"
+  [[ -e "$src" ]] || continue
+  if [[ -L "$src" || ! -f "$src" ]]; then
+    echo "unsupported Antigravity auth state file: $rel" >&2
+    exit 67
+  fi
+  if [[ $(stat -c '%u:%g' "$src") != "$uid:$gid" ]]; then
+    echo "Antigravity auth state owner mismatch: $rel" >&2
+    exit 68
+  fi
+  mkdir -p "$stash/auth/$(dirname "$rel")"
+  cp -p -- "$src" "$stash/auth/$rel"
+done
+if [[ ! -f "$stash/auth/antigravity-oauth-token" ]]; then
+  echo 'Antigravity OAuth token is missing' >&2
+  exit 69
+fi
+chown -R "$uid:$gid" "$stash/auth"
 mount --bind "$binary" "$stash/agy"
 
-# Hide every home directory, then restore only the authenticated Antigravity state
+# Hide every home directory, then restore only the private Antigravity state copy
 # and the CLI binary. The agent cannot browse the operator's projects, SSH config,
-# cloud credentials, or unrelated personal files through /home.
+# cloud credentials, prior Antigravity conversations, or unrelated personal files.
 mount -t tmpfs -o mode=0755 tmpfs /home
 mkdir -p "$home/.gemini/antigravity-cli" "$home/.local/bin"
 touch "$home/.local/bin/agy"
@@ -97,9 +130,11 @@ rmdir "$stash"
 export HOME="$home"
 export USER="$user"
 export LOGNAME="$user"
+# Keep native-agent output writable by the OpenHands execution group.
+umask 0002
 exec /usr/bin/setpriv \
   --reuid="$uid" \
-  --regid="$gid" \
+  --regid="$workspace_gid" \
   --clear-groups \
   --bounding-set=-all \
   --inh-caps=-all \

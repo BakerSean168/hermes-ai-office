@@ -112,6 +112,9 @@ export async function buildControlPlane(
         home: antigravityHome,
         uid: Number(env.MODEL_CP_V3_ANTIGRAVITY_UID ?? antigravityOwner.uid),
         gid: Number(env.MODEL_CP_V3_ANTIGRAVITY_GID ?? antigravityOwner.gid),
+        workspaceGid: Number(
+          env.MODEL_CP_V3_ANTIGRAVITY_WORKSPACE_GID ?? env.MODEL_CP_V3_OPENHANDS_GID ?? 10001,
+        ),
         user: env.MODEL_CP_V3_ANTIGRAVITY_USER ?? 'dev',
         printTimeout: env.MODEL_CP_V3_ANTIGRAVITY_PRINT_TIMEOUT ?? '20m',
         sandboxWrapper:

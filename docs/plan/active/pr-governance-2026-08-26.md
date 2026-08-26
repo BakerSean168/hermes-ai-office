@@ -82,9 +82,11 @@ Commit: `79e6580`
 - Stream objectives through stdin; constrain review output with JSON Schema.
 - Persist normalized terminal status and reported usage.
 - Run `agy` as the authenticated `dev` identity inside a private mount namespace; sandbox construction rejects root or a UID/GID that does not match the configured home owner, `setpriv` clears bounding, inheritable, and ambient capability sets, and after masking the workspace root the wrapper explicitly re-enters the rebound workspace path so inherited cwd cannot retain access to hidden sibling workspaces.
-- Preserve OpenHands ownership while reconciling the entire bounded writer workspace group before each native writer run; recursive permission grants run asynchronously so large workspaces cannot block the control-plane event loop.
+- Copy only the minimum Antigravity consumer-auth/config files into a per-execution private tmpfs; host auth state, prior conversations, brain state, and caches are not mounted writable or exposed to the native agent.
+- Use an OpenHands-compatible shared workspace GID for native writers and re-normalize the terminal writer tree to group-writable permissions before another backend may reuse it; recursive permission reconciliation runs asynchronously so large workspaces cannot block the control-plane event loop.
+- Reject `supports.write=false` backends at policy selection time for `IMPLEMENT` / `IMPLEMENT_FIX`, including explicit operator overrides.
 - Aggregate routed execution-host health: a healthy default OpenHands host plus an unavailable enabled Antigravity host reports `DEGRADED` rather than hiding the unavailable backend.
-- Real reviewer and writer smoke tests passed on GCP Dev; the final namespace probe verified `UID=1001`, `GID=1002`, zero inheritable/permitted/effective/bounding/ambient capabilities, and a hidden sibling-workspace sentinel.
+- Real reviewer and writer smoke tests passed on GCP Dev; the latest real adapter probe verified `UID=1001`, shared workspace `GID=10001`, successful Gemini execution, host OAuth/conversation state unchanged, and terminal handoff files normalized to `1001:10001` with group-write permission.
 
 ### P2 — GitHub PR immutable intake
 
