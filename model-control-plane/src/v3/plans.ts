@@ -24,6 +24,7 @@ export type PlanSource =
         headRef: string;
         baseRef: string;
         headRepository: string;
+        producer?: 'JULES' | 'UNKNOWN';
       };
     };
 

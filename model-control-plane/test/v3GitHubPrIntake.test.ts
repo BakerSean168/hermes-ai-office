@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
+import type { GitHubGovernanceStatusPort } from '../src/v3/githubGovernanceStatus.js';
 import {
   GitHubPullRequestIntake,
   type GitHubIntakeCommandRunner,
@@ -227,6 +228,163 @@ test('GitHub external-change API uses immutable PR identity for plan idempotency
     assert.equal(second.json().planId, firstPlan.planId);
     assert.equal(resolves, 2);
     assert.equal(second.json().batches[0].workItems[0].executions.length, 1);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('authenticated GitHub event bridge coalesces PR events into the same immutable intake and records Jules provenance', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'github-event-bridge-'));
+  let resolves = 0;
+  const intake: GitHubPullRequestIntakePort = {
+    async resolve() {
+      resolves += 1;
+      return {
+        repository: 'example/project',
+        number: 42,
+        url: 'https://github.com/example/project/pull/42',
+        title: 'Jules proposed a repair',
+        author: 'google-labs-jules[bot]',
+        headRevision: HEAD,
+        baseRevision: BASE,
+        headRef: 'jules/fix-42',
+        baseRef: 'main',
+        headRepository: 'example/project',
+        fetchedHeadRef: 'refs/ai-office/external/github/pr-42/head',
+        fetchedBaseRef: 'refs/ai-office/external/github/pr-42/base',
+      };
+    },
+  };
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      return { revision: input.expectedHeadRevision, state: 'pending', stale: false };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: new IntakeHost(),
+    v3ModelGateway: intakeGateway,
+    v3Workspace: intakeWorkspace,
+    v3PullRequestIntake: intake,
+    v3GovernanceStatus: governanceStatus,
+    v3GitHubEventToken: 'bridge-secret',
+  });
+
+  try {
+    const payload = {
+      event: 'pull_request',
+      action: 'opened',
+      projectKey: 'digital-biome',
+      repository: {
+        path: '/tmp/repository',
+        fullName: 'example/project',
+      },
+      pullRequest: {
+        number: 42,
+        headSha: '9999999999999999999999999999999999999999',
+      },
+      reviewBackend: 'antigravity-review',
+      repairBackend: 'antigravity-worker',
+    };
+
+    const unauthorized = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/external-changes/github/events',
+      headers: { 'x-hermes-event-token': 'wrong-secret' },
+      payload,
+    });
+    assert.equal(unauthorized.statusCode, 401);
+    assert.equal(unauthorized.json().error.code, 'GITHUB_EVENT_BRIDGE_UNAUTHORIZED');
+    assert.equal(resolves, 0);
+
+    const ignored = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/external-changes/github/events',
+      headers: { 'x-hermes-event-token': 'bridge-secret' },
+      payload: { ...payload, action: 'edited' },
+    });
+    assert.equal(ignored.statusCode, 202);
+    assert.equal(ignored.json().ignored, true);
+    assert.equal(resolves, 0);
+
+    const accepted = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/external-changes/github/events',
+      headers: { 'x-hermes-event-token': 'bridge-secret' },
+      payload,
+    });
+    assert.equal(accepted.statusCode, 202);
+    const acceptedBody = accepted.json();
+    assert.equal(acceptedBody.accepted, true);
+    assert.equal(acceptedBody.governedHeadRevision, HEAD);
+    assert.equal(acceptedBody.coalescedToCurrentHead, true);
+    const plan = await runtime.v3.getPlan(acceptedBody.planId, false);
+    assert.equal(plan?.source.kind, 'EXTERNAL_CHANGE');
+    if (plan?.source.kind === 'EXTERNAL_CHANGE') {
+      assert.equal(plan.source.origin?.producer, 'JULES');
+      assert.equal(plan.source.origin?.author, 'google-labs-jules[bot]');
+    }
+
+    const duplicate = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/external-changes/github/events',
+      headers: { 'x-hermes-event-token': 'bridge-secret' },
+      payload: { ...payload, action: 'synchronize', pullRequest: { number: 42, headSha: HEAD } },
+    });
+    assert.equal(duplicate.statusCode, 202);
+    assert.equal(duplicate.json().planId, acceptedBody.planId);
+    assert.equal(duplicate.json().coalescedToCurrentHead, false);
+    assert.equal(resolves, 2);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('GitHub event bridge rejects repository/path mismatches after authoritative intake', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'github-event-repo-mismatch-'));
+  const intake: GitHubPullRequestIntakePort = {
+    async resolve() {
+      return {
+        repository: 'example/project',
+        number: 42,
+        url: 'https://github.com/example/project/pull/42',
+        title: 'Proposal',
+        author: 'someone',
+        headRevision: HEAD,
+        baseRevision: BASE,
+        headRef: 'fix-42',
+        baseRef: 'main',
+        headRepository: 'example/project',
+        fetchedHeadRef: 'refs/ai-office/external/github/pr-42/head',
+        fetchedBaseRef: 'refs/ai-office/external/github/pr-42/base',
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: new IntakeHost(),
+    v3ModelGateway: intakeGateway,
+    v3Workspace: intakeWorkspace,
+    v3PullRequestIntake: intake,
+    v3GitHubEventToken: 'bridge-secret',
+  });
+  try {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/external-changes/github/events',
+      headers: { 'x-hermes-event-token': 'bridge-secret' },
+      payload: {
+        event: 'pull_request',
+        action: 'opened',
+        projectKey: 'digital-biome',
+        repository: { path: '/tmp/repository', fullName: 'attacker/other-project' },
+        pullRequest: { number: 42 },
+      },
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error.code, 'GITHUB_PR_REPOSITORY_MISMATCH');
   } finally {
     await runtime.app.close();
   }

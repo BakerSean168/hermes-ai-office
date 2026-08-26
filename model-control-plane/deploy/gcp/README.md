@@ -28,6 +28,8 @@ Antigravity is a deliberate provider-native exception to the LiteLLM-managed mod
 
 GitHub PR governance uses the canonical repository owner's `gh` authentication. Immutable intake and repair publication require normal repository access; the aggregate `Hermes / PR Governance` commit-status reporter additionally requires commit-status write permission (`repo`/`repo:status` for classic OAuth, or fine-grained Commit statuses: write). Check Runs are intentionally not used in this rollout because GitHub restricts Check Run writes to GitHub Apps. Status publication is durable and retried from plan state; branch-protection enforcement remains an explicit rollout step.
 
+The control plane also exposes a normalized GitHub PR event bridge for trusted ingress only. Set `MODEL_CP_V3_GITHUB_EVENT_TOKEN` on the execution plane and send it as `x-hermes-event-token`; the comparison is constant-time. This is not a substitute for verifying GitHub webhook signatures at the public ingress. The bridge accepts only `pull_request` actions `opened`, `reopened`, and `synchronize`, then re-resolves GitHub state through the immutable intake adapter before creating or reusing a governance plan.
+
 ## Install
 
 Build the Control Plane and OpenHands image, install ACP tooling, provide the root-owned runtime env files under `/srv/hermes-personal/secrets`, then run:

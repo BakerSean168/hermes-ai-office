@@ -50,6 +50,7 @@ export interface BuildControlPlaneOptions {
   v3PullRequestIntake?: GitHubPullRequestIntakePort;
   v3PullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
   v3GovernanceStatus?: GitHubGovernanceStatusPort;
+  v3GitHubEventToken?: string;
   v3BackendAvailability?: Readonly<Record<string, boolean>>;
 }
 
@@ -208,7 +209,15 @@ export async function buildControlPlane(
     new GitHubPullRequestIntake({
       home: env.MODEL_CP_V3_GITHUB_HOME ?? env.MODEL_CP_V3_DELIVERY_HOME,
     });
-  registerV3Routes(app, v3, policy, readinessEvidence, modelRegistry, pullRequestIntake);
+  registerV3Routes(
+    app,
+    v3,
+    policy,
+    readinessEvidence,
+    modelRegistry,
+    pullRequestIntake,
+    options.v3GitHubEventToken ?? env.MODEL_CP_V3_GITHUB_EVENT_TOKEN,
+  );
   const reconcileInterval = setInterval(
     () => {
       void v3

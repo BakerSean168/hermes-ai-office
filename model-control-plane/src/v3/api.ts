@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
 
 import type { GitHubPullRequestIntakePort } from './githubPrIntake.js';
 import type { DevelopmentPolicy } from './policy.js';
@@ -57,6 +58,7 @@ export function registerV3Routes(
   readinessEvidence?: V3ReadinessEvidence,
   modelRegistry?: ModelRegistryPort,
   pullRequestIntake?: GitHubPullRequestIntakePort,
+  githubEventToken?: string,
 ): void {
   app.get('/api/v3/health', async () => ({
     status: 'ok',
@@ -67,11 +69,82 @@ export function registerV3Routes(
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
 
-  app.post('/api/v3/development/external-changes/github', async (request, reply) => {
-    if (!pullRequestIntake) {
-      reply.code(503);
-      return { error: { code: 'GITHUB_PR_INTAKE_UNCONFIGURED' } };
+  const createGitHubGovernancePlan = async (input: {
+    projectKey: string;
+    repositoryPath: string;
+    remote?: string;
+    pullRequestNumber: number;
+    expectedRepository?: string;
+    reviewBackend?: string;
+    repairBackend?: string;
+    acceptanceCriteria?: string[];
+  }) => {
+    if (!pullRequestIntake) throw new Error('GITHUB_PR_INTAKE_UNCONFIGURED');
+    if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
+    if (!input.repositoryPath.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
+    const source = await pullRequestIntake.resolve({
+      repositoryPath: input.repositoryPath,
+      pullRequestNumber: input.pullRequestNumber,
+      remote: input.remote,
+    });
+    if (input.expectedRepository && source.repository !== input.expectedRepository) {
+      throw new Error('GITHUB_PR_REPOSITORY_MISMATCH');
     }
+    for (const backend of [input.reviewBackend, input.repairBackend].filter(Boolean) as string[]) {
+      if (!policy.backend(backend)?.enabled) throw new Error('GITHUB_PR_BACKEND_INVALID');
+    }
+    const acceptanceCriteria = [
+      'The claimed problem is supported by repository evidence; otherwise return INVALID without starting a repair writer.',
+      'The proposed change preserves existing public contracts and architecture boundaries.',
+      'Focused verification covers the behavior changed by the pull request.',
+      ...(input.acceptanceCriteria ?? []),
+    ];
+    return service.createPlan(
+      {
+        projectKey: input.projectKey,
+        objective: `Govern GitHub pull request ${source.repository}#${source.number} at its exact head revision.`,
+        analysisSummary:
+          'GitHub PR intake resolved and fetched exact base/head revisions. Pull-request prose is retained only as metadata; repository evidence is authoritative.',
+        repository: { path: input.repositoryPath, baseRevision: source.baseRevision },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: source.headRevision,
+          reviewBackend: input.reviewBackend,
+          repairBackend: input.repairBackend,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: source.repository,
+            pullRequestNumber: source.number,
+            pullRequestUrl: source.url,
+            title: source.title,
+            author: source.author,
+            headRef: source.headRef,
+            baseRef: source.baseRef,
+            headRepository: source.headRepository,
+            producer: source.author === 'google-labs-jules[bot]' ? 'JULES' : 'UNKNOWN',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Validate external pull request',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate and review external change',
+                objective:
+                  'Independently verify whether the claimed problem exists, then review the exact Git diff for correctness, regressions, contract preservation, and architectural quality.',
+                acceptanceCriteria,
+              },
+            ],
+          },
+        ],
+      },
+      `github-pr:${source.repository}:${source.number}:${source.headRevision}`,
+    );
+  };
+
+  app.post('/api/v3/development/external-changes/github', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const repository =
       body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
@@ -81,79 +154,94 @@ export function registerV3Routes(
       body.pullRequest && typeof body.pullRequest === 'object' && !Array.isArray(body.pullRequest)
         ? (body.pullRequest as Record<string, unknown>)
         : {};
-    const projectKey = String(body.projectKey ?? '').trim();
-    const repositoryPath = String(repository.path ?? '').trim();
-    const pullRequestNumber = Number(pullRequest.number);
-    if (!projectKey) {
-      reply.code(400);
-      return { error: { code: 'PROJECT_KEY_REQUIRED' } };
-    }
-    if (!repositoryPath) {
-      reply.code(400);
-      return { error: { code: 'REPOSITORY_PATH_REQUIRED' } };
-    }
-
     try {
-      const source = await pullRequestIntake.resolve({
-        repositoryPath,
-        pullRequestNumber,
+      const plan = await createGitHubGovernancePlan({
+        projectKey: String(body.projectKey ?? '').trim(),
+        repositoryPath: String(repository.path ?? '').trim(),
         remote: repository.remote ? String(repository.remote) : undefined,
+        pullRequestNumber: Number(pullRequest.number),
+        reviewBackend: body.reviewBackend ? String(body.reviewBackend).trim() : undefined,
+        repairBackend: body.repairBackend ? String(body.repairBackend).trim() : undefined,
+        acceptanceCriteria: Array.isArray(body.acceptanceCriteria)
+          ? body.acceptanceCriteria.map(String)
+          : undefined,
       });
-      const reviewBackend = body.reviewBackend ? String(body.reviewBackend).trim() : undefined;
-      const repairBackend = body.repairBackend ? String(body.repairBackend).trim() : undefined;
-      for (const backend of [reviewBackend, repairBackend].filter(Boolean) as string[]) {
-        if (!policy.backend(backend)?.enabled) throw new Error('GITHUB_PR_BACKEND_INVALID');
-      }
-      const acceptanceCriteria = [
-        'The claimed problem is supported by repository evidence; otherwise return INVALID without starting a repair writer.',
-        'The proposed change preserves existing public contracts and architecture boundaries.',
-        'Focused verification covers the behavior changed by the pull request.',
-        ...(Array.isArray(body.acceptanceCriteria) ? body.acceptanceCriteria.map(String) : []),
-      ];
-      const plan = await service.createPlan(
-        {
-          projectKey,
-          objective: `Govern GitHub pull request ${source.repository}#${source.number} at its exact head revision.`,
-          analysisSummary:
-            'GitHub PR intake resolved and fetched exact base/head revisions. Pull-request prose is retained only as metadata; repository evidence is authoritative.',
-          repository: { path: repositoryPath, baseRevision: source.baseRevision },
-          source: {
-            kind: 'EXTERNAL_CHANGE',
-            revision: source.headRevision,
-            reviewBackend,
-            repairBackend,
-            origin: {
-              kind: 'GITHUB_PULL_REQUEST',
-              repository: source.repository,
-              pullRequestNumber: source.number,
-              pullRequestUrl: source.url,
-              title: source.title,
-              author: source.author,
-              headRef: source.headRef,
-              baseRef: source.baseRef,
-              headRepository: source.headRepository,
-            },
-          },
-          batches: [
-            {
-              key: 'external-pr',
-              title: 'Validate external pull request',
-              workItems: [
-                {
-                  key: 'external-pr-change',
-                  title: 'Validate and review external change',
-                  objective:
-                    'Independently verify whether the claimed problem exists, then review the exact Git diff for correctness, regressions, contract preservation, and architectural quality.',
-                  acceptanceCriteria,
-                },
-              ],
-            },
-          ],
-        },
-        `github-pr:${source.repository}:${source.number}:${source.headRevision}`,
-      );
       reply.code(201);
       return plan;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  const validEventToken = (header: string | string[] | undefined): boolean => {
+    const expected = githubEventToken?.trim();
+    const supplied = (Array.isArray(header) ? header[0] : header)?.trim();
+    if (!expected || !supplied) return false;
+    const expectedBytes = Buffer.from(expected);
+    const suppliedBytes = Buffer.from(supplied);
+    return (
+      expectedBytes.length === suppliedBytes.length &&
+      timingSafeEqual(expectedBytes, suppliedBytes)
+    );
+  };
+
+  app.post('/api/v3/development/external-changes/github/events', async (request, reply) => {
+    if (!githubEventToken?.trim()) {
+      reply.code(503);
+      return { error: { code: 'GITHUB_EVENT_BRIDGE_UNCONFIGURED' } };
+    }
+    if (!validEventToken(request.headers['x-hermes-event-token'])) {
+      reply.code(401);
+      return { error: { code: 'GITHUB_EVENT_BRIDGE_UNAUTHORIZED' } };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const event = String(body.event ?? '').trim().toLowerCase();
+    const action = String(body.action ?? '').trim().toLowerCase();
+    if (event !== 'pull_request') {
+      reply.code(202);
+      return { accepted: false, ignored: true, reason: 'EVENT_NOT_GOVERNED' };
+    }
+    if (!['opened', 'reopened', 'synchronize'].includes(action)) {
+      reply.code(202);
+      return { accepted: false, ignored: true, reason: 'PULL_REQUEST_ACTION_NOT_GOVERNED' };
+    }
+    const repository =
+      body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
+        ? (body.repository as Record<string, unknown>)
+        : {};
+    const pullRequest =
+      body.pullRequest && typeof body.pullRequest === 'object' && !Array.isArray(body.pullRequest)
+        ? (body.pullRequest as Record<string, unknown>)
+        : {};
+    try {
+      const eventHeadRevision = pullRequest.headSha ? String(pullRequest.headSha).trim() : undefined;
+      const plan = await createGitHubGovernancePlan({
+        projectKey: String(body.projectKey ?? '').trim(),
+        repositoryPath: String(repository.path ?? '').trim(),
+        remote: repository.remote ? String(repository.remote) : undefined,
+        expectedRepository: repository.fullName ? String(repository.fullName).trim() : undefined,
+        pullRequestNumber: Number(pullRequest.number),
+        reviewBackend: body.reviewBackend ? String(body.reviewBackend).trim() : undefined,
+        repairBackend: body.repairBackend ? String(body.repairBackend).trim() : undefined,
+        acceptanceCriteria: Array.isArray(body.acceptanceCriteria)
+          ? body.acceptanceCriteria.map(String)
+          : undefined,
+      });
+      const governedHeadRevision =
+        plan.source.kind === 'EXTERNAL_CHANGE' ? plan.source.revision : undefined;
+      reply.code(202);
+      return {
+        accepted: true,
+        action,
+        planId: plan.planId,
+        eventHeadRevision,
+        governedHeadRevision,
+        coalescedToCurrentHead: Boolean(
+          eventHeadRevision && governedHeadRevision && eventHeadRevision !== governedHeadRevision,
+        ),
+      };
     } catch (error) {
       const code = errorCode(error);
       reply.code(errorStatus(code));

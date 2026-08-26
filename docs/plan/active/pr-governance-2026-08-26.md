@@ -122,12 +122,13 @@ Status: COMPLETE
 
 ### P4 — Event ingestion and Jules adapter
 
-Status: PENDING
+Status: IN PROGRESS
 
-- Add signed GitHub webhook ingestion or an equivalent authenticated event bridge.
-- Map `pull_request.opened`, `reopened`, and `synchronize` to the same P2 intake contract.
-- Detect/record Jules provenance without trusting its problem statement.
-- Keep Jules REST API behind an adapter because the API is versioned independently.
+- COMPLETE: add a constant-time shared-token authenticated event bridge for a trusted ingress that has already normalized GitHub delivery.
+- COMPLETE: map `pull_request.opened`, `reopened`, and `synchronize` to the exact same immutable P2 intake contract; duplicates are idempotent and stale event heads coalesce to the current GitHub head.
+- COMPLETE: detect `google-labs-jules[bot]` from authoritative GitHub PR metadata and record `producer=JULES` only as provenance; PR prose remains untrusted metadata.
+- NEXT: keep the alpha Jules REST API behind a narrow adapter for source discovery/session creation rather than leaking its request schema into orchestration code.
+- PENDING DEPLOYMENT: connect a real GitHub webhook-verifying ingress to the normalized bridge and provision `MODEL_CP_V3_GITHUB_EVENT_TOKEN`.
 
 ### P5 — Governed rollout
 
