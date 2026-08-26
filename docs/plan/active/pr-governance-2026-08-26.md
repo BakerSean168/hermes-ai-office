@@ -81,16 +81,16 @@ Commit: `79e6580`
 - Add opt-in Antigravity review/repair backends.
 - Stream objectives through stdin; constrain review output with JSON Schema.
 - Persist normalized terminal status and reported usage.
-- Run `agy` as the authenticated `dev` identity inside a private mount namespace; sandbox construction rejects root or a UID/GID that does not match the configured home owner, `setpriv` clears the capability bounding set, and after masking the workspace root the wrapper explicitly re-enters the rebound workspace path so inherited cwd cannot retain access to hidden sibling workspaces.
+- Run `agy` as the authenticated `dev` identity inside a private mount namespace; sandbox construction rejects root or a UID/GID that does not match the configured home owner, `setpriv` clears bounding, inheritable, and ambient capability sets, and after masking the workspace root the wrapper explicitly re-enters the rebound workspace path so inherited cwd cannot retain access to hidden sibling workspaces.
 - Preserve OpenHands ownership while reconciling the entire bounded writer workspace group before each native writer run; recursive permission grants run asynchronously so large workspaces cannot block the control-plane event loop.
 - Aggregate routed execution-host health: a healthy default OpenHands host plus an unavailable enabled Antigravity host reports `DEGRADED` rather than hiding the unavailable backend.
-- Real reviewer and writer smoke tests passed on GCP Dev; the final namespace probe verified `UID=1001`, `GID=1002`, zero effective capabilities, and a hidden sibling-workspace sentinel.
+- Real reviewer and writer smoke tests passed on GCP Dev; the final namespace probe verified `UID=1001`, `GID=1002`, zero inheritable/permitted/effective/bounding/ambient capabilities, and a hidden sibling-workspace sentinel.
 
 ### P2 — GitHub PR immutable intake
 
 Status: COMPLETE
 
-- Resolve PR identity through GitHub and reject lookalike remotes; only canonical `github.com` HTTPS/SSH remote forms are accepted for GitHub-governed intake.
+- Resolve PR identity through GitHub and reject lookalike remotes; only canonical `github.com` HTTPS/SSH remote forms are accepted for GitHub-governed intake, and every persisted GitHub-origin external head is required to be an immutable 40-hex SHA.
 - Fetch `refs/pull/<n>/head` and current base branch into dedicated AI Office refs.
 - Verify PR head SHA, head ref, and head repository again after fetch, and verify the fetched current base branch against `ls-remote`.
 - Reject races with `GITHUB_PR_CHANGED_DURING_INTAKE`.
@@ -105,7 +105,8 @@ Status: COMPLETE
 - A passing re-review of `IMPLEMENT_FIX` is not enough by itself; the reviewed repair must be published back to the same PR branch before governance can pass.
 - Require the repair HEAD to be a clean descendant of the previously governed PR head.
 - Import the reviewed repair through a durable `refs/ai-office/external/.../repairs/...` audit ref.
-- Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten; repair publication independently revalidates a canonical `github.com` remote, and if the lease races after the API precheck it re-reads the remote head and classifies a third-party update as `GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION`.
+- Push with an exact `--force-with-lease=<old head SHA>` so a concurrent Jules/user update is never overwritten; repair publication independently revalidates the canonical fetch URL and every configured push URL as the same `github.com` repository, and if the lease races after the API precheck it re-reads the remote head and classifies a third-party update as `GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION`.
+- Root-created repair bundle scratch is ownership-reconciled to the repository owner before the owner-scoped `git bundle create/fetch` path runs.
 - Treat an already-visible exact reviewed repair as a successful crash replay, rebuilding the audit ref instead of misclassifying the control plane's own prior push as an external race.
 - Fail closed for fork PR heads until a separately reviewed fork publication strategy exists.
 - Persist the new externally visible PR head as `externalHeadRevision` for subsequent checks and event reconciliation.

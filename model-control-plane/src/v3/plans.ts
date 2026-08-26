@@ -338,6 +338,13 @@ function validateGraph(input: CreatePlanInput): void {
   if (input.source?.kind === 'EXTERNAL_CHANGE' && !input.source.revision.trim()) {
     throw new Error('EXTERNAL_CHANGE_REVISION_REQUIRED');
   }
+  if (
+    input.source?.kind === 'EXTERNAL_CHANGE' &&
+    input.source.origin?.kind === 'GITHUB_PULL_REQUEST' &&
+    !/^[0-9a-f]{40}$/i.test(input.source.revision.trim())
+  ) {
+    throw new Error('GITHUB_PR_SOURCE_REVISION_INVALID');
+  }
   if (input.delivery) {
     if (!input.delivery.branch.trim()) throw new Error('DELIVERY_BRANCH_REQUIRED');
     if (input.delivery.autoMerge !== true)

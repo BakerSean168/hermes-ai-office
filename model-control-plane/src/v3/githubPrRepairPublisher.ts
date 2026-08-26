@@ -168,6 +168,22 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
     if (repositoryFromRemote(remoteUrl) !== input.repository) {
       throw new Error('GITHUB_PR_REPAIR_REPOSITORY_MISMATCH');
     }
+    const pushRemoteOutput = await this.#run(
+      repositoryPath,
+      'git',
+      ['remote', 'get-url', '--push', '--all', remote],
+      owner,
+    );
+    const pushRemoteUrls = pushRemoteOutput
+      .split(/\r?\n/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (pushRemoteUrls.length === 0) throw new Error('GITHUB_PR_REPAIR_PUSH_REMOTE_REQUIRED');
+    for (const pushRemoteUrl of pushRemoteUrls) {
+      if (repositoryFromRemote(pushRemoteUrl) !== input.repository) {
+        throw new Error('GITHUB_PR_REPAIR_PUSH_REPOSITORY_MISMATCH');
+      }
+    }
 
     const trustedWorkspace = ['-c', `safe.directory=${workspacePath}`];
     const dirty = await this.#run(workspacePath, 'git', [
@@ -255,6 +271,11 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
     }
 
     const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-pr-repair-'));
+    const tempRootStat = fs.statSync(tempRoot);
+    if (tempRootStat.uid !== owner.uid || tempRootStat.gid !== owner.gid) {
+      fs.chownSync(tempRoot, owner.uid, owner.gid);
+    }
+    fs.chmodSync(tempRoot, 0o700);
     const bundle = path.join(tempRoot, 'repair.bundle');
     try {
       await this.#run(workspacePath, 'git', [

@@ -1038,6 +1038,58 @@ test('delivery repair exhaustion requires an explicit one-at-a-time retry_delive
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+test('GitHub-origin external plans require an immutable 40-hex head revision', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runtime.v3.createPlan(
+          {
+            projectKey: 'digital-biome',
+            objective: 'Reject malformed GitHub-origin provenance.',
+            analysisSummary: 'GitHub-origin revisions must be immutable SHAs.',
+            repository: { path: '/tmp/repository', baseRevision: '2222222222222222222222222222222222222222' },
+            source: {
+              kind: 'EXTERNAL_CHANGE',
+              revision: 'refs/heads/jules/fix-42',
+              origin: {
+                kind: 'GITHUB_PULL_REQUEST',
+                repository: 'example/project',
+                pullRequestNumber: 42,
+                pullRequestUrl: 'https://github.com/example/project/pull/42',
+                title: 'External proposal',
+                headRef: 'jules/fix-42',
+                baseRef: 'main',
+                headRepository: 'example/project',
+              },
+            },
+            batches: [
+              {
+                key: 'external-pr',
+                title: 'Review external PR',
+                workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+              },
+            ],
+          },
+          'github-origin-invalid-revision',
+        ),
+      /GITHUB_PR_SOURCE_REVISION_INVALID/,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('external change plans adopt the existing revision, review first, and repair only after a blocking review', async () => {
   const host = new PlanHost();
   integrationCount = 0;

@@ -102,5 +102,7 @@ exec /usr/bin/setpriv \
   --regid="$gid" \
   --clear-groups \
   --bounding-set=-all \
+  --inh-caps=-all \
+  --ambient-caps=-all \
   --no-new-privs \
   -- "$home/.local/bin/agy" "$@"

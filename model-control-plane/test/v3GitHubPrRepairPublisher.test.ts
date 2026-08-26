@@ -52,6 +52,37 @@ test('GitHub PR repair publication rejects lookalike non-GitHub remotes before G
   assert.equal(githubOrPushCalled, false);
 });
 
+test('GitHub PR repair publication rejects a non-GitHub pushurl before GitHub or push operations', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-pushurl-repo-'));
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-pushurl-workspace-'));
+  let githubOrPushCalled = false;
+  const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') {
+      return 'https://evilgithub.com/example/project.git';
+    }
+    if (command === 'gh' || (command === 'git' && args[0] === 'push')) githubOrPushCalled = true;
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+        planId: 'plan_pushurl',
+        repositoryPath,
+        workspacePath,
+        repository: 'example/project',
+        pullRequestNumber: 42,
+        headRepository: 'example/project',
+        headRef: 'jules/fix-42',
+        expectedHeadRevision: ORIGINAL,
+      }),
+    /GITHUB_PR_REPAIR_GITHUB_REMOTE_REQUIRED/,
+  );
+  assert.equal(githubOrPushCalled, false);
+});
+
 test('GitHub PR repair publication pushes the reviewed descendant with an exact-head lease', async () => {
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-repo-'));
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-workspace-'));
@@ -60,6 +91,7 @@ test('GitHub PR repair publication pushes the reviewed descendant with an exact-
     const key = `${command} ${args.join(' ')}`;
     commands.push(`${cwd} :: ${key}`);
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
     if (key === 'gh api repos/example/project/pulls/42') return pull();
     if (key.includes('status --porcelain')) return '';
     if (key.endsWith('rev-parse HEAD')) return REPAIRED;
@@ -104,6 +136,7 @@ test('GitHub PR repair publication refuses to overwrite a concurrently updated h
   const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
     const key = `${command} ${args.join(' ')}`;
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
     if (key.includes('status --porcelain')) return '';
     if (key.endsWith('rev-parse HEAD')) return REPAIRED;
     if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
@@ -139,6 +172,7 @@ test('GitHub PR repair publication classifies a force-with-lease race as a chang
   const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
     const key = `${command} ${args.join(' ')}`;
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
     if (key.includes('status --porcelain')) return '';
     if (key.endsWith('rev-parse HEAD')) return REPAIRED;
     if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
@@ -206,6 +240,7 @@ test('GitHub PR repair publication is crash-idempotent when the exact reviewed r
     const key = `${command} ${args.join(' ')}`;
     commands.push(key);
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
     if (key.includes('status --porcelain')) return '';
     if (key.endsWith('rev-parse HEAD')) return REPAIRED;
     if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
