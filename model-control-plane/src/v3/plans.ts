@@ -58,6 +58,7 @@ export interface PlanRecord {
   currentRevision: string;
   source: PlanSource;
   externalHeadRevision?: string;
+  externalHeadPublishedAt?: number;
   governanceStatusRequired: boolean;
   governanceStatusRevision?: string;
   governanceStatusPlanStatus?: PlanStatus;
@@ -113,6 +114,7 @@ interface PlanRow {
   current_revision: string;
   source_json: string | null;
   external_head_revision: string | null;
+  external_head_published_at: number | null;
   governance_status_required: number;
   governance_status_revision: string | null;
   governance_status_plan_status: string | null;
@@ -183,6 +185,7 @@ function planFromRow(row: PlanRow): PlanRecord {
       ? (JSON.parse(row.source_json) as PlanSource)
       : { kind: 'TASK' },
     externalHeadRevision: row.external_head_revision ?? undefined,
+    externalHeadPublishedAt: row.external_head_published_at ?? undefined,
     governanceStatusRequired: Boolean(row.governance_status_required),
     governanceStatusRevision: row.governance_status_revision ?? undefined,
     governanceStatusPlanStatus: row.governance_status_plan_status
@@ -249,6 +252,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
       current_revision TEXT NOT NULL,
       source_json TEXT,
       external_head_revision TEXT,
+      external_head_published_at INTEGER,
       governance_status_required INTEGER NOT NULL DEFAULT 0,
       governance_status_revision TEXT,
       governance_status_plan_status TEXT,
@@ -314,6 +318,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
   for (const [name, type] of [
     ['source_json', 'TEXT'],
     ['external_head_revision', 'TEXT'],
+    ['external_head_published_at', 'INTEGER'],
     ['governance_status_required', 'INTEGER NOT NULL DEFAULT 0'],
     ['governance_status_revision', 'TEXT'],
     ['governance_status_plan_status', 'TEXT'],
@@ -671,9 +676,19 @@ export class PlanRepository {
 
   setExternalHeadRevision(planId: string, revision: string): void {
     if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error('EXTERNAL_HEAD_REVISION_INVALID');
+    const now = Date.now();
     this.#db
-      .prepare('UPDATE v3_plans SET external_head_revision=?,updated_at=? WHERE plan_id=?')
-      .run(revision, Date.now(), planId);
+      .prepare(
+        `UPDATE v3_plans
+            SET external_head_published_at=CASE
+                  WHEN external_head_revision=? AND external_head_published_at IS NOT NULL
+                    THEN external_head_published_at
+                  ELSE ?
+                END,
+                external_head_revision=?,updated_at=?
+          WHERE plan_id=?`,
+      )
+      .run(revision, now, revision, now, planId);
   }
 
   setGovernanceStatusPublished(

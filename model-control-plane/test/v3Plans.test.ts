@@ -1628,6 +1628,7 @@ test('external change plans can opt into Antigravity review and repair without c
 test('a reviewed GitHub PR repair is published to the PR head before the plan can verify successfully', async () => {
   const host = new PlanHost();
   const ORIGINAL = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
   const REPAIRED = '3333333333333333333333333333333333333333';
   const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
   const governanceCalls: Array<{ revision: string; planStatus: string; stale: boolean }> = [];
@@ -1683,7 +1684,7 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
         projectKey: 'digital-biome',
         objective: 'Repair a GitHub PR only after independent review.',
         analysisSummary: 'GitHub-origin external change.',
-        repository: { path: '/tmp/repository', baseRevision: '2222222222222222222222222222222222222222' },
+        repository: { path: '/tmp/repository', baseRevision: BASE },
         source: {
           kind: 'EXTERNAL_CHANGE',
           revision: ORIGINAL,
@@ -1737,8 +1738,11 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
     assert.equal(publications[0]!.expectedHeadRevision, ORIGINAL);
     assert.equal(publications[0]!.repository, 'example/project');
     assert.equal(publications[0]!.headRef, 'jules/fix-42');
+    assert.equal(publications[0]!.baseRef, 'main');
+    assert.equal(publications[0]!.expectedBaseRevision, BASE);
     assert.match(publications[0]!.workspacePath, /^\/host\/workspace\//);
     assert.equal(body.externalHeadRevision, REPAIRED);
+    assert.equal(typeof body.externalHeadPublishedAt, 'number');
     assert.equal(body.status, 'RUNNING');
 
     // The next plan reconciliation observes the integrated batch, transitions the

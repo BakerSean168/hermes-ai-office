@@ -13,6 +13,7 @@ import type { PlanStatus } from './plans.js';
 const execFileAsync = promisify(execFile);
 
 export const GITHUB_GOVERNANCE_STATUS_CONTEXT = 'Hermes / PR Governance';
+export const GITHUB_REPAIR_HEAD_PROPAGATION_GRACE_MS = 2 * 60_000;
 
 export interface GitHubGovernanceStatusInput {
   repositoryPath: string;
@@ -21,6 +22,7 @@ export interface GitHubGovernanceStatusInput {
   pullRequestUrl: string;
   expectedHeadRevision: string;
   previousHeadRevision?: string;
+  repairPublishedAt?: number;
   planId: string;
   planStatus: PlanStatus;
   blockedReason?: string;
@@ -85,10 +87,14 @@ function desiredStatus(
 export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
   readonly #home?: string;
   readonly #commandRunner?: GitHubGovernanceCommandRunner;
+  readonly #now: () => number;
 
-  constructor(options: { home?: string; commandRunner?: GitHubGovernanceCommandRunner } = {}) {
+  constructor(
+    options: { home?: string; commandRunner?: GitHubGovernanceCommandRunner; now?: () => number } = {},
+  ) {
     this.#home = options.home;
     this.#commandRunner = options.commandRunner;
+    this.#now = options.now ?? Date.now;
   }
 
   #owner(cwd: string): { uid: number; gid: number; home: string } {
@@ -155,12 +161,16 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
     }
 
     const currentHead = pullRequest.head?.sha?.trim() ?? '';
+    const repairAgeMs =
+      input.repairPublishedAt == null ? Number.POSITIVE_INFINITY : this.#now() - input.repairPublishedAt;
     const repairHeadPropagationLag =
       pullRequest.number === input.pullRequestNumber &&
       pullRequest.state === 'open' &&
       input.previousHeadRevision !== undefined &&
       input.previousHeadRevision !== input.expectedHeadRevision &&
-      currentHead === input.previousHeadRevision;
+      currentHead === input.previousHeadRevision &&
+      repairAgeMs >= 0 &&
+      repairAgeMs <= GITHUB_REPAIR_HEAD_PROPAGATION_GRACE_MS;
     if (repairHeadPropagationLag) {
       return {
         revision: input.expectedHeadRevision,

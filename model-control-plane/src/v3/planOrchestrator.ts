@@ -456,6 +456,8 @@ export class DurablePlanOrchestrator {
           // externalHeadRevision records what Hermes has published, but must never move the lease
           // baseline forward; keeping the original revision makes post-push crash replay idempotent.
           expectedHeadRevision: plan.source.revision,
+          baseRef: plan.source.origin.baseRef,
+          expectedBaseRevision: plan.baseRevision,
         });
         this.#repository.setExternalHeadRevision(plan.planId, publication.publishedRevision);
         this.#repository.appendEvent(
@@ -876,6 +878,10 @@ export class DurablePlanOrchestrator {
         previousHeadRevision:
           plan.externalHeadRevision && plan.externalHeadRevision !== plan.source.revision
             ? plan.source.revision
+            : undefined,
+        repairPublishedAt:
+          plan.externalHeadRevision && plan.externalHeadRevision !== plan.source.revision
+            ? plan.externalHeadPublishedAt
             : undefined,
         planId: plan.planId,
         planStatus: plan.status,

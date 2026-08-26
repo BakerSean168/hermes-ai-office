@@ -21,6 +21,8 @@ export interface GitHubPullRequestRepairInput {
   headRepository: string;
   headRef: string;
   expectedHeadRevision: string;
+  baseRef: string;
+  expectedBaseRevision: string;
   remote?: string;
 }
 
@@ -48,6 +50,7 @@ interface PullRequestApiView {
     ref?: string;
     repo?: { full_name?: string } | null;
   } | null;
+  base?: { sha?: string; ref?: string } | null;
 }
 
 interface UnixIdentity {
@@ -146,6 +149,8 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
     validateRepository(input.headRepository);
     validateRef(input.headRef);
     validateSha(input.expectedHeadRevision);
+    validateRef(input.baseRef);
+    validateSha(input.expectedBaseRevision);
     if (!Number.isInteger(input.pullRequestNumber) || input.pullRequestNumber < 1) {
       throw new Error('GITHUB_PR_REPAIR_NUMBER_INVALID');
     }
@@ -233,6 +238,14 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
     ) {
       throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
     }
+    const observedBaseRevision = pullRequest.base?.sha?.trim() ?? '';
+    if (
+      pullRequest.base?.ref?.trim() !== input.baseRef ||
+      observedBaseRevision !== input.expectedBaseRevision
+    ) {
+      throw new Error('GITHUB_PR_BASE_CHANGED_DURING_REPAIR_PUBLICATION');
+    }
+    validateSha(observedBaseRevision);
     const currentHeadRevision = pullRequest.head?.sha?.trim() ?? '';
     validateSha(currentHeadRevision);
 
@@ -345,6 +358,36 @@ export class GitHubPullRequestRepairPublisher implements GitHubPullRequestRepair
       if (observedRemoteRevision !== publishedRevision) {
         throw new Error('GITHUB_PR_REPAIR_REMOTE_VERIFICATION_FAILED');
       }
+
+      const finalPullRaw = await this.#run(
+        repositoryPath,
+        'gh',
+        ['api', `repos/${input.repository}/pulls/${input.pullRequestNumber}`],
+        owner,
+      );
+      let finalPullRequest: PullRequestApiView;
+      try {
+        finalPullRequest = JSON.parse(finalPullRaw) as PullRequestApiView;
+      } catch {
+        throw new Error('GITHUB_PR_REPAIR_RESPONSE_INVALID');
+      }
+      if (
+        finalPullRequest.state !== 'open' ||
+        finalPullRequest.number !== input.pullRequestNumber ||
+        finalPullRequest.head?.ref?.trim() !== input.headRef ||
+        finalPullRequest.head?.repo?.full_name?.trim() !== input.headRepository ||
+        finalPullRequest.head?.sha?.trim() !== publishedRevision
+      ) {
+        throw new Error('GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION');
+      }
+      const finalBaseRevision = finalPullRequest.base?.sha?.trim() ?? '';
+      if (
+        finalPullRequest.base?.ref?.trim() !== input.baseRef ||
+        finalBaseRevision !== input.expectedBaseRevision
+      ) {
+        throw new Error('GITHUB_PR_BASE_CHANGED_DURING_REPAIR_PUBLICATION');
+      }
+      validateSha(finalBaseRevision);
     } finally {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     }

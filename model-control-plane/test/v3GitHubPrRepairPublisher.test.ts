@@ -10,9 +10,11 @@ import {
 } from '../src/v3/githubPrRepairPublisher.js';
 
 const ORIGINAL = '1111111111111111111111111111111111111111';
+const BASE = '2222222222222222222222222222222222222222';
+const NEW_BASE = '5555555555555555555555555555555555555555';
 const REPAIRED = '3333333333333333333333333333333333333333';
 
-function pull(head = ORIGINAL) {
+function pull(head = ORIGINAL, base = BASE, baseRef = 'main') {
   return JSON.stringify({
     number: 42,
     state: 'open',
@@ -21,6 +23,7 @@ function pull(head = ORIGINAL) {
       ref: 'jules/fix-42',
       repo: { full_name: 'example/project' },
     },
+    base: { sha: base, ref: baseRef },
   });
 }
 
@@ -46,6 +49,8 @@ test('GitHub PR repair publication rejects lookalike non-GitHub remotes before G
         headRepository: 'example/project',
         headRef: 'jules/fix-42',
         expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
       }),
     /GITHUB_PR_REPAIR_GITHUB_REMOTE_REQUIRED/,
   );
@@ -77,6 +82,8 @@ test('GitHub PR repair publication rejects a non-GitHub pushurl before GitHub or
         headRepository: 'example/project',
         headRef: 'jules/fix-42',
         expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
       }),
     /GITHUB_PR_REPAIR_GITHUB_REMOTE_REQUIRED/,
   );
@@ -87,12 +94,16 @@ test('GitHub PR repair publication pushes the reviewed descendant with an exact-
   const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-repo-'));
   const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-workspace-'));
   const commands: string[] = [];
+  let pullReads = 0;
   const runner: GitHubRepairCommandRunner = async (cwd, command, args) => {
     const key = `${command} ${args.join(' ')}`;
     commands.push(`${cwd} :: ${key}`);
     if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
     if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
-    if (key === 'gh api repos/example/project/pulls/42') return pull();
+    if (key === 'gh api repos/example/project/pulls/42') {
+      pullReads += 1;
+      return pull(pullReads === 1 ? ORIGINAL : REPAIRED);
+    }
     if (key.includes('status --porcelain')) return '';
     if (key.endsWith('rev-parse HEAD')) return REPAIRED;
     if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
@@ -114,6 +125,8 @@ test('GitHub PR repair publication pushes the reviewed descendant with an exact-
     headRepository: 'example/project',
     headRef: 'jules/fix-42',
     expectedHeadRevision: ORIGINAL,
+    baseRef: 'main',
+    expectedBaseRevision: BASE,
   });
 
   assert.equal(result.previousRevision, ORIGINAL);
@@ -127,6 +140,97 @@ test('GitHub PR repair publication pushes the reviewed descendant with an exact-
     ),
   );
   assert.equal(commands.some((command) => /\bgit (checkout|reset)\b/.test(command)), false);
+});
+
+test('GitHub PR repair publication refuses a retargeted or advanced PR base before push', async () => {
+  for (const [name, changedPull] of [
+    ['advanced', pull(ORIGINAL, NEW_BASE, 'main')],
+    ['retargeted', pull(ORIGINAL, BASE, 'release')],
+  ] as const) {
+    const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), `pr-repair-base-${name}-repo-`));
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), `pr-repair-base-${name}-workspace-`));
+    let pushed = false;
+    const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+      const key = `${command} ${args.join(' ')}`;
+      if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+      if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
+      if (key.includes('status --porcelain')) return '';
+      if (key.endsWith('rev-parse HEAD')) return REPAIRED;
+      if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
+      if (key === 'gh api repos/example/project/pulls/42') return changedPull;
+      if (key.startsWith('git push ')) pushed = true;
+      if (key.includes('bundle create ') || key.startsWith('git fetch ')) return '';
+      if (key === 'git ls-remote origin refs/heads/jules/fix-42') {
+        return `${REPAIRED}\trefs/heads/jules/fix-42`;
+      }
+      return '';
+    };
+
+    await assert.rejects(
+      () =>
+        new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+          planId: `plan_base_${name}`,
+          repositoryPath,
+          workspacePath,
+          repository: 'example/project',
+          pullRequestNumber: 42,
+          headRepository: 'example/project',
+          headRef: 'jules/fix-42',
+          expectedHeadRevision: ORIGINAL,
+          baseRef: 'main',
+          expectedBaseRevision: BASE,
+        } as any),
+      /GITHUB_PR_BASE_CHANGED_DURING_REPAIR_PUBLICATION/,
+    );
+    assert.equal(pushed, false);
+  }
+});
+
+test('GitHub PR repair publication fails closed if the base moves during the push race window', async () => {
+  const repositoryPath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-base-postpush-repo-'));
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'pr-repair-base-postpush-workspace-'));
+  let pullReads = 0;
+  let pushed = false;
+  const runner: GitHubRepairCommandRunner = async (_cwd, command, args) => {
+    const key = `${command} ${args.join(' ')}`;
+    if (key === 'git remote get-url origin') return 'https://github.com/example/project.git';
+    if (key === 'git remote get-url --push --all origin') return 'https://github.com/example/project.git';
+    if (key.includes('status --porcelain')) return '';
+    if (key.endsWith('rev-parse HEAD')) return REPAIRED;
+    if (key.endsWith(`merge-base ${ORIGINAL} ${REPAIRED}`)) return ORIGINAL;
+    if (key === 'gh api repos/example/project/pulls/42') {
+      pullReads += 1;
+      return pull(pullReads === 1 ? ORIGINAL : REPAIRED, pullReads === 1 ? BASE : NEW_BASE);
+    }
+    if (key.includes('bundle create ') || key.startsWith('git fetch ')) return '';
+    if (key.startsWith('git push --force-with-lease=')) {
+      pushed = true;
+      return '';
+    }
+    if (key === 'git ls-remote origin refs/heads/jules/fix-42') {
+      return `${REPAIRED}\trefs/heads/jules/fix-42`;
+    }
+    return '';
+  };
+
+  await assert.rejects(
+    () =>
+      new GitHubPullRequestRepairPublisher({ commandRunner: runner }).publish({
+        planId: 'plan_base_postpush',
+        repositoryPath,
+        workspacePath,
+        repository: 'example/project',
+        pullRequestNumber: 42,
+        headRepository: 'example/project',
+        headRef: 'jules/fix-42',
+        expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
+      } as any),
+    /GITHUB_PR_BASE_CHANGED_DURING_REPAIR_PUBLICATION/,
+  );
+  assert.equal(pushed, true);
+  assert.equal(pullReads, 2);
 });
 
 test('GitHub PR repair publication refuses to overwrite a concurrently updated head', async () => {
@@ -158,6 +262,8 @@ test('GitHub PR repair publication refuses to overwrite a concurrently updated h
         headRepository: 'example/project',
         headRef: 'jules/fix-42',
         expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
       }),
     /GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION/,
   );
@@ -200,6 +306,8 @@ test('GitHub PR repair publication classifies a force-with-lease race as a chang
         headRepository: 'example/project',
         headRef: 'jules/fix-42',
         expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
       }),
     /GITHUB_PR_CHANGED_DURING_REPAIR_PUBLICATION/,
   );
@@ -226,6 +334,8 @@ test('GitHub PR repair publication fails closed for fork heads', async () => {
         headRepository: 'contributor/project',
         headRef: 'fix-42',
         expectedHeadRevision: ORIGINAL,
+        baseRef: 'main',
+        expectedBaseRevision: BASE,
       }),
     /GITHUB_PR_REPAIR_CROSS_REPOSITORY_UNSUPPORTED/,
   );
@@ -263,6 +373,8 @@ test('GitHub PR repair publication is crash-idempotent when the exact reviewed r
     headRepository: 'example/project',
     headRef: 'jules/fix-42',
     expectedHeadRevision: ORIGINAL,
+    baseRef: 'main',
+    expectedBaseRevision: BASE,
   });
 
   assert.equal(result.previousRevision, ORIGINAL);

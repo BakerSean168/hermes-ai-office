@@ -25,7 +25,7 @@ function fixture() {
     const key = `${command} ${args.join(' ')}`;
     commands.push(key);
     if (key === 'gh api repos/example/project/pulls/42') return currentPull;
-    if (key.startsWith(`gh api -X POST repos/example/project/statuses/${HEAD}`)) return '{}';
+    if (key.startsWith('gh api -X POST repos/example/project/statuses/')) return '{}';
     throw new Error(`unexpected command: ${key}`);
   };
   return {
@@ -102,12 +102,14 @@ test('GitHub governance status never marks a stale reviewed SHA green after PR s
 
 test('GitHub governance status defers publication while the control-plane repair head is propagating', async () => {
   const state = fixture();
-  const reporter = new GitHubGovernanceStatus({ commandRunner: state.runner });
+  const now = Date.parse('2026-08-26T08:00:00.000Z');
+  const reporter = new GitHubGovernanceStatus({ commandRunner: state.runner, now: () => now });
 
   const result = await reporter.publish({
     ...input(state.repositoryPath),
     expectedHeadRevision: NEW_HEAD,
     previousHeadRevision: HEAD,
+    repairPublishedAt: now - 30_000,
     planStatus: 'RUNNING',
   });
 
@@ -119,6 +121,32 @@ test('GitHub governance status defers publication while the control-plane repair
     published: false,
   });
   assert.equal(state.commands.some((command) => command.includes('gh api -X POST')), false);
+});
+
+test('GitHub governance status stops treating the previous head as propagation lag after the bounded grace window', async () => {
+  const state = fixture();
+  const now = Date.parse('2026-08-26T08:00:00.000Z');
+  const reporter = new GitHubGovernanceStatus({
+    commandRunner: state.runner,
+    now: () => now,
+  });
+
+  const result = await reporter.publish({
+    ...input(state.repositoryPath),
+    expectedHeadRevision: NEW_HEAD,
+    previousHeadRevision: HEAD,
+    repairPublishedAt: now - 5 * 60_000,
+    planStatus: 'SUCCEEDED',
+  });
+
+  assert.deepEqual(result, {
+    revision: NEW_HEAD,
+    state: 'error',
+    stale: true,
+    observedHeadRevision: HEAD,
+    published: true,
+  });
+  assert.ok(state.commands.some((command) => command.includes('state=error')));
 });
 
 test('GitHub governance status maps blocking and cancelled plans to non-green commit statuses', async () => {
