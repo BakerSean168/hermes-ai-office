@@ -1,6 +1,7 @@
 export const DEVELOPMENT_PHASES = [
   'ORCHESTRATE',
   'INVESTIGATE_PLAN',
+  'ADOPT_CHANGE',
   'IMPLEMENT',
   'IMPLEMENT_FIX',
   'VERIFY_REVIEW',
@@ -67,6 +68,8 @@ export interface StartDevelopmentExecutionInput {
     previousExecutionId?: string | null;
     previousResult?: string | null;
     acceptanceCriteria?: string[];
+    reviewBaseRevision?: string | null;
+    changeOrigin?: 'EXTERNAL' | null;
   };
   hints?: ExecutionHints;
   override?: ExecutionOverride;

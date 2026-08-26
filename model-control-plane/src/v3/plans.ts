@@ -7,11 +7,16 @@ import { PLAN_LIMITS } from './planConstants.js';
 export type PlanStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
 export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
 
+export type PlanSource =
+  | { kind: 'TASK' }
+  | { kind: 'EXTERNAL_CHANGE'; revision: string };
+
 export interface CreatePlanInput {
   projectKey: string;
   objective: string;
   analysisSummary: string;
   repository: { path: string; baseRevision?: string };
+  source?: PlanSource;
   delivery?: Partial<PlanDeliveryConfig> & Pick<PlanDeliveryConfig, 'branch'>;
   batches: Array<{
     key: string;
@@ -34,6 +39,7 @@ export interface PlanRecord {
   repositoryPath: string;
   baseRevision: string;
   currentRevision: string;
+  source: PlanSource;
   delivery?: PlanDeliveryConfig;
   deliveryStage?: DeliveryStage;
   deliveryEvidence?: Record<string, unknown>;
@@ -84,6 +90,7 @@ interface PlanRow {
   repository_path: string;
   base_revision: string;
   current_revision: string;
+  source_json: string | null;
   delivery_json: string | null;
   delivery_stage: string | null;
   delivery_evidence_json: string | null;
@@ -147,6 +154,9 @@ function planFromRow(row: PlanRow): PlanRecord {
     repositoryPath: row.repository_path,
     baseRevision: row.base_revision,
     currentRevision: row.current_revision,
+    source: row.source_json
+      ? (JSON.parse(row.source_json) as PlanSource)
+      : { kind: 'TASK' },
     delivery,
     deliveryStage: row.delivery_stage ? (row.delivery_stage as DeliveryStage) : undefined,
     deliveryEvidence: row.delivery_evidence_json
@@ -206,6 +216,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
       repository_path TEXT NOT NULL,
       base_revision TEXT NOT NULL,
       current_revision TEXT NOT NULL,
+      source_json TEXT,
       delivery_json TEXT,
       delivery_stage TEXT,
       delivery_evidence_json TEXT,
@@ -266,6 +277,7 @@ export function ensurePlanSchema(db: DatabaseSync): void {
     ),
   );
   for (const [name, type] of [
+    ['source_json', 'TEXT'],
     ['delivery_json', 'TEXT'],
     ['delivery_stage', 'TEXT'],
     ['delivery_evidence_json', 'TEXT'],
@@ -281,6 +293,12 @@ function validateGraph(input: CreatePlanInput): void {
   if (!input.objective.trim()) throw new Error('OBJECTIVE_REQUIRED');
   if (!input.analysisSummary.trim()) throw new Error('PLAN_ANALYSIS_REQUIRED');
   if (!input.repository.path.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
+  if (input.source && !['TASK', 'EXTERNAL_CHANGE'].includes(input.source.kind)) {
+    throw new Error('PLAN_SOURCE_KIND_INVALID');
+  }
+  if (input.source?.kind === 'EXTERNAL_CHANGE' && !input.source.revision.trim()) {
+    throw new Error('EXTERNAL_CHANGE_REVISION_REQUIRED');
+  }
   if (input.delivery) {
     if (!input.delivery.branch.trim()) throw new Error('DELIVERY_BRANCH_REQUIRED');
     if (input.delivery.autoMerge !== true)
@@ -341,6 +359,7 @@ export class PlanRepository {
     const now = Date.now();
     const planId = `plan_${randomUUID()}`;
     const baseRevision = input.repository.baseRevision?.trim() || 'HEAD';
+    const source: PlanSource = input.source ?? { kind: 'TASK' };
     const delivery = input.delivery
       ? {
           remote: input.delivery.remote?.trim() || 'origin',
@@ -356,8 +375,8 @@ export class PlanRepository {
         .prepare(
           `INSERT INTO v3_plans
            (plan_id,command_key,project_key,objective,repository_path,base_revision,current_revision,
-            delivery_json,delivery_stage,status,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            source_json,delivery_json,delivery_stage,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           planId,
@@ -367,6 +386,7 @@ export class PlanRepository {
           input.repository.path,
           baseRevision,
           baseRevision,
+          JSON.stringify(source),
           delivery ? JSON.stringify(delivery) : null,
           delivery ? 'PENDING' : null,
           'PENDING',
@@ -416,6 +436,7 @@ export class PlanRepository {
       });
       this.appendEvent(planId, 'PLAN_CREATED', {
         batches: input.batches.length,
+        source,
         analysisSummary: input.analysisSummary.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
       });
       this.#db.exec('COMMIT');

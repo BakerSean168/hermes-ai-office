@@ -62,6 +62,9 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Produce one coherent result containing diagnosis, evidence, risks, and an implementation plan.',
       'Prefer inspecting the real code and configuration over speculation.',
     ],
+    ADOPT_CHANGE: [
+      'This phase is completed deterministically by the control plane and must not launch a model-backed worker.',
+    ],
     IMPLEMENT: [
       'Implement the approved objective in the isolated workspace.',
       'Run focused tests or checks that are proportionate to the change.',
@@ -79,7 +82,9 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
       'Perform review directly in this execution; do not delegate VERIFY_REVIEW to nested task subagents.',
-      'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
+      input.context?.changeOrigin === 'EXTERNAL'
+        ? 'This is an external change review. First verify that the claimed problem is real and the change is justified from repository evidence. The first non-empty line MUST be exactly PASS, FAIL, or INVALID. Use INVALID only when the claimed problem itself is unsupported or not reproducible; use FAIL when the problem is valid but the implementation has a blocking defect.'
+        : 'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
       'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
       'AI Office freezes the implementation workspace at its current HEAD. Committed implementation work therefore stays committed and a clean implementation remains clean in the review snapshot. The original implementation source revision is preserved at refs/ai-office/review-base for comparison. Any dirty files in the snapshot represent genuine uncommitted implementation changes.',
@@ -183,7 +188,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (previous.projectKey !== input.projectKey) {
       throw new Error('PREVIOUS_EXECUTION_PROJECT_MISMATCH');
     }
-    if (!['IMPLEMENT', 'IMPLEMENT_FIX'].includes(previous.phase)) {
+    if (!['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(previous.phase)) {
       throw new Error('PREVIOUS_EXECUTION_NOT_IMPLEMENTATION');
     }
     if (previous.statusCache !== 'SUCCEEDED') {
@@ -220,6 +225,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     }
     const verdict = reviewVerdict(reviewResult);
     if (verdict === 'APPROVED') throw new Error('PREVIOUS_EXECUTION_REVIEW_ALREADY_APPROVED');
+    if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
 
     const implementationExecutionId = review.previousExecutionId?.trim();
@@ -229,7 +235,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (implementation.projectKey !== input.projectKey) {
       throw new Error('PREVIOUS_EXECUTION_PROJECT_MISMATCH');
     }
-    if (!['IMPLEMENT', 'IMPLEMENT_FIX'].includes(implementation.phase)) {
+    if (!['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(implementation.phase)) {
       throw new Error('REVIEW_IMPLEMENTATION_LINK_INVALID');
     }
     if (implementation.statusCache !== 'SUCCEEDED') {
@@ -330,6 +336,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     const evidence = previous.result?.finalText?.trim() || '';
     const verdict = reviewVerdict(evidence);
     if (verdict === 'BLOCKING') throw new Error('PREVIOUS_EXECUTION_REVIEW_BLOCKING');
+    if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
 
     const finalText = [
@@ -340,6 +347,26 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       '',
       'Review evidence:',
       evidence || '(review completed without textual evidence)',
+    ].join('\n');
+    return this.#links.completeInternal(record.executionId, finalText);
+  }
+
+  #adoptChangeDeterministically(
+    input: StartDevelopmentExecutionInput,
+    record: ExecutionLinkRecord,
+  ): ExecutionLinkRecord {
+    const headRevision = input.repository.baseRevision?.trim();
+    const reviewBaseRevision = input.context?.reviewBaseRevision?.trim();
+    if (!headRevision) throw new Error('ADOPT_CHANGE_REVISION_REQUIRED');
+    if (!reviewBaseRevision) throw new Error('ADOPT_CHANGE_BASE_REVISION_REQUIRED');
+    if (headRevision === reviewBaseRevision) throw new Error('ADOPT_CHANGE_EMPTY');
+    if (!record.workspaceRef) throw new Error('ADOPT_CHANGE_WORKSPACE_MISSING');
+    const finalText = [
+      'ADOPTED_CHANGE',
+      'Project: ' + input.projectKey,
+      'Base revision: ' + reviewBaseRevision,
+      'Adopted revision: ' + headRevision,
+      'No model-backed writer was launched.',
     ].join('\n');
     return this.#links.completeInternal(record.executionId, finalText);
   }
@@ -375,7 +402,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!input.objective?.trim()) throw new Error('OBJECTIVE_REQUIRED');
     if (!input.projectKey?.trim()) throw new Error('PROJECT_KEY_REQUIRED');
     if (
-      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT'].includes(input.phase) &&
+      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'ADOPT_CHANGE', 'IMPLEMENT'].includes(input.phase) &&
       !input.repository?.path
     ) {
       throw new Error('REPOSITORY_PATH_REQUIRED');
@@ -502,13 +529,28 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           record = this.#links.attachWorkspace(record.executionId, {
             workspaceRef: provisioned.executionPath,
             gitBranch: provisioned.branch,
-            sourceRevision: provisioned.sourceRevision,
+            sourceRevision:
+              input.phase === 'ADOPT_CHANGE'
+                ? input.context?.reviewBaseRevision?.trim() || provisioned.sourceRevision
+                : provisioned.sourceRevision,
           });
         }
       } catch (error) {
         this.#links.updateStatus(record.executionId, 'FAILED');
         throw error;
       }
+    }
+
+    if (input.phase === 'ADOPT_CHANGE') {
+      if (record.statusCache !== 'SUCCEEDED' || !record.resultText) {
+        try {
+          record = this.#adoptChangeDeterministically(input, record);
+        } catch (error) {
+          this.#links.updateStatus(record.executionId, 'FAILED');
+          throw error;
+        }
+      }
+      return (await this.get(record.executionId))!;
     }
 
     if (!record.openhandsConversationId) {

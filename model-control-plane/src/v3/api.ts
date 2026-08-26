@@ -73,6 +73,10 @@ export function registerV3Routes(
       body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
         ? (body.repository as Record<string, unknown>)
         : {};
+    const source =
+      body.source && typeof body.source === 'object' && !Array.isArray(body.source)
+        ? (body.source as Record<string, unknown>)
+        : undefined;
     const delivery =
       body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery)
         ? (body.delivery as Record<string, unknown>)
@@ -87,6 +91,12 @@ export function registerV3Routes(
             path: String(repository.path ?? ''),
             baseRevision: repository.baseRevision ? String(repository.baseRevision) : undefined,
           },
+          source: source
+            ? {
+                kind: String(source.kind ?? '').toUpperCase() as 'TASK' | 'EXTERNAL_CHANGE',
+                ...(source.revision ? { revision: String(source.revision) } : {}),
+              } as import('./plans.js').PlanSource
+            : undefined,
           delivery: delivery
             ? {
                 remote: delivery.remote ? String(delivery.remote) : undefined,
@@ -253,6 +263,10 @@ export function registerV3Routes(
     if (phase === 'ORCHESTRATE') {
       reply.code(400);
       return { error: { code: 'V3_ORCHESTRATE_REQUIRES_DURABLE_PLAN' } };
+    }
+    if (phase === 'ADOPT_CHANGE') {
+      reply.code(400);
+      return { error: { code: 'V3_ADOPT_CHANGE_REQUIRES_DURABLE_PLAN' } };
     }
     const header = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(header) ? header[0] : header;

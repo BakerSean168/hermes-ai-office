@@ -182,28 +182,39 @@ export class DurablePlanOrchestrator {
     plan: ReturnType<PlanRepository['get']> extends infer Value ? Exclude<Value, null> : never,
     batch: ReturnType<PlanRepository['batches']>[number],
     item: WorkItemRecord,
-    phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
+    phase: 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
     previousExecutionId: string | undefined,
     attempt: number,
     overrideBackend?: string,
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
+    const previous = previousExecutionId ? this.#links.get(previousExecutionId) : null;
+    const externalReview = phase === 'VERIFY_REVIEW' && previous?.phase === 'ADOPT_CHANGE';
+    const isRepositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT';
     const snapshot = await this.#executions.start(
       {
         phase,
         objective:
           phase === 'VERIFY_REVIEW'
-            ? `Independently review ${item.title}: ${item.objective}`
+            ? externalReview
+              ? `Independently validate the external change and review ${item.title}: ${item.objective}`
+              : `Independently review ${item.title}: ${item.objective}`
             : item.objective,
         projectKey: plan.projectKey,
         repository: {
-          path: phase === 'IMPLEMENT' ? plan.repositoryPath : '',
+          path: isRepositoryEntry ? plan.repositoryPath : '',
           baseRevision:
-            phase === 'IMPLEMENT' ? (batch.baseRevision ?? plan.currentRevision) : undefined,
+            phase === 'ADOPT_CHANGE' && plan.source.kind === 'EXTERNAL_CHANGE'
+              ? plan.source.revision
+              : phase === 'IMPLEMENT'
+                ? (batch.baseRevision ?? plan.currentRevision)
+                : undefined,
         },
         context: {
           previousExecutionId,
           acceptanceCriteria: item.acceptanceCriteria,
+          reviewBaseRevision: phase === 'ADOPT_CHANGE' ? plan.baseRevision : undefined,
+          changeOrigin: externalReview ? 'EXTERNAL' : undefined,
         },
         override: overrideBackend ? { backend: overrideBackend } : undefined,
         await: false,
@@ -234,7 +245,8 @@ export class DurablePlanOrchestrator {
   ): Promise<void> {
     const executionIds = this.#repository.executionIds(item.workItemId);
     if (executionIds.length === 0) {
-      await this.#launchPlanPhase(plan, batch, item, 'IMPLEMENT', undefined, 1);
+      const initialPhase = plan.source.kind === 'EXTERNAL_CHANGE' ? 'ADOPT_CHANGE' : 'IMPLEMENT';
+      await this.#launchPlanPhase(plan, batch, item, initialPhase, undefined, 1);
       return;
     }
     const records = executionIds
@@ -260,7 +272,7 @@ export class DurablePlanOrchestrator {
           plan,
           batch,
           item,
-          latest.phase as 'IMPLEMENT' | 'VERIFY_REVIEW',
+          latest.phase as 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
           latest.previousExecutionId,
           totalPhaseAttempts + 1,
           latest.phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
@@ -272,7 +284,11 @@ export class DurablePlanOrchestrator {
       return;
     }
 
-    if (latest.phase === 'IMPLEMENT' || latest.phase === 'IMPLEMENT_FIX') {
+    if (
+      latest.phase === 'ADOPT_CHANGE' ||
+      latest.phase === 'IMPLEMENT' ||
+      latest.phase === 'IMPLEMENT_FIX'
+    ) {
       const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
       await this.#launchPlanPhase(
         plan,
@@ -286,6 +302,14 @@ export class DurablePlanOrchestrator {
     }
 
     const verdict = reviewVerdict(snapshot.result?.finalText ?? '');
+    if (verdict === 'INVALID') {
+      const reason =
+        plan.source.kind === 'EXTERNAL_CHANGE'
+          ? 'EXTERNAL_CHANGE_INVALID'
+          : 'REVIEW_VERDICT_INVALID_FOR_TASK';
+      this.#blockWorkItem(plan.planId, batch.batchId, item.workItemId, reason, latest.executionId);
+      return;
+    }
     if (verdict === 'BLOCKING') {
       const completedFixCycles = new Set(
         records
@@ -386,7 +410,12 @@ export class DurablePlanOrchestrator {
         .filter((record): record is ExecutionLinkRecord => Boolean(record));
       const implementation = [...records]
         .reverse()
-        .find((record) => record.phase === 'IMPLEMENT' || record.phase === 'IMPLEMENT_FIX');
+        .find(
+          (record) =>
+            record.phase === 'ADOPT_CHANGE' ||
+            record.phase === 'IMPLEMENT' ||
+            record.phase === 'IMPLEMENT_FIX',
+        );
       if (!implementation?.workspaceRef || !implementation.sourceRevision) {
         throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
       }
@@ -613,7 +642,7 @@ export class DurablePlanOrchestrator {
           .reverse()
           .find(
             (record) =>
-              ['IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
+              ['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
               record.statusCache === 'SUCCEEDED' &&
               Boolean(record.workspaceRef),
           );
@@ -662,7 +691,10 @@ export class DurablePlanOrchestrator {
         .map((executionId) => this.#links.get(executionId))
         .filter((record): record is ExecutionLinkRecord => Boolean(record));
       const latest = records.at(-1);
-      if (!latest || !['IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(latest.phase)) {
+      if (
+        !latest ||
+        !['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(latest.phase)
+      ) {
         continue;
       }
       const recoverReviewLimit =
@@ -671,7 +703,7 @@ export class DurablePlanOrchestrator {
         reviewVerdict(latest.resultText ?? '') === 'BLOCKING';
       const phase = recoverReviewLimit
         ? 'IMPLEMENT_FIX'
-        : (latest.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW');
+        : (latest.phase as 'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW');
       const previousExecutionId = recoverReviewLimit
         ? latest.executionId
         : latest.previousExecutionId;

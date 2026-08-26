@@ -49,6 +49,7 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
     'claude-code-review-headless',
     'codex-acp',
     'codex-review-headless',
+    'control-plane-change-adopter',
     'control-plane-finalizer',
     'dsh-acp',
     'opencode-acp',

@@ -1036,3 +1036,154 @@ test('delivery repair exhaustion requires an explicit one-at-a-time retry_delive
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+test('external change plans adopt the existing revision, review first, and repair only after a blocking review', async () => {
+  const host = new PlanHost();
+  integrationCount = 0;
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'external-change-review-first' },
+      payload: {
+        projectKey: 'digital-biome',
+        objective: 'Review an externally proposed fix before allowing any AI writer.',
+        analysisSummary: 'The change already exists at the supplied external revision.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate and review external PR change',
+                objective: 'Confirm the claimed problem is real and the proposed repair preserves contracts.',
+                acceptanceCriteria: [
+                  'The claimed problem is supported by repository evidence.',
+                  'The proposed repair preserves protected contracts.',
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const adopted = body.batches[0].workItems[0].executions[0];
+    assert.equal(adopted.phase, 'ADOPT_CHANGE');
+    assert.equal(adopted.status, 'SUCCEEDED');
+    assert.equal(host.creates, 0);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstReview = body.batches[0].workItems[0].executions[1];
+    assert.equal(firstReview.phase, 'VERIFY_REVIEW');
+    assert.equal(host.creates, 1);
+    assert.match(host.lastCreateInput?.objective ?? '', /external change/i);
+    assert.match(host.lastCreateInput?.objective ?? '', /problem.*valid/i);
+
+    host.succeed(firstReview.refs.openhandsConversationId, 'FAIL\nThe repair breaks the content schema contract.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const fix = body.batches[0].workItems[0].executions[2];
+    assert.equal(fix.phase, 'IMPLEMENT_FIX');
+
+    host.succeed(fix.refs.openhandsConversationId, 'FIXED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const secondReview = body.batches[0].workItems[0].executions[3];
+    assert.equal(secondReview.phase, 'VERIFY_REVIEW');
+
+    host.succeed(secondReview.refs.openhandsConversationId, 'PASS\nProblem validity and contract preservation verified.');
+    await runtime.v3.reconcilePlans(planId);
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.currentRevision, 'integrated-1');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('an invalid external change is blocked without launching a repair writer', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Reject a false-positive external change.',
+        analysisSummary: 'Review the existing external change before any repair.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Verify whether the claimed defect actually exists.',
+              },
+            ],
+          },
+        ],
+      },
+      'external-change-invalid',
+    );
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nThe claimed defect is not reproducible from repository evidence.');
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'EXTERNAL_CHANGE_INVALID');
+    assert.equal(body.batches[0]!.workItems[0]!.executions.length, 2);
+    assert.equal(
+      body.batches[0]!.workItems[0]!.executions.some((execution) => execution.phase === 'IMPLEMENT_FIX'),
+      false,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});

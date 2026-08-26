@@ -26,6 +26,15 @@ phases:
     workspace_mode: read_oriented
     session_policy: fresh
 
+  ADOPT_CHANGE:
+    backend_candidates:
+      - control-plane-change-adopter
+    model_class: deterministic-adopt-v1
+    transport_preference:
+      - INTERNAL
+    workspace_mode: isolated_write
+    session_policy: fresh
+
   IMPLEMENT:
     backend_candidates:
       - opencode-acp
@@ -75,6 +84,12 @@ phases:
     session_policy: fresh
 
 backends:
+  control-plane-change-adopter:
+    kind: internal
+    enabled: true
+    supports:
+      write: false
+
   openhands-builtin:
     kind: openhands
     enabled: true
