@@ -270,3 +270,133 @@ test('writer completion requires a clean commit that advances the durable execut
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('batch integration classifies Git conflicts with conflict evidence for LLM repair', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-conflict-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const left = await provisioner.provision({
+      executionId: 'left',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(left.hostPath, 'tracked.txt'), 'left\n');
+    git(left.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(left.hostPath, 'config', 'user.name', 'Worker');
+    git(left.hostPath, 'add', 'tracked.txt');
+    git(left.hostPath, 'commit', '-m', 'left change');
+
+    const right = await provisioner.provision({
+      executionId: 'right',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(right.hostPath, 'tracked.txt'), 'right\n');
+    git(right.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(right.hostPath, 'config', 'user.name', 'Worker');
+    git(right.hostPath, 'add', 'tracked.txt');
+    git(right.hostPath, 'commit', '-m', 'right change');
+
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-conflict',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [
+          { workspaceRef: left.executionPath, sourceRevision: base },
+          { workspaceRef: right.executionPath, sourceRevision: base },
+        ],
+      }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /^BATCH_INTEGRATION_CONFLICT:/);
+        assert.match(message, /CONFLICT/);
+        assert.match(message, /tracked\.txt/);
+        return true;
+      },
+    );
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('repaired batch integration rejects a repair head that drops an approved source revision', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-ancestor-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const approved = await provisioner.provision({
+      executionId: 'approved',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(approved.hostPath, 'approved.txt'), 'approved\n');
+    git(approved.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(approved.hostPath, 'config', 'user.name', 'Worker');
+    git(approved.hostPath, 'add', '.');
+    git(approved.hostPath, 'commit', '-m', 'approved source');
+    const approvedHead = git(approved.hostPath, 'rev-parse', 'HEAD');
+
+    const incompleteRepair = await provisioner.provision({
+      executionId: 'repair',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(incompleteRepair.hostPath, 'repair.txt'), 'repair without source\n');
+    git(incompleteRepair.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(incompleteRepair.hostPath, 'config', 'user.name', 'Worker');
+    git(incompleteRepair.hostPath, 'add', '.');
+    git(incompleteRepair.hostPath, 'commit', '-m', 'incomplete repair');
+
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-repair',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [{ workspaceRef: incompleteRepair.executionPath, sourceRevision: base }],
+        requiredAncestorRevisions: [approvedHead],
+      }),
+      /BATCH_INTEGRATION_REPAIR_INCOMPLETE/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

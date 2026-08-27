@@ -789,6 +789,64 @@ export class PlanRepository {
     return this.batches(planId).find((batch) => batch.batchId === batchId) ?? null;
   }
 
+  addBatchIntegrationRepairWorkItem(
+    planId: string,
+    batchId: string,
+    input: {
+      objective: string;
+      acceptanceCriteria: string[];
+      evidence: Record<string, unknown>;
+    },
+  ): WorkItemRecord | null {
+    const batch = this.batches(planId).find((candidate) => candidate.batchId === batchId);
+    if (!batch) throw new Error('PLAN_BATCH_NOT_FOUND');
+    const keyPrefix = `integration-repair-b${batch.ordinal + 1}-`;
+    const items = this.workItems(batchId);
+    const repairAttempt = items.filter((item) => item.key.startsWith(keyPrefix)).length + 1;
+    if (repairAttempt > PLAN_LIMITS.batchIntegrationRepairAttempts) return null;
+    const itemKey = `${keyPrefix}${repairAttempt}`;
+    const existing = items.find((item) => item.key === itemKey);
+    if (existing) return existing;
+    const itemId = `work_${randomUUID()}`;
+    const ordinal = items.reduce((max, item) => Math.max(max, item.ordinal), -1) + 1;
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO v3_plan_work_items
+           (work_item_id,plan_id,batch_id,item_key,title,objective,acceptance_criteria_json,ordinal,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          itemId,
+          planId,
+          batchId,
+          itemKey,
+          `Resolve ${batch.key} integration conflict (attempt ${repairAttempt})`,
+          input.objective,
+          JSON.stringify(input.acceptanceCriteria),
+          ordinal,
+          'PENDING',
+          now,
+          now,
+        );
+      this.appendEvent(
+        planId,
+        'BATCH_INTEGRATION_REPAIR_CREATED',
+        { attempt: repairAttempt, evidence: input.evidence },
+        { batchId, workItemId: itemId },
+      );
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      const raced = this.workItems(batchId).find((item) => item.key === itemKey);
+      if (raced) return raced;
+      throw error;
+    }
+    return this.workItems(batchId).find((item) => item.workItemId === itemId) ?? null;
+  }
+
   setBatchStatus(
     batchId: string,
     status: PlanNodeStatus,

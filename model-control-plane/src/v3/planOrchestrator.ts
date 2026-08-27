@@ -18,6 +18,14 @@ import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
+const INTEGRATION_REPAIR_ITEM_PREFIX = 'integration-repair-b';
+const INTEGRATION_REPAIR_BACKEND = 'openhands-builtin';
+const INTEGRATION_REPAIR_MODEL_CLASS = 'gpt-5.6-sol';
+
+function isIntegrationRepairItem(item: Pick<WorkItemRecord, 'key'>): boolean {
+  return item.key.startsWith(INTEGRATION_REPAIR_ITEM_PREFIX);
+}
+
 export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
 
 interface OrchestrationProposal {
@@ -451,7 +459,15 @@ export class DurablePlanOrchestrator {
           previousExecutionId,
           acceptanceCriteria: item.acceptanceCriteria,
         },
-        override: overrideBackend ? { backend: overrideBackend } : undefined,
+        override:
+          isIntegrationRepairItem(item) && phase !== 'VERIFY_REVIEW'
+            ? {
+                backend: INTEGRATION_REPAIR_BACKEND,
+                modelClass: INTEGRATION_REPAIR_MODEL_CLASS,
+              }
+            : overrideBackend
+              ? { backend: overrideBackend }
+              : undefined,
         await: false,
         plan: {
           planId: plan.planId,
@@ -620,28 +636,172 @@ export class DurablePlanOrchestrator {
     );
   }
 
+  #approvedImplementationEvidence(item: WorkItemRecord): {
+    workspaceRef: string;
+    sourceRevision: string;
+    executionId: string;
+    approvedRevision: string;
+  } {
+    const records = this.#repository
+      .executionIds(item.workItemId)
+      .map((executionId) => this.#links.get(executionId))
+      .filter((record): record is ExecutionLinkRecord => Boolean(record));
+    const implementation = [...records]
+      .reverse()
+      .find(
+        (record) =>
+          (record.phase === 'IMPLEMENT' || record.phase === 'IMPLEMENT_FIX') &&
+          record.statusCache === 'SUCCEEDED',
+      );
+    const approvedReview = [...records]
+      .reverse()
+      .find(
+        (record) =>
+          record.phase === 'VERIFY_REVIEW' &&
+          record.statusCache === 'SUCCEEDED' &&
+          reviewVerdict(record.resultText ?? '') === 'APPROVED',
+      );
+    if (
+      !implementation?.workspaceRef ||
+      !implementation.sourceRevision ||
+      !approvedReview?.sourceRevision
+    ) {
+      throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+    }
+    return {
+      workspaceRef: implementation.workspaceRef,
+      sourceRevision: implementation.sourceRevision,
+      executionId: implementation.executionId,
+      approvedRevision: approvedReview.sourceRevision,
+    };
+  }
+
+  #scheduleBatchIntegrationRepair(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    batch: ReturnType<PlanRepository['batches']>[number],
+    items: WorkItemRecord[],
+    reason: string,
+    message: string,
+  ): void {
+    const originalItems = items.filter((item) => !isIntegrationRepairItem(item));
+    const sources = originalItems.map((item, index) => ({
+      index,
+      itemKey: item.key,
+      title: item.title,
+      acceptanceCriteria: item.acceptanceCriteria,
+      ...this.#approvedImplementationEvidence(item),
+    }));
+    const baseRevision = batch.baseRevision ?? plan.currentRevision;
+    const sourceInstructions = sources
+      .map((source) =>
+        [
+          `[${source.index}] ${source.itemKey} — ${source.title}`,
+          `approved revision: ${source.approvedRevision}`,
+          `workspace: ${source.workspaceRef}`,
+          `fetch: git fetch ${source.workspaceRef} ${source.approvedRevision}:refs/ai-office/incoming/${source.index}`,
+          `merge: git merge --no-ff --no-edit refs/ai-office/incoming/${source.index}`,
+          source.acceptanceCriteria.length
+            ? `acceptance: ${source.acceptanceCriteria.join(' | ')}`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      )
+      .join('\n\n');
+    const objective = [
+      `Resolve the semantic Git integration conflict for batch ${batch.key}.`,
+      `The repair workspace starts from the batch base revision ${baseRevision}.`,
+      'Integrate every independently reviewed implementation below into this one workspace. Fetch the exact approved revisions from their sibling workspaces and merge them in the listed order.',
+      'Resolve conflicts according to repository contracts and ownership boundaries. Do not discard either side wholesale with ours/theirs merely to make Git clean.',
+      'If two implementations made competing architecture choices, inspect the surrounding contracts and tests, choose one coherent ownership model, and adapt both tickets to it while preserving their accepted behavior.',
+      'Do not modify the source worktree or sibling implementation workspaces.',
+      'All listed approved revisions must remain Git ancestors of the final repair HEAD; the control plane verifies this mechanically before accepting the repair.',
+      'Run focused regression tests covering the overlapping files plus the affected ticket acceptance criteria, then commit the resolved integration and leave the workspace clean.',
+      '',
+      sourceInstructions,
+      '',
+      `Conflict evidence (${reason}):`,
+      message.slice(0, PLAN_LIMITS.errorDetailCharacters),
+    ].join('\n');
+    const repair = this.#repository.addBatchIntegrationRepairWorkItem(plan.planId, batch.batchId, {
+      objective: objective.slice(0, 20_000),
+      acceptanceCriteria: [
+        'Every independently reviewed source revision is an ancestor of the final repair HEAD.',
+        'No unresolved Git conflicts remain and the repair workspace is clean with a committed integration result.',
+        'The overlapping repository contracts have one coherent architecture rather than duplicated competing implementations.',
+        'Focused regression tests for all affected work items pass.',
+        'The combined repair is independently reviewed before batch integration is accepted.',
+      ],
+      evidence: {
+        reason,
+        message: message.slice(0, PLAN_LIMITS.errorDetailCharacters),
+        baseRevision,
+        sources: sources.map((source) => ({
+          itemKey: source.itemKey,
+          approvedRevision: source.approvedRevision,
+          workspaceRef: source.workspaceRef,
+        })),
+      },
+    });
+    if (!repair) {
+      const blockedReason = 'BATCH_INTEGRATION_REPAIR_LIMIT_EXCEEDED';
+      this.#repository.setBatchStatus(batch.batchId, 'BLOCKED', {
+        blockedReason,
+      });
+      this.#repository.setPlanStatus(plan.planId, 'BLOCKED', blockedReason);
+      this.#repository.appendEvent(
+        plan.planId,
+        'BATCH_INTEGRATION_BLOCKED',
+        {
+          reason: blockedReason,
+          previousReason: reason,
+          message: message.slice(0, PLAN_LIMITS.errorDetailCharacters),
+        },
+        { batchId: batch.batchId },
+      );
+      return;
+    }
+    this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
+    this.#repository.setPlanStatus(plan.planId, 'RUNNING');
+    this.#repository.appendEvent(
+      plan.planId,
+      'BATCH_INTEGRATION_REPAIR_SCHEDULED',
+      {
+        reason,
+        workItemKey: repair.key,
+        modelClass: INTEGRATION_REPAIR_MODEL_CLASS,
+        backend: INTEGRATION_REPAIR_BACKEND,
+      },
+      { batchId: batch.batchId, workItemId: repair.workItemId },
+    );
+  }
+
   async #integrateBatch(
     plan: Exclude<ReturnType<PlanRepository['get']>, null>,
     batch: ReturnType<PlanRepository['batches']>[number],
     items: WorkItemRecord[],
   ): Promise<void> {
-    const implementations = items.map((item) => {
-      const records = this.#repository
-        .executionIds(item.workItemId)
-        .map((executionId) => this.#links.get(executionId))
-        .filter((record): record is ExecutionLinkRecord => Boolean(record));
-      const implementation = [...records]
-        .reverse()
-        .find((record) => record.phase === 'IMPLEMENT' || record.phase === 'IMPLEMENT_FIX');
-      if (!implementation?.workspaceRef || !implementation.sourceRevision) {
-        throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
-      }
+    const originalItems = items.filter((item) => !isIntegrationRepairItem(item));
+    const repairItems = items.filter(isIntegrationRepairItem);
+    const repairItem = repairItems.at(-1);
+    const integrationItems = repairItem ? [repairItem] : originalItems;
+    const implementations = integrationItems.map((item) => {
+      const evidence = this.#approvedImplementationEvidence(item);
       return {
-        workspaceRef: implementation.workspaceRef,
-        sourceRevision: implementation.sourceRevision,
-        executionId: implementation.executionId,
+        workspaceRef: evidence.workspaceRef,
+        sourceRevision: evidence.sourceRevision,
+        executionId: evidence.executionId,
       };
     });
+    const requiredAncestorRevisions = repairItem
+      ? [
+          ...new Set(
+            originalItems.map(
+              (item) => this.#approvedImplementationEvidence(item).approvedRevision,
+            ),
+          ),
+        ]
+      : undefined;
     try {
       const integrated = await this.#workspace.integrateBatch({
         planId: plan.planId,
@@ -649,6 +809,7 @@ export class DurablePlanOrchestrator {
         repositoryPath: plan.repositoryPath,
         baseRevision: batch.baseRevision ?? plan.currentRevision,
         implementations,
+        requiredAncestorRevisions,
       });
       this.#repository.setBatchStatus(batch.batchId, 'SUCCEEDED', {
         integratedRevision: integrated.revision,
@@ -657,12 +818,24 @@ export class DurablePlanOrchestrator {
       this.#repository.appendEvent(
         plan.planId,
         'BATCH_INTEGRATED',
-        { revision: integrated.revision, ref: integrated.ref },
+        {
+          revision: integrated.revision,
+          ref: integrated.ref,
+          repaired: Boolean(repairItem),
+          repairWorkItemKey: repairItem?.key,
+        },
         { batchId: batch.batchId },
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : 'BATCH_INTEGRATION_FAILED';
       const reason = message.split(':', 1)[0] ?? 'BATCH_INTEGRATION_FAILED';
+      if (
+        reason === 'BATCH_INTEGRATION_CONFLICT' ||
+        reason === 'BATCH_INTEGRATION_REPAIR_INCOMPLETE'
+      ) {
+        this.#scheduleBatchIntegrationRepair(plan, batch, items, reason, message);
+        return;
+      }
       this.#repository.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
       this.#repository.setPlanStatus(plan.planId, 'BLOCKED', reason);
       this.#repository.appendEvent(

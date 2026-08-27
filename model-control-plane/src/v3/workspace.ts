@@ -52,6 +52,7 @@ export interface WorkspaceProvisioningPort {
     repositoryPath: string;
     baseRevision: string;
     implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+    requiredAncestorRevisions?: string[];
   }): Promise<{ revision: string; ref: string }>;
 }
 
@@ -89,8 +90,10 @@ async function git(cwd: string, args: string[], identity?: UnixIdentity): Promis
     });
     return result.stdout.trim();
   } catch (error) {
-    const failure = error as Error & { stderr?: string };
-    const detail = failure.stderr?.trim() || failure.message;
+    const failure = error as Error & { stderr?: string; stdout?: string };
+    const detail =
+      [failure.stdout?.trim(), failure.stderr?.trim()].filter(Boolean).join('\n') ||
+      failure.message;
     throw new Error(`GIT_COMMAND_FAILED:${detail.slice(0, PLAN_LIMITS.errorDetailCharacters)}`);
   }
 }
@@ -219,11 +222,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       [...trusted, 'rev-parse', 'HEAD'],
       this.#executionOwner,
     );
-    const dirty = await git(
-      hostPath,
-      [...trusted, 'status', '--porcelain'],
-      this.#executionOwner,
-    );
+    const dirty = await git(hostPath, [...trusted, 'status', '--porcelain'], this.#executionOwner);
     if (dirty) throw new Error('WRITER_COMPLETION_DIRTY');
     if (headRevision === startRevision) throw new Error('WRITER_COMPLETION_NO_COMMIT');
     return { startRevision, headRevision };
@@ -363,6 +362,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     repositoryPath: string;
     baseRevision: string;
     implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+    requiredAncestorRevisions?: string[];
   }): Promise<{ revision: string; ref: string }> {
     const requested = path.resolve(input.repositoryPath);
     if (!this.#allowedRepositoryRoots.some((root) => inside(requested, root))) {
@@ -404,6 +404,19 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         if (head === implementation.sourceRevision) {
           throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
         }
+        for (const requiredRevision of input.requiredAncestorRevisions ?? []) {
+          try {
+            await git(implementationPath, [
+              ...trustedImplementation,
+              'merge-base',
+              '--is-ancestor',
+              requiredRevision,
+              head,
+            ]);
+          } catch {
+            throw new Error(`BATCH_INTEGRATION_REPAIR_INCOMPLETE:${requiredRevision}`);
+          }
+        }
         const fetchedRef = `refs/ai-office/incoming/${index}`;
         const implementationBundle = path.join(integrationRoot, `implementation-${index}.bundle`);
         await git(implementationPath, [
@@ -414,16 +427,24 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           'HEAD',
         ]);
         await git(integrationRepo, ['fetch', implementationBundle, `HEAD:${fetchedRef}`]);
-        await git(integrationRepo, [
-          '-c',
-          'user.name=Hermes AI Office',
-          '-c',
-          'user.email=ai-office@localhost',
-          'merge',
-          '--no-ff',
-          '--no-edit',
-          fetchedRef,
-        ]);
+        try {
+          await git(integrationRepo, [
+            '-c',
+            'user.name=Hermes AI Office',
+            '-c',
+            'user.email=ai-office@localhost',
+            'merge',
+            '--no-ff',
+            '--no-edit',
+            fetchedRef,
+          ]);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/CONFLICT|Automatic merge failed/i.test(message)) {
+            throw new Error(`BATCH_INTEGRATION_CONFLICT:${message}`);
+          }
+          throw error;
+        }
       }
       const revision = await git(integrationRepo, ['rev-parse', 'HEAD']);
       const integrationBundle = path.join(integrationRoot, 'integrated.bundle');

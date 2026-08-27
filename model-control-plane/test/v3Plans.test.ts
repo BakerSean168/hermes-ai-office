@@ -1252,3 +1252,157 @@ test('delivery repair exhaustion requires an explicit one-at-a-time retry_delive
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('batch Git conflicts schedule a premium LLM integration repair and only integrate the reviewed combined head', async () => {
+  const host = new PlanHost();
+  let integrationCalls = 0;
+  const seenIntegrationInputs: Array<Parameters<WorkspaceProvisioningPort['integrateBatch']>[0]> =
+    [];
+  const conflictWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async integrateBatch(input) {
+      integrationCalls += 1;
+      seenIntegrationInputs.push(input);
+      if (integrationCalls === 1) {
+        throw new Error(
+          'BATCH_INTEGRATION_CONFLICT:GIT_COMMAND_FAILED:CONFLICT (content): Merge conflict in shared.ts',
+        );
+      }
+      return {
+        revision: 'integrated-after-repair',
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: conflictWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'batch-integration-repair-plan' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Implement two independently reviewable changes that overlap at integration.',
+        analysisSummary:
+          'The two business changes are independent but may touch shared composition.',
+        repository: { path: '/tmp/memoflow', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Parallel business changes',
+            workItems: [
+              {
+                key: 'task-change',
+                title: 'Task change',
+                objective: 'Implement the Task behavior.',
+                acceptanceCriteria: ['Task behavior is correct.'],
+              },
+              {
+                key: 'goal-change',
+                title: 'Goal change',
+                objective: 'Implement the Goal behavior.',
+                acceptanceCriteria: ['Goal behavior is correct.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const originalItems = body.batches[0].workItems;
+    assert.equal(originalItems.length, 2);
+    for (const item of originalItems) {
+      const implementation = item.executions[0];
+      assert.equal(implementation.phase, 'IMPLEMENT');
+      host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    }
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    for (const item of body.batches[0].workItems) {
+      const review = item.executions.at(-1);
+      assert.equal(review.phase, 'VERIFY_REVIEW');
+      host.succeed(review.refs.openhandsConversationId, 'PASS\nIndependently verified.');
+    }
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.batches[0].status, 'RUNNING');
+    assert.equal(integrationCalls, 1);
+    assert.equal(body.batches[0].workItems.length, 3);
+    const repairItem = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    assert.ok(repairItem);
+    assert.equal(repairItem.status, 'PENDING');
+    assert.match(repairItem.objective, /semantic Git integration conflict/);
+    assert.match(repairItem.objective, /all listed approved revisions must remain Git ancestors/i);
+    assert.match(repairItem.objective, /task-change/);
+    assert.match(repairItem.objective, /goal-change/);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const runningRepair = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    const repairImplementation = runningRepair.executions[0];
+    assert.equal(repairImplementation.phase, 'IMPLEMENT');
+    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
+    host.succeed(repairImplementation.refs.openhandsConversationId, 'INTEGRATED AND COMMITTED');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repairReview = body.batches[0].workItems
+      .find((item: { key: string }) => item.key.startsWith('integration-repair-b1-'))
+      .executions.at(-1);
+    assert.equal(repairReview.phase, 'VERIFY_REVIEW');
+    host.succeed(repairReview.refs.openhandsConversationId, 'PASS\nCombined repair verified.');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[0].integratedRevision, 'integrated-after-repair');
+    assert.equal(integrationCalls, 2);
+    assert.equal(seenIntegrationInputs[0]?.implementations.length, 2);
+    assert.equal(seenIntegrationInputs[1]?.implementations.length, 1);
+    assert.deepEqual(seenIntegrationInputs[1]?.requiredAncestorRevisions, ['HEAD']);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.blockedReason, undefined);
+  } finally {
+    await runtime.app.close();
+  }
+});

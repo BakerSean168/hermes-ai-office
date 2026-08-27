@@ -50,6 +50,7 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Keep this supervisor workspace read-only. Use terminal and task_tool_set for bounded repository investigation.',
       'Do not launch coding workers from ORCHESTRATE. Produce the dependency-aware execution graph; the durable Control Plane launches ACP workers, independent review, repair, integration, and delivery after the graph validates.',
       'Put dependency-independent tickets in the same ready batch so the Control Plane may execute them in parallel within configured writer limits.',
+      'Protect shared contracts and infrastructure with an explicit single-writer boundary: if parallel tickets would independently redesign the same contract, database adapter, host composition surface, or other cross-cutting ownership point, assign that shared foundation to one ticket or sequence the dependent tickets instead of asking batch integration to arbitrate competing architectures.',
       'Keep acceptance criteria observable and repository-grounded. Preserve active-plan constraints and explicitly leave operator/cloud-resource-only work parked when the objective requires it.',
       'Stop and report a blocking decision instead of inventing requirements or bypassing a protected contract.',
     ],
