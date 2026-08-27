@@ -45,3 +45,21 @@ test('plan application modules depend inward and do not import HTTP adapters', (
     assert.doesNotMatch(text, /from ['"]\.\.\/app\.js['"]/);
   }
 });
+
+
+test('plan persistence keeps model and sqlite mechanics outside the transaction repository facade', () => {
+  const repository = source('plans.ts');
+  assert.match(repository, /\.\/plan\/model\.js/);
+  assert.match(repository, /\.\/plan\/sqlite\.js/);
+  assert.doesNotMatch(repository, /interface PlanRecord/);
+  assert.doesNotMatch(repository, /CREATE TABLE IF NOT EXISTS v3_plans/);
+});
+
+test('workspace delegates repository continuation discovery instead of embedding ref scoring', () => {
+  const workspace = source('workspace.ts');
+  const discovery = source('repositoryProgress.ts');
+  assert.match(workspace, /RepositoryProgressDiscovery/);
+  assert.doesNotMatch(workspace, /for-each-ref/);
+  assert.match(discovery, /for-each-ref/);
+  assert.doesNotMatch(discovery, /from ['"]\.\/workspace\.js['"]/);
+});
