@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 6
+      "const": 7
     },
     "generatedAt": {
       "type": "string",
@@ -669,7 +669,7 @@
     "PlanTimelineExecution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["executionId", "phase", "status", "attempt", "backend", "model", "startedAt", "endedAt", "durationMs", "totalTokens", "costUsd", "errorCode", "errorDetail", "verdict"],
+      "required": ["executionId", "phase", "status", "attempt", "backend", "model", "policyReasons", "strongModel", "decisionReason", "startedAt", "endedAt", "durationMs", "totalTokens", "costUsd", "errorCode", "errorDetail", "verdict"],
       "properties": {
         "executionId": {"type": "string", "minLength": 1},
         "phase": {"type": "string", "minLength": 1},
@@ -677,6 +677,12 @@
         "attempt": {"type": ["integer", "null"], "minimum": 1},
         "backend": {"type": ["string", "null"]},
         "model": {"type": ["string", "null"]},
+        "policyReasons": {"type": "array", "items": {"type": "string"}},
+        "strongModel": {"type": "boolean"},
+        "decisionReason": {
+          "type": ["string", "null"],
+          "enum": ["BATCH_AGGREGATE_REVIEW", "INTEGRATION_REPAIR", "POST_MERGE_RECOVERY", "DELIVERY_REPAIR", "INDEPENDENT_REVIEW", "FAILED_VERIFICATION_REPAIR", "STRONG_MODEL_POLICY", null]
+        },
         "startedAt": {"type": ["string", "null"]},
         "endedAt": {"type": ["string", "null"]},
         "durationMs": {"type": ["integer", "null"], "minimum": 0},
@@ -731,16 +737,90 @@
         "events": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineEvent"}}
       }
     },
+    "PlanAuditMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executions", "failures", "repairs", "strongModelExecutions", "durationMs", "totalTokens", "costUsd"],
+      "properties": {
+        "executions": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "repairs": {"type": "integer", "minimum": 0},
+        "strongModelExecutions": {"type": "integer", "minimum": 0},
+        "durationMs": {"type": "integer", "minimum": 0},
+        "totalTokens": {"type": "integer", "minimum": 0},
+        "costUsd": {"type": "number", "minimum": 0}
+      }
+    },
+    "PlanAuditBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "executions", "failures", "repairs", "strongModelExecutions", "durationMs", "totalTokens", "costUsd"],
+      "properties": {
+        "key": {"type": "string"},
+        "executions": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "repairs": {"type": "integer", "minimum": 0},
+        "strongModelExecutions": {"type": "integer", "minimum": 0},
+        "durationMs": {"type": "integer", "minimum": 0},
+        "totalTokens": {"type": "integer", "minimum": 0},
+        "costUsd": {"type": "number", "minimum": 0}
+      }
+    },
+    "PlanAuditAttention": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "batchKey", "workItemKey", "sourceExecutionId", "sourcePhase", "reason", "repairExecutionId", "resolved"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["FAILURE_REPAIR", "CONTROL_PLANE_FAILURE"]},
+        "batchKey": {"type": "string"},
+        "workItemKey": {"type": ["string", "null"]},
+        "sourceExecutionId": {"type": ["string", "null"]},
+        "sourcePhase": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "repairExecutionId": {"type": ["string", "null"]},
+        "resolved": {"type": "boolean"}
+      }
+    },
+    "PlanStrongModelDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["batchKey", "workItemKey", "executionId", "phase", "model", "backend", "reason", "policyReasons"],
+      "properties": {
+        "batchKey": {"type": "string"},
+        "workItemKey": {"type": "string"},
+        "executionId": {"type": "string", "minLength": 1},
+        "phase": {"type": "string"},
+        "model": {"type": ["string", "null"]},
+        "backend": {"type": ["string", "null"]},
+        "reason": {
+          "type": ["string", "null"],
+          "enum": ["BATCH_AGGREGATE_REVIEW", "INTEGRATION_REPAIR", "POST_MERGE_RECOVERY", "DELIVERY_REPAIR", "INDEPENDENT_REVIEW", "FAILED_VERIFICATION_REPAIR", "STRONG_MODEL_POLICY", null]
+        },
+        "policyReasons": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "PlanAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "batches", "attention", "strongModelDecisions"],
+      "properties": {
+        "summary": {"$ref": "#/$defs/PlanAuditMetrics"},
+        "batches": {"type": "array", "items": {"$ref": "#/$defs/PlanAuditBatch"}},
+        "attention": {"type": "array", "items": {"$ref": "#/$defs/PlanAuditAttention"}},
+        "strongModelDecisions": {"type": "array", "items": {"$ref": "#/$defs/PlanStrongModelDecision"}}
+      }
+    },
     "PlanDetailResponse": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "generatedAt", "plan", "batches", "deliveryEvents"],
+      "required": ["schemaVersion", "generatedAt", "plan", "batches", "deliveryEvents", "audit"],
       "properties": {
-        "schemaVersion": {"const": 6},
+        "schemaVersion": {"const": 7},
         "generatedAt": {"type": "string", "format": "date-time"},
         "plan": {"$ref": "#/$defs/Plan"},
         "batches": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineBatch"}},
-        "deliveryEvents": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineEvent"}}
+        "deliveryEvents": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineEvent"}},
+        "audit": {"$ref": "#/$defs/PlanAudit"}
       }
     },
     "ProgressCount": {

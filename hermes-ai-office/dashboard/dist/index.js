@@ -8,7 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
-  const DASHBOARD_SCHEMA_VERSION = 6;
+  const DASHBOARD_SCHEMA_VERSION = 7;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -87,6 +87,23 @@
       mechanicalEvent: "Control-plane event",
       deliveryTimeline: "Delivery timeline",
       noTimeline: "No execution timeline yet",
+      auditTitle: "Engineering audit",
+      attentionTitle: "Needs attention",
+      strongModelTitle: "Strong-model decisions",
+      auditExecutions: "Executions",
+      failures: "Failures",
+      repairs: "Repairs",
+      strongModelUses: "Strong-model uses",
+      whyStrongModel: "Why strong model",
+      failureToRepair: "Failure → repair",
+      controlPlaneFailure: "Control-plane failure",
+      decisionBatchAggregateReview: "Batch aggregate semantic review",
+      decisionIntegrationRepair: "Integration conflict / semantic repair",
+      decisionPostMergeRecovery: "Post-merge CI recovery",
+      decisionDeliveryRepair: "Delivery recovery",
+      decisionIndependentReview: "Independent premium review",
+      decisionFailedVerificationRepair: "Premium repair after failed verification",
+      decisionStrongModelPolicy: "Strong-model policy decision",
     },
     zh: {
       overview: "总览",
@@ -154,6 +171,23 @@
       mechanicalEvent: "控制面事件",
       deliveryTimeline: "交付时间线",
       noTimeline: "暂无执行时间线",
+      auditTitle: "工程审计",
+      attentionTitle: "需要关注",
+      strongModelTitle: "强模型决策",
+      auditExecutions: "执行次数",
+      failures: "失败",
+      repairs: "修复",
+      strongModelUses: "强模型调用",
+      whyStrongModel: "为何使用强模型",
+      failureToRepair: "失败 → 修复",
+      controlPlaneFailure: "控制面失败",
+      decisionBatchAggregateReview: "批次整体语义审查",
+      decisionIntegrationRepair: "集成冲突 / 语义修复",
+      decisionPostMergeRecovery: "合并后 CI 恢复",
+      decisionDeliveryRepair: "交付恢复",
+      decisionIndependentReview: "独立高质量审查",
+      decisionFailedVerificationRepair: "审查失败后的高质量修复",
+      decisionStrongModelPolicy: "强模型策略决策",
     },
   };
 
@@ -403,6 +437,69 @@
     );
   }
 
+  function decisionReasonLabel(reason, t) {
+    const labels = {
+      BATCH_AGGREGATE_REVIEW: t.decisionBatchAggregateReview,
+      INTEGRATION_REPAIR: t.decisionIntegrationRepair,
+      POST_MERGE_RECOVERY: t.decisionPostMergeRecovery,
+      DELIVERY_REPAIR: t.decisionDeliveryRepair,
+      INDEPENDENT_REVIEW: t.decisionIndependentReview,
+      FAILED_VERIFICATION_REPAIR: t.decisionFailedVerificationRepair,
+      STRONG_MODEL_POLICY: t.decisionStrongModelPolicy,
+    };
+    return labels[reason] || String(reason || "").replace(/_/g, " ");
+  }
+
+  function AuditOverview(props) {
+    const summary = (props.audit && props.audit.summary) || {};
+    const metrics = [
+      [props.t.auditExecutions, integer(summary.executions || 0, props.locale)],
+      [props.t.failures, integer(summary.failures || 0, props.locale)],
+      [props.t.repairs, integer(summary.repairs || 0, props.locale)],
+      [props.t.strongModelUses, integer(summary.strongModelExecutions || 0, props.locale)],
+      [props.t.duration, duration(summary.durationMs || 0)],
+      ["Token", compact(summary.totalTokens || 0, props.locale)],
+      [props.t.cost, money(summary.costUsd || 0)],
+    ];
+    return h("section", { className: "hao-audit" },
+      h("div", { className: "hao-audit-head" }, h("h3", null, props.t.auditTitle)),
+      h("div", { className: "hao-audit-metrics" }, metrics.map(function (item) {
+        return h("div", { className: "hao-audit-metric", key: item[0] }, h("span", null, item[0]), h("strong", null, item[1]));
+      }))
+    );
+  }
+
+  function AuditAttention(props) {
+    const audit = props.audit || {};
+    const attention = audit.attention || [];
+    const decisions = audit.strongModelDecisions || [];
+    if (!attention.length && !decisions.length) return null;
+    return h("section", { className: "hao-audit-grid" },
+      attention.length ? h("div", { className: "hao-audit-panel" },
+        h("h3", null, props.t.attentionTitle),
+        h("div", { className: "hao-audit-attention" }, attention.map(function (item, index) {
+          const label = item.kind === "CONTROL_PLANE_FAILURE" ? props.t.controlPlaneFailure : props.t.failureToRepair;
+          return h("article", { className: "hao-audit-finding" + (item.resolved ? " is-resolved" : " is-open"), key: item.kind + index },
+            h("div", { className: "hao-audit-finding-head" }, h("strong", null, label), h(Badge, { value: item.resolved ? "SUCCEEDED" : "BLOCKED" })),
+            h("div", { className: "hao-audit-path" }, [item.batchKey, item.workItemKey, item.sourcePhase].filter(Boolean).join(" · ")),
+            item.reason ? h("div", { className: "hao-plan-reason" }, item.reason) : null,
+            item.repairExecutionId ? h("div", { className: "hao-audit-link" }, shortRevision(item.sourceExecutionId) + " → " + shortRevision(item.repairExecutionId)) : null
+          );
+        }))
+      ) : null,
+      decisions.length ? h("div", { className: "hao-audit-panel" },
+        h("h3", null, props.t.strongModelTitle),
+        h("div", { className: "hao-audit-decisions" }, decisions.map(function (item) {
+          return h("article", { className: "hao-audit-decision", key: item.executionId },
+            h("div", { className: "hao-audit-finding-head" }, h("strong", null, decisionReasonLabel(item.reason, props.t)), h("span", { className: "hao-plan-chip" }, item.model || "—")),
+            h("div", { className: "hao-audit-path" }, [item.batchKey, item.workItemKey, item.phase, item.backend].filter(Boolean).join(" · ")),
+            (item.policyReasons || []).length ? h("div", { className: "hao-plan-meta" }, item.policyReasons.map(function (reason) { return h("span", { className: "hao-plan-chip", key: reason }, reason); })) : null
+          );
+        }))
+      ) : null
+    );
+  }
+
   function TimelineExecution(props) {
     const item = props.execution || {};
     const chips = [];
@@ -422,6 +519,13 @@
       h("div", { className: "hao-plan-meta" }, chips.map(function (value, index) {
         return h("span", { className: "hao-plan-chip", key: value + index }, value);
       })),
+      item.strongModel && item.decisionReason
+        ? h("div", { className: "hao-audit-why" },
+            h("strong", null, props.t.whyStrongModel + ": "),
+            h("span", null, decisionReasonLabel(item.decisionReason, props.t)),
+            (item.policyReasons || []).length ? h("div", { className: "hao-plan-meta" }, item.policyReasons.map(function (reason) { return h("span", { className: "hao-plan-chip", key: reason }, reason); })) : null
+          )
+        : null,
       item.errorCode || item.errorDetail
         ? h("div", { className: "hao-plan-reason" }, [item.errorCode, item.errorDetail].filter(Boolean).join(" · "))
         : null,
@@ -465,9 +569,16 @@
         ),
         props.error ? h("div", { className: "hao-error" }, props.error) : null,
         detail ? h("div", { className: "hao-plan-detail-body" },
+          h(AuditOverview, { audit: detail.audit, t: t, locale: props.locale }),
+          h(AuditAttention, { audit: detail.audit, t: t, locale: props.locale }),
           (detail.batches || []).length
             ? h("div", { className: "hao-timeline" }, (detail.batches || []).map(function (batch) {
                 const isOpen = batch.status === "RUNNING" || batch.status === "BLOCKED";
+                const batchAudit = ((((detail.audit || {}).batches) || []).find(function (item) { return item.key === batch.key; })) || {};
+                const auditChips = [duration(batchAudit.durationMs || 0), compact(batchAudit.totalTokens || 0, props.locale) + " tok", money(batchAudit.costUsd || 0)];
+                if (batchAudit.failures) auditChips.push(batchAudit.failures + " " + t.failures);
+                if (batchAudit.repairs) auditChips.push(batchAudit.repairs + " " + t.repairs);
+                if (batchAudit.strongModelExecutions) auditChips.push(batchAudit.strongModelExecutions + " " + t.strongModelUses);
                 return h("details", { className: "hao-timeline-batch", key: batch.key, open: isOpen },
                   h("summary", null,
                     h("div", { className: "hao-timeline-batch-summary" },
@@ -476,7 +587,8 @@
                       h("span", null, batch.title),
                       batch.system ? h("span", { className: "hao-plan-chip" }, t.systemWork) : null,
                       batch.integratedRevision ? h("span", { className: "hao-plan-chip" }, shortRevision(batch.integratedRevision)) : null
-                    )
+                    ),
+                    h("div", { className: "hao-timeline-batch-audit" }, auditChips.map(function (value, index) { return h("span", { className: "hao-plan-chip", key: value + index }, value); }))
                   ),
                   h("div", { className: "hao-timeline-batch-body" },
                     (batch.workItems || []).map(function (work) {

@@ -575,14 +575,30 @@ class DashboardTest(unittest.TestCase):
                                     "executionId": "exec-2",
                                     "projectKey": "memoflow",
                                     "objectiveSummary": "Review it.",
+                                    "status": "SUCCEEDED",
+                                    "selection": {
+                                        "backend": "openhands-builtin",
+                                        "modelClass": "gpt-5.6-sol",
+                                        "workspaceMode": "isolated_write",
+                                        "reasons": ["phase:IMPLEMENT_FIX", "model:premium-repair"],
+                                    },
+                                    "phase": "IMPLEMENT_FIX",
+                                    "timing": {"startedAt": "2026-08-27T01:03:00Z", "endedAt": "2026-08-27T01:03:45Z", "durationMs": 45000},
+                                    "usage": {"input": 40, "output": 10, "calls": 1, "costUsd": 0.02},
+                                },
+                                {
+                                    "executionId": "exec-3",
+                                    "projectKey": "memoflow",
+                                    "objectiveSummary": "Review repair.",
                                     "phase": "VERIFY_REVIEW",
                                     "status": "SUCCEEDED",
                                     "selection": {
                                         "backend": "codex-review-headless",
                                         "modelClass": "gpt-5.6-sol",
                                         "workspaceMode": "review_snapshot",
+                                        "reasons": ["phase:VERIFY_REVIEW", "backend:phase-policy"],
                                     },
-                                    "timing": {"startedAt": "2026-08-27T01:03:00Z", "endedAt": "2026-08-27T01:04:00Z", "durationMs": 60000},
+                                    "timing": {"startedAt": "2026-08-27T01:04:00Z", "endedAt": "2026-08-27T01:05:00Z", "durationMs": 60000},
                                     "usage": {"input": 50, "output": 5, "calls": 1, "costUsd": 0.01},
                                     "result": {"finalText": "PASS\nVerified."},
                                 },
@@ -607,6 +623,7 @@ class DashboardTest(unittest.TestCase):
                                         "backend": "codex-review-headless",
                                         "modelClass": "gpt-5.6-sol",
                                         "workspaceMode": "review_snapshot",
+                                        "reasons": ["phase:BATCH_VERIFY", "model:aggregate-review-premium"],
                                     },
                                     "timing": {"startedAt": "2026-08-27T01:05:00Z"},
                                     "usage": {},
@@ -640,12 +657,54 @@ class DashboardTest(unittest.TestCase):
         self.assertAlmostEqual(failed["costUsd"], 0.03)
         self.assertEqual(failed["errorCode"], "WRITER_COMPLETION_NO_COMMIT")
         self.assertEqual(failed["errorDetail"], "No commit")
-        approved = batch["workItems"][0]["executions"][1]
+        repaired = batch["workItems"][0]["executions"][1]
+        self.assertEqual(repaired["phase"], "IMPLEMENT_FIX")
+        self.assertTrue(repaired["strongModel"])
+        self.assertEqual(repaired["decisionReason"], "FAILED_VERIFICATION_REPAIR")
+        self.assertEqual(repaired["policyReasons"], ["phase:IMPLEMENT_FIX", "model:premium-repair"])
+        approved = batch["workItems"][0]["executions"][2]
         self.assertEqual(approved["verdict"], "PASS")
+        self.assertEqual(approved["decisionReason"], "INDEPENDENT_REVIEW")
         aggregate = batch["workItems"][1]
         self.assertTrue(aggregate["system"])
         self.assertEqual(aggregate["executions"][0]["phase"], "BATCH_VERIFY")
         self.assertEqual(batch["events"][0]["type"], "BATCH_INTEGRATED")
+        audit = detail["audit"]
+        self.assertEqual(set(audit), set(CONTRACT["$defs"]["PlanAudit"]["properties"]))
+        self.assertEqual(audit["summary"]["failures"], 1)
+        self.assertEqual(audit["summary"]["repairs"], 1)
+        self.assertEqual(audit["summary"]["strongModelExecutions"], 3)
+        self.assertEqual(audit["summary"]["totalTokens"], 225)
+        self.assertAlmostEqual(audit["summary"]["costUsd"], 0.06)
+        self.assertEqual(audit["batches"][0]["key"], "batch-1")
+        self.assertEqual(audit["batches"][0]["failures"], 1)
+        self.assertEqual(audit["attention"][0]["sourceExecutionId"], "exec-1")
+        self.assertEqual(audit["attention"][0]["repairExecutionId"], "exec-2")
+        self.assertTrue(audit["attention"][0]["resolved"])
+        reasons = {item["executionId"]: item["reason"] for item in audit["strongModelDecisions"]}
+        self.assertEqual(reasons["exec-2"], "FAILED_VERIFICATION_REPAIR")
+        self.assertEqual(reasons["exec-v"], "BATCH_AGGREGATE_REVIEW")
+
+    def test_plan_audit_links_failed_implement_to_successful_retry(self) -> None:
+        audit = api._plan_audit([
+            {
+                "key": "batch-retry",
+                "status": "SUCCEEDED",
+                "events": [],
+                "workItems": [
+                    {
+                        "key": "TASK-RETRY",
+                        "executions": [
+                            {"executionId": "failed", "phase": "IMPLEMENT", "status": "FAILED", "verdict": None, "strongModel": False, "durationMs": 10, "totalTokens": 5, "costUsd": 0},
+                            {"executionId": "retry", "phase": "IMPLEMENT", "status": "SUCCEEDED", "verdict": None, "strongModel": False, "durationMs": 20, "totalTokens": 7, "costUsd": 0},
+                        ],
+                    }
+                ],
+            }
+        ])
+        self.assertEqual(audit["summary"]["repairs"], 1)
+        self.assertEqual(audit["attention"][0]["repairExecutionId"], "retry")
+        self.assertTrue(audit["attention"][0]["resolved"])
 
     def test_plan_detail_endpoint_is_read_only_and_fetches_one_plan_on_demand(self) -> None:
         paths = {route.path for route in api.router.routes}
@@ -671,6 +730,12 @@ class DashboardTest(unittest.TestCase):
         self.assertIn('className: "hao-timeline"', source)
         self.assertIn(".hao-plan-detail", styles)
         self.assertIn(".hao-timeline-step", styles)
+        self.assertIn("function AuditOverview", source)
+        self.assertIn("function AuditAttention", source)
+        self.assertIn("strongModelDecisions", source)
+        self.assertIn("decisionReasonLabel", source)
+        self.assertIn(".hao-audit-metrics", styles)
+        self.assertIn(".hao-audit-attention", styles)
 
     def test_frontend_is_two_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
@@ -683,7 +748,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.3.0")
+        self.assertEqual(manifest["version"], "1.4.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

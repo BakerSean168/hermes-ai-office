@@ -195,3 +195,32 @@
   .hao-timeline-batch-summary .hao-plan-chip { display: none; }
   .hao-timeline-time { width: 100%; margin-left: 0; }
 }
+
+/* Plan engineering audit */
+.hao-audit { margin-bottom: 10px; padding: 12px; border: 1px solid var(--hao-border); border-radius: 10px; background: var(--hao-surface); }
+.hao-audit-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.hao-audit-head h3, .hao-audit-panel h3 { margin: 0; color: var(--hao-text); font-size: 12px; }
+.hao-audit-metrics { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.hao-audit-metric { display: grid; gap: 4px; min-width: 0; padding: 8px; border: 1px solid var(--hao-border-soft); border-radius: 7px; background: var(--hao-surface-2); }
+.hao-audit-metric span { color: var(--hao-muted); font-size: 8.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hao-audit-metric strong { color: var(--hao-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.hao-audit-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-bottom: 10px; }
+.hao-audit-panel { min-width: 0; padding: 12px; border: 1px solid var(--hao-border); border-radius: 10px; background: var(--hao-surface); }
+.hao-audit-attention, .hao-audit-decisions { display: grid; gap: 7px; margin-top: 9px; }
+.hao-audit-finding, .hao-audit-decision { padding: 9px; border: 1px solid var(--hao-border-soft); border-radius: 7px; background: var(--hao-surface-2); }
+.hao-audit-finding.is-open { border-color: var(--hao-warn); }
+.hao-audit-finding.is-resolved { border-color: var(--hao-good); }
+.hao-audit-finding-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hao-audit-finding-head strong { min-width: 0; color: var(--hao-text); font-size: 10px; line-height: 1.35; }
+.hao-audit-path { margin-top: 5px; color: var(--hao-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 8.5px; overflow-wrap: anywhere; }
+.hao-audit-link { margin-top: 7px; color: var(--hao-info); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; }
+.hao-audit-why { margin-top: 7px; padding: 7px 8px; border-left: 2px solid var(--hao-info); border-radius: 4px; background: var(--hao-info-soft); color: var(--hao-muted); font-size: 9.5px; line-height: 1.4; }
+.hao-audit-why strong { color: var(--hao-text); }
+.hao-timeline-batch-audit { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+@media (max-width: 980px) {
+  .hao-audit-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+@media (max-width: 720px) {
+  .hao-audit-grid { grid-template-columns: 1fr; }
+  .hao-audit-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
