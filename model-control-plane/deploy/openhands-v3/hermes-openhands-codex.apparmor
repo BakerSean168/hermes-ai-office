@@ -1,0 +1,13 @@
+# AI Office OpenHands execution-plane profile.
+#
+# Ubuntu restricts unprivileged user namespaces unless the caller is covered by
+# an AppArmor profile that grants `userns`. Codex's workspace-write sandbox uses
+# bubblewrap, so the OpenHands container needs that single mediation permission.
+# Docker still drops every Linux capability, enforces no-new-privileges, and the
+# review snapshot itself remains physically read-only.
+abi <abi/4.0>,
+include <tunables/global>
+
+profile hermes-openhands-codex flags=(attach_disconnected,mediate_deleted,default_allow) {
+  userns,
+}
