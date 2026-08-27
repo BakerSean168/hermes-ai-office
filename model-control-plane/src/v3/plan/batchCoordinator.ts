@@ -324,7 +324,7 @@ export class BatchCoordinator {
     if (snapshot.status !== 'SUCCEEDED') {
       const attempts = records.filter((record) => record.phase === 'BATCH_VERIFY').length;
       const limit = snapshot.error?.retryable
-        ? PLAN_LIMITS.retryableTransportAttemptsPerParent
+        ? this.#workItems.retryAttemptLimit('BATCH_VERIFY')
         : PLAN_LIMITS.transportAttemptsPerParent;
       if (attempts < limit) {
         await this.#workItems.launch(
@@ -353,7 +353,7 @@ export class BatchCoordinator {
     const verdict = reviewVerdict(result);
     if (verdict === 'UNKNOWN') {
       const attempts = records.filter((record) => record.phase === 'BATCH_VERIFY').length;
-      if (attempts < PLAN_LIMITS.transportAttemptsPerParent) {
+      if (attempts < this.#workItems.retryAttemptLimit('BATCH_VERIFY')) {
         await this.#workItems.launch(
           plan,
           batch,

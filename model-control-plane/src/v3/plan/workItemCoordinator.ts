@@ -73,12 +73,37 @@ export class WorkItemCoordinator {
     const backendIndex = latest ? policy.backendCandidates.indexOf(latest.backend) : -1;
     const backend = policy.backendCandidates[(backendIndex + 1) % policy.backendCandidates.length];
     const currentModelIndex = latest ? policy.modelClasses.indexOf(latest.logicalModelClass) : -1;
+    const sameParent = records.filter(
+      (record) => record.phase === phase && record.previousExecutionId === latest?.previousExecutionId,
+    );
+    const triedBackendsForCurrentModel = new Set(
+      sameParent
+        .filter((record) => record.logicalModelClass === latest?.logicalModelClass)
+        .map((record) => record.backend),
+    );
+    const exhaustedCurrentModelBackends =
+      currentModelIndex >= 0 &&
+      policy.backendCandidates.every((candidate) => triedBackendsForCurrentModel.has(candidate));
     let modelClass = currentModelIndex >= 0 ? policy.modelClasses[currentModelIndex] : policy.modelClasses[0];
-    if (options.advanceModel) {
+    if (options.advanceModel || exhaustedCurrentModelBackends) {
       const nextIndex = currentModelIndex >= 0 ? currentModelIndex + 1 : 1;
       modelClass = policy.modelClasses[Math.min(nextIndex, policy.modelClasses.length - 1)];
     }
     return { backend, modelClass };
+  }
+
+  retryAttemptLimit(phase: PlanWorkerPhase): number {
+    const policy = this.#retryPolicies[phase];
+    if (!policy?.backendCandidates.length || !policy.modelClasses.length) {
+      return PLAN_LIMITS.transportAttemptsPerParent;
+    }
+    return Math.max(
+      PLAN_LIMITS.transportAttemptsPerParent,
+      Math.min(
+        PLAN_LIMITS.reviewRouteAttemptsPerParent,
+        policy.backendCandidates.length * policy.modelClasses.length,
+      ),
+    );
   }
 
   sourceBackend(plan: PlanRecord, phase: PlanWorkerPhase): string | undefined {
@@ -210,9 +235,12 @@ export class WorkItemCoordinator {
           record.phase === latest.phase && record.previousExecutionId === latest.previousExecutionId,
       ).length;
       const totalPhaseAttempts = records.filter((record) => record.phase === latest.phase).length;
-      const attemptLimit = snapshot.error?.retryable
-        ? PLAN_LIMITS.retryableTransportAttemptsPerParent
-        : PLAN_LIMITS.transportAttemptsPerParent;
+      const attemptLimit =
+        snapshot.error?.retryable && latest.phase === 'VERIFY_REVIEW'
+          ? this.retryAttemptLimit('VERIFY_REVIEW')
+          : snapshot.error?.retryable
+            ? PLAN_LIMITS.retryableTransportAttemptsPerParent
+            : PLAN_LIMITS.transportAttemptsPerParent;
       if (sameParentAttempts < attemptLimit) {
         const phase = latest.phase as PlanWorkerPhase;
         const retryOverride =
@@ -296,7 +324,7 @@ export class WorkItemCoordinator {
         (record) =>
           record.phase === 'VERIFY_REVIEW' && record.previousExecutionId === latest.previousExecutionId,
       ).length;
-      if (sameParentReviews < PLAN_LIMITS.transportAttemptsPerParent) {
+      if (sameParentReviews < this.retryAttemptLimit('VERIFY_REVIEW')) {
         const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
         const retryOverride =
           plan.source.kind === 'EXTERNAL_CHANGE'
