@@ -16,7 +16,8 @@ RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ProtectHome=read-only
+# Docker MCP verifies signed images and persists Sigstore/cache state under the
+# service user home. Keep system paths read-only but do not mask the dev home.
 
 [Install]
 WantedBy=multi-user.target
