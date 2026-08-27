@@ -456,9 +456,10 @@ class DashboardTest(unittest.TestCase):
     def test_contract_is_the_single_dashboard_shape_source(self) -> None:
         version = CONTRACT["properties"]["schemaVersion"]["const"]
         self.assertEqual(api._config.DASHBOARD_SCHEMA_VERSION, version)
-        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
-        self.assertIn(f"const DASHBOARD_SCHEMA_VERSION = {version};", source)
-        self.assertIn(".then(assertDashboardContract)", source)
+        runtime_source = (ROOT / "dashboard" / "src" / "runtime.js").read_text(encoding="utf-8")
+        app_source = (ROOT / "dashboard" / "src" / "app.js").read_text(encoding="utf-8")
+        self.assertIn(f"export const DASHBOARD_SCHEMA_VERSION = {version};", runtime_source)
+        self.assertIn(".then(assertDashboardContract)", app_source)
 
         catalog = {
             "dep-paid": {
@@ -831,6 +832,19 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(".hao-audit-filters", styles)
         self.assertIn(".hao-timeline-step.is-target", styles)
 
+    def test_frontend_dist_is_generated_from_modular_source(self) -> None:
+        source_dir = ROOT / "dashboard" / "src"
+        self.assertEqual(
+            {path.name for path in source_dir.glob("*.js")},
+            {"analytics.js", "app.js", "components.js", "format.js", "i18n.js", "index.js", "overview.js", "plan-detail.js", "runtime.js"},
+        )
+        self.assertLessEqual(max(len(path.read_text(encoding="utf-8").splitlines()) for path in source_dir.glob("*.js")), 400)
+        build_script = (ROOT / "scripts" / "build-dashboard.mjs").read_text(encoding="utf-8")
+        self.assertIn('process.argv.includes("--check")', build_script)
+        self.assertIn('bundle: true', build_script)
+        dist = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        self.assertIn('registry.register("hermes-ai-office", App)', dist)
+
     def test_frontend_is_two_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('setView("overview")', source)
@@ -842,17 +856,18 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.7.2")
+        self.assertEqual(manifest["version"], "1.8.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:
-        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        runtime_source = (ROOT / "dashboard" / "src" / "runtime.js").read_text(encoding="utf-8")
+        app_source = (ROOT / "dashboard" / "src" / "app.js").read_text(encoding="utf-8")
         styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
-        self.assertIn("const fetchJSON = SDK.fetchJSON", source)
-        self.assertIn("return fetchJSON(API_ROOT + path, init)", source)
-        self.assertNotIn('fetch(API_ROOT + path, { credentials: "same-origin" })', source)
-        self.assertIn('root.getPropertyValue("--background-base")', source)
-        self.assertIn('"data-theme-mode": themeMode', source)
+        self.assertIn("SDK.fetchJSON", runtime_source)
+        self.assertIn("return fetchJSON(API_ROOT + path, init)", runtime_source)
+        self.assertNotIn('fetch(API_ROOT + path, { credentials: "same-origin" })', runtime_source)
+        self.assertIn('root.getPropertyValue("--background-base")', runtime_source)
+        self.assertIn('"data-theme-mode": themeMode', app_source)
         self.assertIn('.hao-shell[data-theme-mode="light"]', styles)
         self.assertIn("--hao-bg: #0f1115", styles)
         self.assertIn("--hao-bg: #f6f7f9", styles)

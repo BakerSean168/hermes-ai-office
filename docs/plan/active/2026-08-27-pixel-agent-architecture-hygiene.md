@@ -1,7 +1,7 @@
 # Pixel Agent Architecture Hygiene Refactor
 
 Date: 2026-08-27
-Status: ACTIVE
+Status: COMPLETE
 Baseline: `1ebdb2b` plus the production-required AppArmor profile that was previously untracked.
 
 ## Outcome
@@ -95,3 +95,51 @@ python3 -m unittest test_dashboard.py test_plugin.py
 node --check dashboard/dist/index.js
 git diff --check
 ```
+
+
+## Completion report
+
+Completed on 2026-08-27 as four independently verified checkpoints.
+
+### Wave 1 result — application state-machine boundaries
+
+- `planOrchestrator.ts`: ~1780 -> 589 lines.
+- Added `WorkItemCoordinator`, `BatchCoordinator`, `ExternalProgressReconciler`, and `PlanRecoveryCoordinator`.
+- Moved orchestration/external-audit protocol parsing into pure protocol modules.
+- Added architecture regression tests that fail if ticket, batch-repair, or external-sync internals regrow inside the plan-level orchestrator.
+- Tracked the production-required AppArmor profile so the clean Git revision is self-contained.
+
+### Wave 2 result — persistence and Git boundaries
+
+- `plans.ts`: ~1180 -> 879 lines while keeping transaction/state mutations in one repository facade.
+- Domain records/graph validation now live in `plan/model.ts`.
+- SQLite schema and row mapping now live in `plan/sqlite.ts`; the database schema itself did not change.
+- `workspace.ts`: ~570 -> 434 lines.
+- Low-level Git helpers now live in `gitSupport.ts` and external continuation discovery/scoring in `repositoryProgress.ts`.
+- Existing public type/interface imports remain compatible through re-exports.
+
+### Wave 3 result — Hermes Python ownership
+
+- Main Hermes plugin facade: ~1124 -> 715 lines.
+- Tool protocol/schema moved to `protocol.py`; execution-enforcement policy moved to `policy.py`.
+- Plugin tests now reproduce Hermes' real package-loader semantics instead of treating the plugin as an unsupported single-file module.
+- Dashboard backend: ~1135-line `plugin_api.py` replaced by the native `plugin_api/` package with transport, execution, plan, audit/detail, config, and assembly owners; largest module is ~394 lines.
+- The safe deploy classifier recognizes the package API path.
+
+### Wave 4 result — dashboard frontend source authority
+
+- `dashboard/dist/index.js` is no longer an editing surface.
+- Added modular `dashboard/src/` source with separate runtime, i18n, formatting, primitives, plan detail/audit, overview, analytics, app, and entry modules; largest source module is ~316 lines.
+- Added deterministic esbuild pipeline: `node hermes-ai-office/scripts/build-dashboard.mjs`.
+- `--check` mode fails when the checked-in browser bundle is stale or edited independently of source.
+- Hermes continues to load the same classic browser entry `dashboard/dist/index.js`; no Plugin SDK/runtime contract changed.
+
+### Final verification
+
+- Control Plane: 77/77 tests PASS.
+- Control Plane TypeScript build: PASS.
+- Hermes plugin/dashboard: 48/48 tests PASS.
+- Dashboard generated-bundle freshness: PASS.
+- Python compile, dashboard JS syntax, deployment script syntax, and `git diff --check`: PASS.
+
+The remaining larger files (`DevelopmentExecutionService`, transaction-heavy `PlanRepository`, correlation/delivery adapters) are now bounded by explicit ownership and are not current patch hotspots. Future extraction should be driven by a concrete ownership split rather than arbitrary line-count targets.

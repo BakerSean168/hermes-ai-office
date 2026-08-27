@@ -22,3 +22,30 @@ Application coordinators may depend on repositories/ports. Repositories and port
 ## Extension rule
 
 Before adding a new recovery/repair feature, identify its owner. If it is a new semantic phase, add it to the narrow coordinator that owns that transition and expose only the minimal orchestration hook. Do not add another multi-hundred-line branch to `DurablePlanOrchestrator`.
+
+
+## Hermes / dashboard boundaries
+
+```text
+Hermes plugin facade (__init__.py)
+  -> protocol.py            tool schemas + stable V3 defaults
+  -> policy.py              profile enforcement + read-only verification policy
+  -> Control Plane HTTP     transport/tool handlers remain at the facade boundary
+
+Dashboard API facade (dashboard/plugin_api/__init__.py)
+  -> transport.py
+  -> executions.py
+  -> plans.py
+  -> detail.py
+  -> assembly.py
+
+Dashboard browser source (dashboard/src/index.js)
+  -> app.js
+     -> overview.js
+     -> plan-detail.js
+     -> analytics.js
+     -> shared runtime / formatting / primitives / i18n
+  -> esbuild -> dashboard/dist/index.js
+```
+
+The browser bundle is generated output. New UI behavior belongs in `dashboard/src/`; direct feature edits to `dashboard/dist/index.js` are prohibited by the bundle-freshness check.
