@@ -14,6 +14,7 @@ import {
   validatePlanGraph,
   type WorkItemRecord,
 } from './plan/model.js';
+import { normalizePlanSource, type PlanSource } from './plan/source.js';
 import {
   batchFromRow,
   ensurePlanSchema,
@@ -33,6 +34,7 @@ export type {
   PlanStatus,
   WorkItemRecord,
 } from './plan/model.js';
+export type { PlanSource } from './plan/source.js';
 export { ensurePlanSchema } from './plan/sqlite.js';
 
 export class PlanRepository {
@@ -50,6 +52,7 @@ export class PlanRepository {
     const now = Date.now();
     const planId = `plan_${randomUUID()}`;
     const baseRevision = input.repository.baseRevision?.trim() || 'HEAD';
+    const source = normalizePlanSource(input.source);
     const delivery = input.delivery
       ? {
           remote: input.delivery.remote?.trim() || 'origin',
@@ -65,8 +68,9 @@ export class PlanRepository {
         .prepare(
           `INSERT INTO v3_plans
            (plan_id,command_key,project_key,objective,repository_path,base_revision,current_revision,
-            delivery_json,delivery_stage,status,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+            source_json,external_head_revision,governance_status_required,governance_status_revision,
+            governance_status_plan_status,delivery_json,delivery_stage,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           planId,
@@ -76,6 +80,11 @@ export class PlanRepository {
           input.repository.path,
           baseRevision,
           baseRevision,
+          JSON.stringify(source),
+          source.kind === 'EXTERNAL_CHANGE' ? source.revision : null,
+          source.kind === 'EXTERNAL_CHANGE' && source.origin?.kind === 'GITHUB_PULL_REQUEST' ? 1 : 0,
+          null,
+          null,
           delivery ? JSON.stringify(delivery) : null,
           delivery ? 'PENDING' : null,
           'PENDING',
@@ -125,6 +134,7 @@ export class PlanRepository {
       });
       this.appendEvent(planId, 'PLAN_CREATED', {
         batches: input.batches.length,
+        source,
         analysisSummary: input.analysisSummary.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
       });
       this.#db.exec('COMMIT');
@@ -280,15 +290,22 @@ export class PlanRepository {
   }
 
   active(planId?: string): PlanRecord[] {
+    const pendingGovernanceStatus = `(
+      governance_status_required=1 AND (
+        governance_status_revision IS NULL OR
+        governance_status_revision IS NOT external_head_revision OR
+        governance_status_plan_status IS NOT status
+      )
+    )`;
     const rows = planId
       ? (this.#db
           .prepare(
-            "SELECT * FROM v3_plans WHERE plan_id=? AND status IN ('ORCHESTRATING','PENDING','RUNNING')",
+            `SELECT * FROM v3_plans WHERE plan_id=? AND (status IN ('ORCHESTRATING','PENDING','RUNNING') OR ${pendingGovernanceStatus})`,
           )
           .all(planId) as unknown as PlanRow[])
       : (this.#db
           .prepare(
-            "SELECT * FROM v3_plans WHERE status IN ('ORCHESTRATING','PENDING','RUNNING') ORDER BY created_at",
+            `SELECT * FROM v3_plans WHERE status IN ('ORCHESTRATING','PENDING','RUNNING') OR ${pendingGovernanceStatus} ORDER BY created_at`,
           )
           .all() as unknown as PlanRow[]);
     return rows.map(planFromRow);
@@ -446,6 +463,34 @@ export class PlanRepository {
       throw error;
     }
     return { adoptedWorkItems, adoptedBatches };
+  }
+
+  setExternalHeadRevision(planId: string, revision: string): void {
+    if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error('EXTERNAL_HEAD_REVISION_INVALID');
+    const now = Date.now();
+    this.#db
+      .prepare(
+        `UPDATE v3_plans
+            SET external_head_published_at=CASE
+                  WHEN external_head_revision=? AND external_head_published_at IS NOT NULL
+                    THEN external_head_published_at
+                  ELSE ?
+                END,
+                external_head_revision=?,updated_at=?
+          WHERE plan_id=?`,
+      )
+      .run(revision, now, revision, now, planId);
+  }
+
+  setGovernanceStatusPublished(planId: string, revision: string, planStatus: PlanStatus): void {
+    if (!/^[0-9a-f]{40}$/i.test(revision)) throw new Error('GOVERNANCE_STATUS_REVISION_INVALID');
+    this.#db
+      .prepare(
+        `UPDATE v3_plans
+            SET governance_status_revision=?,governance_status_plan_status=?,updated_at=?
+          WHERE plan_id=?`,
+      )
+      .run(revision, planStatus, Date.now(), planId);
   }
 
   setPlanStatus(planId: string, status: PlanStatus, blockedReason?: string): void {

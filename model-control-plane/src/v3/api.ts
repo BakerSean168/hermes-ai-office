@@ -1,4 +1,8 @@
 import type { FastifyInstance } from 'fastify';
+import { timingSafeEqual } from 'node:crypto';
+
+import type { GitHubPullRequestIntakePort } from './githubPrIntake.js';
+import type { JulesApiPort } from './jules.js';
 
 import type { DevelopmentPolicy } from './policy.js';
 import type { ModelRegistryPort } from './ports.js';
@@ -15,7 +19,8 @@ import {
 
 function errorStatus(code: string): number {
   if (code.endsWith('_NOT_FOUND') || code === 'EXECUTION_NOT_FOUND') return 404;
-  if (code.includes('UNAVAILABLE')) return 503;
+  if (code.includes('UNAVAILABLE') || code.includes('UNCONFIGURED')) return 503;
+  if (code === 'GITHUB_PR_COMMAND_FAILED') return 502;
   if (
     code.endsWith('_REQUIRED') ||
     code.endsWith('_INVALID') ||
@@ -25,6 +30,9 @@ function errorStatus(code: string): number {
     return 400;
   if (
     code.includes('CONCURRENCY') ||
+    code.includes('CHANGED_DURING') ||
+    code.includes('MISMATCH') ||
+    code.endsWith('_NOT_OPEN') ||
     code.includes('LEASE_CONFLICT') ||
     code.includes('NOT_CONTINUABLE')
   )
@@ -51,6 +59,9 @@ export function registerV3Routes(
   policy: DevelopmentPolicy,
   readinessEvidence?: V3ReadinessEvidence,
   modelRegistry?: ModelRegistryPort,
+  pullRequestIntake?: GitHubPullRequestIntakePort,
+  githubEventToken?: string,
+  jules?: JulesApiPort,
 ): void {
   app.get('/api/v3/health', async () => ({
     status: 'ok',
@@ -60,6 +71,248 @@ export function registerV3Routes(
   }));
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
+
+  app.get('/api/v3/development/jules/source', async (request, reply) => {
+    if (!jules) {
+      reply.code(503);
+      return { error: { code: 'JULES_API_UNCONFIGURED' } };
+    }
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    try {
+      const source = await jules.findSource(String(query.repository ?? ''));
+      if (!source) {
+        reply.code(404);
+        return { error: { code: 'JULES_SOURCE_NOT_FOUND' } };
+      }
+      return source;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  app.post('/api/v3/development/jules/sessions', async (request, reply) => {
+    if (!jules) {
+      reply.code(503);
+      return { error: { code: 'JULES_API_UNCONFIGURED' } };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    try {
+      const session = await jules.createSession({
+        repository: String(body.repository ?? ''),
+        startingBranch: String(body.startingBranch ?? ''),
+        prompt: String(body.prompt ?? ''),
+        title: body.title ? String(body.title) : undefined,
+        requirePlanApproval: body.requirePlanApproval === true,
+        autoCreatePullRequest: body.autoCreatePullRequest === true,
+      });
+      reply.code(201);
+      return session;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  app.get<{ Params: { sessionId: string } }>(
+    '/api/v3/development/jules/sessions/:sessionId',
+    async (request, reply) => {
+      if (!jules) {
+        reply.code(503);
+        return { error: { code: 'JULES_API_UNCONFIGURED' } };
+      }
+      try {
+        return await jules.getSession(`sessions/${request.params.sessionId}`);
+      } catch (error) {
+        const code = errorCode(error);
+        reply.code(errorStatus(code));
+        return { error: { code } };
+      }
+    },
+  );
+
+  const createGitHubGovernancePlan = async (input: {
+    projectKey: string;
+    repositoryPath: string;
+    remote?: string;
+    pullRequestNumber: number;
+    expectedRepository?: string;
+    reviewBackend?: string;
+    repairBackend?: string;
+    acceptanceCriteria?: string[];
+  }) => {
+    if (!pullRequestIntake) throw new Error('GITHUB_PR_INTAKE_UNCONFIGURED');
+    if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
+    if (!input.repositoryPath.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
+    const source = await pullRequestIntake.resolve({
+      repositoryPath: input.repositoryPath,
+      pullRequestNumber: input.pullRequestNumber,
+      remote: input.remote,
+    });
+    if (input.expectedRepository && source.repository !== input.expectedRepository) {
+      throw new Error('GITHUB_PR_REPOSITORY_MISMATCH');
+    }
+    for (const backend of [input.reviewBackend, input.repairBackend].filter(Boolean) as string[]) {
+      if (!policy.backend(backend)?.enabled) throw new Error('GITHUB_PR_BACKEND_INVALID');
+    }
+    const acceptanceCriteria = [
+      'The claimed problem is supported by repository evidence; otherwise return INVALID without starting a repair writer.',
+      'The proposed change preserves existing public contracts and architecture boundaries.',
+      'Focused verification covers the behavior changed by the pull request.',
+      ...(input.acceptanceCriteria ?? []),
+    ];
+    return service.createPlan(
+      {
+        projectKey: input.projectKey,
+        objective: `Govern GitHub pull request ${source.repository}#${source.number} at its exact head revision.`,
+        analysisSummary:
+          'GitHub PR intake resolved and fetched exact base/head revisions. Pull-request prose is retained only as metadata; repository evidence is authoritative.',
+        repository: { path: input.repositoryPath, baseRevision: source.baseRevision },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: source.headRevision,
+          reviewBackend: input.reviewBackend,
+          repairBackend: input.repairBackend,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: source.repository,
+            pullRequestNumber: source.number,
+            pullRequestUrl: source.url,
+            title: source.title,
+            author: source.author,
+            headRef: source.headRef,
+            baseRef: source.baseRef,
+            headRepository: source.headRepository,
+            producer: source.author === 'google-labs-jules[bot]' ? 'JULES' : 'UNKNOWN',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Validate external pull request',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate and review external change',
+                objective:
+                  'Independently verify whether the claimed problem exists, then review the exact Git diff for correctness, regressions, contract preservation, and architectural quality.',
+                acceptanceCriteria,
+              },
+            ],
+          },
+        ],
+      },
+      `github-pr:${source.repository}:${source.number}:${source.headRevision}`,
+    );
+  };
+
+  app.post('/api/v3/development/external-changes/github', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const repository =
+      body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
+        ? (body.repository as Record<string, unknown>)
+        : {};
+    const pullRequest =
+      body.pullRequest && typeof body.pullRequest === 'object' && !Array.isArray(body.pullRequest)
+        ? (body.pullRequest as Record<string, unknown>)
+        : {};
+    try {
+      const plan = await createGitHubGovernancePlan({
+        projectKey: String(body.projectKey ?? '').trim(),
+        repositoryPath: String(repository.path ?? '').trim(),
+        remote: repository.remote ? String(repository.remote) : undefined,
+        pullRequestNumber: Number(pullRequest.number),
+        reviewBackend: body.reviewBackend ? String(body.reviewBackend).trim() : undefined,
+        repairBackend: body.repairBackend ? String(body.repairBackend).trim() : undefined,
+        acceptanceCriteria: Array.isArray(body.acceptanceCriteria)
+          ? body.acceptanceCriteria.map(String)
+          : undefined,
+      });
+      reply.code(201);
+      return plan;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
+  const validEventToken = (header: string | string[] | undefined): boolean => {
+    const expected = githubEventToken?.trim();
+    const supplied = (Array.isArray(header) ? header[0] : header)?.trim();
+    if (!expected || !supplied) return false;
+    const expectedBytes = Buffer.from(expected);
+    const suppliedBytes = Buffer.from(supplied);
+    return (
+      expectedBytes.length === suppliedBytes.length &&
+      timingSafeEqual(expectedBytes, suppliedBytes)
+    );
+  };
+
+  app.post('/api/v3/development/external-changes/github/events', async (request, reply) => {
+    if (!githubEventToken?.trim()) {
+      reply.code(503);
+      return { error: { code: 'GITHUB_EVENT_BRIDGE_UNCONFIGURED' } };
+    }
+    if (!validEventToken(request.headers['x-hermes-event-token'])) {
+      reply.code(401);
+      return { error: { code: 'GITHUB_EVENT_BRIDGE_UNAUTHORIZED' } };
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const event = String(body.event ?? '').trim().toLowerCase();
+    const action = String(body.action ?? '').trim().toLowerCase();
+    if (event !== 'pull_request') {
+      reply.code(202);
+      return { accepted: false, ignored: true, reason: 'EVENT_NOT_GOVERNED' };
+    }
+    if (!['opened', 'reopened', 'synchronize'].includes(action)) {
+      reply.code(202);
+      return { accepted: false, ignored: true, reason: 'PULL_REQUEST_ACTION_NOT_GOVERNED' };
+    }
+    const repository =
+      body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
+        ? (body.repository as Record<string, unknown>)
+        : {};
+    const pullRequest =
+      body.pullRequest && typeof body.pullRequest === 'object' && !Array.isArray(body.pullRequest)
+        ? (body.pullRequest as Record<string, unknown>)
+        : {};
+    try {
+      const eventHeadRevision = pullRequest.headSha ? String(pullRequest.headSha).trim() : undefined;
+      const plan = await createGitHubGovernancePlan({
+        projectKey: String(body.projectKey ?? '').trim(),
+        repositoryPath: String(repository.path ?? '').trim(),
+        remote: repository.remote ? String(repository.remote) : undefined,
+        expectedRepository: repository.fullName ? String(repository.fullName).trim() : undefined,
+        pullRequestNumber: Number(pullRequest.number),
+        reviewBackend: body.reviewBackend ? String(body.reviewBackend).trim() : undefined,
+        repairBackend: body.repairBackend ? String(body.repairBackend).trim() : undefined,
+        acceptanceCriteria: Array.isArray(body.acceptanceCriteria)
+          ? body.acceptanceCriteria.map(String)
+          : undefined,
+      });
+      const governedHeadRevision =
+        plan.source.kind === 'EXTERNAL_CHANGE' ? plan.source.revision : undefined;
+      reply.code(202);
+      return {
+        accepted: true,
+        action,
+        planId: plan.planId,
+        eventHeadRevision,
+        governedHeadRevision,
+        coalescedToCurrentHead: Boolean(
+          eventHeadRevision && governedHeadRevision && eventHeadRevision !== governedHeadRevision,
+        ),
+      };
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
 
   app.post('/api/v3/development/delegations', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
@@ -121,6 +374,10 @@ export function registerV3Routes(
       body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
         ? (body.repository as Record<string, unknown>)
         : {};
+    const source =
+      body.source && typeof body.source === 'object' && !Array.isArray(body.source)
+        ? (body.source as Record<string, unknown>)
+        : undefined;
     const delivery =
       body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery)
         ? (body.delivery as Record<string, unknown>)
@@ -135,6 +392,14 @@ export function registerV3Routes(
             path: String(repository.path ?? ''),
             baseRevision: repository.baseRevision ? String(repository.baseRevision) : undefined,
           },
+          source: source
+            ? ({
+                kind: String(source.kind ?? '').toUpperCase(),
+                ...(source.revision ? { revision: String(source.revision) } : {}),
+                ...(source.reviewBackend ? { reviewBackend: String(source.reviewBackend) } : {}),
+                ...(source.repairBackend ? { repairBackend: String(source.repairBackend) } : {}),
+              } as import('./plans.js').PlanSource)
+            : undefined,
           delivery: delivery
             ? {
                 remote: delivery.remote ? String(delivery.remote) : undefined,
@@ -317,6 +582,10 @@ export function registerV3Routes(
     if (phase === 'BATCH_VERIFY') {
       reply.code(400);
       return { error: { code: 'V3_BATCH_VERIFY_REQUIRES_DURABLE_PLAN' } };
+    }
+    if (phase === 'ADOPT_CHANGE') {
+      reply.code(400);
+      return { error: { code: 'V3_ADOPT_CHANGE_REQUIRES_DURABLE_PLAN' } };
     }
     const header = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(header) ? header[0] : header;

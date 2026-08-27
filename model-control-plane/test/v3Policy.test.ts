@@ -9,6 +9,8 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const policyFile = path.resolve(here, '../config/development-policy.yaml');
 
 const allAvailable = {
+  'antigravity-review': true,
+  'antigravity-worker': true,
   'openhands-builtin': true,
   'opencode-acp': true,
   'codex-review-headless': true,
@@ -46,10 +48,13 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
   }
   assert.equal(policy.config.version, 2);
   assert.deepEqual(Object.keys(policy.config.backends).sort(), [
+    'antigravity-review',
+    'antigravity-worker',
     'claude-code-acp',
     'claude-code-review-headless',
     'codex-acp',
     'codex-review-headless',
+    'control-plane-change-adopter',
     'control-plane-finalizer',
     'dsh-acp',
     'opencode-acp',
@@ -133,6 +138,20 @@ test('development policy rejects an unavailable explicit backend', () => {
   );
 });
 
+test('writer phases reject read-only backends even when explicitly overridden', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  for (const phase of ['IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
+    assert.throws(
+      () => policy.select(phase, { backend: 'antigravity-review' }, allAvailable),
+      /POLICY_NO_ELIGIBLE_BACKEND/,
+    );
+  }
+  assert.equal(
+    policy.select('IMPLEMENT_FIX', { backend: 'antigravity-worker' }, allAvailable).backend,
+    'antigravity-worker',
+  );
+});
+
 test('FINALIZE uses the deterministic internal finalizer', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   const selected = policy.select('FINALIZE', {}, {});
@@ -146,4 +165,24 @@ test('development policy exposes bounded writer concurrency caps', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.equal(policy.config.concurrency.max_active_writers, 4);
   assert.equal(policy.config.concurrency.max_active_writers_per_project, 2);
+});
+
+
+test('Antigravity is provider-native and opt-in without changing default phase routing', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  assert.equal(policy.backend('antigravity-review')?.supports?.untrusted_external, false);
+  assert.equal(policy.backend('antigravity-worker')?.supports?.untrusted_external, false);
+  const defaultReview = policy.select('VERIFY_REVIEW', {}, allAvailable);
+  assert.equal(defaultReview.backend, 'codex-review-headless');
+  assert.equal(defaultReview.transportMode, 'LITELLM_MANAGED');
+
+  const review = policy.select('VERIFY_REVIEW', { backend: 'antigravity-review' }, allAvailable);
+  assert.equal(review.backend, 'antigravity-review');
+  assert.equal(review.transportMode, 'PROVIDER_NATIVE');
+  assert.equal(review.modelClass, 'gemini-3.1-pro-high');
+
+  const repair = policy.select('IMPLEMENT_FIX', { backend: 'antigravity-worker' }, allAvailable);
+  assert.equal(repair.backend, 'antigravity-worker');
+  assert.equal(repair.transportMode, 'PROVIDER_NATIVE');
+  assert.equal(repair.modelClass, 'gemini-3.7-flash-high');
 });

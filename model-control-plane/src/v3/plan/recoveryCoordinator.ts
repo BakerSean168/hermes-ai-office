@@ -110,7 +110,7 @@ export class PlanRecoveryCoordinator {
           .reverse()
           .find(
             (record) =>
-              ['IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
+              ['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
               record.statusCache === 'SUCCEEDED' &&
               Boolean(record.workspaceRef),
           );
@@ -146,6 +146,7 @@ export class PlanRecoveryCoordinator {
           'VERIFY_REVIEW',
           implementation.executionId,
           attempt,
+          this.#workItems.sourceBackend(blocked, 'VERIFY_REVIEW'),
         );
       }
       return;
@@ -187,7 +188,8 @@ export class PlanRecoveryCoordinator {
         phase,
         previousExecutionId,
         attempt,
-        phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined,
+        this.#workItems.sourceBackend(blocked, phase) ??
+          (phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined),
       );
     }
   }

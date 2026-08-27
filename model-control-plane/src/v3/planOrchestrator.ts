@@ -1,5 +1,7 @@
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
+import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
+import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import {
   PlanRepository,
   type CreatePlanInput,
@@ -13,6 +15,7 @@ import {
 } from './plan/kinds.js';
 import { BatchCoordinator } from './plan/batchCoordinator.js';
 import { ExternalProgressReconciler } from './plan/externalProgress.js';
+import { GovernanceCoordinator } from './plan/governanceCoordinator.js';
 import { parseOrchestrationProposal } from './plan/protocol.js';
 import { PlanRecoveryCoordinator } from './plan/recoveryCoordinator.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './plan/runtime.js';
@@ -92,6 +95,7 @@ export class DurablePlanOrchestrator {
   readonly #workItems: WorkItemCoordinator;
   readonly #batches: BatchCoordinator;
   readonly #recovery: PlanRecoveryCoordinator;
+  readonly #governance: GovernanceCoordinator;
   readonly #planReconcileTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -99,6 +103,8 @@ export class DurablePlanOrchestrator {
     links: ExecutionLinkRepository;
     workspace: WorkspaceProvisioningPort;
     delivery?: PlanDeliveryPort;
+    pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+    governanceStatus?: GitHubGovernanceStatusPort;
     executions: PlanExecutionPort;
   }) {
     this.#repository = options.repository;
@@ -115,6 +121,8 @@ export class DurablePlanOrchestrator {
       repository: this.#repository,
       links: this.#links,
       executions: this.#executions,
+      workspace: this.#workspace,
+      pullRequestRepairPublisher: options.pullRequestRepairPublisher,
     });
     this.#batches = new BatchCoordinator({
       repository: this.#repository,
@@ -128,6 +136,10 @@ export class DurablePlanOrchestrator {
       links: this.#links,
       workItems: this.#workItems,
       externalProgress: this.#externalProgress,
+    });
+    this.#governance = new GovernanceCoordinator({
+      repository: this.#repository,
+      status: options.governanceStatus,
     });
   }
 
@@ -356,49 +368,51 @@ export class DurablePlanOrchestrator {
   }
 
   async cancelPlan(planId: string) {
-    const plan = this.#repository.get(planId);
-    if (!plan) return null;
-    if (['SUCCEEDED', 'CANCELLED'].includes(plan.status)) return this.getPlan(planId);
-    const orchestrationIds = this.#repository
-      .events(planId)
-      .filter((event) => event.type === 'PLAN_ORCHESTRATION_STARTED' && event.executionId)
-      .map((event) => String(event.executionId));
-    for (const executionId of orchestrationIds) {
-      const record = this.#links.get(executionId);
-      if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
-        try {
-          await this.#executions.cancel(executionId);
-        } catch {
-          // The plan cancellation below remains authoritative even if a remote supervisor is unreachable.
+    return this.#enqueuePlanOperation(planId, async () => {
+      const plan = this.#repository.get(planId);
+      if (!plan) return null;
+      if (['SUCCEEDED', 'CANCELLED'].includes(plan.status)) return this.getPlan(planId);
+      const orchestrationIds = this.#repository
+        .events(planId)
+        .filter((event) => event.type === 'PLAN_ORCHESTRATION_STARTED' && event.executionId)
+        .map((event) => String(event.executionId));
+      for (const executionId of orchestrationIds) {
+        const record = this.#links.get(executionId);
+        if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
+          try {
+            await this.#executions.cancel(executionId);
+          } catch {
+            // The plan cancellation below remains authoritative even if a remote supervisor is unreachable.
+          }
         }
       }
-    }
-    this.#repository.cancel(planId);
-    for (const batch of this.#repository.batches(planId)) {
-      for (const item of this.#repository.workItems(batch.batchId)) {
-        for (const executionId of this.#repository.executionIds(item.workItemId)) {
-          const record = this.#links.get(executionId);
-          if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
-            try {
-              await this.#executions.cancel(executionId);
-            } catch (error) {
-              this.#repository.appendEvent(
-                planId,
-                'PLAN_WORKER_CANCEL_FAILED',
-                {
-                  message: (error instanceof Error ? error.message : String(error)).slice(
-                    0,
-                    PLAN_LIMITS.errorDetailCharacters,
-                  ),
-                },
-                { batchId: batch.batchId, workItemId: item.workItemId, executionId },
-              );
+      this.#repository.cancel(planId);
+      for (const batch of this.#repository.batches(planId)) {
+        for (const item of this.#repository.workItems(batch.batchId)) {
+          for (const executionId of this.#repository.executionIds(item.workItemId)) {
+            const record = this.#links.get(executionId);
+            if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
+              try {
+                await this.#executions.cancel(executionId);
+              } catch (error) {
+                this.#repository.appendEvent(
+                  planId,
+                  'PLAN_WORKER_CANCEL_FAILED',
+                  {
+                    message: (error instanceof Error ? error.message : String(error)).slice(
+                      0,
+                      PLAN_LIMITS.errorDetailCharacters,
+                    ),
+                  },
+                  { batchId: batch.batchId, workItemId: item.workItemId, executionId },
+                );
+              }
             }
           }
         }
       }
-    }
-    return this.getPlan(planId);
+      return this.getPlan(planId);
+    });
   }
 
   async #reconcilePlan(planId: string): Promise<void> {
@@ -550,27 +564,31 @@ export class DurablePlanOrchestrator {
     }
   }
 
+  #enqueuePlanOperation<T>(planId: string, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.#planReconcileTails.get(planId) ?? Promise.resolve();
+    const current = predecessor.catch(() => undefined).then(operation);
+    const tail = current.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#planReconcileTails.set(planId, tail);
+    const cleanup = () => {
+      if (this.#planReconcileTails.get(planId) === tail) this.#planReconcileTails.delete(planId);
+    };
+    void tail.then(cleanup, cleanup);
+    return current;
+  }
+
   #enqueuePlanReconciliation(
     planId: string,
     recoverBlocked: boolean,
     recoveryMode: PlanRecoveryMode = 'AUTO',
   ): Promise<void> {
-    const predecessor = this.#planReconcileTails.get(planId) ?? Promise.resolve();
-    const current = predecessor
-      .catch(() => undefined)
-      .then(async () => {
-        if (recoverBlocked) await this.#recovery.recover(planId, recoveryMode);
-        await this.#reconcilePlan(planId);
-      });
-    this.#planReconcileTails.set(planId, current);
-    void current
-      .finally(() => {
-        if (this.#planReconcileTails.get(planId) === current) {
-          this.#planReconcileTails.delete(planId);
-        }
-      })
-      .catch(() => undefined);
-    return current;
+    return this.#enqueuePlanOperation(planId, async () => {
+      if (recoverBlocked) await this.#recovery.recover(planId, recoveryMode);
+      await this.#reconcilePlan(planId);
+      await this.#governance.reconcile(planId);
+    });
   }
 
   async reconcilePlans(

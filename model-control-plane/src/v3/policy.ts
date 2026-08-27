@@ -16,7 +16,9 @@ import {
 
 interface BackendSupportsConfig {
   litellm_managed?: boolean | 'conditional';
+  provider_native?: boolean;
   write?: boolean;
+  untrusted_external?: boolean;
 }
 
 export type ManagedEnvironmentSource =
@@ -32,6 +34,7 @@ export interface BackendPolicyConfig {
   enabled: boolean;
   command?: string[];
   acp_server?: string;
+  default_model?: string;
   managed_model_prefix?: string;
   managed_env?: Record<string, ManagedEnvironmentSource>;
   static_env?: Record<string, string>;
@@ -60,9 +63,12 @@ function isDevelopmentPhase(value: string): value is DevelopmentPhase {
   return DEVELOPMENT_PHASES.includes(value as DevelopmentPhase);
 }
 
+const WRITER_PHASES = new Set<DevelopmentPhase>(['IMPLEMENT', 'IMPLEMENT_FIX']);
+
 function supportsTransport(backend: BackendPolicyConfig, mode: TransportMode): boolean {
   if (mode === 'INTERNAL') return backend.kind === 'internal';
   if (backend.kind === 'internal') return false;
+  if (mode === 'PROVIDER_NATIVE') return backend.supports?.provider_native === true;
   return backend.supports?.litellm_managed !== false;
 }
 
@@ -195,6 +201,7 @@ export class DevelopmentPolicy {
       const backend = this.config.backends[name];
       if (!backend?.enabled) return false;
       if (availability[name] === false) return false;
+      if (WRITER_PHASES.has(phase) && backend.supports?.write !== true) return false;
       return true;
     });
     if (!backendName) throw new Error('POLICY_NO_ELIGIBLE_BACKEND');
@@ -207,7 +214,7 @@ export class DevelopmentPolicy {
 
     return {
       backend: backendName,
-      modelClass: override.modelClass?.trim() || phasePolicy.model_class,
+      modelClass: override.modelClass?.trim() || backend.default_model?.trim() || phasePolicy.model_class,
       transportMode,
       workspaceMode: phasePolicy.workspace_mode,
       sessionPolicy: phasePolicy.session_policy,

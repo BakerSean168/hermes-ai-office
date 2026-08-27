@@ -1,4 +1,5 @@
 import type { DeliveryStage, PlanDeliveryConfig } from '../delivery.js';
+import { validatePlanSource, type PlanSource } from './source.js';
 
 export type PlanStatus =
   'ORCHESTRATING' | 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
@@ -16,6 +17,7 @@ export interface CreatePlanInput {
   objective: string;
   analysisSummary: string;
   repository: { path: string; baseRevision?: string };
+  source?: PlanSource;
   delivery?: Partial<PlanDeliveryConfig> & Pick<PlanDeliveryConfig, 'branch'>;
   batches: Array<{
     key: string;
@@ -38,6 +40,12 @@ export interface PlanRecord {
   repositoryPath: string;
   baseRevision: string;
   currentRevision: string;
+  source: PlanSource;
+  externalHeadRevision?: string;
+  externalHeadPublishedAt?: number;
+  governanceStatusRequired: boolean;
+  governanceStatusRevision?: string;
+  governanceStatusPlanStatus?: PlanStatus;
   delivery?: PlanDeliveryConfig;
   deliveryStage?: DeliveryStage;
   deliveryEvidence?: Record<string, unknown>;
@@ -99,6 +107,7 @@ export function validatePlanEnvelope(input: DelegatePlanInput): void {
 export function validatePlanGraph(input: CreatePlanInput): void {
   validatePlanEnvelope(input);
   if (!input.analysisSummary.trim()) throw new Error('PLAN_ANALYSIS_REQUIRED');
+  validatePlanSource(input.source, input.repository.baseRevision);
   if (input.batches.length === 0) throw new Error('PLAN_BATCHES_REQUIRED');
 
   const batchKeys = new Set<string>();

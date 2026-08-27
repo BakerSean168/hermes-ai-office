@@ -2,6 +2,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import type { DeliveryStage, PlanDeliveryConfig } from '../delivery.js';
 import type { BatchRecord, PlanNodeStatus, PlanRecord, PlanStatus, WorkItemRecord } from './model.js';
+import type { PlanSource } from './source.js';
 
 export interface PlanRow {
   plan_id: string;
@@ -11,6 +12,12 @@ export interface PlanRow {
   repository_path: string;
   base_revision: string;
   current_revision: string;
+  source_json: string | null;
+  external_head_revision: string | null;
+  external_head_published_at: number | null;
+  governance_status_required: number;
+  governance_status_revision: string | null;
+  governance_status_plan_status: string | null;
   delivery_json: string | null;
   delivery_stage: string | null;
   delivery_evidence_json: string | null;
@@ -74,6 +81,14 @@ export function planFromRow(row: PlanRow): PlanRecord {
     repositoryPath: row.repository_path,
     baseRevision: row.base_revision,
     currentRevision: row.current_revision,
+    source: row.source_json ? (JSON.parse(row.source_json) as PlanSource) : { kind: 'TASK' },
+    externalHeadRevision: row.external_head_revision ?? undefined,
+    externalHeadPublishedAt: row.external_head_published_at ?? undefined,
+    governanceStatusRequired: Boolean(row.governance_status_required),
+    governanceStatusRevision: row.governance_status_revision ?? undefined,
+    governanceStatusPlanStatus: row.governance_status_plan_status
+      ? (row.governance_status_plan_status as PlanStatus)
+      : undefined,
     delivery,
     deliveryStage: row.delivery_stage ? (row.delivery_stage as DeliveryStage) : undefined,
     deliveryEvidence: row.delivery_evidence_json
@@ -133,6 +148,12 @@ export function ensurePlanSchema(db: DatabaseSync): void {
       repository_path TEXT NOT NULL,
       base_revision TEXT NOT NULL,
       current_revision TEXT NOT NULL,
+      source_json TEXT,
+      external_head_revision TEXT,
+      external_head_published_at INTEGER,
+      governance_status_required INTEGER NOT NULL DEFAULT 0,
+      governance_status_revision TEXT,
+      governance_status_plan_status TEXT,
       delivery_json TEXT,
       delivery_stage TEXT,
       delivery_evidence_json TEXT,
@@ -193,6 +214,12 @@ export function ensurePlanSchema(db: DatabaseSync): void {
     ),
   );
   for (const [name, type] of [
+    ['source_json', 'TEXT'],
+    ['external_head_revision', 'TEXT'],
+    ['external_head_published_at', 'INTEGER'],
+    ['governance_status_required', 'INTEGER NOT NULL DEFAULT 0'],
+    ['governance_status_revision', 'TEXT'],
+    ['governance_status_plan_status', 'TEXT'],
     ['delivery_json', 'TEXT'],
     ['delivery_stage', 'TEXT'],
     ['delivery_evidence_json', 'TEXT'],

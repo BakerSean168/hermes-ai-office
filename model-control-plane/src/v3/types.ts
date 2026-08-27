@@ -1,6 +1,7 @@
 export const DEVELOPMENT_PHASES = [
   'ORCHESTRATE',
   'INVESTIGATE_PLAN',
+  'ADOPT_CHANGE',
   'IMPLEMENT',
   'IMPLEMENT_FIX',
   'VERIFY_REVIEW',
@@ -10,7 +11,7 @@ export const DEVELOPMENT_PHASES = [
 
 export type DevelopmentPhase = (typeof DEVELOPMENT_PHASES)[number];
 
-export const TRANSPORT_MODES = ['LITELLM_MANAGED', 'INTERNAL'] as const;
+export const TRANSPORT_MODES = ['LITELLM_MANAGED', 'PROVIDER_NATIVE', 'INTERNAL'] as const;
 export type TransportMode = (typeof TRANSPORT_MODES)[number];
 
 export type SessionPolicy = 'fresh' | 'resume_preferred' | 'fresh_required';
@@ -68,6 +69,8 @@ export interface StartDevelopmentExecutionInput {
     previousExecutionId?: string | null;
     previousResult?: string | null;
     acceptanceCriteria?: string[];
+    reviewBaseRevision?: string | null;
+    changeOrigin?: 'EXTERNAL' | null;
   };
   hints?: ExecutionHints;
   override?: ExecutionOverride;
@@ -98,6 +101,7 @@ export interface UsageSummary {
     | 'LANGFUSE_REPORTED'
     | 'ACP_REPORTED'
     | 'OPENHANDS_REPORTED'
+    | 'ANTIGRAVITY_REPORTED'
     | 'ESTIMATED'
     | 'UNKNOWN';
   input: number;

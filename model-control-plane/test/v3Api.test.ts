@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
+import { openDb } from '../src/db.mjs';
+import { ExecutionLinkRepository } from '../src/v3/correlation.js';
 import type {
   ExecutionHostPort,
   ExecutionHostSnapshot,
@@ -90,6 +95,62 @@ const gateway: ModelGatewayPort = {
     };
   },
 };
+
+test('external replay revalidates the persisted backend selection from pre-gate crash residue', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'external-backend-residue-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const db = openDb(dbFile);
+  const links = new ExecutionLinkRepository(db);
+  links.reserve({
+    idempotencyKey: 'legacy-external-antigravity-review',
+    projectKey: 'digital-biome',
+    phase: 'VERIFY_REVIEW',
+    objectiveSummary: 'Legacy external review reservation.',
+    selection: {
+      backend: 'antigravity-review',
+      modelClass: 'gemini-3.1-pro-high',
+      transportMode: 'PROVIDER_NATIVE',
+      workspaceMode: 'review_snapshot',
+      sessionPolicy: 'fresh_required',
+      reasons: ['legacy:before-untrusted-external-gate'],
+    },
+  });
+  db.close();
+
+  const host = new FakeHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'codex-review-headless': true,
+      'openhands-builtin': true,
+      'antigravity-review': true,
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runtime.v3.start(
+          {
+            phase: 'VERIFY_REVIEW',
+            objective: 'Replay an external review after upgrade.',
+            projectKey: 'digital-biome',
+            repository: { path: '' },
+            context: { changeOrigin: 'EXTERNAL' },
+            await: false,
+          },
+          'legacy-external-antigravity-review',
+        ),
+      /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+    );
+    assert.equal(host.creates, 0);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('V3 API provides an idempotent production execution facade', async () => {
   const host = new FakeHost();
@@ -208,6 +269,17 @@ test('V3 writer completion fails closed when the agent returns success without a
     assert.equal(body.error.code, 'WRITER_COMPLETION_NO_COMMIT');
     assert.equal(body.error.retryable, false);
     assert.match(body.result.finalText, /did not edit or commit/);
+
+
+    // The host keeps reporting its own SUCCEEDED terminal state. A deterministic
+    // writer-completion rejection is product truth and must never be resurrected.
+    const replayedObservation = await runtime.app.inject({
+      method: 'GET',
+      url: `/api/v3/development/executions/${executionId}`,
+    });
+    assert.equal(replayedObservation.statusCode, 200);
+    assert.equal(replayedObservation.json().status, 'FAILED');
+    assert.equal(replayedObservation.json().error.code, 'WRITER_COMPLETION_NO_COMMIT');
   } finally {
     await runtime.app.close();
   }
@@ -1499,6 +1571,11 @@ test('V3 readiness refuses to count probe volume as representative cutover evide
     assert.equal(body.gates.representativeWorkflows.current, 2);
     assert.equal(body.gates.representativeWorkflows.required, 10);
     assert.equal(body.gates.representativeWorkflows.pass, false);
+    assert.deepEqual(body.gates.corePhaseCoverage.phases, {
+      ORCHESTRATE: false,
+      IMPLEMENT: false,
+      VERIFY_REVIEW: false,
+    });
     assert.equal(body.gates.providerFallback.pass, true);
     assert.equal(body.gates.gatewayReconnect.pass, true);
     assert.equal(body.gates.reviewVerdict.pass, true);

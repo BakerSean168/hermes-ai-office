@@ -15,6 +15,8 @@ import type {
 } from './types.js';
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
+import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
+import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import { DurablePlanOrchestrator, type PlanRecoveryMode } from './planOrchestrator.js';
 import { PlanRepository, type CreatePlanInput, type DelegatePlanInput } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
@@ -60,6 +62,9 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Produce one coherent result containing diagnosis, evidence, risks, and an implementation plan.',
       'Prefer inspecting the real code and configuration over speculation.',
     ],
+    ADOPT_CHANGE: [
+      'This phase is completed deterministically by the control plane and must not launch a model-backed worker.',
+    ],
     IMPLEMENT: [
       'Implement the approved objective in the isolated workspace.',
       'Run focused tests or checks that are proportionate to the change.',
@@ -77,7 +82,9 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
     VERIFY_REVIEW: [
       'Review the implementation independently and verify behavior from repository evidence.',
       'Perform review directly in this execution; do not delegate VERIFY_REVIEW to nested task subagents.',
-      'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
+      input.context?.changeOrigin === 'EXTERNAL'
+        ? 'This is an external change review. First verify that the claimed problem is real and the change is justified from repository evidence. The first non-empty line MUST be exactly PASS, FAIL, or INVALID. Use INVALID only when the claimed problem itself is unsupported or not reproducible; use FAIL when the problem is valid but the implementation has a blocking defect.'
+        : 'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the review verdict deterministically.',
       'Use PASS only when the implementation satisfies the supplied acceptance criteria; otherwise use FAIL and report the blocking findings below it.',
       'The supplied review snapshot is intentionally physically read-only and must remain unchanged.',
       'AI Office freezes the implementation workspace at its current HEAD. Committed implementation work therefore stays committed and a clean implementation remains clean in the review snapshot. The original implementation source revision is preserved at refs/ai-office/review-base for comparison. Any dirty files in the snapshot represent genuine uncommitted implementation changes.',
@@ -164,6 +171,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     observability?: ObservabilityPort;
     plans: PlanRepository;
     delivery?: PlanDeliveryPort;
+    pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+    governanceStatus?: GitHubGovernanceStatusPort;
     backendAvailability?: Readonly<Record<string, boolean>>;
   }) {
     this.#policy = options.policy;
@@ -177,6 +186,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       links: options.links,
       workspace: options.workspace,
       delivery: options.delivery,
+      pullRequestRepairPublisher: options.pullRequestRepairPublisher,
+      governanceStatus: options.governanceStatus,
       executions: this,
     });
     this.#backendAvailability = options.backendAvailability ?? {};
@@ -190,7 +201,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (previous.projectKey !== input.projectKey) {
       throw new Error('PREVIOUS_EXECUTION_PROJECT_MISMATCH');
     }
-    if (!['IMPLEMENT', 'IMPLEMENT_FIX'].includes(previous.phase)) {
+    if (!['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(previous.phase)) {
       throw new Error('PREVIOUS_EXECUTION_NOT_IMPLEMENTATION');
     }
     if (previous.statusCache !== 'SUCCEEDED') {
@@ -225,8 +236,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         reviewSnapshot.result?.finalText?.trim() ||
         '';
     }
-    const verdict = reviewVerdict(reviewResult);
+    const verdict = reviewVerdict(reviewResult, {
+      allowInvalid: input.context?.changeOrigin === 'EXTERNAL',
+    });
     if (verdict === 'APPROVED') throw new Error('PREVIOUS_EXECUTION_REVIEW_ALREADY_APPROVED');
+    if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
 
     const implementationExecutionId = review.previousExecutionId?.trim();
@@ -236,7 +250,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (implementation.projectKey !== input.projectKey) {
       throw new Error('PREVIOUS_EXECUTION_PROJECT_MISMATCH');
     }
-    if (!['IMPLEMENT', 'IMPLEMENT_FIX'].includes(implementation.phase)) {
+    if (!['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(implementation.phase)) {
       throw new Error('REVIEW_IMPLEMENTATION_LINK_INVALID');
     }
     if (implementation.statusCache !== 'SUCCEEDED') {
@@ -335,8 +349,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       throw new Error('PREVIOUS_EXECUTION_NOT_FINALIZABLE');
     }
     const evidence = previous.result?.finalText?.trim() || '';
-    const verdict = reviewVerdict(evidence);
+    const verdict = reviewVerdict(evidence, {
+      allowInvalid: input.context?.changeOrigin === 'EXTERNAL',
+    });
     if (verdict === 'BLOCKING') throw new Error('PREVIOUS_EXECUTION_REVIEW_BLOCKING');
+    if (verdict === 'INVALID') throw new Error('PREVIOUS_EXECUTION_REVIEW_INVALID');
     if (verdict === 'UNKNOWN') throw new Error('PREVIOUS_EXECUTION_REVIEW_VERDICT_UNKNOWN');
 
     const finalText = [
@@ -349,6 +366,35 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       evidence || '(review completed without textual evidence)',
     ].join('\n');
     return this.#links.completeInternal(record.executionId, finalText);
+  }
+
+  #adoptChangeDeterministically(
+    input: StartDevelopmentExecutionInput,
+    record: ExecutionLinkRecord,
+  ): ExecutionLinkRecord {
+    const headRevision = input.repository.baseRevision?.trim();
+    const reviewBaseRevision = input.context?.reviewBaseRevision?.trim();
+    if (!headRevision) throw new Error('ADOPT_CHANGE_REVISION_REQUIRED');
+    if (!reviewBaseRevision) throw new Error('ADOPT_CHANGE_BASE_REVISION_REQUIRED');
+    if (headRevision === reviewBaseRevision) throw new Error('ADOPT_CHANGE_EMPTY');
+    if (!record.workspaceRef) throw new Error('ADOPT_CHANGE_WORKSPACE_MISSING');
+    const finalText = [
+      'ADOPTED_CHANGE',
+      'Project: ' + input.projectKey,
+      'Base revision: ' + reviewBaseRevision,
+      'Adopted revision: ' + headRevision,
+      'No model-backed writer was launched.',
+    ].join('\n');
+    return this.#links.completeInternal(record.executionId, finalText);
+  }
+
+  #assertExternalBackendAllowed(backendName: string | undefined): void {
+    if (!backendName) return;
+    const backend = this.#policy.backend(backendName);
+    if (!backend?.enabled) throw new Error('EXTERNAL_CHANGE_BACKEND_INVALID');
+    if (backend.supports?.untrusted_external === false) {
+      throw new Error('EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED');
+    }
   }
 
   async runtimeSummary() {
@@ -382,7 +428,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!input.objective?.trim()) throw new Error('OBJECTIVE_REQUIRED');
     if (!input.projectKey?.trim()) throw new Error('PROJECT_KEY_REQUIRED');
     if (
-      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT', 'BATCH_VERIFY'].includes(input.phase) &&
+      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'ADOPT_CHANGE', 'IMPLEMENT', 'BATCH_VERIFY'].includes(input.phase) &&
       !input.repository?.path
     ) {
       throw new Error('REPOSITORY_PATH_REQUIRED');
@@ -414,6 +460,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       this.#backendAvailability,
       effectiveInput.hints ?? {},
     );
+    if (effectiveInput.context?.changeOrigin === 'EXTERNAL') {
+      this.#assertExternalBackendAllowed(selection.backend);
+    }
     const reserve = () =>
       this.#links.reserve({
         idempotencyKey,
@@ -461,6 +510,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       reservation = reserve();
     }
     let record = reservation.record;
+    const persistedSelection = selectionFromRecord(record);
+    if (effectiveInput.context?.changeOrigin === 'EXTERNAL') {
+      this.#assertExternalBackendAllowed(persistedSelection.backend);
+    }
 
     if (input.phase === 'FINALIZE') {
       if (record.statusCache !== 'SUCCEEDED' || !record.resultText) {
@@ -509,13 +562,28 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           record = this.#links.attachWorkspace(record.executionId, {
             workspaceRef: provisioned.executionPath,
             gitBranch: provisioned.branch,
-            sourceRevision: provisioned.sourceRevision,
+            sourceRevision:
+              input.phase === 'ADOPT_CHANGE'
+                ? input.context?.reviewBaseRevision?.trim() || provisioned.sourceRevision
+                : provisioned.sourceRevision,
           });
         }
       } catch (error) {
         this.#links.updateStatus(record.executionId, 'FAILED');
         throw error;
       }
+    }
+
+    if (input.phase === 'ADOPT_CHANGE') {
+      if (record.statusCache !== 'SUCCEEDED' || !record.resultText) {
+        try {
+          record = this.#adoptChangeDeterministically(input, record);
+        } catch (error) {
+          this.#links.updateStatus(record.executionId, 'FAILED');
+          throw error;
+        }
+      }
+      return (await this.get(record.executionId))!;
     }
 
     if (!record.openhandsConversationId) {
@@ -533,7 +601,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           phase: record.phase,
           objective: phasePrompt(effectiveInput),
           repositoryPath: record.workspaceRef!,
-          selection: selectionFromRecord(record),
+          selection: persistedSelection,
           correlationMetadata: {
             execution_id: record.executionId,
             project_key: record.projectKey,
@@ -585,12 +653,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     let hostSnapshot = record.openhandsConversationId
       ? await this.#host.getExecution(record.openhandsConversationId)
       : null;
-    // Once the execution host accepts cancellation, product state is monotonic.
-    // OpenHands implements cancel through an asynchronous pause primitive, so an
-    // immediate follow-up GET may transiently still report RUNNING. Never let
-    // that transport race resurrect a cancelled AI Office execution.
-    const preserveCancelled = record.statusCache === 'CANCELLED';
-    if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveCancelled) {
+    // Durable terminal product state is monotonic. In particular, a writer may be
+    // rejected after the host reports SUCCEEDED because deterministic Git completion
+    // verification failed. A later stale host snapshot must never resurrect that
+    // FAILED/STUCK/CANCELLED execution and bypass the product integrity gate.
+    const preserveTerminal = TERMINAL.has(record.statusCache);
+    if (hostSnapshot && hostSnapshot.status !== record.statusCache && !preserveTerminal) {
       const observedAt = hostSnapshot.updatedAt ? Date.parse(hostSnapshot.updatedAt) : Number.NaN;
       const observedAtMs = Number.isFinite(observedAt) ? observedAt : undefined;
       if (
@@ -696,6 +764,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   }
 
   createPlan(input: CreatePlanInput, commandKey: string) {
+    if (input.source?.kind === 'EXTERNAL_CHANGE') {
+      this.#assertExternalBackendAllowed(input.source.reviewBackend);
+      this.#assertExternalBackendAllowed(input.source.repairBackend);
+    }
     return this.#planOrchestrator.createPlan(input, commandKey);
   }
 

@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { buildControlPlane } from '../src/app.js';
 import type { PlanDeliveryPort, PlanDeliveryResult } from '../src/v3/delivery.js';
+import type { GitHubGovernanceStatusPort } from '../src/v3/githubGovernanceStatus.js';
+import type { GitHubPullRequestRepairPublisherPort } from '../src/v3/githubPrRepairPublisher.js';
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
@@ -16,6 +19,8 @@ import type { WorkspaceProvisioningPort } from '../src/v3/workspace.js';
 class PlanHost implements ExecutionHostPort {
   readonly executions: Map<string, ExecutionHostSnapshot>;
   readonly getBarriers = new Map<string, Promise<void>>();
+  nextCreateBarrier?: Promise<void>;
+  nextCreateEntered?: () => void;
   creates = 0;
   gets = 0;
   lastCreateInput?: ExecutionHostCreateInput;
@@ -30,6 +35,12 @@ class PlanHost implements ExecutionHostPort {
   }
 
   async createExecution(input: ExecutionHostCreateInput) {
+    const barrier = this.nextCreateBarrier;
+    const entered = this.nextCreateEntered;
+    this.nextCreateBarrier = undefined;
+    this.nextCreateEntered = undefined;
+    entered?.();
+    if (barrier) await barrier;
     this.creates += 1;
     this.lastCreateInput = input;
     const conversationId = `conversation-${this.creates}`;
@@ -48,6 +59,11 @@ class PlanHost implements ExecutionHostPort {
 
   blockGet(conversationId: string, barrier: Promise<void>) {
     this.getBarriers.set(conversationId, barrier);
+  }
+
+  blockNextCreate(barrier: Promise<void>, entered: () => void) {
+    this.nextCreateBarrier = barrier;
+    this.nextCreateEntered = entered;
   }
 
   async cancelExecution(conversationId: string) {
@@ -2042,6 +2058,992 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     assert.equal(auditExecution.selection.backend, 'openhands-builtin');
     assert.equal(auditExecution.selection.modelClass, 'gpt-5.6-sol');
     assert.equal(discoveryCalls, 2, 'candidate must be re-discovered before adoption');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('plan cancellation is serialized with reconciliation so a late worker start cannot resurrect a cancelled plan', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'openhands-builtin': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'cancel-race',
+        objective: 'Never resurrect work after plan cancellation.',
+        analysisSummary: 'Cancellation races a review worker launch.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+      'cancel-race-plan',
+    );
+    const implementation = plan.batches[0]!.workItems[0]!.executions[0]!;
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+
+    let releaseCreate!: () => void;
+    let markCreateEntered!: () => void;
+    const createEntered = new Promise<void>((resolve) => {
+      markCreateEntered = resolve;
+    });
+    host.blockNextCreate(
+      new Promise<void>((resolve) => {
+        releaseCreate = resolve;
+      }),
+      markCreateEntered,
+    );
+
+    const reconcile = runtime.v3.reconcilePlans(plan.planId);
+    await createEntered;
+    const cancellation = runtime.v3.cancelPlan(plan.planId);
+    releaseCreate();
+    await Promise.all([reconcile, cancellation]);
+
+    const body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.workItems[0]!.status, 'CANCELLED');
+    assert.equal(body.batches[0]!.workItems[0]!.executions.at(-1)!.status, 'CANCELLED');
+    assert.equal(host.executions.get('conversation-2')?.status, 'PAUSED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('normal TASK review keeps legacy INVALID-as-UNKNOWN retry semantics', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'compat-task',
+        objective: 'Preserve the pre-existing TASK review contract.',
+        analysisSummary: 'INVALID was not a TASK verdict before external-change governance.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Implement.' }],
+          },
+        ],
+      },
+      'task-invalid-compatibility',
+    );
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const implementation = body.batches[0]!.workItems[0]!.executions[0]!;
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(review.phase, 'VERIFY_REVIEW');
+
+    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nLegacy reviewer emitted an unsupported token.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const retried = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(retried.phase, 'VERIFY_REVIEW');
+    assert.notEqual(retried.executionId, review.executionId);
+    assert.equal(retried.selection.backend, 'openhands-builtin');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('GitHub-origin external plans require an immutable 40-hex head revision', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    await assert.rejects(
+      () =>
+        runtime.v3.createPlan(
+          {
+            projectKey: 'digital-biome',
+            objective: 'Reject malformed GitHub-origin provenance.',
+            analysisSummary: 'GitHub-origin revisions must be immutable SHAs.',
+            repository: { path: '/tmp/repository', baseRevision: '2222222222222222222222222222222222222222' },
+            source: {
+              kind: 'EXTERNAL_CHANGE',
+              revision: 'refs/heads/jules/fix-42',
+              origin: {
+                kind: 'GITHUB_PULL_REQUEST',
+                repository: 'example/project',
+                pullRequestNumber: 42,
+                pullRequestUrl: 'https://github.com/example/project/pull/42',
+                title: 'External proposal',
+                headRef: 'jules/fix-42',
+                baseRef: 'main',
+                headRepository: 'example/project',
+              },
+            },
+            batches: [
+              {
+                key: 'external-pr',
+                title: 'Review external PR',
+                workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+              },
+            ],
+          },
+          'github-origin-invalid-revision',
+        ),
+      /GITHUB_PR_SOURCE_REVISION_INVALID/,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('GitHub-origin external plans validate every durable PR identity field', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'codex-review-headless': true },
+  });
+  const baseSource = {
+    kind: 'EXTERNAL_CHANGE',
+    revision: '1111111111111111111111111111111111111111',
+    origin: {
+      kind: 'GITHUB_PULL_REQUEST',
+      repository: 'example/project',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://github.com/example/project/pull/42',
+      title: 'External proposal',
+      author: 'jules',
+      headRef: 'jules/fix-42',
+      baseRef: 'main',
+      headRepository: 'example/project',
+      producer: 'JULES',
+    },
+  } as const;
+  const create = (source: unknown, key: string, baseRevision = '2222222222222222222222222222222222222222') =>
+    runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Validate durable GitHub identity.',
+        analysisSummary: 'Malformed GitHub provenance must fail before plan persistence.',
+        repository: { path: '/tmp/repository', baseRevision },
+        source: source as never,
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+          },
+        ],
+      },
+      key,
+    );
+  try {
+    const cases: Array<[string, (source: any) => void, RegExp]> = [
+      ['repository', (source) => (source.origin.repository = ''), /GITHUB_PR_SOURCE_REPOSITORY_INVALID/],
+      ['number', (source) => (source.origin.pullRequestNumber = 0), /GITHUB_PR_SOURCE_NUMBER_INVALID/],
+      ['url', (source) => (source.origin.pullRequestUrl = 'https://example.test/pull/42'), /GITHUB_PR_SOURCE_URL_INVALID/],
+      ['title', (source) => (source.origin.title = ''), /GITHUB_PR_SOURCE_TITLE_REQUIRED/],
+      ['head-ref', (source) => (source.origin.headRef = '../escape'), /GITHUB_PR_SOURCE_HEAD_REF_INVALID/],
+      ['base-ref', (source) => (source.origin.baseRef = ''), /GITHUB_PR_SOURCE_BASE_REF_INVALID/],
+      ['head-repository', (source) => (source.origin.headRepository = 'not-a-repo'), /GITHUB_PR_SOURCE_HEAD_REPOSITORY_INVALID/],
+      ['producer', (source) => (source.origin.producer = 'OTHER'), /GITHUB_PR_SOURCE_PRODUCER_INVALID/],
+    ];
+    for (const [name, mutate, expected] of cases) {
+      const source = structuredClone(baseSource) as any;
+      mutate(source);
+      await assert.rejects(() => create(source, `github-origin-invalid-${name}`), expected);
+    }
+    await assert.rejects(
+      () => create(structuredClone(baseSource), 'github-origin-invalid-base', 'main'),
+      /GITHUB_PR_BASE_REVISION_INVALID/,
+    );
+
+
+    const canonicalSource = structuredClone(baseSource) as any;
+    canonicalSource.revision = `  ${baseSource.revision}  `;
+    canonicalSource.origin.repository = '  example/project  ';
+    canonicalSource.origin.pullRequestUrl = '  https://github.com/example/project/pull/42  ';
+    canonicalSource.origin.title = '  External proposal  ';
+    canonicalSource.origin.author = '  jules  ';
+    canonicalSource.origin.headRef = '  jules/fix-42  ';
+    canonicalSource.origin.baseRef = '  main  ';
+    canonicalSource.origin.headRepository = '  example/project  ';
+    const canonical = await create(canonicalSource, 'github-origin-canonicalized');
+    assert.equal(canonical.source.kind, 'EXTERNAL_CHANGE');
+    if (canonical.source.kind !== 'EXTERNAL_CHANGE') throw new Error('expected external source');
+    assert.equal(canonical.source.revision, baseSource.revision);
+    assert.equal(canonical.externalHeadRevision, baseSource.revision);
+    assert.equal(canonical.source.origin?.repository, 'example/project');
+    assert.equal(canonical.source.origin?.pullRequestUrl, 'https://github.com/example/project/pull/42');
+    assert.equal(canonical.source.origin?.title, 'External proposal');
+    assert.equal(canonical.source.origin?.author, 'jules');
+    assert.equal(canonical.source.origin?.headRef, 'jules/fix-42');
+    assert.equal(canonical.source.origin?.baseRef, 'main');
+    assert.equal(canonical.source.origin?.headRepository, 'example/project');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('ADOPT_CHANGE replays the same deterministic execution after a restart crash residue', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-adopt-restart-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const HEAD = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const host = new PlanHost();
+  let planId = '';
+  let adoptExecutionId = '';
+
+  const build = () =>
+    buildControlPlane({
+      dbFile,
+      logger: false,
+      v3ExecutionHost: host,
+      v3Workspace: workspace,
+      v3BackendAvailability: {
+        'openhands-builtin': true,
+        'codex-review-headless': true,
+      },
+    });
+
+  const first = await build();
+  try {
+    const plan = await first.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Recover deterministic external adoption after restart.',
+        analysisSummary: 'Simulate a crash between durable reservation and internal completion.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: { kind: 'EXTERNAL_CHANGE', revision: HEAD },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external change',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review.' }],
+          },
+        ],
+      },
+      'adopt-restart-crash',
+    );
+    planId = plan.planId;
+    adoptExecutionId = plan.batches[0]!.workItems[0]!.executions[0]!.executionId;
+    assert.equal(plan.batches[0]!.workItems[0]!.executions[0]!.phase, 'ADOPT_CHANGE');
+    assert.equal(plan.batches[0]!.workItems[0]!.executions[0]!.status, 'SUCCEEDED');
+  } finally {
+    await first.app.close();
+  }
+
+  const db = new DatabaseSync(dbFile);
+  db.prepare(
+    `UPDATE v3_execution_links
+        SET status_cache='STARTING',result_text=NULL,started_at=NULL,ended_at=NULL
+      WHERE execution_id=?`,
+  ).run(adoptExecutionId);
+  db.close();
+
+  const restarted = await build();
+  try {
+    await restarted.v3.reconcilePlans(planId);
+    const recovered = (await restarted.v3.getPlan(planId, true))!;
+    const executions = recovered.batches[0]!.workItems[0]!.executions;
+    assert.equal(executions.length, 1, 'deterministic adoption must reuse the same command key');
+    assert.equal(executions[0]!.executionId, adoptExecutionId);
+    assert.equal(executions[0]!.status, 'SUCCEEDED');
+    assert.match(executions[0]!.result?.finalText ?? '', /^ADOPTED_CHANGE/);
+  } finally {
+    await restarted.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('legacy multi-batch external plans keep the untrusted-input trust boundary beyond batch zero', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'external-multibatch-trust-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'antigravity-worker': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Preserve external trust across every legacy batch.',
+        analysisSummary: 'A pre-gate durable plan may contain more than one batch.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'first',
+            title: 'First external batch',
+            workItems: [{ key: 'first-item', title: 'First', objective: 'Review external change.' }],
+          },
+          {
+            key: 'second',
+            title: 'Legacy follow-up batch',
+            dependsOn: ['first'],
+            workItems: [{ key: 'second-item', title: 'Second', objective: 'Apply follow-up.' }],
+          },
+        ],
+      },
+      'external-multibatch-trust',
+    );
+    const db = new DatabaseSync(dbFile);
+    db.prepare('UPDATE v3_plans SET source_json=? WHERE plan_id=?').run(
+      JSON.stringify({ ...plan.source, repairBackend: 'antigravity-worker' }),
+      plan.planId,
+    );
+    db.close();
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'PASS\nFirst batch verified.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    let secondExecutions = body.batches[1]!.workItems[0]!.executions;
+    if (secondExecutions.length === 0) {
+      await runtime.v3.reconcilePlans(plan.planId);
+      body = (await runtime.v3.getPlan(plan.planId, true))!;
+      secondExecutions = body.batches[1]!.workItems[0]!.executions;
+    }
+    const implementation = secondExecutions.at(-1)!;
+    assert.equal(implementation.phase, 'IMPLEMENT');
+    host.succeed(implementation.refs.openhandsConversationId!, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[1]!.workItems[0]!.executions.at(-1)!;
+    assert.equal(secondReview.phase, 'VERIFY_REVIEW');
+    host.succeed(secondReview.refs.openhandsConversationId!, 'FAIL\nBlocking defect.');
+    await assert.rejects(
+      () => runtime.v3.reconcilePlans(plan.planId),
+      /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+    );
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.batches[1]!.workItems[0]!.executions.at(-1)!.phase, 'VERIFY_REVIEW');
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('external change plans adopt the existing revision, review first, and repair only after a blocking review', async () => {
+  const host = new PlanHost();
+  integrationCount = 0;
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'external-change-review-first' },
+      payload: {
+        projectKey: 'digital-biome',
+        objective: 'Review an externally proposed fix before allowing any AI writer.',
+        analysisSummary: 'The change already exists at the supplied external revision.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate and review external PR change',
+                objective: 'Confirm the claimed problem is real and the proposed repair preserves contracts.',
+                acceptanceCriteria: [
+                  'The claimed problem is supported by repository evidence.',
+                  'The proposed repair preserves protected contracts.',
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const adopted = body.batches[0].workItems[0].executions[0];
+    assert.equal(adopted.phase, 'ADOPT_CHANGE');
+    assert.equal(adopted.status, 'SUCCEEDED');
+    assert.equal(host.creates, 0);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstReview = body.batches[0].workItems[0].executions[1];
+    assert.equal(firstReview.phase, 'VERIFY_REVIEW');
+    assert.equal(host.creates, 1);
+    assert.match(host.lastCreateInput?.objective ?? '', /external change/i);
+    assert.match(host.lastCreateInput?.objective ?? '', /problem.*valid/i);
+
+    host.succeed(firstReview.refs.openhandsConversationId, 'FAIL\nThe repair breaks the content schema contract.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const fix = body.batches[0].workItems[0].executions[2];
+    assert.equal(fix.phase, 'IMPLEMENT_FIX');
+
+    host.succeed(fix.refs.openhandsConversationId, 'FIXED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const secondReview = body.batches[0].workItems[0].executions[3];
+    assert.equal(secondReview.phase, 'VERIFY_REVIEW');
+    assert.match(host.lastCreateInput?.objective ?? '', /This is an external change review/);
+    assert.match(host.lastCreateInput?.objective ?? '', /PASS, FAIL, or INVALID/);
+
+    host.succeed(secondReview.refs.openhandsConversationId, 'PASS\nProblem validity and contract preservation verified.');
+    await runtime.v3.reconcilePlans(planId);
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.currentRevision, 'integrated-1');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('an invalid external change is blocked without launching a repair writer', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Reject a false-positive external change.',
+        analysisSummary: 'Review the existing external change before any repair.',
+        repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        source: { kind: 'EXTERNAL_CHANGE', revision: 'external-head-revision' },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Verify whether the claimed defect actually exists.',
+              },
+            ],
+          },
+        ],
+      },
+      'external-change-invalid',
+    );
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nThe claimed defect is not reproducible from repository evidence.');
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'EXTERNAL_CHANGE_INVALID');
+    assert.equal(body.batches[0]!.workItems[0]!.executions.length, 2);
+    assert.equal(
+      body.batches[0]!.workItems[0]!.executions.some((execution) => execution.phase === 'IMPLEMENT_FIX'),
+      false,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('external change plans reject trusted-input-only Antigravity backends before persistence', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+      'antigravity-review': true,
+      'antigravity-worker': true,
+    },
+  });
+
+  try {
+    for (const source of [
+      {
+        kind: 'EXTERNAL_CHANGE' as const,
+        revision: 'external-head-revision',
+        reviewBackend: 'antigravity-review',
+      },
+      {
+        kind: 'EXTERNAL_CHANGE' as const,
+        revision: 'external-head-revision',
+        repairBackend: 'antigravity-worker',
+      },
+    ]) {
+      assert.throws(
+        () =>
+          runtime.v3.createPlan(
+            {
+              projectKey: 'digital-biome',
+              objective: 'Never expose provider-native consumer auth to untrusted PR input.',
+              analysisSummary: 'External PR governance must use an untrusted-input-safe backend.',
+              repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+              source,
+              batches: [
+                {
+                  key: 'external-pr',
+                  title: 'Review external PR',
+                  workItems: [
+                    {
+                      key: 'external-pr-change',
+                      title: 'Validate external PR',
+                      objective: 'Verify the defect and implementation quality.',
+                    },
+                  ],
+                },
+              ],
+            },
+            `external-antigravity-rejected-${source.reviewBackend ?? source.repairBackend}`,
+          ),
+        /EXTERNAL_CHANGE_BACKEND_NOT_ALLOWED/,
+      );
+    }
+    assert.equal((await runtime.v3.listPlans()).length, 0, 'unsafe plans must not be persisted');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('a reviewed GitHub PR repair is published to the PR head before the plan can verify successfully', async () => {
+  const host = new PlanHost();
+  const ORIGINAL = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const REPAIRED = '3333333333333333333333333333333333333333';
+  const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
+  const governanceCalls: Array<{ revision: string; planStatus: string; stale: boolean }> = [];
+  let repairHeadStillPropagating = true;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      const stale =
+        input.expectedHeadRevision === REPAIRED &&
+        input.planStatus === 'SUCCEEDED' &&
+        repairHeadStillPropagating;
+      if (stale) repairHeadStillPropagating = false;
+      governanceCalls.push({
+        revision: input.expectedHeadRevision,
+        planStatus: input.planStatus,
+        stale,
+      });
+      return {
+        revision: input.expectedHeadRevision,
+        state: stale ? 'pending' : input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale,
+        observedHeadRevision: stale ? ORIGINAL : input.expectedHeadRevision,
+        published: !stale,
+      };
+    },
+  };
+  const publisher: GitHubPullRequestRepairPublisherPort = {
+    async publish(input) {
+      publications.push(input);
+      return {
+        previousRevision: input.expectedHeadRevision,
+        publishedRevision: REPAIRED,
+        auditRef: `refs/ai-office/external/github/pr-42/repairs/${input.planId}/${REPAIRED}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3PullRequestRepairPublisher: publisher,
+    v3GovernanceStatus: governanceStatus,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Repair a GitHub PR only after independent review.',
+        analysisSummary: 'GitHub-origin external change.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: ORIGINAL,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Verify and repair only confirmed blocking defects.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-repair-publication',
+    );
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'FAIL\nA blocking regression remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const fix = body.batches[0]!.workItems[0]!.executions[2]!;
+    host.succeed(fix.refs.openhandsConversationId!, 'FIXED');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[0]!.workItems[0]!.executions[3]!;
+    host.succeed(secondReview.refs.openhandsConversationId!, 'FAIL\nOne more blocking defect remains.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    assert.equal(publications.length, 0, 'a failed re-review must never publish an intermediate repair');
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondFix = body.batches[0]!.workItems[0]!.executions[4]!;
+    assert.equal(secondFix.phase, 'IMPLEMENT_FIX');
+    host.succeed(secondFix.refs.openhandsConversationId!, 'FIXED AGAIN');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const thirdReview = body.batches[0]!.workItems[0]!.executions[5]!;
+    assert.equal(thirdReview.phase, 'VERIFY_REVIEW');
+    assert.equal(publications.length, 0, 'repair publication occurs only after the final passing review');
+    host.succeed(thirdReview.refs.openhandsConversationId!, 'PASS\nThe final repaired change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(publications.length, 1);
+    assert.equal(publications[0]!.expectedHeadRevision, ORIGINAL);
+    assert.equal(publications[0]!.repository, 'example/project');
+    assert.equal(publications[0]!.headRef, 'jules/fix-42');
+    assert.equal(publications[0]!.baseRef, 'main');
+    assert.equal(publications[0]!.expectedBaseRevision, BASE);
+    assert.match(publications[0]!.workspacePath, /^\/host\/workspace\//);
+    assert.equal(body.externalHeadRevision, REPAIRED);
+    assert.equal(typeof body.externalHeadPublishedAt, 'number');
+    assert.equal(body.status, 'RUNNING');
+
+    // The next plan reconciliation observes the integrated batch, transitions the
+    // plan to SUCCEEDED, and attempts the repaired-head governance publication.
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(governanceCalls.at(-1)?.revision, REPAIRED);
+    assert.equal(governanceCalls.at(-1)?.stale, true);
+    assert.equal(body.governanceStatusRevision, REPAIRED);
+    assert.notEqual(body.governanceStatusPlanStatus, 'SUCCEEDED');
+
+    // A stale PR API read immediately after our own repair push is propagation lag,
+    // not a durable publication. The periodic path must retry and only fingerprint
+    // the repaired head after GitHub observes that exact revision.
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(
+      governanceCalls.filter(
+        (call) => call.revision === REPAIRED && call.planStatus === 'SUCCEEDED',
+      ).length,
+      2,
+    );
+    assert.equal(governanceCalls.at(-1)?.stale, false);
+    assert.equal(body.governanceStatusRevision, REPAIRED);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
+    assert.ok(
+      body.events.some(
+        (event: Record<string, unknown>) => event.type === 'EXTERNAL_CHANGE_REPAIR_PUBLISHED',
+      ),
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('repair publication keeps the force-with-lease anchored to the intake head after a crash residue is persisted', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-pr-publication-crash-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const ORIGINAL = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const REPAIRED = '3333333333333333333333333333333333333333';
+  const publications: Parameters<GitHubPullRequestRepairPublisherPort['publish']>[0][] = [];
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3PullRequestRepairPublisher: {
+      async publish(input) {
+        publications.push(input);
+        return {
+          previousRevision: input.expectedHeadRevision,
+          publishedRevision: REPAIRED,
+          auditRef: `refs/ai-office/external/github/pr-42/repairs/${input.planId}/${REPAIRED}`,
+        };
+      },
+    },
+    v3GovernanceStatus: {
+      async publish(input) {
+        return { revision: input.expectedHeadRevision, state: 'pending', stale: false, published: true };
+      },
+    },
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Recover repair publication after a crash window.',
+        analysisSummary: 'The durable repair SHA may outlive the work-item state transition.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: ORIGINAL,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [{ key: 'item', title: 'Item', objective: 'Review and repair.' }],
+          },
+        ],
+      },
+      'github-repair-crash-window',
+    );
+
+    // Simulate the durable state left by a process crash after publication succeeded
+    // and externalHeadRevision was persisted, but before the work item was marked verified.
+    const db = new DatabaseSync(dbFile);
+    db.prepare('UPDATE v3_plans SET external_head_revision=? WHERE plan_id=?').run(REPAIRED, plan.planId);
+    db.close();
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const firstReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(firstReview.refs.openhandsConversationId!, 'FAIL\nRepair required.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const fix = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(fix.refs.openhandsConversationId!, 'FIXED');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const secondReview = body.batches[0]!.workItems[0]!.executions.at(-1)!;
+    host.succeed(secondReview.refs.openhandsConversationId!, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    assert.equal(publications.length, 1);
+    assert.equal(publications[0]!.expectedHeadRevision, ORIGINAL);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('terminal GitHub governance status is retried durably after a transient reporting failure', async () => {
+  const host = new PlanHost();
+  const HEAD = '1111111111111111111111111111111111111111';
+  const BASE = '2222222222222222222222222222222222222222';
+  const calls: Array<{ planStatus: string; revision: string }> = [];
+  let failFirstSuccess = true;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      calls.push({ planStatus: input.planStatus, revision: input.expectedHeadRevision });
+      if (input.planStatus === 'SUCCEEDED' && failFirstSuccess) {
+        failFirstSuccess = false;
+        throw new Error('simulated GitHub outage');
+      }
+      return {
+        revision: input.expectedHeadRevision,
+        state: input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale: false,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3GovernanceStatus: governanceStatus,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Publish durable GitHub governance state.',
+        analysisSummary: 'Review-only GitHub PR path.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: HEAD,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Approve only after independent verification.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-governance-durable-status',
+    );
+    assert.equal(plan.governanceStatusRequired, true);
+    assert.equal(calls.at(-1)?.planStatus, 'RUNNING');
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'PASS\nThe external change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.governanceStatusPlanStatus, 'RUNNING');
+    assert.equal(calls.filter((call) => call.planStatus === 'SUCCEEDED').length, 1);
+
+    // No plan ID: proves a terminal plan with a stale reporting fingerprint is
+    // still selected by PlanRepository.active() and retried by the periodic path.
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.governanceStatusRevision, HEAD);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
+    assert.equal(calls.filter((call) => call.planStatus === 'SUCCEEDED').length, 2);
   } finally {
     await runtime.app.close();
   }
