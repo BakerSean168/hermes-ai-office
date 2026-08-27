@@ -9,7 +9,8 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = path.join(root, "dashboard", "src", "index.js");
 const outfile = path.join(root, "dashboard", "dist", "index.js");
 const options = {
-  entryPoints: [entry],
+  absWorkingDir: root,
+  entryPoints: [path.relative(root, entry)],
   bundle: true,
   format: "iife",
   platform: "browser",
