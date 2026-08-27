@@ -655,7 +655,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
     ).json();
     const fallbackReview = body.batches[0].workItems[0].executions[3];
     assert.equal(fallbackReview.phase, 'VERIFY_REVIEW');
-    assert.equal(fallbackReview.selection.backend, 'claude-code-review-headless');
+    assert.equal(fallbackReview.selection.backend, 'openhands-builtin');
     assert.equal(fallbackReview.selection.modelClass, 'review-premium');
 
     host.fail(fallbackReview.refs.openhandsConversationId, {
@@ -670,7 +670,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
     const retriedFallbackReview = body.batches[0].workItems[0].executions[4];
     const failedFallbackReview = body.batches[0].workItems[0].executions[3];
     assert.equal(retriedFallbackReview.phase, 'VERIFY_REVIEW');
-    assert.equal(retriedFallbackReview.selection.backend, 'openhands-builtin');
+    assert.equal(retriedFallbackReview.selection.backend, 'codex-review-headless');
     assert.equal(retriedFallbackReview.selection.modelClass, 'codex-auto-review');
     assert.equal(failedFallbackReview.error.code, 'LLMServiceUnavailableError');
     assert.equal(failedFallbackReview.error.retryable, true);
@@ -2384,7 +2384,7 @@ test('normal TASK review keeps legacy INVALID-as-UNKNOWN retry semantics', async
     assert.equal(body.status, 'RUNNING');
     assert.equal(retried.phase, 'VERIFY_REVIEW');
     assert.notEqual(retried.executionId, review.executionId);
-    assert.equal(retried.selection.backend, 'claude-code-review-headless');
+    assert.equal(retried.selection.backend, 'openhands-builtin');
     assert.equal(retried.selection.modelClass, 'review-premium');
   } finally {
     await runtime.app.close();

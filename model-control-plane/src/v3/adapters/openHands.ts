@@ -239,7 +239,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
 
   #executionSecrets(input: ExecutionHostCreateInput): JsonRecord | undefined {
     const backend = this.#policy.backend(input.selection.backend);
-    if (!backend || input.selection.transportMode !== 'LITELLM_MANAGED') return undefined;
+    if (!backend) return undefined;
     const values: Record<string, JsonRecord> = {
       // Execution hosts allocate a PTY for tool compatibility. Explicitly keep
       // test runners in automation mode so completed commands cannot strand an
@@ -247,8 +247,10 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       CI: { kind: 'StaticSecret', value: '1' },
       NX_TUI: { kind: 'StaticSecret', value: 'false' },
     };
-    for (const [name, source] of Object.entries(backend.managed_env ?? {})) {
-      values[name] = { kind: 'StaticSecret', value: this.#managedValue(source, input) };
+    if (input.selection.transportMode === 'LITELLM_MANAGED') {
+      for (const [name, source] of Object.entries(backend.managed_env ?? {})) {
+        values[name] = { kind: 'StaticSecret', value: this.#managedValue(source, input) };
+      }
     }
     for (const [name, value] of Object.entries(backend.static_env ?? {})) {
       values[name] = { kind: 'StaticSecret', value };
@@ -309,6 +311,8 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
         throw new Error('ACP_MANAGED_TRANSPORT_NOT_MATERIALIZED');
       }
       config.acp_model = `${backend.managed_model_prefix ?? ''}${input.selection.modelClass}`;
+    } else if (input.selection.transportMode === 'PROVIDER_NATIVE') {
+      config.acp_model = input.selection.modelClass;
     }
     return config;
   }

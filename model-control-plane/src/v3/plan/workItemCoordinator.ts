@@ -23,6 +23,7 @@ export type PlanWorkerPhase =
 
 export interface PhaseRetryPolicy {
   backendCandidates: string[];
+  externalBackendCandidates?: string[];
   modelClasses: string[];
 }
 
@@ -108,7 +109,12 @@ export class WorkItemCoordinator {
 
   sourceBackend(plan: PlanRecord, phase: PlanWorkerPhase): string | undefined {
     if (plan.source.kind !== 'EXTERNAL_CHANGE') return undefined;
-    if (phase === 'VERIFY_REVIEW') return plan.source.reviewBackend;
+    if (phase === 'VERIFY_REVIEW') {
+      return (
+        plan.source.reviewBackend ??
+        this.#retryPolicies.VERIFY_REVIEW?.externalBackendCandidates?.[0]
+      );
+    }
     if (phase === 'IMPLEMENT_FIX') return plan.source.repairBackend;
     return undefined;
   }

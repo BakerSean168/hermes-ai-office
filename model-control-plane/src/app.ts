@@ -175,14 +175,15 @@ export async function buildControlPlane(
         gid: Number(env.MODEL_CP_V3_OPENHANDS_GID ?? 10001),
       },
     });
-  const backendAvailability =
-    options.v3BackendAvailability ??
-    Object.fromEntries(
-      Object.entries(policy.config.backends).map(([name, backend]) => [
-        name,
-        backend.kind === 'internal' || configuredBackends.has(name),
-      ]),
-    );
+  const backendAvailability = Object.fromEntries(
+    Object.entries(policy.config.backends).map(([name, backend]) => [
+      name,
+      backend.kind === 'internal' ||
+        (options.v3BackendAvailability
+          ? options.v3BackendAvailability[name] === true
+          : configuredBackends.has(name)),
+    ]),
+  );
 
   const v3 = new DevelopmentExecutionService({
     policy,

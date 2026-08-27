@@ -13,6 +13,7 @@ const allAvailable = {
   'antigravity-worker': true,
   'openhands-builtin': true,
   'opencode-acp': true,
+  'codex-business-review-headless': true,
   'codex-review-headless': true,
   'claude-code-review-headless': true,
   'codex-acp': true,
@@ -21,30 +22,16 @@ const allAvailable = {
   'zcode-acp': true,
 };
 
-test('development policy uses LiteLLM-managed execution for all model-backed phases', () => {
+test('development policy keeps managed coding routes and prefers provider-native Business review', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
-  for (const phase of [
-    'ORCHESTRATE',
-    'INVESTIGATE_PLAN',
-    'IMPLEMENT',
-    'IMPLEMENT_FIX',
-    'VERIFY_REVIEW',
-    'BATCH_VERIFY',
-  ] as const) {
+  for (const phase of ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
+    assert.equal(policy.select(phase, {}, allAvailable).transportMode, 'LITELLM_MANAGED');
+  }
+  for (const phase of ['VERIFY_REVIEW', 'BATCH_VERIFY'] as const) {
     const selected = policy.select(phase, {}, allAvailable);
-    assert.equal(selected.transportMode, 'LITELLM_MANAGED');
-    assert.ok(
-      [
-        'openhands-builtin',
-        'opencode-acp',
-        'codex-review-headless',
-        'claude-code-review-headless',
-        'codex-acp',
-        'claude-code-acp',
-        'dsh-acp',
-        'zcode-acp',
-      ].includes(selected.backend),
-    );
+    assert.equal(selected.backend, 'codex-business-review-headless');
+    assert.equal(selected.transportMode, 'PROVIDER_NATIVE');
+    assert.equal(selected.modelClass, 'gpt-5.6-sol');
   }
   assert.equal(policy.config.version, 2);
   assert.deepEqual(Object.keys(policy.config.backends).sort(), [
@@ -53,6 +40,7 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
     'claude-code-acp',
     'claude-code-review-headless',
     'codex-acp',
+    'codex-business-review-headless',
     'codex-review-headless',
     'control-plane-change-adopter',
     'control-plane-finalizer',
@@ -71,16 +59,18 @@ test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
   assert.equal(selected.workspaceMode, 'read_oriented');
 });
 
-test('implementation prefers OpenCode and review uses the premium logical review route', () => {
+test('implementation prefers OpenCode and review prefers the authenticated Business Codex route', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.equal(policy.select('IMPLEMENT', {}, allAvailable).backend, 'opencode-acp');
   assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'opencode-acp');
   const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
-  assert.equal(review.backend, 'codex-review-headless');
-  assert.equal(review.modelClass, 'review-premium');
+  assert.equal(review.backend, 'codex-business-review-headless');
+  assert.equal(review.modelClass, 'gpt-5.6-sol');
+  assert.equal(review.transportMode, 'PROVIDER_NATIVE');
   const batchReview = policy.select('BATCH_VERIFY', {}, allAvailable);
-  assert.equal(batchReview.backend, 'codex-review-headless');
-  assert.equal(batchReview.modelClass, 'review-premium');
+  assert.equal(batchReview.backend, 'codex-business-review-headless');
+  assert.equal(batchReview.modelClass, 'gpt-5.6-sol');
+  assert.equal(batchReview.transportMode, 'PROVIDER_NATIVE');
   assert.equal(batchReview.workspaceMode, 'read_oriented');
 });
 
@@ -92,17 +82,31 @@ test('review retry candidates preserve backend order and expose bounded model fa
     ...allAvailable,
     'claude-code-review-headless': false,
   });
-  assert.deepEqual(retry.backendCandidates, ['codex-review-headless', 'openhands-builtin']);
+  assert.deepEqual(retry.backendCandidates, [
+    'codex-business-review-headless',
+    'codex-review-headless',
+    'openhands-builtin',
+  ]);
   assert.deepEqual(retry.modelClasses, ['review-premium', 'codex-auto-review', 'gpt-5.4']);
 });
 
-test('review falls back from headless Codex to Claude Code and then OpenHands', () => {
+test('review falls back from Business Codex to managed Codex, Claude Code, and OpenHands', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
+  const managedCodex = policy.select(
+    'VERIFY_REVIEW',
+    {},
+    { ...allAvailable, 'codex-business-review-headless': false },
+  );
+  assert.equal(managedCodex.backend, 'codex-review-headless');
+  assert.equal(managedCodex.modelClass, 'review-premium');
+  assert.equal(managedCodex.transportMode, 'LITELLM_MANAGED');
+
   const claude = policy.select(
     'VERIFY_REVIEW',
     {},
     {
       ...allAvailable,
+      'codex-business-review-headless': false,
       'codex-review-headless': false,
     },
   );
@@ -114,6 +118,7 @@ test('review falls back from headless Codex to Claude Code and then OpenHands', 
     {},
     {
       ...allAvailable,
+      'codex-business-review-headless': false,
       'codex-review-headless': false,
       'claude-code-review-headless': false,
     },
@@ -185,8 +190,8 @@ test('Antigravity is provider-native and opt-in without changing default phase r
   assert.equal(policy.backend('antigravity-review')?.supports?.untrusted_external, false);
   assert.equal(policy.backend('antigravity-worker')?.supports?.untrusted_external, false);
   const defaultReview = policy.select('VERIFY_REVIEW', {}, allAvailable);
-  assert.equal(defaultReview.backend, 'codex-review-headless');
-  assert.equal(defaultReview.transportMode, 'LITELLM_MANAGED');
+  assert.equal(defaultReview.backend, 'codex-business-review-headless');
+  assert.equal(defaultReview.transportMode, 'PROVIDER_NATIVE');
 
   const review = policy.select('VERIFY_REVIEW', { backend: 'antigravity-review' }, allAvailable);
   assert.equal(review.backend, 'antigravity-review');

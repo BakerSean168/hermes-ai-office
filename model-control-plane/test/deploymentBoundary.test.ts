@@ -36,7 +36,7 @@ test('control-plane deployment contains no V2, CPA, or Provider Hub runtime conf
   assert.match(dropin, /MODEL_CP_V3_LITELLM_URL=http:\/\/127\.0\.0\.1:4000/);
   assert.match(
     dropin,
-    /MODEL_CP_V3_ENABLED_BACKENDS=opencode-acp,dsh-acp,codex-review-headless,claude-code-review-headless,openhands-builtin/,
+    /MODEL_CP_V3_ENABLED_BACKENDS=opencode-acp,dsh-acp,codex-business-review-headless,codex-review-headless,claude-code-review-headless,openhands-builtin/,
   );
   assert.match(
     dropin,
@@ -100,6 +100,30 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.match(adapter, /reviewer completed without independent repository command activity/);
   assert.match(adapter, /item\?\.type === 'command_execution'/);
   assert.doesNotMatch(adapter, /sandbox_mode = \"read-only\"/);
+});
+
+
+test('provider-native Business Codex review is explicit, persistent, and excluded from untrusted external change', () => {
+  const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
+  const policy = parse(policyRaw) as any;
+  const adapter = fs.readFileSync(
+    path.join(root, 'openhands_tools/headless_review_acp.mjs'),
+    'utf8',
+  );
+  const backend = policy.backends['codex-business-review-headless'];
+
+  assert.equal(backend.kind, 'acp');
+  assert.equal(backend.default_model, 'gpt-5.6-sol');
+  assert.equal(backend.supports.provider_native, true);
+  assert.equal(backend.supports.litellm_managed, false);
+  assert.equal(backend.supports.untrusted_external, false);
+  assert.equal(backend.static_env.AI_OFFICE_CODEX_AUTH_HOME, '/openhands-state/codex-business');
+  assert.equal(policy.phases.VERIFY_REVIEW.backend_candidates[0], 'codex-business-review-headless');
+  assert.equal(policy.phases.BATCH_VERIFY.backend_candidates[0], 'codex-business-review-headless');
+  assert.match(adapter, /HEADLESS_TRANSPORT === 'provider-native'/);
+  assert.match(adapter, /HEADLESS_REVIEW_CODEX_AUTH_MISSING/);
+  assert.match(adapter, /delete env\.CODEX_API_KEY/);
+  assert.match(adapter, /--ignore-user-config/);
 });
 
 

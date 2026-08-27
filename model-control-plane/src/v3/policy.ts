@@ -199,7 +199,7 @@ export class DevelopmentPolicy {
   retryCandidates(
     phase: DevelopmentPhase,
     availability: Readonly<Record<string, boolean>> = {},
-  ): { backendCandidates: string[]; modelClasses: string[] } {
+  ): { backendCandidates: string[]; externalBackendCandidates: string[]; modelClasses: string[] } {
     if (!isDevelopmentPhase(phase)) throw new Error('V3_PHASE_INVALID');
     const phasePolicy = this.config.phases[phase];
     const backendCandidates = phasePolicy.backend_candidates.filter((name) => {
@@ -211,6 +211,9 @@ export class DevelopmentPolicy {
     });
     return {
       backendCandidates,
+      externalBackendCandidates: backendCandidates.filter(
+        (name) => this.config.backends[name]?.supports?.untrusted_external !== false,
+      ),
       modelClasses: [phasePolicy.model_class, ...(phasePolicy.model_fallbacks ?? [])],
     };
   }

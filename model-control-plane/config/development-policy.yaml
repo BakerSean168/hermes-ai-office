@@ -66,6 +66,7 @@ phases:
 
   VERIFY_REVIEW:
     backend_candidates:
+      - codex-business-review-headless
       - codex-review-headless
       - claude-code-review-headless
       - openhands-builtin
@@ -81,6 +82,7 @@ phases:
 
   BATCH_VERIFY:
     backend_candidates:
+      - codex-business-review-headless
       - codex-review-headless
       - claude-code-review-headless
       - openhands-builtin
@@ -89,6 +91,7 @@ phases:
       - codex-auto-review
       - gpt-5.4
     transport_preference:
+      - PROVIDER_NATIVE
       - LITELLM_MANAGED
     workspace_mode: read_oriented
     session_policy: fresh_required
@@ -151,6 +154,28 @@ backends:
     supports:
       litellm_managed: true
       write: true
+
+  codex-business-review-headless:
+    kind: acp
+    enabled: true
+    command:
+      - /usr/local/bin/node
+      - /opt/hermes-ai-office-tools/headless_review_acp.mjs
+    acp_server: custom
+    default_model: gpt-5.6-sol
+    static_env:
+      AI_OFFICE_HEADLESS_DRIVER: codex
+      AI_OFFICE_HEADLESS_TRANSPORT: provider-native
+      AI_OFFICE_HEADLESS_MODEL: gpt-5.6-sol
+      AI_OFFICE_CODEX_AUTH_HOME: /openhands-state/codex-business
+      AI_OFFICE_CODEX_BIN: /openhands-state/tooling/node_modules/.bin/codex
+      AI_OFFICE_WORKSPACE_ROOT: /workspace
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: '900'
+    supports:
+      litellm_managed: false
+      provider_native: true
+      write: false
+      untrusted_external: false
 
   codex-review-headless:
     kind: acp

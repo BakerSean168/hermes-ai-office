@@ -245,6 +245,43 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
 
     await host.createExecution({
+      executionId: 'exec_codex_business_headless_1',
+      projectKey: 'pixel-agents',
+      phase: 'VERIFY_REVIEW',
+      objective: 'Review with authenticated Business Codex.',
+      repositoryPath: '/workspace/executions/exec_codex_business_headless_1/repo',
+      selection: {
+        backend: 'codex-business-review-headless',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'PROVIDER_NATIVE',
+        workspaceMode: 'review_snapshot',
+        sessionPolicy: 'fresh_required',
+        reasons: [],
+      },
+      correlationMetadata: {
+        execution_id: 'exec_codex_business_headless_1',
+        phase: 'VERIFY_REVIEW',
+      },
+    });
+    const codexBusinessBody = createBody as any;
+    assert.equal(codexBusinessBody.agent.acp_server, 'custom');
+    assert.equal(codexBusinessBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.deepEqual(codexBusinessBody.agent.acp_command, [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ]);
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'codex');
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value, 'provider-native');
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(
+      codexBusinessBody.secrets.AI_OFFICE_CODEX_AUTH_HOME.value,
+      '/openhands-state/codex-business',
+    );
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_LITELLM_BASE_URL, undefined);
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_LITELLM_API_KEY, undefined);
+    assert.equal(codexBusinessBody.secrets.CODEX_API_KEY, undefined);
+
+    await host.createExecution({
       executionId: 'exec_codex_headless_1',
       projectKey: 'pixel-agents',
       phase: 'VERIFY_REVIEW',

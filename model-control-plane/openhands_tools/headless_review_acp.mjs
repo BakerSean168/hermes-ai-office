@@ -10,6 +10,8 @@ const DRIVER = process.env.AI_OFFICE_HEADLESS_DRIVER ?? '';
 const DEFAULT_MODEL = process.env.AI_OFFICE_HEADLESS_MODEL ?? 'gpt-5.6-sol';
 const LITELLM_BASE_URL = (process.env.AI_OFFICE_LITELLM_BASE_URL ?? '').replace(/\/$/, '');
 const LITELLM_API_KEY = process.env.AI_OFFICE_LITELLM_API_KEY ?? '';
+const HEADLESS_TRANSPORT = process.env.AI_OFFICE_HEADLESS_TRANSPORT ?? 'litellm-managed';
+const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const CODEX_BIN =
   process.env.AI_OFFICE_CODEX_BIN ?? '/openhands-state/tooling/node_modules/.bin/codex';
 const CLAUDE_BIN =
@@ -312,41 +314,62 @@ function codexIndependentActivity(stdout) {
 
 function codexCommand(session, prompt, evidence) {
   const sessionDir = safeSessionDirectory(session.id);
-  const codexHome = path.join(sessionDir, 'codex-home');
-  fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  const native = HEADLESS_TRANSPORT === 'provider-native';
+  const codexHome = native ? path.resolve(CODEX_AUTH_HOME) : path.join(sessionDir, 'codex-home');
+  if (native) {
+    if (!CODEX_AUTH_HOME) throw new Error('HEADLESS_REVIEW_CODEX_AUTH_HOME_MISSING');
+    const authFile = path.join(codexHome, 'auth.json');
+    if (!fs.existsSync(authFile)) throw new Error('HEADLESS_REVIEW_CODEX_AUTH_MISSING');
+  } else {
+    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  }
   const schemaPath = path.join(sessionDir, 'review-schema.json');
   fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
-  const baseUrl = LITELLM_BASE_URL.endsWith('/v1') ? LITELLM_BASE_URL : `${LITELLM_BASE_URL}/v1`;
-  const configPath = path.join(codexHome, 'config.toml');
-  fs.writeFileSync(
-    configPath,
-    [
-      `model = ${JSON.stringify(session.model)}`,
-      'model_provider = "hermes-litellm"',
-      'model_reasoning_effort = "high"',
-      'model_verbosity = "high"',
-      'approval_policy = "never"',
-      'sandbox_mode = "workspace-write"',
-      '[model_providers.hermes-litellm]',
-      'name = "Hermes LiteLLM"',
-      `base_url = ${JSON.stringify(baseUrl)}`,
-      'env_key = "CODEX_API_KEY"',
-      'wire_api = "responses"',
-      '[model_providers.hermes-litellm.env_http_headers]',
-      '"X-LiteLLM-End-User-ID" = "HERMES_V3_EXECUTION_ID"',
-      '[features]',
-      'multi_agent = false',
-      '',
-    ].join('\n'),
-    { mode: 0o600 },
-  );
+  if (!native) {
+    const baseUrl = LITELLM_BASE_URL.endsWith('/v1') ? LITELLM_BASE_URL : `${LITELLM_BASE_URL}/v1`;
+    const configPath = path.join(codexHome, 'config.toml');
+    fs.writeFileSync(
+      configPath,
+      [
+        `model = ${JSON.stringify(session.model)}`,
+        'model_provider = "hermes-litellm"',
+        'model_reasoning_effort = "high"',
+        'model_verbosity = "high"',
+        'approval_policy = "never"',
+        'sandbox_mode = "workspace-write"',
+        '[model_providers.hermes-litellm]',
+        'name = "Hermes LiteLLM"',
+        `base_url = ${JSON.stringify(baseUrl)}`,
+        'env_key = "CODEX_API_KEY"',
+        'wire_api = "responses"',
+        '[model_providers.hermes-litellm.env_http_headers]',
+        '"X-LiteLLM-End-User-ID" = "HERMES_V3_EXECUTION_ID"',
+        '[features]',
+        'multi_agent = false',
+        '',
+      ].join('\n'),
+      { mode: 0o600 },
+    );
+  }
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
   const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
+  const env = {
+    ...process.env,
+    CODEX_HOME: codexHome,
+  };
+  if (native) {
+    delete env.OPENAI_API_KEY;
+    delete env.CODEX_API_KEY;
+    delete env.CODEX_ACCESS_TOKEN;
+  } else {
+    env.CODEX_API_KEY = LITELLM_API_KEY;
+  }
   return {
     command: CODEX_BIN,
     args: [
       'exec',
       '--ephemeral',
+      ...(native ? ['--ignore-user-config'] : []),
       '--ignore-rules',
       '--sandbox',
       'workspace-write',
@@ -360,11 +383,7 @@ function codexCommand(session, prompt, evidence) {
       '-',
     ],
     input: reviewPrompt,
-    env: {
-      ...process.env,
-      CODEX_API_KEY: LITELLM_API_KEY,
-      CODEX_HOME: codexHome,
-    },
+    env,
     parse: (stdout) => parseCodexResult(sessionDir, stdout),
     hasIndependentActivity: codexIndependentActivity,
   };
@@ -412,6 +431,9 @@ function claudeCommand(session, prompt, evidence) {
 }
 
 function buildCommand(session, prompt, evidence) {
+  if (DRIVER === 'codex' && HEADLESS_TRANSPORT === 'provider-native') {
+    return codexCommand(session, prompt, evidence);
+  }
   if (!LITELLM_BASE_URL || !LITELLM_API_KEY) throw new Error('HEADLESS_REVIEW_GATEWAY_MISSING');
   if (DRIVER === 'codex') return codexCommand(session, prompt, evidence);
   if (DRIVER === 'claude') return claudeCommand(session, prompt, evidence);
@@ -538,7 +560,12 @@ class HeadlessReviewAgent {
     if (!prompt) throw new Error('HEADLESS_REVIEW_PROMPT_REQUIRED');
 
     const toolCallId = crypto.randomUUID();
-    const title = DRIVER === 'codex' ? 'Codex GPT-5.6 review' : 'Claude Code GPT-5.6 review';
+    const title =
+      DRIVER === 'codex'
+        ? HEADLESS_TRANSPORT === 'provider-native'
+          ? 'Codex Business review'
+          : 'Codex managed review'
+        : 'Claude Code managed review';
     await cx.notify(acp.methods.client.session.update, {
       sessionId: session.id,
       update: {
