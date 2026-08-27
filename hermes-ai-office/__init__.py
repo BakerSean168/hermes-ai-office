@@ -171,7 +171,7 @@ _CREATE_PLAN_SCHEMA = {
             "base_revision": {"type": "string"},
             "delivery": {
                 "type": "object",
-                "description": "Optional explicit authorization to push, open/reuse a PR, wait for checks, merge, and verify post-merge checks.",
+                "description": "Optional explicit authorization to push, open/reuse a PR, wait for checks, merge, verify post-merge checks, and create bounded reviewed follow-up repair PRs when those checks fail.",
                 "properties": {
                     "remote": {"type": "string"},
                     "branch": {"type": "string"},

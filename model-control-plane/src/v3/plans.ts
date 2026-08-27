@@ -710,26 +710,48 @@ export class PlanRepository {
     const reason =
       typeof evidence.reason === 'string' ? evidence.reason : 'DELIVERY_REPAIR_REQUIRED';
     const mergeConflict = reason === 'DELIVERY_MERGE_CONFLICT';
+    const postMergeFailure = reason === 'DELIVERY_POST_MERGE_CHECKS_FAILED';
+    const mergeRevision =
+      typeof evidence.mergeRevision === 'string' ? evidence.mergeRevision.trim() : '';
+    if (postMergeFailure && !mergeRevision) {
+      throw new Error('DELIVERY_POST_MERGE_REVISION_REQUIRED');
+    }
     const batchTitle = mergeConflict
       ? `Resolve delivery merge conflict (attempt ${repairAttempt})`
-      : `Repair remote checks (attempt ${repairAttempt})`;
+      : postMergeFailure
+        ? `Repair post-merge checks (attempt ${repairAttempt})`
+        : `Repair remote checks (attempt ${repairAttempt})`;
     const itemTitle = mergeConflict
       ? `Resolve delivery merge conflict (attempt ${repairAttempt})`
-      : `Repair failed remote checks (attempt ${repairAttempt})`;
+      : postMergeFailure
+        ? `Repair failed post-merge checks (attempt ${repairAttempt})`
+        : `Repair failed remote checks (attempt ${repairAttempt})`;
     const objective = mergeConflict
       ? `Resolve only the merge conflict preventing this verified delivery. Fetch the current target branch, reconcile it into the repair workspace without discarding previously reviewed plan behavior, resolve conflicts according to repository contracts, and run focused regression checks. Conflict evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`
-      : `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`;
+      : postMergeFailure
+        ? `Diagnose and repair the post-merge CI failure on target branch revision ${mergeRevision}. This is a follow-up repair after the previous pull request already merged, so do not rewrite or pretend to amend the merged history. Fetch the current target branch, reconcile it into this repair workspace, verify that failed merge revision ${mergeRevision} remains an ancestor of the final repair HEAD, inspect the failing checks and repository evidence, implement the smallest safe follow-up fix, run focused regression checks, commit the repair, and leave the workspace clean. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`
+        : `Diagnose and repair only the failed remote checks for this delivery. Use repository and GitHub evidence to identify the root cause. Failure evidence: ${JSON.stringify(evidence).slice(0, PLAN_LIMITS.repairEvidenceCharacters)}`;
     const acceptanceCriteria = mergeConflict
       ? [
           'The repair commit incorporates the current target branch without unresolved conflicts.',
           'Previously reviewed plan behavior is preserved and focused regression tests pass.',
           'The repair is committed and independently reviewed.',
         ]
-      : [
-          'The previously failing remote checks pass.',
-          'Focused regression tests pass locally.',
-          'The repair is committed and independently reviewed.',
-        ];
+      : postMergeFailure
+        ? [
+            `The failed merge revision ${mergeRevision} is an ancestor of the final repair HEAD and the current target branch has been reconciled before the fix is finalized.`,
+            'The post-merge CI root cause is addressed by a new follow-up commit without rewriting already-merged history.',
+            'Focused regression tests pass locally and the previously failing post-merge checks are expected to pass on the follow-up pull request.',
+            'The repair is committed and independently reviewed before delivery resumes.',
+          ]
+        : [
+            'The previously failing remote checks pass.',
+            'Focused regression tests pass locally.',
+            'The repair is committed and independently reviewed.',
+          ];
+    const itemKey = postMergeFailure
+      ? `post-merge-fix-${repairAttempt}`
+      : `delivery-fix-${repairAttempt}`;
     this.#db.exec('BEGIN IMMEDIATE');
     try {
       this.#db
@@ -759,7 +781,7 @@ export class PlanRepository {
           itemId,
           planId,
           batchId,
-          `delivery-fix-${repairAttempt}`,
+          itemKey,
           itemTitle,
           objective,
           JSON.stringify(acceptanceCriteria),

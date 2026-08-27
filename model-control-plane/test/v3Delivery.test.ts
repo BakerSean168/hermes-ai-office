@@ -186,3 +186,55 @@ test('production delivery waits for an open pull request to observe the pushed r
     false,
   );
 });
+
+test('production delivery turns failed post-merge checks into a follow-up repair signal with merge evidence', async () => {
+  const commands: string[] = [];
+  const runner: DeliveryCommandRunner = async (_cwd, command, args) => {
+    const key = commandKey(command, args);
+    commands.push(key);
+    if (key === 'git remote get-url origin') return 'git@github.com:example/project.git';
+    if (key.includes('gh pr list')) {
+      return JSON.stringify([
+        {
+          number: 12,
+          url: 'https://github.com/example/project/pull/12',
+          state: 'MERGED',
+          baseRefName: 'main',
+          headRefOid: 'abc123',
+          mergeCommit: { oid: 'merge-bad-123' },
+          statusCheckRollup: [{ name: 'PR CI', status: 'COMPLETED', conclusion: 'SUCCESS' }],
+        },
+      ]);
+    }
+    if (key.includes('repos/example/project/commits/merge-bad-123/check-runs')) {
+      return JSON.stringify([
+        { name: 'main-smoke', status: 'completed', conclusion: 'failure' },
+        { name: 'typecheck', status: 'completed', conclusion: 'success' },
+      ]);
+    }
+    if (key.includes('repos/example/project/commits/merge-bad-123/status')) {
+      return JSON.stringify([]);
+    }
+    throw new Error(`unexpected command: ${key}`);
+  };
+
+  const result = await new GitHubPlanDelivery({ commandRunner: runner }).reconcile(request);
+
+  assert.equal(result.outcome, 'NEEDS_FIX');
+  assert.equal(result.stage, 'POST_MERGE_CHECKS');
+  assert.equal(result.reason, 'DELIVERY_POST_MERGE_CHECKS_FAILED');
+  assert.equal(result.mergeRevision, 'merge-bad-123');
+  assert.equal(result.pullRequestUrl, 'https://github.com/example/project/pull/12');
+  assert.deepEqual(result.evidence, {
+    reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
+    mergeRevision: 'merge-bad-123',
+    branch: 'feature/durable-delivery',
+    targetBranch: 'main',
+    pullRequestNumber: 12,
+    pending: [],
+    failed: ['main-smoke'],
+    passed: ['typecheck'],
+  });
+  assert.equal(commands.some((command) => command.includes('git push')), false);
+  assert.equal(commands.some((command) => command.includes('gh pr create')), false);
+});

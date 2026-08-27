@@ -20,6 +20,7 @@ const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK'
 
 const INTEGRATION_REPAIR_ITEM_PREFIX = 'integration-repair-b';
 const BATCH_AGGREGATE_REVIEW_ITEM_PREFIX = 'batch-verify-b';
+const POST_MERGE_DELIVERY_REPAIR_ITEM_PREFIX = 'post-merge-fix-';
 const INTEGRATION_REPAIR_BACKEND = 'openhands-builtin';
 const INTEGRATION_REPAIR_MODEL_CLASS = 'gpt-5.6-sol';
 
@@ -29,6 +30,10 @@ function isIntegrationRepairItem(item: Pick<WorkItemRecord, 'key'>): boolean {
 
 function isBatchAggregateReviewItem(item: Pick<WorkItemRecord, 'key'>): boolean {
   return item.key.startsWith(BATCH_AGGREGATE_REVIEW_ITEM_PREFIX);
+}
+
+function isPostMergeDeliveryRepairItem(item: Pick<WorkItemRecord, 'key'>): boolean {
+  return item.key.startsWith(POST_MERGE_DELIVERY_REPAIR_ITEM_PREFIX);
 }
 
 export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
@@ -471,7 +476,8 @@ export class DurablePlanOrchestrator {
           acceptanceCriteria: item.acceptanceCriteria,
         },
         override:
-          isIntegrationRepairItem(item) && phase !== 'VERIFY_REVIEW'
+          (isIntegrationRepairItem(item) || isPostMergeDeliveryRepairItem(item)) &&
+          phase !== 'VERIFY_REVIEW'
             ? {
                 backend: INTEGRATION_REPAIR_BACKEND,
                 modelClass: INTEGRATION_REPAIR_MODEL_CLASS,
@@ -700,6 +706,10 @@ export class DurablePlanOrchestrator {
     const originalItems = items.filter(
       (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
     );
+    const postMergeFailedRevision =
+      originalItems.some(isPostMergeDeliveryRepairItem) && plan.mergeRevision
+        ? plan.mergeRevision
+        : undefined;
     const sources = originalItems.map((item, index) => ({
       index,
       itemKey: item.key,
@@ -753,6 +763,11 @@ export class DurablePlanOrchestrator {
           'If two implementations made competing architecture choices, inspect the surrounding contracts and tests, choose one coherent ownership model, and adapt both tickets to it while preserving their accepted behavior.',
           'Do not modify the source worktree or sibling implementation workspaces.',
           'All listed approved revisions must remain Git ancestors of the final repair HEAD; the control plane verifies this mechanically before accepting the repair.',
+          ...(postMergeFailedRevision
+            ? [
+                `This integration belongs to a post-merge delivery repair. Fetch/reconcile the current target branch and ensure already-merged revision ${postMergeFailedRevision} is also a Git ancestor of the final repair HEAD; this ancestry is mechanically enforced and cannot be bypassed by a second repair pass.`,
+              ]
+            : []),
           'Run focused regression tests covering the overlapping files plus the affected ticket acceptance criteria, then commit the resolved integration and leave the workspace clean.',
           '',
           sourceInstructions,
@@ -764,6 +779,11 @@ export class DurablePlanOrchestrator {
       objective: objective.slice(0, 20_000),
       acceptanceCriteria: [
         'Every independently reviewed source revision is an ancestor of the final repair HEAD.',
+        ...(postMergeFailedRevision
+          ? [
+              `The already-merged target revision ${postMergeFailedRevision} remains a Git ancestor of the final repair HEAD.`,
+            ]
+          : []),
         'No unresolved Git conflicts remain and the repair workspace is clean with a committed integration result.',
         'The overlapping repository contracts have one coherent architecture rather than duplicated competing implementations.',
         'Focused regression tests for all affected work items pass.',
@@ -773,6 +793,7 @@ export class DurablePlanOrchestrator {
         reason,
         message: message.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
         baseRevision,
+        postMergeFailedRevision,
         sources: sources.map((source) => ({
           itemKey: source.itemKey,
           approvedRevision: source.approvedRevision,
@@ -832,15 +853,24 @@ export class DurablePlanOrchestrator {
         executionId: evidence.executionId,
       };
     });
+    const postMergeRepairItem = integrationItems.find(isPostMergeDeliveryRepairItem);
+    const postMergeFailedRevision =
+      (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) &&
+      plan.mergeRevision
+        ? plan.mergeRevision
+        : undefined;
     const requiredAncestorRevisions = repairItem
       ? [
-          ...new Set(
-            originalItems.map(
+          ...new Set([
+            ...originalItems.map(
               (item) => this.#approvedImplementationEvidence(item).approvedRevision,
             ),
-          ),
+            ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
+          ]),
         ]
-      : undefined;
+      : postMergeFailedRevision
+        ? [postMergeFailedRevision]
+        : undefined;
     try {
       const integrated = await this.#workspace.integrateBatch({
         planId: plan.planId,
@@ -1105,7 +1135,7 @@ export class DurablePlanOrchestrator {
         stage: result.stage,
         evidence: result.evidence,
         pullRequestUrl: result.pullRequestUrl,
-        mergeRevision: result.outcome === 'SUCCEEDED' ? result.mergeRevision : undefined,
+        mergeRevision: 'mergeRevision' in result ? result.mergeRevision : undefined,
       });
       if (result.outcome === 'NEEDS_FIX') {
         const repairEvidence = {

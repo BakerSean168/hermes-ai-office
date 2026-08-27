@@ -33,9 +33,13 @@ export interface PlanDeliveryRequest {
 export type PlanDeliveryResult =
   | {
       outcome: 'NEEDS_FIX';
-      stage: 'CHECKS' | 'MERGE';
-      reason: 'DELIVERY_CHECKS_FAILED' | 'DELIVERY_MERGE_CONFLICT';
+      stage: 'CHECKS' | 'MERGE' | 'POST_MERGE_CHECKS';
+      reason:
+        | 'DELIVERY_CHECKS_FAILED'
+        | 'DELIVERY_MERGE_CONFLICT'
+        | 'DELIVERY_POST_MERGE_CHECKS_FAILED';
       pullRequestUrl: string;
+      mergeRevision?: string;
       evidence: Record<string, unknown>;
     }
   | {
@@ -380,11 +384,19 @@ export class GitHubPlanDelivery implements PlanDeliveryPort {
     const postMergeChecks = await this.#postMergeChecks(input, mergeRevision);
     if (postMergeChecks.failed.length > 0) {
       return {
-        outcome: 'BLOCKED',
-        stage: 'BLOCKED',
+        outcome: 'NEEDS_FIX',
+        stage: 'POST_MERGE_CHECKS',
         reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
         pullRequestUrl: pullRequest.url,
-        evidence: { ...postMergeChecks },
+        mergeRevision,
+        evidence: {
+          reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
+          mergeRevision,
+          branch: input.config.branch,
+          targetBranch: input.config.targetBranch,
+          pullRequestNumber: pullRequest.number,
+          ...postMergeChecks,
+        },
       };
     }
     if (postMergeChecks.pending.length > 0 || postMergeChecks.passed.length === 0) {

@@ -1641,3 +1641,193 @@ test('clean multi-item integration is aggregate-reviewed and semantic FAIL sched
     await runtime.app.close();
   }
 });
+
+test('failed post-merge checks launch a premium follow-up repair and require the failed merge revision as an ancestor', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-post-merge-repair-'));
+  const host = new PlanHost();
+  const seenIntegrations: Array<Parameters<WorkspaceProvisioningPort['integrateBatch']>[0]> = [];
+  let localIntegrationCount = 0;
+  const postMergeWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async integrateBatch(input) {
+      seenIntegrations.push(input);
+      localIntegrationCount += 1;
+      return {
+        revision: `post-merge-integrated-${localIntegrationCount}`,
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const delivery = new PlanDelivery([
+    {
+      outcome: 'NEEDS_FIX',
+      stage: 'POST_MERGE_CHECKS',
+      reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
+      pullRequestUrl: 'https://github.test/example/repo/pull/50',
+      mergeRevision: 'merge-bad-1',
+      evidence: {
+        reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
+        mergeRevision: 'merge-bad-1',
+        branch: 'feature/ship',
+        targetBranch: 'main',
+        pullRequestNumber: 50,
+        failed: ['main-smoke'],
+        passed: ['typecheck'],
+        pending: [],
+      },
+    },
+    {
+      outcome: 'WAITING',
+      stage: 'CHECKS',
+      pullRequestUrl: 'https://github.test/example/repo/pull/51',
+      evidence: { pending: ['ci'], failed: [], passed: [] },
+    },
+    {
+      outcome: 'WAITING',
+      stage: 'POST_MERGE_CHECKS',
+      pullRequestUrl: 'https://github.test/example/repo/pull/51',
+      evidence: { pending: ['main-smoke'], failed: [], passed: ['typecheck'] },
+    },
+    {
+      outcome: 'SUCCEEDED',
+      stage: 'SUCCEEDED',
+      pullRequestUrl: 'https://github.test/example/repo/pull/51',
+      mergeRevision: 'merge-good-2',
+      evidence: { pending: [], failed: [], passed: ['main-smoke', 'typecheck'] },
+    },
+  ]);
+  const runtime = await buildControlPlane({
+    dbFile: path.join(directory, 'control-plane.sqlite'),
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: postMergeWorkspace,
+    v3Delivery: delivery,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'post-merge-repair-plan' },
+      payload: {
+        projectKey: 'example',
+        objective: 'Ship and recover safely from a main-branch CI regression.',
+        analysisSummary: 'One implementation batch followed by protected delivery.',
+        repository: { path: '/repo', baseRevision: 'base' },
+        delivery: {
+          branch: 'feature/ship',
+          targetBranch: 'main',
+          autoMerge: true,
+          mergeMethod: 'merge',
+        },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [
+              {
+                key: 'item',
+                title: 'Item',
+                objective: 'Implement the change.',
+                acceptanceCriteria: ['The requested behavior is implemented.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+    host.succeed(
+      created.json().batches[0].workItems[0].executions[0].refs.openhandsConversationId,
+      'IMPLEMENTED',
+    );
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstReview = body.batches[0].workItems[0].executions.at(-1);
+    host.succeed(firstReview.refs.openhandsConversationId, 'PASS\nVerified.');
+
+    await runtime.v3.reconcilePlans(planId); // integrate original batch
+    await runtime.v3.reconcilePlans(planId); // observe failed post-merge checks and schedule repair
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.mergeRevision, 'merge-bad-1');
+    assert.equal(body.deliveryStage, 'PENDING');
+    assert.equal(body.batches[1].key, 'delivery-fix-1');
+    assert.match(body.batches[1].title, /post-merge/i);
+    const repairItem = body.batches[1].workItems[0];
+    assert.equal(repairItem.key, 'post-merge-fix-1');
+    assert.match(repairItem.objective, /follow-up repair after the previous pull request already merged/i);
+    assert.match(repairItem.objective, /merge-bad-1/);
+    assert.match(repairItem.objective, /current target branch/i);
+    assert.deepEqual(body.deliveryEvidence, {
+      reason: 'DELIVERY_POST_MERGE_CHECKS_FAILED',
+      stage: 'POST_MERGE_CHECKS',
+      mergeRevision: 'merge-bad-1',
+      branch: 'feature/ship',
+      targetBranch: 'main',
+      pullRequestNumber: 50,
+      failed: ['main-smoke'],
+      passed: ['typecheck'],
+      pending: [],
+    });
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repairImplementation = body.batches[1].workItems[0].executions[0];
+    assert.equal(repairImplementation.phase, 'IMPLEMENT');
+    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
+    host.succeed(repairImplementation.refs.openhandsConversationId, 'FOLLOW-UP FIX COMMITTED');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repairReview = body.batches[1].workItems[0].executions.at(-1);
+    assert.equal(repairReview.phase, 'VERIFY_REVIEW');
+    assert.equal(repairReview.selection.backend, 'codex-review-headless');
+    assert.equal(repairReview.selection.modelClass, 'gpt-5.6-sol');
+    host.succeed(repairReview.refs.openhandsConversationId, 'PASS\nFollow-up repair verified.');
+
+    await runtime.v3.reconcilePlans(planId); // integrate repair
+    assert.deepEqual(seenIntegrations.at(-1)?.requiredAncestorRevisions, ['merge-bad-1']);
+
+    await runtime.v3.reconcilePlans(planId); // new repair PR checks
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.deliveryStage, 'CHECKS');
+    assert.equal(body.pullRequestUrl, 'https://github.test/example/repo/pull/51');
+
+    await runtime.v3.reconcilePlans(planId); // new merge, post-merge checks pending
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.deliveryStage, 'POST_MERGE_CHECKS');
+
+    await runtime.v3.reconcilePlans(planId); // follow-up post-merge checks pass
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.deliveryStage, 'SUCCEEDED');
+    assert.equal(body.mergeRevision, 'merge-good-2');
+    assert.equal(delivery.calls, 4);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
