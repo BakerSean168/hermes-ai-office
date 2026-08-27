@@ -11,15 +11,13 @@ import {
   INTEGRATION_REPAIR_MODEL_CLASS,
   isIntegrationRepairItem,
   isPostMergeDeliveryRepairItem,
+  DEFAULT_PLAN_REVIEW_STRATEGY,
+  type PlanReviewStrategy,
 } from './kinds.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './runtime.js';
 
 export type PlanWorkerPhase =
-  | 'ADOPT_CHANGE'
-  | 'IMPLEMENT'
-  | 'IMPLEMENT_FIX'
-  | 'VERIFY_REVIEW'
-  | 'BATCH_VERIFY';
+  'ADOPT_CHANGE' | 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW' | 'BATCH_VERIFY';
 
 export interface PhaseRetryPolicy {
   backendCandidates: string[];
@@ -52,6 +50,7 @@ export class WorkItemCoordinator {
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
   readonly #retryPolicies: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
+  readonly #reviewStrategy: PlanReviewStrategy;
 
   constructor(options: {
     repository: PlanRepository;
@@ -60,6 +59,7 @@ export class WorkItemCoordinator {
     workspace: WorkspaceProvisioningPort;
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
     retryPolicies?: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
+    reviewStrategy?: PlanReviewStrategy;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
@@ -67,6 +67,7 @@ export class WorkItemCoordinator {
     this.#workspace = options.workspace;
     this.#pullRequestRepairPublisher = options.pullRequestRepairPublisher;
     this.#retryPolicies = options.retryPolicies ?? {};
+    this.#reviewStrategy = options.reviewStrategy ?? DEFAULT_PLAN_REVIEW_STRATEGY;
   }
 
   retryOverride(
@@ -81,7 +82,8 @@ export class WorkItemCoordinator {
     const backend = policy.backendCandidates[(backendIndex + 1) % policy.backendCandidates.length];
     const currentModelIndex = latest ? policy.modelClasses.indexOf(latest.logicalModelClass) : -1;
     const sameParent = records.filter(
-      (record) => record.phase === phase && record.previousExecutionId === latest?.previousExecutionId,
+      (record) =>
+        record.phase === phase && record.previousExecutionId === latest?.previousExecutionId,
     );
     const triedBackendsForCurrentModel = new Set(
       sameParent
@@ -91,7 +93,8 @@ export class WorkItemCoordinator {
     const exhaustedCurrentModelBackends =
       currentModelIndex >= 0 &&
       policy.backendCandidates.every((candidate) => triedBackendsForCurrentModel.has(candidate));
-    let modelClass = currentModelIndex >= 0 ? policy.modelClasses[currentModelIndex] : policy.modelClasses[0];
+    let modelClass =
+      currentModelIndex >= 0 ? policy.modelClasses[currentModelIndex] : policy.modelClasses[0];
     if (options.advanceModel || exhaustedCurrentModelBackends) {
       const nextIndex = currentModelIndex >= 0 ? currentModelIndex + 1 : 1;
       modelClass = policy.modelClasses[Math.min(nextIndex, policy.modelClasses.length - 1)];
@@ -138,7 +141,8 @@ export class WorkItemCoordinator {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
     const external = plan.source.kind === 'EXTERNAL_CHANGE';
     const externalReview = external && phase === 'VERIFY_REVIEW';
-    const repositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT' || phase === 'BATCH_VERIFY';
+    const repositoryEntry =
+      phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT' || phase === 'BATCH_VERIFY';
     const sourceOverride = this.sourceBackend(plan, phase);
     const launchOverride: WorkerLaunchOverride | undefined =
       typeof override === 'string' ? { backend: override } : override;
@@ -175,7 +179,6 @@ export class WorkItemCoordinator {
           (isIntegrationRepairItem(item) || isPostMergeDeliveryRepairItem(item)) &&
           phase !== 'VERIFY_REVIEW'
             ? {
-                backend: INTEGRATION_REPAIR_BACKEND,
                 modelClass: INTEGRATION_REPAIR_MODEL_CLASS,
               }
             : launchOverride || sourceOverride
@@ -208,9 +211,10 @@ export class WorkItemCoordinator {
   async reconcile(plan: PlanRecord, batch: BatchRecord, item: WorkItemRecord): Promise<void> {
     const executionIds = this.#repository.executionIds(item.workItemId);
     if (executionIds.length === 0) {
-      const phase = plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0
-        ? 'ADOPT_CHANGE'
-        : 'IMPLEMENT';
+      const phase =
+        plan.source.kind === 'EXTERNAL_CHANGE' && batch.ordinal === 0
+          ? 'ADOPT_CHANGE'
+          : 'IMPLEMENT';
       await this.launch(plan, batch, item, phase, undefined, 1);
       return;
     }
@@ -244,7 +248,8 @@ export class WorkItemCoordinator {
     if (snapshot.status !== 'SUCCEEDED') {
       const sameParentAttempts = records.filter(
         (record) =>
-          record.phase === latest.phase && record.previousExecutionId === latest.previousExecutionId,
+          record.phase === latest.phase &&
+          record.previousExecutionId === latest.previousExecutionId,
       ).length;
       const totalPhaseAttempts = records.filter((record) => record.phase === latest.phase).length;
       const attemptLimit =
@@ -257,7 +262,9 @@ export class WorkItemCoordinator {
         const phase = latest.phase as PlanWorkerPhase;
         const retryOverride =
           phase === 'VERIFY_REVIEW' && plan.source.kind !== 'EXTERNAL_CHANGE'
-            ? this.retryOverride(phase, records, { advanceModel: snapshot.error?.retryable === true })
+            ? this.retryOverride(phase, records, {
+                advanceModel: snapshot.error?.retryable === true,
+              })
             : this.sourceBackend(plan, phase);
         await this.launch(
           plan,
@@ -276,6 +283,20 @@ export class WorkItemCoordinator {
     }
 
     if (['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(latest.phase)) {
+      const batchOnlyReview =
+        this.#reviewStrategy === 'BATCH_ONLY' && plan.source.kind !== 'EXTERNAL_CHANGE';
+      if (batchOnlyReview) {
+        this.#repository.setWorkItemStatus(item.workItemId, 'SUCCEEDED');
+        if (isIntegrationRepairItem(item))
+          this.#repository.clearBatchIntegrationCandidate(batch.batchId);
+        this.#repository.appendEvent(
+          plan.planId,
+          'WORK_ITEM_IMPLEMENTED_BATCH_REVIEW_PENDING',
+          { reviewStrategy: this.#reviewStrategy },
+          { batchId: batch.batchId, workItemId: item.workItemId, executionId: latest.executionId },
+        );
+        return;
+      }
       const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
       await this.launch(
         plan,
@@ -334,10 +355,12 @@ export class WorkItemCoordinator {
     if (verdict === 'UNKNOWN') {
       const sameParentReviews = records.filter(
         (record) =>
-          record.phase === 'VERIFY_REVIEW' && record.previousExecutionId === latest.previousExecutionId,
+          record.phase === 'VERIFY_REVIEW' &&
+          record.previousExecutionId === latest.previousExecutionId,
       ).length;
       if (sameParentReviews < this.retryAttemptLimit('VERIFY_REVIEW')) {
-        const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
+        const reviewAttempt =
+          records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
         const retryOverride =
           plan.source.kind === 'EXTERNAL_CHANGE'
             ? this.sourceBackend(plan, 'VERIFY_REVIEW')
@@ -395,7 +418,9 @@ export class WorkItemCoordinator {
         const publication = await this.#pullRequestRepairPublisher.publish({
           planId: plan.planId,
           repositoryPath: plan.repositoryPath,
-          workspacePath: this.#workspace.hostPathForWorkspaceRef(reviewedImplementation.workspaceRef),
+          workspacePath: this.#workspace.hostPathForWorkspaceRef(
+            reviewedImplementation.workspaceRef,
+          ),
           repository: plan.source.origin.repository,
           pullRequestNumber: plan.source.origin.pullRequestNumber,
           headRepository: plan.source.origin.headRepository,
@@ -429,7 +454,8 @@ export class WorkItemCoordinator {
     }
 
     this.#repository.setWorkItemStatus(item.workItemId, 'SUCCEEDED');
-    if (isIntegrationRepairItem(item)) this.#repository.clearBatchIntegrationCandidate(batch.batchId);
+    if (isIntegrationRepairItem(item))
+      this.#repository.clearBatchIntegrationCandidate(batch.batchId);
     this.#repository.appendEvent(
       plan.planId,
       'WORK_ITEM_VERIFIED',
@@ -480,7 +506,10 @@ export class WorkItemCoordinator {
     return { revision, ref, evidence };
   }
 
-  approvedImplementationEvidence(item: WorkItemRecord): ApprovedImplementationEvidence {
+  approvedImplementationEvidence(
+    item: WorkItemRecord,
+    options: { allowUnreviewed?: boolean } = {},
+  ): ApprovedImplementationEvidence {
     const records = this.#repository
       .executionIds(item.workItemId)
       .map((executionId) => this.#links.get(executionId))
@@ -500,14 +529,17 @@ export class WorkItemCoordinator {
           record.statusCache === 'SUCCEEDED' &&
           reviewVerdict(record.resultText ?? '') === 'APPROVED',
       );
-    if (!implementation?.workspaceRef || !implementation.sourceRevision || !approvedReview?.sourceRevision) {
+    if (!implementation?.workspaceRef || !implementation.sourceRevision) {
+      throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+    }
+    if (!options.allowUnreviewed && !approvedReview?.sourceRevision) {
       throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     }
     return {
       workspaceRef: implementation.workspaceRef,
       sourceRevision: implementation.sourceRevision,
       executionId: implementation.executionId,
-      approvedRevision: approvedReview.sourceRevision,
+      approvedRevision: approvedReview?.sourceRevision ?? implementation.sourceRevision,
     };
   }
 }

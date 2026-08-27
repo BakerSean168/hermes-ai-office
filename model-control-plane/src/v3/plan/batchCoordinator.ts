@@ -11,6 +11,8 @@ import {
   isBatchAggregateReviewItem,
   isIntegrationRepairItem,
   isPostMergeDeliveryRepairItem,
+  DEFAULT_PLAN_REVIEW_STRATEGY,
+  type PlanReviewStrategy,
 } from './kinds.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './runtime.js';
 import { WorkItemCoordinator } from './workItemCoordinator.js';
@@ -21,6 +23,7 @@ export class BatchCoordinator {
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #executions: PlanExecutionPort;
   readonly #workItems: WorkItemCoordinator;
+  readonly #reviewStrategy: PlanReviewStrategy;
 
   constructor(options: {
     repository: PlanRepository;
@@ -28,12 +31,18 @@ export class BatchCoordinator {
     workspace: WorkspaceProvisioningPort;
     executions: PlanExecutionPort;
     workItems: WorkItemCoordinator;
+    reviewStrategy?: PlanReviewStrategy;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
     this.#workspace = options.workspace;
     this.#executions = options.executions;
     this.#workItems = options.workItems;
+    this.#reviewStrategy = options.reviewStrategy ?? DEFAULT_PLAN_REVIEW_STRATEGY;
+  }
+
+  #allowUnreviewed(plan: PlanRecord): boolean {
+    return this.#reviewStrategy === 'BATCH_ONLY' && plan.source.kind !== 'EXTERNAL_CHANGE';
   }
 
   #scheduleIntegrationRepair(
@@ -69,7 +78,9 @@ export class BatchCoordinator {
         itemKey: item.key,
         title: item.title,
         acceptanceCriteria: item.acceptanceCriteria,
-        ...this.#workItems.approvedImplementationEvidence(item),
+        ...this.#workItems.approvedImplementationEvidence(item, {
+          allowUnreviewed: this.#allowUnreviewed(plan),
+        }),
       };
     });
     const aggregateReviewFailure = reason === 'BATCH_AGGREGATE_REVIEW_FAILED';
@@ -200,7 +211,9 @@ export class BatchCoordinator {
     const externalBaseline = new Map(
       originalItems
         .map((item) => [item.workItemId, this.#workItems.externalAdoptionEvidence(item)] as const)
-        .filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => Boolean(entry[1])),
+        .filter((entry): entry is readonly [string, NonNullable<(typeof entry)[1]>] =>
+          Boolean(entry[1]),
+        ),
     );
     // External handoff/audit work is already present in the durable baseline.
     // Do not demand a synthetic implementation workspace for it; integrate only
@@ -211,7 +224,9 @@ export class BatchCoordinator {
       ? [repairItem]
       : originalItems.filter((item) => !externalBaseline.has(item.workItemId));
     const implementations = integrationItems.map((item) => {
-      const evidence = this.#workItems.approvedImplementationEvidence(item);
+      const evidence = this.#workItems.approvedImplementationEvidence(item, {
+        allowUnreviewed: this.#allowUnreviewed(plan),
+      });
       return {
         workspaceRef: evidence.workspaceRef,
         sourceRevision: evidence.sourceRevision,
@@ -220,15 +235,19 @@ export class BatchCoordinator {
     });
     const postMergeRepairItem = integrationItems.find(isPostMergeDeliveryRepairItem);
     const postMergeFailedRevision =
-      (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) && plan.mergeRevision
+      (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) &&
+      plan.mergeRevision
         ? plan.mergeRevision
         : undefined;
     const requiredAncestorRevisions = repairItem
       ? [
           ...new Set([
-            ...originalItems.map((item) =>
-              externalBaseline.get(item.workItemId)?.revision ??
-              this.#workItems.approvedImplementationEvidence(item).approvedRevision,
+            ...originalItems.map(
+              (item) =>
+                externalBaseline.get(item.workItemId)?.revision ??
+                this.#workItems.approvedImplementationEvidence(item, {
+                  allowUnreviewed: this.#allowUnreviewed(plan),
+                }).approvedRevision,
             ),
             ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
           ]),
@@ -245,9 +264,13 @@ export class BatchCoordinator {
         implementations,
         requiredAncestorRevisions,
       });
-      const requiresAggregateReview = originalItems.length > 1;
+      const requiresAggregateReview = this.#allowUnreviewed(plan) || originalItems.length > 1;
       if (requiresAggregateReview) {
-        this.#repository.setBatchIntegrationCandidate(batch.batchId, integrated.revision, integrated.ref);
+        this.#repository.setBatchIntegrationCandidate(
+          batch.batchId,
+          integrated.revision,
+          integrated.ref,
+        );
         this.#repository.appendEvent(
           plan.planId,
           'BATCH_INTEGRATION_CANDIDATE',
@@ -287,7 +310,10 @@ export class BatchCoordinator {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'BATCH_INTEGRATION_FAILED';
       const reason = message.split(':', 1)[0] ?? 'BATCH_INTEGRATION_FAILED';
-      if (reason === 'BATCH_INTEGRATION_CONFLICT' || reason === 'BATCH_INTEGRATION_REPAIR_INCOMPLETE') {
+      if (
+        reason === 'BATCH_INTEGRATION_CONFLICT' ||
+        reason === 'BATCH_INTEGRATION_REPAIR_INCOMPLETE'
+      ) {
         this.#scheduleIntegrationRepair(plan, batch, items, reason, message);
         return;
       }
@@ -313,7 +339,7 @@ export class BatchCoordinator {
     const originalItems = items.filter(
       (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
     );
-    if (originalItems.length <= 1) return;
+    if (originalItems.length <= 1 && !this.#allowUnreviewed(plan)) return;
     const acceptanceSummary = originalItems
       .map((item) => {
         const criteria = item.acceptanceCriteria.length
@@ -330,7 +356,9 @@ export class BatchCoordinator {
       'Review the COMBINED artifact for defects that individual ticket reviews cannot see: cross-ticket contract mismatch, duplicate ownership, incompatible architecture choices, host composition/wiring errors, ordering/migration conflicts, state-machine interactions, and regressions caused by the combination.',
       'Inspect the integrated diff from the batch base to the candidate and run focused verification across the overlapping/affected modules.',
       '',
-      'Individually approved work items and acceptance criteria:',
+      this.#allowUnreviewed(plan)
+        ? 'Batch-review-only strategy is active: implementations below ran their own verification but have not received per-ticket model review. This independent batch review is the approval gate.'
+        : 'Individually approved work items and acceptance criteria:',
       acceptanceSummary,
     ].join('\n');
     const aggregateItem = this.#repository.addBatchAggregateReviewWorkItem(
@@ -340,9 +368,9 @@ export class BatchCoordinator {
         candidateRevision: batch.integratedRevision,
         objective: objective.slice(0, 20_000),
         acceptanceCriteria: [
-          'The integrated candidate preserves every individually approved work-item acceptance criterion.',
+          'The integrated candidate preserves every work-item acceptance criterion.',
           'Cross-ticket contracts, ownership boundaries, dependency injection/composition, migrations, and state transitions are coherent as a combined artifact.',
-          'No blocking regression is introduced only by combining the independently reviewed changes.',
+          'No blocking regression is introduced by the implemented changes individually or by their combination.',
           'At least one focused aggregate verification command is executed against the integrated candidate.',
         ],
       },

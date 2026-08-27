@@ -2,16 +2,14 @@ import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
 import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
 import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
-import {
-  PlanRepository,
-  type CreatePlanInput,
-  type DelegatePlanInput,
-} from './plans.js';
+import { PlanRepository, type CreatePlanInput, type DelegatePlanInput } from './plans.js';
 import { PLAN_LIMITS } from './planConstants.js';
 import {
+  DEFAULT_PLAN_REVIEW_STRATEGY,
   isBatchAggregateReviewItem,
   isIntegrationRepairItem,
   type PlanRecoveryMode,
+  type PlanReviewStrategy,
 } from './plan/kinds.js';
 import { BatchCoordinator } from './plan/batchCoordinator.js';
 import { ExternalProgressReconciler } from './plan/externalProgress.js';
@@ -20,7 +18,11 @@ import { HandoffReconciler } from './plan/handoffReconciler.js';
 import { parseOrchestrationProposal } from './plan/protocol.js';
 import { PlanRecoveryCoordinator } from './plan/recoveryCoordinator.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './plan/runtime.js';
-import { WorkItemCoordinator, type PhaseRetryPolicy, type PlanWorkerPhase } from './plan/workItemCoordinator.js';
+import {
+  WorkItemCoordinator,
+  type PhaseRetryPolicy,
+  type PlanWorkerPhase,
+} from './plan/workItemCoordinator.js';
 import type {
   DevelopmentExecutionSnapshot,
   ExecutionLinkRecord,
@@ -98,6 +100,7 @@ export class DurablePlanOrchestrator {
   readonly #recovery: PlanRecoveryCoordinator;
   readonly #governance: GovernanceCoordinator;
   readonly #handoff: HandoffReconciler;
+  readonly #reviewStrategy: PlanReviewStrategy;
   readonly #planReconcileTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -109,12 +112,14 @@ export class DurablePlanOrchestrator {
     governanceStatus?: GitHubGovernanceStatusPort;
     executions: PlanExecutionPort;
     retryPolicies?: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
+    reviewStrategy?: PlanReviewStrategy;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
     this.#workspace = options.workspace;
     this.#delivery = options.delivery;
     this.#executions = options.executions;
+    this.#reviewStrategy = options.reviewStrategy ?? DEFAULT_PLAN_REVIEW_STRATEGY;
     this.#externalProgress = new ExternalProgressReconciler({
       repository: this.#repository,
       workspace: this.#workspace,
@@ -127,6 +132,7 @@ export class DurablePlanOrchestrator {
       workspace: this.#workspace,
       pullRequestRepairPublisher: options.pullRequestRepairPublisher,
       retryPolicies: options.retryPolicies,
+      reviewStrategy: this.#reviewStrategy,
     });
     this.#batches = new BatchCoordinator({
       repository: this.#repository,
@@ -134,6 +140,7 @@ export class DurablePlanOrchestrator {
       workspace: this.#workspace,
       executions: this.#executions,
       workItems: this.#workItems,
+      reviewStrategy: this.#reviewStrategy,
     });
     this.#recovery = new PlanRecoveryCoordinator({
       repository: this.#repository,
@@ -576,7 +583,10 @@ export class DurablePlanOrchestrator {
     const originalItems = refreshed.filter(
       (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
     );
-    if (originalItems.length > 1) {
+    if (
+      originalItems.length > 1 ||
+      (this.#reviewStrategy === 'BATCH_ONLY' && plan.source.kind !== 'EXTERNAL_CHANGE')
+    ) {
       await this.#batches.reconcileAggregateReview(plan, afterWork, refreshed);
     }
   }
@@ -627,9 +637,7 @@ export class DurablePlanOrchestrator {
       await this.#enqueuePlanReconciliation(planId, recoverBlocked, recoveryMode);
       return;
     }
-    const byId = new Map(
-      this.#repository.active().map((plan) => [plan.planId, plan] as const),
-    );
+    const byId = new Map(this.#repository.active().map((plan) => [plan.planId, plan] as const));
     for (const plan of this.#repository.blocked()) {
       if (this.#externalProgress.hasPendingAudit(plan.planId)) byId.set(plan.planId, plan);
     }

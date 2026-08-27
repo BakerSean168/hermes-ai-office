@@ -18,6 +18,7 @@ import type { PlanDeliveryPort } from './delivery.js';
 import type { GitHubGovernanceStatusPort } from './githubGovernanceStatus.js';
 import type { GitHubPullRequestRepairPublisherPort } from './githubPrRepairPublisher.js';
 import { DurablePlanOrchestrator, type PlanRecoveryMode } from './planOrchestrator.js';
+import type { PlanReviewStrategy } from './plan/kinds.js';
 import { PlanRepository, type CreatePlanInput, type DelegatePlanInput } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
@@ -174,6 +175,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
     governanceStatus?: GitHubGovernanceStatusPort;
     backendAvailability?: Readonly<Record<string, boolean>>;
+    reviewStrategy?: PlanReviewStrategy;
   }) {
     this.#policy = options.policy;
     this.#links = options.links;
@@ -190,6 +192,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       pullRequestRepairPublisher: options.pullRequestRepairPublisher,
       governanceStatus: options.governanceStatus,
       executions: this,
+      reviewStrategy: options.reviewStrategy,
       retryPolicies: {
         VERIFY_REVIEW: this.#policy.retryCandidates('VERIFY_REVIEW', this.#backendAvailability),
         BATCH_VERIFY: this.#policy.retryCandidates('BATCH_VERIFY', this.#backendAvailability),
@@ -432,7 +435,9 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!input.objective?.trim()) throw new Error('OBJECTIVE_REQUIRED');
     if (!input.projectKey?.trim()) throw new Error('PROJECT_KEY_REQUIRED');
     if (
-      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'ADOPT_CHANGE', 'IMPLEMENT', 'BATCH_VERIFY'].includes(input.phase) &&
+      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'ADOPT_CHANGE', 'IMPLEMENT', 'BATCH_VERIFY'].includes(
+        input.phase,
+      ) &&
       !input.repository?.path
     ) {
       throw new Error('REPOSITORY_PATH_REQUIRED');

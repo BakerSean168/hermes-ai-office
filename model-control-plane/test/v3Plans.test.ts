@@ -478,6 +478,111 @@ test('durable plans retry a writer instead of reviewing a no-commit success', as
   }
 });
 
+test('batch-only review strategy self-verifies implementation and uses one independent batch review even for one ticket', async () => {
+  const host = new PlanHost();
+  integrationCount = 0;
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    env: {
+      ...process.env,
+      MODEL_CP_V3_PLAN_REVIEW_STRATEGY: 'BATCH_ONLY',
+    },
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-business-worker-headless': true,
+      'codex-business-review-headless': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'batch-only-single-ticket' },
+      payload: {
+        projectKey: 'overnight-plan',
+        objective: 'Implement one verified overnight change with minimal review overhead.',
+        analysisSummary:
+          'One ticket is self-verified by the writer and independently reviewed at the batch boundary.',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Overnight batch',
+            workItems: [
+              {
+                key: 'item',
+                title: 'Implement change',
+                objective: 'Implement, test, and commit the change.',
+                acceptanceCriteria: ['Focused tests pass and the workspace is committed cleanly.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const implementation = body.batches[0].workItems[0].executions[0];
+    assert.equal(implementation.phase, 'IMPLEMENT');
+    assert.equal(implementation.selection.backend, 'codex-business-worker-headless');
+    assert.equal(implementation.selection.transportMode, 'PROVIDER_NATIVE');
+    host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED, TESTED, AND COMMITTED');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const itemExecutions = body.batches[0].workItems[0].executions;
+    assert.equal(body.batches[0].workItems[0].status, 'SUCCEEDED');
+    assert.equal(
+      itemExecutions.some((execution: { phase: string }) => execution.phase === 'VERIFY_REVIEW'),
+      false,
+    );
+    assert.match(body.batches[0].integratedRevision, /^integrated-/);
+    assert.equal(body.batches[0].status, 'RUNNING');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const aggregate = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('batch-verify-'),
+    );
+    assert.ok(aggregate);
+    const batchReview = aggregate.executions.at(-1);
+    assert.equal(batchReview.phase, 'BATCH_VERIFY');
+    assert.equal(batchReview.selection.backend, 'codex-business-review-headless');
+    assert.equal(batchReview.selection.transportMode, 'PROVIDER_NATIVE');
+    host.succeed(batchReview.refs.openhandsConversationId, 'PASS\nIndependent batch gate passed.');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.status, 'RUNNING');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'SUCCEEDED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 class PlanDelivery implements PlanDeliveryPort {
   readonly results: PlanDeliveryResult[];
   calls = 0;
@@ -744,7 +849,9 @@ test('a durable plan survives worker timeout, failed review, integration failure
       url: '/api/v3/development/plans?limit=10&view=summary',
     });
     assert.equal(summarized.statusCode, 200);
-    const summaryPlan = summarized.json().items.find((item: { planId: string }) => item.planId === planId);
+    const summaryPlan = summarized
+      .json()
+      .items.find((item: { planId: string }) => item.planId === planId);
     assert.ok(summaryPlan);
     assert.equal('events' in summaryPlan, false);
     assert.equal('orchestration' in summaryPlan, false);
@@ -1426,7 +1533,7 @@ test('batch Git conflicts schedule a premium LLM integration repair and only int
     );
     const repairImplementation = runningRepair.executions[0];
     assert.equal(repairImplementation.phase, 'IMPLEMENT');
-    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.backend, 'opencode-acp');
     assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
     host.succeed(repairImplementation.refs.openhandsConversationId, 'INTEGRATED AND COMMITTED');
 
@@ -1622,7 +1729,7 @@ test('clean multi-item integration is aggregate-reviewed and semantic FAIL sched
     );
     const repairImplementation = repairRunning.executions[0];
     assert.equal(repairImplementation.phase, 'IMPLEMENT');
-    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.backend, 'opencode-acp');
     assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
     assert.ok(
       provisionInputs.some(
@@ -1808,7 +1915,10 @@ test('failed post-merge checks launch a premium follow-up repair and require the
     assert.match(body.batches[1].title, /post-merge/i);
     const repairItem = body.batches[1].workItems[0];
     assert.equal(repairItem.key, 'post-merge-fix-1');
-    assert.match(repairItem.objective, /follow-up repair after the previous pull request already merged/i);
+    assert.match(
+      repairItem.objective,
+      /follow-up repair after the previous pull request already merged/i,
+    );
     assert.match(repairItem.objective, /merge-bad-1/);
     assert.match(repairItem.objective, /current target branch/i);
     assert.deepEqual(body.deliveryEvidence, {
@@ -1829,7 +1939,7 @@ test('failed post-merge checks launch a premium follow-up repair and require the
     ).json();
     const repairImplementation = body.batches[1].workItems[0].executions[0];
     assert.equal(repairImplementation.phase, 'IMPLEMENT');
-    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.backend, 'opencode-acp');
     assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
     host.succeed(repairImplementation.refs.openhandsConversationId, 'FOLLOW-UP FIX COMMITTED');
 
@@ -1994,7 +2104,11 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     });
     assert.equal(recoveryRequest.statusCode, 202);
     assert.equal(recoveryRequest.json().accepted, true);
-    for (let index = 0; index < 100 && host.lastCreateInput?.phase !== 'INVESTIGATE_PLAN'; index += 1) {
+    for (
+      let index = 0;
+      index < 100 && host.lastCreateInput?.phase !== 'INVESTIGATE_PLAN';
+      index += 1
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     assert.equal(host.lastCreateInput?.phase, 'INVESTIGATE_PLAN');
@@ -2021,7 +2135,8 @@ test('sync_external audits descendant work, adopts verified progress, and contin
           {
             key: 'BLOCKER-1',
             status: 'VERIFIED_COMPLETE',
-            evidence: 'Previously reviewed implementation remains correct in the combined candidate.',
+            evidence:
+              'Previously reviewed implementation remains correct in the combined candidate.',
           },
           {
             key: 'EXTERNAL-2',
@@ -2051,7 +2166,9 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     assert.equal(body.batches[2].status, 'RUNNING');
     assert.equal(body.batches[2].baseRevision, 'external-revision-2');
     assert.equal(body.batches[2].workItems[0].executions[0].phase, 'IMPLEMENT');
-    assert.ok(body.events.some((event: { type: string }) => event.type === 'EXTERNAL_PROGRESS_ADOPTED'));
+    assert.ok(
+      body.events.some((event: { type: string }) => event.type === 'EXTERNAL_PROGRESS_ADOPTED'),
+    );
     const syncEvent = body.events.find(
       (event: { type: string }) => event.type === 'EXTERNAL_PROGRESS_SYNC_STARTED',
     );
@@ -2138,7 +2255,11 @@ test('operator handoff adopts a committed descendant without launching a model a
             title: 'Externally completed work',
             dependsOn: ['batch-1'],
             workItems: [
-              { key: 'EXTERNAL-2', title: 'External work', objective: 'Complete this outside Pixel Agent.' },
+              {
+                key: 'EXTERNAL-2',
+                title: 'External work',
+                objective: 'Complete this outside Pixel Agent.',
+              },
             ],
           },
           {
@@ -2158,11 +2279,15 @@ test('operator handoff adopts a committed descendant without launching a model a
     const implementation = body.batches[0].workItems[0].executions[0];
     host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED');
     await runtime.v3.reconcilePlans(planId);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     const review = body.batches[0].workItems[0].executions.at(-1);
     host.succeed(review.refs.openhandsConversationId, 'PASS\nVerified.');
     await runtime.v3.reconcilePlans(planId);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     assert.equal(body.status, 'BLOCKED');
     assert.equal(body.blockedReason, 'BATCH_INTEGRATION_FAILED');
 
@@ -2176,11 +2301,15 @@ test('operator handoff adopts a committed descendant without launching a model a
         baseRevision: BASE,
         headRevision: HEAD,
         ref: 'core-vnext/agent-handoff',
-        summary: 'External agent completed EXTERNAL-2 and preserved the already reviewed blocked batch.',
+        summary:
+          'External agent completed EXTERNAL-2 and preserved the already reviewed blocked batch.',
         completedWorkItems: [
           {
             key: 'EXTERNAL-2',
-            evidence: ['Committed implementation at the declared head.', 'Focused external checks passed.'],
+            evidence: [
+              'Committed implementation at the declared head.',
+              'Focused external checks passed.',
+            ],
           },
         ],
         recommendedNextWorkItem: 'REMAIN-3',
@@ -2191,7 +2320,9 @@ test('operator handoff adopts a committed descendant without launching a model a
     assert.equal(resumed.json().currentRevision, HEAD);
     assert.equal(handoffChecks, 1);
 
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     assert.equal(body.status, 'RUNNING');
     assert.equal(body.currentRevision, HEAD);
     assert.equal(body.batches[0].status, 'SUCCEEDED');
@@ -2200,9 +2331,15 @@ test('operator handoff adopts a committed descendant without launching a model a
     assert.equal(body.batches[2].status, 'RUNNING');
     assert.equal(body.batches[2].baseRevision, HEAD);
     assert.equal(body.batches[2].workItems[0].executions[0].phase, 'IMPLEMENT');
-    assert.equal(host.creates, createsBeforeHandoff + 1, 'only the next real implementation may launch');
     assert.equal(
-      body.batches.flatMap((batch: any) => batch.workItems).flatMap((item: any) => item.executions)
+      host.creates,
+      createsBeforeHandoff + 1,
+      'only the next real implementation may launch',
+    );
+    assert.equal(
+      body.batches
+        .flatMap((batch: any) => batch.workItems)
+        .flatMap((item: any) => item.executions)
         .some((execution: any) => execution.phase === 'INVESTIGATE_PLAN'),
       false,
     );
@@ -2279,32 +2416,50 @@ test('deferred externally adopted work integrates from the later durable baselin
       headers: { 'idempotency-key': 'deferred-agent-handoff-plan' },
       payload: {
         projectKey: 'memoflow',
-        objective: 'Keep a future externally completed ticket durable while an intervening Pixel batch still needs work.',
-        analysisSummary: 'Four sequential batches isolate deferred external adoption from normal implementation.',
+        objective:
+          'Keep a future externally completed ticket durable while an intervening Pixel batch still needs work.',
+        analysisSummary:
+          'Four sequential batches isolate deferred external adoption from normal implementation.',
         repository: { path: '/tmp/memoflow', baseRevision: BASE },
         batches: [
           {
             key: 'batch-1',
             title: 'Blocked ownership transfer',
-            workItems: [{ key: 'BLOCKER-1', title: 'Blocked work', objective: 'Implement the blocked work.' }],
+            workItems: [
+              { key: 'BLOCKER-1', title: 'Blocked work', objective: 'Implement the blocked work.' },
+            ],
           },
           {
             key: 'batch-2',
             title: 'Intervening Pixel work',
             dependsOn: ['batch-1'],
-            workItems: [{ key: 'PIXEL-2', title: 'Pixel work', objective: 'Implement after the handoff.' }],
+            workItems: [
+              { key: 'PIXEL-2', title: 'Pixel work', objective: 'Implement after the handoff.' },
+            ],
           },
           {
             key: 'batch-3',
             title: 'Deferred external work',
             dependsOn: ['batch-2'],
-            workItems: [{ key: 'EXTERNAL-3', title: 'External work', objective: 'Already completed by another agent.' }],
+            workItems: [
+              {
+                key: 'EXTERNAL-3',
+                title: 'External work',
+                objective: 'Already completed by another agent.',
+              },
+            ],
           },
           {
             key: 'batch-4',
             title: 'Remaining work',
             dependsOn: ['batch-3'],
-            workItems: [{ key: 'REMAIN-4', title: 'Remaining work', objective: 'Continue after deferred adoption.' }],
+            workItems: [
+              {
+                key: 'REMAIN-4',
+                title: 'Remaining work',
+                objective: 'Continue after deferred adoption.',
+              },
+            ],
           },
         ],
       },
@@ -2316,11 +2471,15 @@ test('deferred externally adopted work integrates from the later durable baselin
     const blockerImplementation = body.batches[0].workItems[0].executions[0];
     host.succeed(blockerImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
     await runtime.v3.reconcilePlans(planId);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     const blockerReview = body.batches[0].workItems[0].executions.at(-1);
     host.succeed(blockerReview.refs.openhandsConversationId, 'PASS\nVerified.');
     await runtime.v3.reconcilePlans(planId);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     assert.equal(body.status, 'BLOCKED');
     assert.equal(body.blockedReason, 'BATCH_INTEGRATION_FAILED');
 
@@ -2333,7 +2492,8 @@ test('deferred externally adopted work integrates from the later durable baselin
         baseRevision: BASE,
         headRevision: HEAD,
         ref: 'core-vnext/deferred-agent-handoff',
-        summary: 'The external agent completed EXTERNAL-3 while PIXEL-2 remains intentionally unfinished.',
+        summary:
+          'The external agent completed EXTERNAL-3 while PIXEL-2 remains intentionally unfinished.',
         completedWorkItems: [
           {
             key: 'EXTERNAL-3',
@@ -2344,7 +2504,9 @@ test('deferred externally adopted work integrates from the later durable baselin
       },
     });
     assert.equal(resumed.statusCode, 200);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     assert.equal(body.currentRevision, HEAD);
     assert.equal(body.batches[0].status, 'SUCCEEDED');
     assert.equal(body.batches[1].status, 'RUNNING');
@@ -2356,7 +2518,9 @@ test('deferred externally adopted work integrates from the later durable baselin
     assert.equal(pixelImplementation.phase, 'IMPLEMENT');
     host.succeed(pixelImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
     await runtime.v3.reconcilePlans(planId);
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     const pixelReview = body.batches[1].workItems[0].executions.at(-1);
     assert.equal(pixelReview.phase, 'VERIFY_REVIEW');
     host.succeed(pixelReview.refs.openhandsConversationId, 'PASS\nVerified.');
@@ -2364,7 +2528,9 @@ test('deferred externally adopted work integrates from the later durable baselin
     await runtime.v3.reconcilePlans(planId); // no-op integrate deferred batch-3
     await runtime.v3.reconcilePlans(planId); // start batch-4
 
-    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
     assert.equal(body.status, 'RUNNING');
     assert.equal(body.batches[1].status, 'SUCCEEDED');
     assert.equal(body.batches[2].status, 'SUCCEEDED');
@@ -2378,11 +2544,14 @@ test('deferred externally adopted work integrates from the later durable baselin
     assert.equal(deferredIntegration.baseRevision, 'integrated-batch-2');
     assert.deepEqual(deferredIntegration.implementations, []);
     const integratedEvent = body.events.find(
-      (event: any) => event.type === 'BATCH_INTEGRATED' && event.batchId === body.batches[2].batchId,
+      (event: any) =>
+        event.type === 'BATCH_INTEGRATED' && event.batchId === body.batches[2].batchId,
     );
     assert.deepEqual(integratedEvent.detail.externalBaselineItems, ['EXTERNAL-3']);
     assert.equal(
-      body.batches[2].workItems[0].executions.some((execution: any) => execution.phase === 'INVESTIGATE_PLAN'),
+      body.batches[2].workItems[0].executions.some(
+        (execution: any) => execution.phase === 'INVESTIGATE_PLAN',
+      ),
       false,
     );
   } finally {
@@ -2400,7 +2569,12 @@ test('handoff rejects stale or unknown claims before mutating durable progress',
     ...workspace,
     async verifyExternalHandoff(input) {
       handoffChecks += 1;
-      return { baseRevision: input.baseRevision, headRevision: input.headRevision, ref: input.ref, aheadBy: 1 };
+      return {
+        baseRevision: input.baseRevision,
+        headRevision: input.headRevision,
+        ref: input.ref,
+        aheadBy: 1,
+      };
     },
     async integrateBatch(input) {
       if (failIntegration) {
@@ -2411,27 +2585,50 @@ test('handoff rejects stale or unknown claims before mutating durable progress',
     },
   };
   const runtime = await buildControlPlane({
-    dbFile: ':memory:', logger: false, v3ExecutionHost: host, v3Workspace: handoffWorkspace,
-    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': true, 'codex-review-headless': true },
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: handoffWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
   });
   try {
-    const plan = await runtime.v3.createPlan({
-      projectKey: 'handoff-validation',
-      objective: 'Reject invalid handoff claims.',
-      analysisSummary: 'One blocked batch is sufficient.',
-      repository: { path: '/tmp/repository', baseRevision: BASE },
-      batches: [{ key: 'batch', title: 'Batch', workItems: [{ key: 'KNOWN-1', title: 'Known', objective: 'Implement.' }] }],
-    }, 'handoff-validation-plan');
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'handoff-validation',
+        objective: 'Reject invalid handoff claims.',
+        analysisSummary: 'One blocked batch is sufficient.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            workItems: [{ key: 'KNOWN-1', title: 'Known', objective: 'Implement.' }],
+          },
+        ],
+      },
+      'handoff-validation-plan',
+    );
     let body = (await runtime.v3.getPlan(plan.planId, true))!;
-    host.succeed(body.batches[0]!.workItems[0]!.executions[0]!.refs.openhandsConversationId!, 'IMPLEMENTED');
+    host.succeed(
+      body.batches[0]!.workItems[0]!.executions[0]!.refs.openhandsConversationId!,
+      'IMPLEMENTED',
+    );
     await runtime.v3.reconcilePlans(plan.planId);
     body = (await runtime.v3.getPlan(plan.planId, true))!;
-    host.succeed(body.batches[0]!.workItems[0]!.executions.at(-1)!.refs.openhandsConversationId!, 'PASS\nVerified.');
+    host.succeed(
+      body.batches[0]!.workItems[0]!.executions.at(-1)!.refs.openhandsConversationId!,
+      'PASS\nVerified.',
+    );
     await runtime.v3.reconcilePlans(plan.planId);
     assert.equal((await runtime.v3.getPlan(plan.planId))!.status, 'BLOCKED');
 
     const invalid = await runtime.app.inject({
-      method: 'POST', url: `/api/v3/development/plans/${plan.planId}/handoffs`,
+      method: 'POST',
+      url: `/api/v3/development/plans/${plan.planId}/handoffs`,
       payload: {
         schemaVersion: 1,
         planId: plan.planId,
@@ -2551,7 +2748,10 @@ test('normal TASK review keeps legacy INVALID-as-UNKNOWN retry semantics', async
     const review = body.batches[0]!.workItems[0]!.executions.at(-1)!;
     assert.equal(review.phase, 'VERIFY_REVIEW');
 
-    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nLegacy reviewer emitted an unsupported token.');
+    host.succeed(
+      review.refs.openhandsConversationId!,
+      'INVALID\nLegacy reviewer emitted an unsupported token.',
+    );
     await runtime.v3.reconcilePlans(plan.planId);
     body = (await runtime.v3.getPlan(plan.planId, true))!;
     const retried = body.batches[0]!.workItems[0]!.executions.at(-1)!;
@@ -2585,7 +2785,10 @@ test('GitHub-origin external plans require an immutable 40-hex head revision', a
             projectKey: 'digital-biome',
             objective: 'Reject malformed GitHub-origin provenance.',
             analysisSummary: 'GitHub-origin revisions must be immutable SHAs.',
-            repository: { path: '/tmp/repository', baseRevision: '2222222222222222222222222222222222222222' },
+            repository: {
+              path: '/tmp/repository',
+              baseRevision: '2222222222222222222222222222222222222222',
+            },
             source: {
               kind: 'EXTERNAL_CHANGE',
               revision: 'refs/heads/jules/fix-42',
@@ -2642,7 +2845,11 @@ test('GitHub-origin external plans validate every durable PR identity field', as
       producer: 'JULES',
     },
   } as const;
-  const create = (source: unknown, key: string, baseRevision = '2222222222222222222222222222222222222222') =>
+  const create = (
+    source: unknown,
+    key: string,
+    baseRevision = '2222222222222222222222222222222222222222',
+  ) =>
     runtime.v3.createPlan(
       {
         projectKey: 'digital-biome',
@@ -2662,14 +2869,38 @@ test('GitHub-origin external plans validate every durable PR identity field', as
     );
   try {
     const cases: Array<[string, (source: any) => void, RegExp]> = [
-      ['repository', (source) => (source.origin.repository = ''), /GITHUB_PR_SOURCE_REPOSITORY_INVALID/],
-      ['number', (source) => (source.origin.pullRequestNumber = 0), /GITHUB_PR_SOURCE_NUMBER_INVALID/],
-      ['url', (source) => (source.origin.pullRequestUrl = 'https://example.test/pull/42'), /GITHUB_PR_SOURCE_URL_INVALID/],
+      [
+        'repository',
+        (source) => (source.origin.repository = ''),
+        /GITHUB_PR_SOURCE_REPOSITORY_INVALID/,
+      ],
+      [
+        'number',
+        (source) => (source.origin.pullRequestNumber = 0),
+        /GITHUB_PR_SOURCE_NUMBER_INVALID/,
+      ],
+      [
+        'url',
+        (source) => (source.origin.pullRequestUrl = 'https://example.test/pull/42'),
+        /GITHUB_PR_SOURCE_URL_INVALID/,
+      ],
       ['title', (source) => (source.origin.title = ''), /GITHUB_PR_SOURCE_TITLE_REQUIRED/],
-      ['head-ref', (source) => (source.origin.headRef = '../escape'), /GITHUB_PR_SOURCE_HEAD_REF_INVALID/],
+      [
+        'head-ref',
+        (source) => (source.origin.headRef = '../escape'),
+        /GITHUB_PR_SOURCE_HEAD_REF_INVALID/,
+      ],
       ['base-ref', (source) => (source.origin.baseRef = ''), /GITHUB_PR_SOURCE_BASE_REF_INVALID/],
-      ['head-repository', (source) => (source.origin.headRepository = 'not-a-repo'), /GITHUB_PR_SOURCE_HEAD_REPOSITORY_INVALID/],
-      ['producer', (source) => (source.origin.producer = 'OTHER'), /GITHUB_PR_SOURCE_PRODUCER_INVALID/],
+      [
+        'head-repository',
+        (source) => (source.origin.headRepository = 'not-a-repo'),
+        /GITHUB_PR_SOURCE_HEAD_REPOSITORY_INVALID/,
+      ],
+      [
+        'producer',
+        (source) => (source.origin.producer = 'OTHER'),
+        /GITHUB_PR_SOURCE_PRODUCER_INVALID/,
+      ],
     ];
     for (const [name, mutate, expected] of cases) {
       const source = structuredClone(baseSource) as any;
@@ -2680,7 +2911,6 @@ test('GitHub-origin external plans validate every durable PR identity field', as
       () => create(structuredClone(baseSource), 'github-origin-invalid-base', 'main'),
       /GITHUB_PR_BASE_REVISION_INVALID/,
     );
-
 
     const canonicalSource = structuredClone(baseSource) as any;
     canonicalSource.revision = `  ${baseSource.revision}  `;
@@ -2697,7 +2927,10 @@ test('GitHub-origin external plans validate every durable PR identity field', as
     assert.equal(canonical.source.revision, baseSource.revision);
     assert.equal(canonical.externalHeadRevision, baseSource.revision);
     assert.equal(canonical.source.origin?.repository, 'example/project');
-    assert.equal(canonical.source.origin?.pullRequestUrl, 'https://github.com/example/project/pull/42');
+    assert.equal(
+      canonical.source.origin?.pullRequestUrl,
+      'https://github.com/example/project/pull/42',
+    );
     assert.equal(canonical.source.origin?.title, 'External proposal');
     assert.equal(canonical.source.origin?.author, 'jules');
     assert.equal(canonical.source.origin?.headRef, 'jules/fix-42');
@@ -2807,7 +3040,9 @@ test('legacy multi-batch external plans keep the untrusted-input trust boundary 
           {
             key: 'first',
             title: 'First external batch',
-            workItems: [{ key: 'first-item', title: 'First', objective: 'Review external change.' }],
+            workItems: [
+              { key: 'first-item', title: 'First', objective: 'Review external change.' },
+            ],
           },
           {
             key: 'second',
@@ -2895,7 +3130,8 @@ test('external change plans adopt the existing revision, review first, and repai
               {
                 key: 'external-pr-change',
                 title: 'Validate and review external PR change',
-                objective: 'Confirm the claimed problem is real and the proposed repair preserves contracts.',
+                objective:
+                  'Confirm the claimed problem is real and the proposed repair preserves contracts.',
                 acceptanceCriteria: [
                   'The claimed problem is supported by repository evidence.',
                   'The proposed repair preserves protected contracts.',
@@ -2927,7 +3163,10 @@ test('external change plans adopt the existing revision, review first, and repai
     assert.match(host.lastCreateInput?.objective ?? '', /external change/i);
     assert.match(host.lastCreateInput?.objective ?? '', /problem.*valid/i);
 
-    host.succeed(firstReview.refs.openhandsConversationId, 'FAIL\nThe repair breaks the content schema contract.');
+    host.succeed(
+      firstReview.refs.openhandsConversationId,
+      'FAIL\nThe repair breaks the content schema contract.',
+    );
     await runtime.v3.reconcilePlans(planId);
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
@@ -2945,7 +3184,10 @@ test('external change plans adopt the existing revision, review first, and repai
     assert.match(host.lastCreateInput?.objective ?? '', /This is an external change review/);
     assert.match(host.lastCreateInput?.objective ?? '', /PASS, FAIL, or INVALID/);
 
-    host.succeed(secondReview.refs.openhandsConversationId, 'PASS\nProblem validity and contract preservation verified.');
+    host.succeed(
+      secondReview.refs.openhandsConversationId,
+      'PASS\nProblem validity and contract preservation verified.',
+    );
     await runtime.v3.reconcilePlans(planId);
     await runtime.v3.reconcilePlans(planId);
     body = (
@@ -2999,7 +3241,10 @@ test('an invalid external change is blocked without launching a repair writer', 
     await runtime.v3.reconcilePlans(plan.planId);
     let body = (await runtime.v3.getPlan(plan.planId, true))!;
     const review = body.batches[0]!.workItems[0]!.executions[1]!;
-    host.succeed(review.refs.openhandsConversationId!, 'INVALID\nThe claimed defect is not reproducible from repository evidence.');
+    host.succeed(
+      review.refs.openhandsConversationId!,
+      'INVALID\nThe claimed defect is not reproducible from repository evidence.',
+    );
 
     await runtime.v3.reconcilePlans(plan.planId);
     body = (await runtime.v3.getPlan(plan.planId, true))!;
@@ -3007,7 +3252,9 @@ test('an invalid external change is blocked without launching a repair writer', 
     assert.equal(body.blockedReason, 'EXTERNAL_CHANGE_INVALID');
     assert.equal(body.batches[0]!.workItems[0]!.executions.length, 2);
     assert.equal(
-      body.batches[0]!.workItems[0]!.executions.some((execution) => execution.phase === 'IMPLEMENT_FIX'),
+      body.batches[0]!.workItems[0]!.executions.some(
+        (execution) => execution.phase === 'IMPLEMENT_FIX',
+      ),
       false,
     );
   } finally {
@@ -3183,9 +3430,16 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
 
     body = (await runtime.v3.getPlan(plan.planId, true))!;
     const secondReview = body.batches[0]!.workItems[0]!.executions[3]!;
-    host.succeed(secondReview.refs.openhandsConversationId!, 'FAIL\nOne more blocking defect remains.');
+    host.succeed(
+      secondReview.refs.openhandsConversationId!,
+      'FAIL\nOne more blocking defect remains.',
+    );
     await runtime.v3.reconcilePlans(plan.planId);
-    assert.equal(publications.length, 0, 'a failed re-review must never publish an intermediate repair');
+    assert.equal(
+      publications.length,
+      0,
+      'a failed re-review must never publish an intermediate repair',
+    );
 
     body = (await runtime.v3.getPlan(plan.planId, true))!;
     const secondFix = body.batches[0]!.workItems[0]!.executions[4]!;
@@ -3196,8 +3450,15 @@ test('a reviewed GitHub PR repair is published to the PR head before the plan ca
     body = (await runtime.v3.getPlan(plan.planId, true))!;
     const thirdReview = body.batches[0]!.workItems[0]!.executions[5]!;
     assert.equal(thirdReview.phase, 'VERIFY_REVIEW');
-    assert.equal(publications.length, 0, 'repair publication occurs only after the final passing review');
-    host.succeed(thirdReview.refs.openhandsConversationId!, 'PASS\nThe final repaired change is valid.');
+    assert.equal(
+      publications.length,
+      0,
+      'repair publication occurs only after the final passing review',
+    );
+    host.succeed(
+      thirdReview.refs.openhandsConversationId!,
+      'PASS\nThe final repaired change is valid.',
+    );
     await runtime.v3.reconcilePlans(plan.planId);
 
     body = (await runtime.v3.getPlan(plan.planId, true))!;
@@ -3271,7 +3532,12 @@ test('repair publication keeps the force-with-lease anchored to the intake head 
     },
     v3GovernanceStatus: {
       async publish(input) {
-        return { revision: input.expectedHeadRevision, state: 'pending', stale: false, published: true };
+        return {
+          revision: input.expectedHeadRevision,
+          state: 'pending',
+          stale: false,
+          published: true,
+        };
       },
     },
     v3BackendAvailability: {
@@ -3315,7 +3581,10 @@ test('repair publication keeps the force-with-lease anchored to the intake head 
     // Simulate the durable state left by a process crash after publication succeeded
     // and externalHeadRevision was persisted, but before the work item was marked verified.
     const db = new DatabaseSync(dbFile);
-    db.prepare('UPDATE v3_plans SET external_head_revision=? WHERE plan_id=?').run(REPAIRED, plan.planId);
+    db.prepare('UPDATE v3_plans SET external_head_revision=? WHERE plan_id=?').run(
+      REPAIRED,
+      plan.planId,
+    );
     db.close();
 
     await runtime.v3.reconcilePlans(plan.planId);

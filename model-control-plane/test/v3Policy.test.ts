@@ -13,6 +13,7 @@ const allAvailable = {
   'antigravity-worker': true,
   'openhands-builtin': true,
   'opencode-acp': true,
+  'codex-business-worker-headless': true,
   'codex-business-review-headless': true,
   'codex-review-headless': true,
   'claude-code-review-headless': true,
@@ -24,8 +25,14 @@ const allAvailable = {
 
 test('development policy keeps managed coding routes and prefers provider-native Business review', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
-  for (const phase of ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
+  for (const phase of ['ORCHESTRATE', 'INVESTIGATE_PLAN'] as const) {
     assert.equal(policy.select(phase, {}, allAvailable).transportMode, 'LITELLM_MANAGED');
+  }
+  for (const phase of ['IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
+    const selected = policy.select(phase, {}, allAvailable);
+    assert.equal(selected.backend, 'codex-business-worker-headless');
+    assert.equal(selected.transportMode, 'PROVIDER_NATIVE');
+    assert.equal(selected.modelClass, 'gpt-5.6-sol');
   }
   for (const phase of ['VERIFY_REVIEW', 'BATCH_VERIFY'] as const) {
     const selected = policy.select(phase, {}, allAvailable);
@@ -41,6 +48,7 @@ test('development policy keeps managed coding routes and prefers provider-native
     'claude-code-review-headless',
     'codex-acp',
     'codex-business-review-headless',
+    'codex-business-worker-headless',
     'codex-review-headless',
     'control-plane-change-adopter',
     'control-plane-finalizer',
@@ -59,10 +67,16 @@ test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
   assert.equal(selected.workspaceMode, 'read_oriented');
 });
 
-test('implementation prefers OpenCode and review prefers the authenticated Business Codex route', () => {
+test('implementation and review prefer authenticated provider-native Business Codex routes', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
-  assert.equal(policy.select('IMPLEMENT', {}, allAvailable).backend, 'opencode-acp');
-  assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'opencode-acp');
+  const implement = policy.select('IMPLEMENT', {}, allAvailable);
+  assert.equal(implement.backend, 'codex-business-worker-headless');
+  assert.equal(implement.transportMode, 'PROVIDER_NATIVE');
+  assert.equal(implement.modelClass, 'gpt-5.6-sol');
+  assert.equal(
+    policy.select('IMPLEMENT_FIX', {}, allAvailable).backend,
+    'codex-business-worker-headless',
+  );
   const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
   assert.equal(review.backend, 'codex-business-review-headless');
   assert.equal(review.modelClass, 'gpt-5.6-sol');
@@ -73,8 +87,6 @@ test('implementation prefers OpenCode and review prefers the authenticated Busin
   assert.equal(batchReview.transportMode, 'PROVIDER_NATIVE');
   assert.equal(batchReview.workspaceMode, 'read_oriented');
 });
-
-
 
 test('review retry candidates preserve backend order and expose bounded model fallbacks', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
@@ -133,6 +145,7 @@ test('development policy falls back through enabled implementation workers to Op
     'IMPLEMENT',
     {},
     {
+      'codex-business-worker-headless': false,
       'opencode-acp': false,
       'dsh-acp': false,
       'zcode-acp': false,
@@ -183,7 +196,6 @@ test('development policy exposes bounded writer concurrency caps', () => {
   assert.equal(policy.config.concurrency.max_active_writers, 4);
   assert.equal(policy.config.concurrency.max_active_writers_per_project, 2);
 });
-
 
 test('Antigravity is provider-native and opt-in without changing default phase routing', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);

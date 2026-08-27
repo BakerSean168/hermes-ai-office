@@ -7,13 +7,16 @@ import { openDb } from './db.mjs';
 import { registerV3Routes } from './v3/api.js';
 import { ExecutionLinkRepository } from './v3/correlation.js';
 import { GitHubPlanDelivery, type PlanDeliveryPort } from './v3/delivery.js';
-import { GitHubGovernanceStatus, type GitHubGovernanceStatusPort } from './v3/githubGovernanceStatus.js';
-import { GitHubPullRequestRepairPublisher, type GitHubPullRequestRepairPublisherPort } from './v3/githubPrRepairPublisher.js';
-import { JulesApiClient, type JulesApiPort } from './v3/jules.js';
 import {
-  GitHubPullRequestIntake,
-  type GitHubPullRequestIntakePort,
-} from './v3/githubPrIntake.js';
+  GitHubGovernanceStatus,
+  type GitHubGovernanceStatusPort,
+} from './v3/githubGovernanceStatus.js';
+import {
+  GitHubPullRequestRepairPublisher,
+  type GitHubPullRequestRepairPublisherPort,
+} from './v3/githubPrRepairPublisher.js';
+import { JulesApiClient, type JulesApiPort } from './v3/jules.js';
+import { GitHubPullRequestIntake, type GitHubPullRequestIntakePort } from './v3/githubPrIntake.js';
 import {
   LiteLlmModelGateway,
   LiteLlmModelRegistry,
@@ -98,7 +101,8 @@ export async function buildControlPlane(
         policy,
       });
       const antigravityEnabled =
-        configuredBackends.has('antigravity-review') || configuredBackends.has('antigravity-worker');
+        configuredBackends.has('antigravity-review') ||
+        configuredBackends.has('antigravity-worker');
       if (!antigravityEnabled) return openHandsHost;
       const antigravityHome = env.MODEL_CP_V3_ANTIGRAVITY_HOME ?? '/home/dev';
       const antigravityOwner = fs.statSync(antigravityHome);
@@ -107,7 +111,8 @@ export async function buildControlPlane(
         stateRoot:
           env.MODEL_CP_V3_ANTIGRAVITY_STATE_ROOT ??
           '/srv/hermes-personal/data/model-control-plane/antigravity',
-        workspaceHostRoot: env.MODEL_CP_V3_WORKSPACE_ROOT ?? '/opt/data/hermes-ai-office-v3/workspaces',
+        workspaceHostRoot:
+          env.MODEL_CP_V3_WORKSPACE_ROOT ?? '/opt/data/hermes-ai-office-v3/workspaces',
         workspaceExecutionRoot: env.MODEL_CP_V3_OPENHANDS_WORKSPACE_ROOT ?? '/workspace',
         home: antigravityHome,
         uid: Number(env.MODEL_CP_V3_ANTIGRAVITY_UID ?? antigravityOwner.uid),
@@ -205,6 +210,8 @@ export async function buildControlPlane(
     gateway: modelGateway,
     observability,
     backendAvailability,
+    reviewStrategy:
+      env.MODEL_CP_V3_PLAN_REVIEW_STRATEGY === 'BATCH_ONLY' ? 'BATCH_ONLY' : 'PER_ITEM_AND_BATCH',
   });
   const readinessEvidence = loadV3ReadinessEvidence(
     env.MODEL_CP_V3_READINESS_EVIDENCE_FILE ??

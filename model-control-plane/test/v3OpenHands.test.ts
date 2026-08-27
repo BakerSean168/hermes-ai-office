@@ -287,6 +287,47 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     assert.equal(codexBusinessBody.secrets.CODEX_API_KEY, undefined);
 
     await host.createExecution({
+      executionId: 'exec_codex_business_worker_1',
+      projectKey: 'pixel-agents',
+      phase: 'IMPLEMENT',
+      objective: 'Implement with authenticated Business Codex.',
+      repositoryPath: '/workspace/executions/exec_codex_business_worker_1/repo',
+      selection: {
+        backend: 'codex-business-worker-headless',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'PROVIDER_NATIVE',
+        workspaceMode: 'isolated_write',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: {
+        execution_id: 'exec_codex_business_worker_1',
+        phase: 'IMPLEMENT',
+      },
+    });
+    const codexBusinessWorkerBody = createBody as any;
+    assert.equal(codexBusinessWorkerBody.agent.acp_server, 'custom');
+    assert.equal(codexBusinessWorkerBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.deepEqual(codexBusinessWorkerBody.agent.acp_command, [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ]);
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'codex');
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'worker');
+    assert.equal(
+      codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value,
+      'provider-native',
+    );
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(
+      codexBusinessWorkerBody.secrets.AI_OFFICE_CODEX_AUTH_HOME.value,
+      '/openhands-state/codex-business',
+    );
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_LITELLM_BASE_URL, undefined);
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_LITELLM_API_KEY, undefined);
+    assert.equal(codexBusinessWorkerBody.secrets.CODEX_API_KEY, undefined);
+
+    await host.createExecution({
       executionId: 'exec_codex_headless_1',
       projectKey: 'pixel-agents',
       phase: 'VERIFY_REVIEW',

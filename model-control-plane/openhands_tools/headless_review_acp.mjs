@@ -11,6 +11,8 @@ const DEFAULT_MODEL = process.env.AI_OFFICE_HEADLESS_MODEL ?? 'gpt-5.6-sol';
 const LITELLM_BASE_URL = (process.env.AI_OFFICE_LITELLM_BASE_URL ?? '').replace(/\/$/, '');
 const LITELLM_API_KEY = process.env.AI_OFFICE_LITELLM_API_KEY ?? '';
 const HEADLESS_TRANSPORT = process.env.AI_OFFICE_HEADLESS_TRANSPORT ?? 'litellm-managed';
+const HEADLESS_ROLE = process.env.AI_OFFICE_HEADLESS_ROLE ?? 'review';
+const IS_WORKER = HEADLESS_ROLE === 'worker';
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
 const HARNESS_PROFILE = process.env.AI_OFFICE_HARNESS_PROFILE ?? 'openhands';
@@ -127,7 +129,9 @@ function prepareHarness(session, host) {
   );
   if (prepared.error) throw prepared.error;
   if (prepared.status !== 0) {
-    throw new Error(`HEADLESS_REVIEW_HARNESS_BLOCKED:${redact(prepared.stderr || prepared.stdout)}`);
+    throw new Error(
+      `HEADLESS_REVIEW_HARNESS_BLOCKED:${redact(prepared.stderr || prepared.stdout)}`,
+    );
   }
   const payload = JSON.parse(prepared.stdout);
   if (payload?.admission?.status !== 'READY') {
@@ -351,6 +355,40 @@ function parseCodexResult(sessionDir, stdout) {
   throw new Error('CODEX_STRUCTURED_REVIEW_MISSING');
 }
 
+function parseCodexWorkerResult(stdout) {
+  for (const line of stdout.split(/\r?\n/).reverse()) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const text = event?.item?.type === 'agent_message' ? event.item.text : null;
+      if (typeof text === 'string' && text.trim()) return text.trim();
+    } catch {
+      // Ignore non-JSON event lines.
+    }
+  }
+  throw new Error('CODEX_WORKER_RESULT_MISSING');
+}
+
+function codexWorkspaceActivity(stdout) {
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const item = event?.item;
+      if (
+        item?.type === 'command_execution' ||
+        item?.type === 'mcp_tool_call' ||
+        item?.type === 'file_change'
+      ) {
+        return true;
+      }
+    } catch {
+      // Ignore non-JSON event lines.
+    }
+  }
+  return false;
+}
+
 function parseClaudeResult(stdout) {
   const envelope = JSON.parse(stdout);
   if (envelope?.is_error === true) {
@@ -391,7 +429,10 @@ function codexCommand(session, prompt, evidence) {
     const authFile = path.join(CODEX_AUTH_HOME, 'auth.json');
     if (!fs.existsSync(authFile)) throw new Error('HEADLESS_REVIEW_CODEX_AUTH_MISSING');
     safeSymlink(authFile, path.join(codexHome, 'auth.json'));
-    safeSymlink(path.join(CODEX_AUTH_HOME, 'skills', '.system'), path.join(codexHome, 'skills', '.system'));
+    safeSymlink(
+      path.join(CODEX_AUTH_HOME, 'skills', '.system'),
+      path.join(codexHome, 'skills', '.system'),
+    );
   } else {
     const baseUrl = LITELLM_BASE_URL.endsWith('/v1') ? LITELLM_BASE_URL : `${LITELLM_BASE_URL}/v1`;
     const configPath = path.join(codexHome, 'config.toml');
@@ -401,7 +442,7 @@ function codexCommand(session, prompt, evidence) {
       [
         `model = ${JSON.stringify(session.model)}`,
         'model_provider = "hermes-litellm"',
-        'model_reasoning_effort = "high"',
+        `model_reasoning_effort = ${JSON.stringify(IS_WORKER ? 'medium' : 'high')}`,
         'model_verbosity = "high"',
         'approval_policy = "never"',
         'sandbox_mode = "workspace-write"',
@@ -421,10 +462,6 @@ function codexCommand(session, prompt, evidence) {
       { mode: 0o600 },
     );
   }
-  const schemaPath = path.join(sessionDir, 'review-schema.json');
-  fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
-  const lastMessage = path.join(sessionDir, 'codex-last-message.json');
-  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   const env = {
     ...harness.env,
     CODEX_HOME: codexHome,
@@ -436,6 +473,33 @@ function codexCommand(session, prompt, evidence) {
   } else {
     env.CODEX_API_KEY = LITELLM_API_KEY;
   }
+
+  if (IS_WORKER) {
+    const workerPrompt = `${prompt}\n\nYou are the implementation worker. Work directly in the current repository and complete the requested change, not merely analyze it. Inspect the relevant repository instructions, active plan, code, and tests; preserve existing contracts outside scope; implement the acceptance criteria; run focused verification first and then the appropriate wider checks. Commit the completed change with a concise conventional commit and leave the workspace clean. Do not wait for human confirmation for ordinary implementation choices. If a genuine external blocker remains, report the exact blocker and the evidence you collected.`;
+    return {
+      command: CODEX_BIN,
+      args: [
+        'exec',
+        '--ephemeral',
+        '--ignore-rules',
+        '--sandbox',
+        'workspace-write',
+        '--model',
+        session.model,
+        '--json',
+        '-',
+      ],
+      input: workerPrompt,
+      env,
+      parse: parseCodexWorkerResult,
+      hasIndependentActivity: codexWorkspaceActivity,
+    };
+  }
+
+  const schemaPath = path.join(sessionDir, 'review-schema.json');
+  fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
+  const lastMessage = path.join(sessionDir, 'codex-last-message.json');
+  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   return {
     command: CODEX_BIN,
     args: [
@@ -641,7 +705,9 @@ class HeadlessReviewAgent {
     const title =
       DRIVER === 'codex'
         ? HEADLESS_TRANSPORT === 'provider-native'
-          ? 'Codex Business review'
+          ? IS_WORKER
+            ? 'Codex Business implementation'
+            : 'Codex Business review'
           : 'Codex managed review'
         : 'Claude Code managed review';
     await cx.notify(acp.methods.client.session.update, {
@@ -658,7 +724,7 @@ class HeadlessReviewAgent {
 
     let heartbeat;
     try {
-      const evidence = collectEvidence(session.cwd);
+      const evidence = IS_WORKER ? '' : collectEvidence(session.cwd);
       const spec = buildCommand(session, prompt, evidence);
       heartbeat = setInterval(() => {
         void cx
@@ -668,7 +734,7 @@ class HeadlessReviewAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: 'in_progress',
-              rawOutput: { state: 'reviewing' },
+              rawOutput: { state: IS_WORKER ? 'implementing' : 'reviewing' },
             },
           })
           .catch(() => {});
@@ -706,7 +772,7 @@ class HeadlessReviewAgent {
             sessionUpdate: 'agent_message_chunk',
             content: {
               type: 'text',
-              text: `REVIEW_TRANSPORT_ERROR\n${reason}${detail ? `\n${detail}` : ''}`,
+              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}${detail ? `\n${detail}` : ''}`,
             },
           },
         });
@@ -717,7 +783,9 @@ class HeadlessReviewAgent {
         typeof spec.hasIndependentActivity === 'function' &&
         !spec.hasIndependentActivity(result.stdout)
       ) {
-        const reason = 'reviewer completed without independent repository command activity';
+        const reason = IS_WORKER
+          ? 'worker completed without repository command or file-change activity'
+          : 'reviewer completed without independent repository command activity';
         await cx.notify(acp.methods.client.session.update, {
           sessionId: session.id,
           update: {
@@ -731,13 +799,18 @@ class HeadlessReviewAgent {
           sessionId: session.id,
           update: {
             sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: `REVIEW_TRANSPORT_ERROR\n${reason}` },
+            content: {
+              type: 'text',
+              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}`,
+            },
           },
         });
         return { stopReason: 'end_turn' };
       }
 
-      const canonical = canonicalReview(spec.parse(result.stdout));
+      const canonical = IS_WORKER
+        ? String(spec.parse(result.stdout)).trim()
+        : canonicalReview(spec.parse(result.stdout));
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,
         update: {
@@ -770,7 +843,10 @@ class HeadlessReviewAgent {
         sessionId: session.id,
         update: {
           sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: `REVIEW_TRANSPORT_ERROR\n${detail}` },
+          content: {
+            type: 'text',
+            text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${detail}`,
+          },
         },
       });
       return { stopReason: 'end_turn' };
@@ -798,7 +874,7 @@ const output = Readable.toWeb(process.stdin);
 const stream = acp.ndJsonStream(input, output);
 const agent = new HeadlessReviewAgent();
 acp
-  .agent({ name: `ai-office-${DRIVER || 'headless'}-review` })
+  .agent({ name: `ai-office-${DRIVER || 'headless'}-${IS_WORKER ? 'worker' : 'review'}` })
   .onRequest('initialize', (ctx) => agent.initialize(ctx.params))
   .onRequest('session/new', (ctx) => agent.newSession(ctx.params))
   .onRequest('authenticate', () => ({}))

@@ -74,11 +74,23 @@ test('OpenHands outer container permits Codex bubblewrap without granting Linux 
 test('OpenHands coding workers launch through Agent Harness capability materialization', () => {
   const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
   const policy = parse(policyRaw) as any;
-  const composeRaw = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
+  const composeRaw = fs.readFileSync(
+    path.join(root, 'deploy/openhands-v3/docker-compose.yml'),
+    'utf8',
+  );
   const compose = parse(composeRaw) as any;
-  const tooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
-  const launcher = fs.readFileSync(path.join(root, 'openhands_tools/harness_agent_launcher.sh'), 'utf8');
-  const gatewayUnit = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-agent-harness-mcp.service'), 'utf8');
+  const tooling = fs.readFileSync(
+    path.join(root, 'scripts/install-openhands-v3-tooling.sh'),
+    'utf8',
+  );
+  const launcher = fs.readFileSync(
+    path.join(root, 'openhands_tools/harness_agent_launcher.sh'),
+    'utf8',
+  );
+  const gatewayUnit = fs.readFileSync(
+    path.join(root, 'deploy/gcp/hermes-agent-harness-mcp.service'),
+    'utf8',
+  );
 
   assert.deepEqual(policy.backends['opencode-acp'].command, [
     '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
@@ -152,7 +164,6 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.doesNotMatch(adapter, /sandbox_mode = \"read-only\"/);
 });
 
-
 test('provider-native Business Codex review is explicit, persistent, and excluded from untrusted external change', () => {
   const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
   const policy = parse(policyRaw) as any;
@@ -161,6 +172,16 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
     'utf8',
   );
   const backend = policy.backends['codex-business-review-headless'];
+  const worker = policy.backends['codex-business-worker-headless'];
+
+  assert.equal(worker.kind, 'acp');
+  assert.equal(worker.default_model, 'gpt-5.6-sol');
+  assert.equal(worker.supports.provider_native, true);
+  assert.equal(worker.supports.write, true);
+  assert.equal(worker.supports.untrusted_external, false);
+  assert.equal(worker.static_env.AI_OFFICE_HEADLESS_ROLE, 'worker');
+  assert.equal(policy.phases.IMPLEMENT.backend_candidates[0], 'codex-business-worker-headless');
+  assert.equal(policy.phases.IMPLEMENT_FIX.backend_candidates[0], 'codex-business-worker-headless');
 
   assert.equal(backend.kind, 'acp');
   assert.equal(backend.default_model, 'gpt-5.6-sol');
@@ -178,14 +199,19 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.match(adapter, /path.join\(codexHome, 'skills', '\.system'\)/);
 });
 
-
 test('provider-native Antigravity remains opt-in and executes behind the mount sandbox boundary', () => {
   const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
   const policy = parse(policyRaw) as any;
-  const unit = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-model-control-plane.service'), 'utf8');
+  const unit = fs.readFileSync(
+    path.join(root, 'deploy/gcp/hermes-model-control-plane.service'),
+    'utf8',
+  );
   const wrapper = fs.readFileSync(path.join(root, 'scripts/run-antigravity-sandbox.sh'), 'utf8');
   const adapter = fs.readFileSync(path.join(root, 'src/v3/adapters/antigravity.ts'), 'utf8');
-  const repairPublisher = fs.readFileSync(path.join(root, 'src/v3/githubPrRepairPublisher.ts'), 'utf8');
+  const repairPublisher = fs.readFileSync(
+    path.join(root, 'src/v3/githubPrRepairPublisher.ts'),
+    'utf8',
+  );
   const app = fs.readFileSync(path.join(root, 'src/app.ts'), 'utf8');
 
   assert.equal(policy.backends['antigravity-review'].kind, 'external_adapter');
@@ -194,14 +220,8 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.equal(policy.backends['antigravity-worker'].supports.write, true);
   assert.equal(policy.backends['antigravity-review'].supports.untrusted_external, false);
   assert.equal(policy.backends['antigravity-worker'].supports.untrusted_external, false);
-  assert.doesNotMatch(
-    policy.phases.VERIFY_REVIEW.backend_candidates.join(','),
-    /antigravity/,
-  );
-  assert.doesNotMatch(
-    policy.phases.IMPLEMENT_FIX.backend_candidates.join(','),
-    /antigravity/,
-  );
+  assert.doesNotMatch(policy.phases.VERIFY_REVIEW.backend_candidates.join(','), /antigravity/);
+  assert.doesNotMatch(policy.phases.IMPLEMENT_FIX.backend_candidates.join(','), /antigravity/);
   assert.doesNotMatch(unit, /antigravity-review|antigravity-worker/);
   assert.ok(app.includes("configuredBackends.has('antigravity-review')"));
   assert.ok(app.includes('if (!antigravityEnabled) return openHandsHost'));

@@ -3,8 +3,11 @@ import type { WorkItemRecord } from '../plans.js';
 export const INTEGRATION_REPAIR_ITEM_PREFIX = 'integration-repair-b';
 export const BATCH_AGGREGATE_REVIEW_ITEM_PREFIX = 'batch-verify-b';
 export const POST_MERGE_DELIVERY_REPAIR_ITEM_PREFIX = 'post-merge-fix-';
-export const INTEGRATION_REPAIR_BACKEND = 'openhands-builtin';
+export const INTEGRATION_REPAIR_BACKEND = 'phase-policy';
 export const INTEGRATION_REPAIR_MODEL_CLASS = 'gpt-5.6-sol';
+
+export type PlanReviewStrategy = 'PER_ITEM_AND_BATCH' | 'BATCH_ONLY';
+export const DEFAULT_PLAN_REVIEW_STRATEGY: PlanReviewStrategy = 'PER_ITEM_AND_BATCH';
 
 export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY' | 'SYNC_EXTERNAL';
 
