@@ -19,11 +19,16 @@ import type { WorkspaceProvisioningPort } from './workspace.js';
 const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
 const INTEGRATION_REPAIR_ITEM_PREFIX = 'integration-repair-b';
+const BATCH_AGGREGATE_REVIEW_ITEM_PREFIX = 'batch-verify-b';
 const INTEGRATION_REPAIR_BACKEND = 'openhands-builtin';
 const INTEGRATION_REPAIR_MODEL_CLASS = 'gpt-5.6-sol';
 
 function isIntegrationRepairItem(item: Pick<WorkItemRecord, 'key'>): boolean {
   return item.key.startsWith(INTEGRATION_REPAIR_ITEM_PREFIX);
+}
+
+function isBatchAggregateReviewItem(item: Pick<WorkItemRecord, 'key'>): boolean {
+  return item.key.startsWith(BATCH_AGGREGATE_REVIEW_ITEM_PREFIX);
 }
 
 export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
@@ -436,7 +441,7 @@ export class DurablePlanOrchestrator {
     plan: ReturnType<PlanRepository['get']> extends infer Value ? Exclude<Value, null> : never,
     batch: ReturnType<PlanRepository['batches']>[number],
     item: WorkItemRecord,
-    phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW',
+    phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'VERIFY_REVIEW' | 'BATCH_VERIFY',
     previousExecutionId: string | undefined,
     attempt: number,
     overrideBackend?: string,
@@ -451,9 +456,15 @@ export class DurablePlanOrchestrator {
             : item.objective,
         projectKey: plan.projectKey,
         repository: {
-          path: phase === 'IMPLEMENT' ? plan.repositoryPath : '',
+          path: phase === 'IMPLEMENT' || phase === 'BATCH_VERIFY' ? plan.repositoryPath : '',
           baseRevision:
-            phase === 'IMPLEMENT' ? (batch.baseRevision ?? plan.currentRevision) : undefined,
+            phase === 'IMPLEMENT'
+              ? isIntegrationRepairItem(item) && batch.integratedRevision
+                ? batch.integratedRevision
+                : (batch.baseRevision ?? plan.currentRevision)
+              : phase === 'BATCH_VERIFY'
+                ? batch.integratedRevision
+                : undefined,
         },
         context: {
           previousExecutionId,
@@ -602,6 +613,9 @@ export class DurablePlanOrchestrator {
       return;
     }
     this.#repository.setWorkItemStatus(item.workItemId, 'SUCCEEDED');
+    if (isIntegrationRepairItem(item)) {
+      this.#repository.clearBatchIntegrationCandidate(batch.batchId);
+    }
     this.#repository.appendEvent(
       plan.planId,
       'WORK_ITEM_VERIFIED',
@@ -683,7 +697,9 @@ export class DurablePlanOrchestrator {
     reason: string,
     message: string,
   ): void {
-    const originalItems = items.filter((item) => !isIntegrationRepairItem(item));
+    const originalItems = items.filter(
+      (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
+    );
     const sources = originalItems.map((item, index) => ({
       index,
       itemKey: item.key,
@@ -691,15 +707,23 @@ export class DurablePlanOrchestrator {
       acceptanceCriteria: item.acceptanceCriteria,
       ...this.#approvedImplementationEvidence(item),
     }));
-    const baseRevision = batch.baseRevision ?? plan.currentRevision;
+    const aggregateReviewFailure = reason === 'BATCH_AGGREGATE_REVIEW_FAILED';
+    const baseRevision =
+      (aggregateReviewFailure ? batch.integratedRevision : undefined) ??
+      batch.baseRevision ??
+      plan.currentRevision;
     const sourceInstructions = sources
       .map((source) =>
         [
           `[${source.index}] ${source.itemKey} — ${source.title}`,
           `approved revision: ${source.approvedRevision}`,
           `workspace: ${source.workspaceRef}`,
-          `fetch: git fetch ${source.workspaceRef} ${source.approvedRevision}:refs/ai-office/incoming/${source.index}`,
-          `merge: git merge --no-ff --no-edit refs/ai-office/incoming/${source.index}`,
+          aggregateReviewFailure
+            ? ''
+            : `fetch: git fetch ${source.workspaceRef} ${source.approvedRevision}:refs/ai-office/incoming/${source.index}`,
+          aggregateReviewFailure
+            ? ''
+            : `merge: git merge --no-ff --no-edit refs/ai-office/incoming/${source.index}`,
           source.acceptanceCriteria.length
             ? `acceptance: ${source.acceptanceCriteria.join(' | ')}`
             : '',
@@ -708,21 +732,34 @@ export class DurablePlanOrchestrator {
           .join('\n'),
       )
       .join('\n\n');
-    const objective = [
-      `Resolve the semantic Git integration conflict for batch ${batch.key}.`,
-      `The repair workspace starts from the batch base revision ${baseRevision}.`,
-      'Integrate every independently reviewed implementation below into this one workspace. Fetch the exact approved revisions from their sibling workspaces and merge them in the listed order.',
-      'Resolve conflicts according to repository contracts and ownership boundaries. Do not discard either side wholesale with ours/theirs merely to make Git clean.',
-      'If two implementations made competing architecture choices, inspect the surrounding contracts and tests, choose one coherent ownership model, and adapt both tickets to it while preserving their accepted behavior.',
-      'Do not modify the source worktree or sibling implementation workspaces.',
-      'All listed approved revisions must remain Git ancestors of the final repair HEAD; the control plane verifies this mechanically before accepting the repair.',
-      'Run focused regression tests covering the overlapping files plus the affected ticket acceptance criteria, then commit the resolved integration and leave the workspace clean.',
-      '',
-      sourceInstructions,
-      '',
-      `Conflict evidence (${reason}):`,
-      message.slice(0, PLAN_LIMITS.errorDetailCharacters),
-    ].join('\n');
+    const objective = aggregateReviewFailure
+      ? [
+          `Repair the integrated batch ${batch.key} after the aggregate reviewer found a semantic integration defect.`,
+          `The repair workspace starts from integrated candidate revision ${baseRevision}, which already contains every independently reviewed source revision.`,
+          'Address the aggregate reviewer findings directly in the combined codebase. Preserve the previously accepted behavior of every ticket while repairing cross-ticket contracts, wiring, ordering, migrations, ownership, or other combined semantics.',
+          'Do not reset, revert, or rewrite away an approved ticket merely to make the aggregate review pass.',
+          'Run focused regression checks for the reviewer findings and the affected ticket acceptance criteria, then commit the repair and leave the workspace clean.',
+          '',
+          sourceInstructions,
+          '',
+          'Aggregate review findings:',
+          message.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
+        ].join('\n')
+      : [
+          `Resolve the semantic Git integration conflict for batch ${batch.key}.`,
+          `The repair workspace starts from the batch base revision ${baseRevision}.`,
+          'Integrate every independently reviewed implementation below into this one workspace. Fetch the exact approved revisions from their sibling workspaces and merge them in the listed order.',
+          'Resolve conflicts according to repository contracts and ownership boundaries. Do not discard either side wholesale with ours/theirs merely to make Git clean.',
+          'If two implementations made competing architecture choices, inspect the surrounding contracts and tests, choose one coherent ownership model, and adapt both tickets to it while preserving their accepted behavior.',
+          'Do not modify the source worktree or sibling implementation workspaces.',
+          'All listed approved revisions must remain Git ancestors of the final repair HEAD; the control plane verifies this mechanically before accepting the repair.',
+          'Run focused regression tests covering the overlapping files plus the affected ticket acceptance criteria, then commit the resolved integration and leave the workspace clean.',
+          '',
+          sourceInstructions,
+          '',
+          `Conflict evidence (${reason}):`,
+          message.slice(0, PLAN_LIMITS.errorDetailCharacters),
+        ].join('\n');
     const repair = this.#repository.addBatchIntegrationRepairWorkItem(plan.planId, batch.batchId, {
       objective: objective.slice(0, 20_000),
       acceptanceCriteria: [
@@ -734,7 +771,7 @@ export class DurablePlanOrchestrator {
       ],
       evidence: {
         reason,
-        message: message.slice(0, PLAN_LIMITS.errorDetailCharacters),
+        message: message.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
         baseRevision,
         sources: sources.map((source) => ({
           itemKey: source.itemKey,
@@ -781,7 +818,9 @@ export class DurablePlanOrchestrator {
     batch: ReturnType<PlanRepository['batches']>[number],
     items: WorkItemRecord[],
   ): Promise<void> {
-    const originalItems = items.filter((item) => !isIntegrationRepairItem(item));
+    const originalItems = items.filter(
+      (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
+    );
     const repairItems = items.filter(isIntegrationRepairItem);
     const repairItem = repairItems.at(-1);
     const integrationItems = repairItem ? [repairItem] : originalItems;
@@ -811,6 +850,27 @@ export class DurablePlanOrchestrator {
         implementations,
         requiredAncestorRevisions,
       });
+      const requiresAggregateReview = originalItems.length > 1;
+      if (requiresAggregateReview) {
+        this.#repository.setBatchIntegrationCandidate(
+          batch.batchId,
+          integrated.revision,
+          integrated.ref,
+        );
+        this.#repository.appendEvent(
+          plan.planId,
+          'BATCH_INTEGRATION_CANDIDATE',
+          {
+            revision: integrated.revision,
+            ref: integrated.ref,
+            repaired: Boolean(repairItem),
+            repairWorkItemKey: repairItem?.key,
+            aggregateReviewRequired: true,
+          },
+          { batchId: batch.batchId },
+        );
+        return;
+      }
       this.#repository.setBatchStatus(batch.batchId, 'SUCCEEDED', {
         integratedRevision: integrated.revision,
         integrationRef: integrated.ref,
@@ -823,6 +883,7 @@ export class DurablePlanOrchestrator {
           ref: integrated.ref,
           repaired: Boolean(repairItem),
           repairWorkItemKey: repairItem?.key,
+          aggregateReviewRequired: false,
         },
         { batchId: batch.batchId },
       );
@@ -845,6 +906,163 @@ export class DurablePlanOrchestrator {
         { batchId: batch.batchId },
       );
     }
+  }
+
+  async #reconcileBatchAggregateReview(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    batch: ReturnType<PlanRepository['batches']>[number],
+    items: WorkItemRecord[],
+  ): Promise<void> {
+    if (!batch.integratedRevision || !batch.integrationRef) {
+      throw new Error('BATCH_INTEGRATION_CANDIDATE_MISSING');
+    }
+    const originalItems = items.filter(
+      (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
+    );
+    if (originalItems.length <= 1) return;
+    const acceptanceSummary = originalItems
+      .map((item) => {
+        const criteria = item.acceptanceCriteria.length
+          ? item.acceptanceCriteria.map((criterion) => `  - ${criterion}`).join('\n')
+          : '  - (no explicit criterion)';
+        return `${item.key} — ${item.title}\n${criteria}`;
+      })
+      .join('\n\n');
+    const objective = [
+      `Aggregate-review integrated batch ${batch.key}.`,
+      `Batch base revision: ${batch.baseRevision ?? plan.currentRevision}.`,
+      `Integrated candidate revision: ${batch.integratedRevision}.`,
+      `Integration ref: ${batch.integrationRef}.`,
+      'Review the COMBINED artifact for defects that individual ticket reviews cannot see: cross-ticket contract mismatch, duplicate ownership, incompatible architecture choices, host composition/wiring errors, ordering/migration conflicts, state-machine interactions, and regressions caused by the combination.',
+      'Inspect the integrated diff from the batch base to the candidate and run focused verification across the overlapping/affected modules.',
+      '',
+      'Individually approved work items and acceptance criteria:',
+      acceptanceSummary,
+    ].join('\n');
+    const aggregateItem = this.#repository.addBatchAggregateReviewWorkItem(
+      plan.planId,
+      batch.batchId,
+      {
+        candidateRevision: batch.integratedRevision,
+        objective: objective.slice(0, 20_000),
+        acceptanceCriteria: [
+          'The integrated candidate preserves every individually approved work-item acceptance criterion.',
+          'Cross-ticket contracts, ownership boundaries, dependency injection/composition, migrations, and state transitions are coherent as a combined artifact.',
+          'No blocking regression is introduced only by combining the independently reviewed changes.',
+          'At least one focused aggregate verification command is executed against the integrated candidate.',
+        ],
+      },
+    );
+    const executionIds = this.#repository.executionIds(aggregateItem.workItemId);
+    if (executionIds.length === 0) {
+      await this.#launchPlanPhase(plan, batch, aggregateItem, 'BATCH_VERIFY', undefined, 1);
+      return;
+    }
+    const records = executionIds
+      .map((executionId) => this.#links.get(executionId))
+      .filter((record): record is ExecutionLinkRecord => Boolean(record));
+    const latest = records.at(-1);
+    if (!latest) return;
+    const snapshot = await this.#executions.get(latest.executionId);
+    if (!snapshot || !PLAN_TERMINAL_EXECUTION_STATUSES.has(snapshot.status)) return;
+    if (snapshot.status !== 'SUCCEEDED') {
+      const attempts = records.filter((record) => record.phase === 'BATCH_VERIFY').length;
+      const limit = snapshot.error?.retryable
+        ? PLAN_LIMITS.retryableTransportAttemptsPerParent
+        : PLAN_LIMITS.transportAttemptsPerParent;
+      if (attempts < limit) {
+        await this.#launchPlanPhase(
+          plan,
+          batch,
+          aggregateItem,
+          'BATCH_VERIFY',
+          undefined,
+          attempts + 1,
+          'openhands-builtin',
+        );
+        return;
+      }
+      const reason = `BATCH_VERIFY_${snapshot.status}`;
+      this.#blockWorkItem(
+        plan.planId,
+        batch.batchId,
+        aggregateItem.workItemId,
+        reason,
+        latest.executionId,
+      );
+      return;
+    }
+    const result = snapshot.result?.finalText ?? '';
+    const verdict = reviewVerdict(result);
+    if (verdict === 'UNKNOWN') {
+      const attempts = records.filter((record) => record.phase === 'BATCH_VERIFY').length;
+      if (attempts < PLAN_LIMITS.transportAttemptsPerParent) {
+        await this.#launchPlanPhase(
+          plan,
+          batch,
+          aggregateItem,
+          'BATCH_VERIFY',
+          undefined,
+          attempts + 1,
+          'openhands-builtin',
+        );
+        return;
+      }
+      this.#blockWorkItem(
+        plan.planId,
+        batch.batchId,
+        aggregateItem.workItemId,
+        'BATCH_VERIFY_VERDICT_UNKNOWN',
+        latest.executionId,
+      );
+      return;
+    }
+    this.#repository.setWorkItemStatus(aggregateItem.workItemId, 'SUCCEEDED');
+    if (verdict === 'BLOCKING') {
+      this.#repository.appendEvent(
+        plan.planId,
+        'BATCH_AGGREGATE_REVIEW_FAILED',
+        {
+          revision: batch.integratedRevision,
+          findings: result.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
+        },
+        {
+          batchId: batch.batchId,
+          workItemId: aggregateItem.workItemId,
+          executionId: latest.executionId,
+        },
+      );
+      this.#scheduleBatchIntegrationRepair(
+        plan,
+        batch,
+        items,
+        'BATCH_AGGREGATE_REVIEW_FAILED',
+        result,
+      );
+      return;
+    }
+    this.#repository.promoteBatchIntegration(batch.batchId);
+    this.#repository.appendEvent(
+      plan.planId,
+      'BATCH_AGGREGATE_VERIFIED',
+      { revision: batch.integratedRevision },
+      {
+        batchId: batch.batchId,
+        workItemId: aggregateItem.workItemId,
+        executionId: latest.executionId,
+      },
+    );
+    this.#repository.appendEvent(
+      plan.planId,
+      'BATCH_INTEGRATED',
+      {
+        revision: batch.integratedRevision,
+        ref: batch.integrationRef,
+        aggregateReviewRequired: true,
+        aggregateReviewExecutionId: latest.executionId,
+      },
+      { batchId: batch.batchId },
+    );
   }
 
   async #reconcilePlan(planId: string): Promise<void> {
@@ -968,18 +1186,31 @@ export class DurablePlanOrchestrator {
       .find((item) => item.batchId === batch.batchId)!;
     const items = this.#repository.workItems(batch.batchId);
     for (const item of items) {
-      if (item.status !== 'SUCCEEDED') {
-        try {
-          await this.#reconcileWorkItem(plan, currentBatch, item);
-        } catch (error) {
-          const code = error instanceof Error ? (error.message.split(':', 1)[0] ?? '') : '';
-          if (!code.includes('CONCURRENCY') && !code.includes('LEASE_CONFLICT')) throw error;
-        }
+      if (isBatchAggregateReviewItem(item) || item.status === 'SUCCEEDED') continue;
+      try {
+        await this.#reconcileWorkItem(plan, currentBatch, item);
+      } catch (error) {
+        const code = error instanceof Error ? (error.message.split(':', 1)[0] ?? '') : '';
+        if (!code.includes('CONCURRENCY') && !code.includes('LEASE_CONFLICT')) throw error;
       }
     }
     const refreshed = this.#repository.workItems(batch.batchId);
-    if (refreshed.every((item) => item.status === 'SUCCEEDED')) {
-      await this.#integrateBatch(plan, currentBatch, refreshed);
+    const implementationItems = refreshed.filter((item) => !isBatchAggregateReviewItem(item));
+    if (!implementationItems.every((item) => item.status === 'SUCCEEDED')) return;
+
+    const afterWork = this.#repository
+      .batches(plan.planId)
+      .find((item) => item.batchId === batch.batchId)!;
+    if (!afterWork.integratedRevision || !afterWork.integrationRef) {
+      await this.#integrateBatch(plan, afterWork, refreshed);
+      return;
+    }
+
+    const originalItems = refreshed.filter(
+      (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
+    );
+    if (originalItems.length > 1) {
+      await this.#reconcileBatchAggregateReview(plan, afterWork, refreshed);
     }
   }
 
@@ -1026,6 +1257,37 @@ export class DurablePlanOrchestrator {
       return;
     }
     const retryable = items.filter((item) => item.status === 'BLOCKED');
+    const aggregateReview = retryable.find(isBatchAggregateReviewItem);
+    if (aggregateReview) {
+      const records = this.#repository
+        .executionIds(aggregateReview.workItemId)
+        .map((executionId) => this.#links.get(executionId))
+        .filter((record): record is ExecutionLinkRecord => Boolean(record));
+      const latest = records.at(-1);
+      if (!latest || latest.phase !== 'BATCH_VERIFY') {
+        throw new Error('BATCH_VERIFY_RECOVERY_EVIDENCE_MISSING');
+      }
+      const attempt = records.filter((record) => record.phase === 'BATCH_VERIFY').length + 1;
+      this.#repository.setPlanStatus(planId, 'RUNNING');
+      this.#repository.setBatchStatus(batch.batchId, 'RUNNING');
+      this.#repository.setWorkItemStatus(aggregateReview.workItemId, 'RUNNING');
+      this.#repository.appendEvent(
+        planId,
+        'BATCH_AGGREGATE_REVIEW_RECOVERY_REQUESTED',
+        { previousReason: aggregateReview.blockedReason, attempt },
+        { batchId: batch.batchId, workItemId: aggregateReview.workItemId },
+      );
+      await this.#launchPlanPhase(
+        blocked,
+        batch,
+        aggregateReview,
+        'BATCH_VERIFY',
+        undefined,
+        attempt,
+        'openhands-builtin',
+      );
+      return;
+    }
 
     if (recoveryMode === 'RETRY_REVIEW') {
       const targets = retryable.map((item) => {

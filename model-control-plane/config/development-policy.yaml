@@ -65,6 +65,17 @@ phases:
     workspace_mode: review_snapshot
     session_policy: fresh_required
 
+  BATCH_VERIFY:
+    backend_candidates:
+      - codex-review-headless
+      - claude-code-review-headless
+      - openhands-builtin
+    model_class: gpt-5.6-sol
+    transport_preference:
+      - LITELLM_MANAGED
+    workspace_mode: read_oriented
+    session_policy: fresh_required
+
   FINALIZE:
     backend_candidates:
       - control-plane-finalizer

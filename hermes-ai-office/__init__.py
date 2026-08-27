@@ -155,7 +155,7 @@ _CREATE_PLAN_SCHEMA = {
     "name": "ai_office_create_plan",
     "description": (
         "Submit the analyzed ORCHESTRATE proposal as one durable development plan. The control plane validates and persists the graph before it automatically runs each work item through "
-        "IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX when needed, deterministic batch integration, dependent batches, "
+        "IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX when needed, deterministic batch integration, premium aggregate BATCH_VERIFY for multi-item batches, integration repair when aggregate review fails, dependent batches, "
         "and, when explicitly authorized, remote checks and merge."
     ),
     "parameters": {
@@ -1075,7 +1075,7 @@ def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] |
     sections: list[str] = []
     if development_topic:
         sections.append(
-            "Pixel Agent is the Hermes-facing name for the hermes-ai-office / AI Office V3 execution path, and it is the mandatory development execution authority for enforced project profiles. For complete project work, use ai_office_delegate: provide only the objective, repository, and optional active-plan/delivery hint. OpenHands then inspects the repository and creates the dependency-aware durable graph; the Control Plane automatically runs parallel-safe IMPLEMENT workers, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic integration, and dependent batches without Hermes polling. "
+            "Pixel Agent is the Hermes-facing name for the hermes-ai-office / AI Office V3 execution path, and it is the mandatory development execution authority for enforced project profiles. For complete project work, use ai_office_delegate: provide only the objective, repository, and optional active-plan/delivery hint. OpenHands then inspects the repository and creates the dependency-aware durable graph; the Control Plane automatically runs parallel-safe IMPLEMENT workers, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic integration, premium aggregate BATCH_VERIFY for multi-item batches, bounded integration repair after aggregate FAIL, and dependent batches without Hermes polling. "
             "Use ai_office_create_plan only when an operator already has an explicit graph that must be preserved exactly. Use ai_office_run_phase only for standalone investigation or an operator-directed single phase. VERIFY_REVIEW keeps the strict first-line PASS/FAIL contract. Preserve planId across turns and recover with ai_office_get_plan or ai_office_list_plans after Telegram, Hermes, or gateway reconnects. "
             "Backend and logical model are policy decisions; physical provider selection, fallback, health, and spend are exclusively LiteLLM decisions."
         )

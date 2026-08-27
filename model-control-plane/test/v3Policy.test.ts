@@ -27,6 +27,7 @@ test('development policy uses LiteLLM-managed execution for all model-backed pha
     'IMPLEMENT',
     'IMPLEMENT_FIX',
     'VERIFY_REVIEW',
+    'BATCH_VERIFY',
   ] as const) {
     const selected = policy.select(phase, {}, allAvailable);
     assert.equal(selected.transportMode, 'LITELLM_MANAGED');
@@ -72,6 +73,10 @@ test('implementation prefers OpenCode and review prefers headless Codex with GPT
   const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
   assert.equal(review.backend, 'codex-review-headless');
   assert.equal(review.modelClass, 'gpt-5.6-sol');
+  const batchReview = policy.select('BATCH_VERIFY', {}, allAvailable);
+  assert.equal(batchReview.backend, 'codex-review-headless');
+  assert.equal(batchReview.modelClass, 'gpt-5.6-sol');
+  assert.equal(batchReview.workspaceMode, 'read_oriented');
 });
 
 test('review falls back from headless Codex to Claude Code and then OpenHands', () => {

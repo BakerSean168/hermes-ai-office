@@ -4,6 +4,7 @@ export const DEVELOPMENT_PHASES = [
   'IMPLEMENT',
   'IMPLEMENT_FIX',
   'VERIFY_REVIEW',
+  'BATCH_VERIFY',
   'FINALIZE',
 ] as const;
 

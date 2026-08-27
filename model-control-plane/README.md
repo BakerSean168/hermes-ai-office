@@ -11,7 +11,7 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 - isolated implementation workspaces and read-only review snapshots;
 - strict PASS/FAIL review governance;
 - single-writer leases;
-- deterministic reviewed batch integration into durable Git refs;
+- deterministic batch integration candidates plus premium `BATCH_VERIFY` aggregate semantic review before promotion into durable Git refs;
 - explicitly authorized branch delivery, pull-request checks, merge, and
   post-merge verification;
 - durable execution timing, result, LiteLLM usage, and per-deployment route usage;
@@ -41,7 +41,7 @@ Coding backends are defined in policy independently from runtime readiness. Open
 
 `GET /api/v3/development/executions?limit=5000&hydrate=1` backfills missing historical LiteLLM observations into durable execution correlation state.
 
-Plan creation is the normal multi-step protocol. The coordinator persists the graph before launching work, retries transport failures once, applies strict independent review gates, integrates only clean committed implementations, and starts dependent batches from the preceding integrated revision. When plan creation explicitly authorizes delivery, the coordinator also pushes the integrated revision, creates or reuses a pull request, waits for checks, creates a bounded reviewed repair batch for failed pre-merge checks, merges through GitHub branch protection, and verifies checks on the merge revision. Explicit plan reconcile recovers a blocked infrastructure attempt after the underlying fault is repaired. It returns `202 Accepted`; clients poll the returned `statusUrl`. Plan reads use durable state by default, while `hydrate=true` explicitly refreshes host observations. Reconciliation is serialized per plan so a slow execution host cannot stall unrelated plans.
+Plan creation is the normal multi-step protocol. The coordinator persists the graph before launching work, retries transport failures once, applies strict independent ticket review gates, integrates only clean committed implementations, and for multi-item batches treats a clean Git merge as a candidate only. A premium `BATCH_VERIFY` reviewer checks the combined artifact for cross-ticket semantic conflicts before the candidate is promoted to `currentRevision`; blocking findings automatically create a bounded premium integration-repair work item and the repaired candidate is aggregate-reviewed again. Dependent batches start only from the promoted integrated revision. When plan creation explicitly authorizes delivery, the coordinator also pushes the integrated revision, creates or reuses a pull request, waits for checks, creates a bounded reviewed repair batch for failed pre-merge checks, merges through GitHub branch protection, and verifies checks on the merge revision. Explicit plan reconcile recovers a blocked infrastructure attempt after the underlying fault is repaired. It returns `202 Accepted`; clients poll the returned `statusUrl`. Plan reads use durable state by default, while `hydrate=true` explicitly refreshes host observations. Reconciliation is serialized per plan so a slow execution host cannot stall unrelated plans.
 
 Delivery is opt-in and fail-closed. `delivery.autoMerge` must be explicitly true;
 without that authorization AI Office never pushes or merges. A delivery plan is

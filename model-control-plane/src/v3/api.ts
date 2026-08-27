@@ -302,6 +302,10 @@ export function registerV3Routes(
       reply.code(400);
       return { error: { code: 'V3_ORCHESTRATE_REQUIRES_DURABLE_PLAN' } };
     }
+    if (phase === 'BATCH_VERIFY') {
+      reply.code(400);
+      return { error: { code: 'V3_BATCH_VERIFY_REQUIRES_DURABLE_PLAN' } };
+    }
     const header = request.headers['idempotency-key'];
     const idempotencyKey = Array.isArray(header) ? header[0] : header;
     if (!idempotencyKey?.trim()) {

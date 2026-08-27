@@ -88,6 +88,15 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
       'Use the read-only snapshot as the evidence source and ensure the disposable verification copy represents the same Git-visible implementation working tree.',
       'Report concrete defects with severity and evidence; otherwise explicitly approve.',
     ],
+    BATCH_VERIFY: [
+      'Review the already-integrated multi-work-item batch as one combined artifact.',
+      'This is an aggregate semantic review, not a repeat of the individual ticket reviews: focus on cross-ticket interactions, shared contracts, duplicate ownership, composition/wiring, ordering, migrations, and behavior that only emerges after the changes are combined.',
+      'The first non-empty line of the final result MUST be exactly PASS or FAIL so the control plane can apply the aggregate verdict deterministically.',
+      'Use PASS only when the combined batch preserves every supplied acceptance criterion and introduces no blocking integration defect; otherwise use FAIL and report concrete blocking findings.',
+      'The supplied batch snapshot is physically read-only. Do not modify it.',
+      'Before returning a verdict, inspect the integrated diff against the supplied batch base revision and execute at least one focused verification command. If verification requires writes, use a disposable writable copy under /tmp.',
+      'Do not fail merely because remote delivery, PR merge, or post-merge checks have not happened yet; those are separate delivery gates.',
+    ],
     FINALIZE: [
       'Summarize the completed development run and its verification evidence.',
       'Do not make additional code changes.',
@@ -373,7 +382,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     if (!input.objective?.trim()) throw new Error('OBJECTIVE_REQUIRED');
     if (!input.projectKey?.trim()) throw new Error('PROJECT_KEY_REQUIRED');
     if (
-      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT'].includes(input.phase) &&
+      ['ORCHESTRATE', 'INVESTIGATE_PLAN', 'IMPLEMENT', 'BATCH_VERIFY'].includes(input.phase) &&
       !input.repository?.path
     ) {
       throw new Error('REPOSITORY_PATH_REQUIRED');

@@ -512,6 +512,20 @@ test('a durable plan survives worker timeout, failed review, integration failure
     assert.equal(legacyOrchestration.statusCode, 400);
     assert.equal(legacyOrchestration.json().error.code, 'V3_ORCHESTRATE_REQUIRES_DURABLE_PLAN');
 
+    const standaloneBatchVerify = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'standalone-batch-verify' },
+      payload: {
+        phase: 'BATCH_VERIFY',
+        projectKey: 'pixel-agents',
+        objective: 'Bypass durable batch candidate governance.',
+        repository: { path: '/home/ubuntu/projects/pixel-agents', baseRevision: 'base-revision' },
+      },
+    });
+    assert.equal(standaloneBatchVerify.statusCode, 400);
+    assert.equal(standaloneBatchVerify.json().error.code, 'V3_BATCH_VERIFY_REQUIRES_DURABLE_PLAN');
+
     const missingAnalysis = await runtime.app.inject({
       method: 'POST',
       url: '/api/v3/development/plans',
@@ -1389,19 +1403,240 @@ test('batch Git conflicts schedule a premium LLM integration repair and only int
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
-    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[0].status, 'RUNNING');
     assert.equal(body.batches[0].integratedRevision, 'integrated-after-repair');
     assert.equal(integrationCalls, 2);
     assert.equal(seenIntegrationInputs[0]?.implementations.length, 2);
     assert.equal(seenIntegrationInputs[1]?.implementations.length, 1);
     assert.deepEqual(seenIntegrationInputs[1]?.requiredAncestorRevisions, ['HEAD']);
 
+    // A successful Git integration is only a candidate. Multi-item batches require
+    // one premium aggregate semantic review before the revision becomes canonical.
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const batchReviewItem = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('batch-verify-b1-'),
+    );
+    assert.ok(batchReviewItem);
+    const batchReview = batchReviewItem.executions.at(-1);
+    assert.equal(batchReview.phase, 'BATCH_VERIFY');
+    assert.equal(batchReview.selection.backend, 'codex-review-headless');
+    assert.equal(batchReview.selection.modelClass, 'gpt-5.6-sol');
+    assert.match(
+      batchReviewItem.objective,
+      /Integrated candidate revision: integrated-after-repair/,
+    );
+    host.succeed(
+      batchReview.refs.openhandsConversationId,
+      'PASS\nCombined batch semantics verified.',
+    );
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.status, 'RUNNING');
+
     await runtime.v3.reconcilePlans(planId);
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
     ).json();
     assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(body.currentRevision, 'integrated-after-repair');
     assert.equal(body.blockedReason, undefined);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('clean multi-item integration is aggregate-reviewed and semantic FAIL schedules a premium repair before promotion', async () => {
+  const host = new PlanHost();
+  let integrationCalls = 0;
+  const provisionInputs: Array<Parameters<WorkspaceProvisioningPort['provision']>[0]> = [];
+  const semanticWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async provision(input) {
+      provisionInputs.push(input);
+      return workspace.provision(input);
+    },
+    async integrateBatch(input) {
+      integrationCalls += 1;
+      return {
+        revision: `aggregate-candidate-${integrationCalls}`,
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: semanticWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'aggregate-semantic-review-plan' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Combine two independently reviewed changes safely.',
+        analysisSummary: 'The batch is intentionally parallel and requires aggregate semantics.',
+        repository: { path: '/tmp/memoflow', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Parallel changes',
+            workItems: [
+              {
+                key: 'task',
+                title: 'Task behavior',
+                objective: 'Implement Task behavior.',
+                acceptanceCriteria: ['Task behavior remains correct after integration.'],
+              },
+              {
+                key: 'goal',
+                title: 'Goal behavior',
+                objective: 'Implement Goal behavior.',
+                acceptanceCriteria: ['Goal behavior remains correct after integration.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    for (const item of body.batches[0].workItems) {
+      host.succeed(item.executions[0].refs.openhandsConversationId, 'IMPLEMENTED');
+    }
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    for (const item of body.batches[0].workItems) {
+      host.succeed(item.executions.at(-1).refs.openhandsConversationId, 'PASS\nTicket verified.');
+    }
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'RUNNING');
+    assert.equal(body.batches[0].integratedRevision, 'aggregate-candidate-1');
+    assert.equal(body.currentRevision, 'base-revision');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const firstAggregateItem = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('batch-verify-b1-'),
+    );
+    const firstAggregateReview = firstAggregateItem.executions.at(-1);
+    assert.equal(firstAggregateReview.phase, 'BATCH_VERIFY');
+    assert.equal(firstAggregateReview.selection.backend, 'codex-review-headless');
+    assert.equal(firstAggregateReview.selection.modelClass, 'gpt-5.6-sol');
+    host.succeed(
+      firstAggregateReview.refs.openhandsConversationId,
+      'FAIL\nTask and Goal register competing ownership for the same shared adapter.',
+    );
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'RUNNING');
+    assert.equal(body.currentRevision, 'base-revision');
+    const repair = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    assert.ok(repair);
+    assert.match(
+      repair.objective,
+      /starts from integrated candidate revision aggregate-candidate-1/,
+    );
+    assert.match(repair.objective, /competing ownership/);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repairRunning = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    const repairImplementation = repairRunning.executions[0];
+    assert.equal(repairImplementation.phase, 'IMPLEMENT');
+    assert.equal(repairImplementation.selection.backend, 'openhands-builtin');
+    assert.equal(repairImplementation.selection.modelClass, 'gpt-5.6-sol');
+    assert.ok(
+      provisionInputs.some(
+        (input) =>
+          input.workspaceMode === 'isolated_write' &&
+          input.baseRevision === 'aggregate-candidate-1',
+      ),
+    );
+    host.succeed(repairImplementation.refs.openhandsConversationId, 'REPAIRED');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repairReview = body.batches[0].workItems
+      .find((item: { key: string }) => item.key.startsWith('integration-repair-b1-'))
+      .executions.at(-1);
+    assert.equal(repairReview.phase, 'VERIFY_REVIEW');
+    host.succeed(repairReview.refs.openhandsConversationId, 'PASS\nRepair verified.');
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].integratedRevision, 'aggregate-candidate-2');
+    assert.equal(body.batches[0].status, 'RUNNING');
+    assert.equal(integrationCalls, 2);
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const aggregateItems = body.batches[0].workItems.filter((item: { key: string }) =>
+      item.key.startsWith('batch-verify-b1-'),
+    );
+    assert.equal(aggregateItems.length, 2);
+    const secondAggregateReview = aggregateItems.at(-1).executions.at(-1);
+    assert.equal(secondAggregateReview.phase, 'BATCH_VERIFY');
+    host.succeed(
+      secondAggregateReview.refs.openhandsConversationId,
+      'PASS\nCombined semantics verified.',
+    );
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.currentRevision, 'aggregate-candidate-2');
+    assert.ok(
+      body.events.some((event: { type: string }) => event.type === 'BATCH_AGGREGATE_REVIEW_FAILED'),
+    );
+    assert.ok(
+      body.events.some((event: { type: string }) => event.type === 'BATCH_AGGREGATE_VERIFIED'),
+    );
   } finally {
     await runtime.app.close();
   }

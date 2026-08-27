@@ -847,6 +847,114 @@ export class PlanRepository {
     return this.workItems(batchId).find((item) => item.workItemId === itemId) ?? null;
   }
 
+  addBatchAggregateReviewWorkItem(
+    planId: string,
+    batchId: string,
+    input: {
+      objective: string;
+      acceptanceCriteria: string[];
+      candidateRevision: string;
+    },
+  ): WorkItemRecord {
+    const batch = this.batches(planId).find((candidate) => candidate.batchId === batchId);
+    if (!batch) throw new Error('PLAN_BATCH_NOT_FOUND');
+    const keyPrefix = `batch-verify-b${batch.ordinal + 1}-`;
+    const items = this.workItems(batchId);
+    const existing = [...items]
+      .reverse()
+      .find(
+        (item) =>
+          item.key.startsWith(keyPrefix) && item.objective.includes(input.candidateRevision),
+      );
+    if (existing) return existing;
+    const attempt = items.filter((item) => item.key.startsWith(keyPrefix)).length + 1;
+    const itemId = `work_${randomUUID()}`;
+    const itemKey = `${keyPrefix}${attempt}`;
+    const ordinal = items.reduce((max, item) => Math.max(max, item.ordinal), -1) + 1;
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO v3_plan_work_items
+           (work_item_id,plan_id,batch_id,item_key,title,objective,acceptance_criteria_json,ordinal,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          itemId,
+          planId,
+          batchId,
+          itemKey,
+          `Verify ${batch.key} integrated batch (attempt ${attempt})`,
+          input.objective,
+          JSON.stringify(input.acceptanceCriteria),
+          ordinal,
+          'PENDING',
+          now,
+          now,
+        );
+      this.appendEvent(
+        planId,
+        'BATCH_AGGREGATE_REVIEW_CREATED',
+        { attempt, candidateRevision: input.candidateRevision },
+        { batchId, workItemId: itemId },
+      );
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      const raced = this.workItems(batchId).find((item) => item.key === itemKey);
+      if (raced) return raced;
+      throw error;
+    }
+    return this.workItems(batchId).find((item) => item.workItemId === itemId)!;
+  }
+
+  setBatchIntegrationCandidate(batchId: string, revision: string, ref: string): void {
+    this.#db
+      .prepare(
+        `UPDATE v3_plan_batches
+         SET status='RUNNING',integrated_revision=?,integration_ref=?,blocked_reason=NULL,updated_at=?
+         WHERE batch_id=?`,
+      )
+      .run(revision, ref, Date.now(), batchId);
+  }
+
+  clearBatchIntegrationCandidate(batchId: string): void {
+    this.#db
+      .prepare(
+        `UPDATE v3_plan_batches
+         SET integrated_revision=NULL,integration_ref=NULL,blocked_reason=NULL,updated_at=?
+         WHERE batch_id=?`,
+      )
+      .run(Date.now(), batchId);
+  }
+
+  promoteBatchIntegration(batchId: string): void {
+    const batch = this.#db
+      .prepare('SELECT plan_id,integrated_revision FROM v3_plan_batches WHERE batch_id=?')
+      .get(batchId) as { plan_id: string; integrated_revision: string | null } | undefined;
+    if (!batch) throw new Error('PLAN_BATCH_NOT_FOUND');
+    if (!batch.integrated_revision) throw new Error('BATCH_INTEGRATION_CANDIDATE_MISSING');
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#db
+        .prepare(
+          `UPDATE v3_plan_batches SET status='SUCCEEDED',blocked_reason=NULL,updated_at=? WHERE batch_id=?`,
+        )
+        .run(now, batchId);
+      this.#db
+        .prepare(
+          'UPDATE v3_plans SET current_revision=?,blocked_reason=NULL,updated_at=? WHERE plan_id=?',
+        )
+        .run(batch.integrated_revision, now, batch.plan_id);
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
   setBatchStatus(
     batchId: string,
     status: PlanNodeStatus,

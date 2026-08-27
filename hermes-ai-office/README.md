@@ -31,9 +31,10 @@ The plugin uses two enforcement hooks. `pre_llm_call` tells the Hermes Brain tha
 - `IMPLEMENT`
 - `VERIFY_REVIEW`
 - `IMPLEMENT_FIX`
+- internal `BATCH_VERIFY` for multi-item aggregate semantic review
 - `FINALIZE`
 
-Reviewers should put `PASS` or `FAIL` on the first non-empty line. The parser prefers that strict contract and otherwise accepts only one unique standalone verdict token in the whole result; ambiguous results fail closed as `UNKNOWN`. A blocking review enters `IMPLEMENT_FIX`; an approved plan work item enters deterministic batch integration. When `ai_office_create_plan` explicitly sets `delivery.auto_merge=true`, AI Office continues through pull-request checks, bounded reviewed CI repair, merge, and post-merge verification before reporting plan success.
+Reviewers should put `PASS` or `FAIL` on the first non-empty line. The parser prefers that strict contract and otherwise accepts only one unique standalone verdict token in the whole result; ambiguous results fail closed as `UNKNOWN`. A blocking review enters `IMPLEMENT_FIX`; approved work items enter deterministic batch integration. For multi-item batches, a clean Git merge is only an integration candidate: internal `BATCH_VERIFY` performs a premium aggregate semantic review before that revision is promoted. Aggregate FAIL creates a bounded premium integration-repair work item and the repaired candidate is reviewed again. When `ai_office_create_plan` explicitly sets `delivery.auto_merge=true`, AI Office continues through pull-request checks, bounded reviewed CI repair, merge, and post-merge verification before reporting plan success.
 
 The legacy single-execution phase tool does not expose `ORCHESTRATE`; it cannot
 bypass durable graph validation. External ACP backends currently include OpenCode,
