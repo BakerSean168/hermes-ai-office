@@ -85,6 +85,10 @@ def _route_catalog(registry: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     return result
 
 
+def _has_complete_route_identity(raw: Mapping[str, Any]) -> bool:
+    return all(isinstance(raw.get(key), str) and str(raw.get(key)).strip() for key in ("deploymentId", "providerKey", "model"))
+
+
 def _enrich_route(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]]) -> Dict[str, Any]:
     deployment_id = _required_string(raw, "deploymentId", "refs.upstream.route")
     provider_key = _required_string(raw, "providerKey", "refs.upstream.route")
@@ -113,13 +117,17 @@ def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]])
     route_usage_raw = upstream.get("routeUsage") if isinstance(upstream.get("routeUsage"), list) else []
     routes = []
     for route_raw in route_usage_raw:
-        if not isinstance(route_raw, Mapping):
+        if not isinstance(route_raw, Mapping) or not _has_complete_route_identity(route_raw):
             continue
         route = _enrich_route(route_raw, catalog)
         route.update(_usage(route_raw))
         routes.append(route)
     last_raw = upstream.get("route") if isinstance(upstream.get("route"), Mapping) else {}
-    last_route = _enrich_route(last_raw, catalog) if last_raw else (routes[0] if routes else None)
+    last_route = (
+        _enrich_route(last_raw, catalog)
+        if last_raw and _has_complete_route_identity(last_raw)
+        else (routes[0] if routes else None)
+    )
     execution_id = _required_string(raw, "executionId", "execution")
     project_key = _required_string(raw, "projectKey", "execution")
     objective = _required_string(raw, "objectiveSummary", "execution")

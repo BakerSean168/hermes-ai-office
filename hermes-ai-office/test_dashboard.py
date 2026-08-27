@@ -52,6 +52,34 @@ class DashboardTest(unittest.TestCase):
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
 
+    def test_execution_skips_incomplete_legacy_route_metadata_without_breaking_dashboard(self) -> None:
+        row = api._execution(
+            {
+                "executionId": "exec-legacy-route",
+                "projectKey": "project-a",
+                "objectiveSummary": "Review legacy execution",
+                "phase": "VERIFY_REVIEW",
+                "status": "SUCCEEDED",
+                "selection": {
+                    "modelClass": "gpt-5.6-sol",
+                    "backend": "codex-review-headless",
+                    "workspaceMode": "review_snapshot",
+                },
+                "timing": {"durationMs": 1000},
+                "usage": {},
+                "refs": {
+                    "upstream": {
+                        "route": {"model": "gpt-5.6-sol", "calls": 1, "costUsd": 0},
+                        "routeUsage": [{"model": "gpt-5.6-sol", "calls": 1, "costUsd": 0}],
+                    }
+                },
+            },
+            {},
+        )
+        self.assertIsNone(row["route"])
+        self.assertEqual(row["routeUsage"], [])
+        self.assertEqual(row["logicalModel"], "gpt-5.6-sol")
+
     def test_execution_enriches_physical_routes_from_litellm_registry(self) -> None:
         catalog = {
             "dep-paid": {
