@@ -257,3 +257,20 @@
 .hao-health-priority-p2 { color: var(--hao-info); border-color: var(--hao-info); background: var(--hao-info-soft); }
 .hao-health-priority-p3 { color: var(--hao-muted); }
 .hao-plan-health-issue { display: flex; align-items: flex-start; gap: 7px; }
+
+/* Fixed plan portfolio cards and explicit actions */
+.hao-plan-card { height: 270px; min-height: 270px; display: flex; flex-direction: column; }
+.hao-plan-card > h3 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; max-height: 5.6em; overflow: hidden; }
+.hao-plan-card .hao-plan-activity { min-height: 28px; }
+.hao-plan-card .hao-plan-health-issue { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; max-height: 3.4em; overflow: hidden; }
+.hao-plan-card-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-top: auto; padding-top: 10px; }
+.hao-plan-card-actions .hao-button { min-height: 28px; padding: 5px 9px; font-size: 9.5px; }
+.hao-plan-continue-button { margin-right: auto; }
+.hao-plan-details-button { white-space: nowrap; }
+@media (max-width: 720px) {
+  .hao-plan-card { height: 285px; min-height: 285px; }
+  .hao-plan-card-actions { flex-wrap: wrap; justify-content: flex-start; }
+  .hao-plan-continue-button { width: 100%; margin-right: 0; }
+}
+.hao-plan-card .hao-plan-meta { max-height: 24px; overflow: hidden; }
+.hao-plan-card .hao-plan-progress { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

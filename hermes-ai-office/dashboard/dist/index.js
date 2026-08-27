@@ -121,6 +121,14 @@
       healthDegraded: "Degraded",
       healthCritical: "Critical",
       filteredTimelineEmpty: "No timeline entries match this filter",
+      details: "View details",
+      continueExternal: "Sync external progress & continue",
+      syncingExternal: "Syncing external progress…",
+      projectStats: "Projects",
+      implementingProjects: "implementing",
+      completedProjects: "completed",
+      blockedProjects: "blocked",
+      criticalProjects: "critical",
     },
     zh: {
       overview: "总览",
@@ -222,11 +230,19 @@
       healthDegraded: "降级",
       healthCritical: "严重",
       filteredTimelineEmpty: "当前过滤条件下没有时间线记录",
+      details: "查看详情",
+      continueExternal: "同步外部进度并继续",
+      syncingExternal: "正在同步外部进度…",
+      projectStats: "项目",
+      implementingProjects: "实施中",
+      completedProjects: "已完成",
+      blockedProjects: "阻塞",
+      criticalProjects: "严重",
     },
   };
 
-  function api(path) {
-    return fetchJSON(API_ROOT + path);
+  function api(path, init) {
+    return fetchJSON(API_ROOT + path, init);
   }
 
   function assertDashboardContract(value) {
@@ -784,8 +800,25 @@
     );
   }
 
+  function portfolioHealthRank(plan) {
+    const priorityRank = { P0: 0, P1: 1, P2: 2, P3: 3 };
+    const statusRank = { BLOCKED: 0, RUNNING: 1, PENDING: 2, ORCHESTRATING: 3, SUCCEEDED: 4, CANCELLED: 5 };
+    const priority = String(((plan.health || {}).topPriority) || "").toUpperCase();
+    const status = String(plan.status || "").toUpperCase();
+    return [priorityRank[priority] == null ? 4 : priorityRank[priority], statusRank[status] == null ? 6 : statusRank[status], -(Number((plan.health || {}).issueCount || 0)), -(Number(plan.updatedAt || 0))];
+  }
+
+  function comparePortfolioHealth(left, right) {
+    const a = portfolioHealthRank(left);
+    const b = portfolioHealthRank(right);
+    for (let index = 0; index < a.length; index += 1) {
+      if (a[index] !== b[index]) return a[index] - b[index];
+    }
+    return String(left.projectKey || "").localeCompare(String(right.projectKey || ""));
+  }
+
   function PlanCards(props) {
-    const rows = props.rows || [];
+    const rows = (props.rows || []).slice().sort(comparePortfolioHealth);
     const t = props.t;
     if (!rows.length) return h("div", { className: "hao-empty" }, props.locale === "zh" ? "暂无项目计划" : "No development plans");
     return h("div", { className: "hao-running-grid" }, rows.map(function (plan) {
@@ -793,6 +826,7 @@
       const activity = plan.currentActivity || {};
       const health = plan.health || {};
       const topIssue = health.topIssue || {};
+      const syncing = Boolean(props.syncingPlanIds && props.syncingPlanIds[plan.planId]);
       const activityTitle = activity.workItemTitle || activity.batchTitle || batch.title || "All batches complete";
       const phase = activity.phase || plan.deliveryStage;
       const meta = [];
@@ -839,10 +873,24 @@
               h("span", null, topIssue.reason || activity.reason || plan.blockedReason)
             )
           : null,
-        plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", {
-          href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer",
-          onClick: function (event) { event.stopPropagation(); }
-        }, "Pull request")) : null,
+        h("div", { className: "hao-plan-card-actions" },
+          plan.status === "BLOCKED" && batch.status === "BLOCKED" ? h("button", {
+            type: "button",
+            className: "hao-button hao-plan-continue-button",
+            disabled: syncing,
+            onClick: function (event) { event.stopPropagation(); props.onContinue(plan); },
+          }, syncing ? t.syncingExternal : t.continueExternal) : null,
+          plan.pullRequestUrl ? h("a", {
+            className: "hao-button hao-button-secondary",
+            href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer",
+            onClick: function (event) { event.stopPropagation(); }
+          }, "PR") : null,
+          h("button", {
+            type: "button",
+            className: "hao-button hao-button-secondary hao-plan-details-button",
+            onClick: function (event) { event.stopPropagation(); openPlan(); },
+          }, t.details)
+        )
       );
     }));
   }
@@ -853,8 +901,8 @@
     const s = data.summary || {};
     const registryData = data.registry || {};
     const deployments = registryData.deployments || {};
-    const readiness = data.readiness || {};
-    const representative = (readiness.gates && readiness.gates.representativeWorkflows) || {};
+    const projectStats = data.planSummary || {};
+    const criticalProjects = (data.plans || []).filter(function (plan) { return String(((plan.health || {}).state) || "").toUpperCase() === "CRITICAL"; }).length;
     const [search, setSearch] = React.useState("");
     const query = search.trim().toLowerCase();
     const history = (data.history || []).filter(function (item) {
@@ -873,12 +921,18 @@
         h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) }),
       ),
       h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t: t, locale: props.locale, now: props.now })),
-      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale, onOpen: props.onOpenPlan })),
+      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale, onOpen: props.onOpenPlan, onContinue: props.onContinuePlan, syncingPlanIds: props.syncingPlanIds })),
       h(
         "div",
         { className: "hao-runtime-strip" },
         h("div", null, h("span", null, t.runtime), h(Badge, { value: ((data.runtime || {}).sourceHealth || {}).openhands || "UNKNOWN" }), h("span", null, "LiteLLM"), h(Badge, { value: ((data.runtime || {}).sourceHealth || {}).litellm || registryData.health || "UNKNOWN" })),
-        h("div", null, h("span", null, t.readiness), h("strong", null, (representative.current || 0) + "/" + (representative.required || 10)), h(Badge, { value: readiness.ready ? "READY" : "NOT_READY" })),
+        h("div", null,
+          h("span", null, t.projectStats),
+          h("strong", null, integer(projectStats.active || 0, props.locale)), h("span", null, t.implementingProjects),
+          h("strong", null, integer(projectStats.succeeded || 0, props.locale)), h("span", null, t.completedProjects),
+          h("strong", null, integer(projectStats.blocked || 0, props.locale)), h("span", null, t.blockedProjects),
+          criticalProjects ? h("span", { className: "hao-health-priority hao-health-priority-p0" }, criticalProjects + " " + t.criticalProjects) : null
+        ),
         h("div", null, h("span", null, t.providers), h("strong", null, integer(deployments.active || 0, props.locale)), h("span", null, t.activeDeployments), h("span", { className: "hao-muted" }, integer(deployments.paused || 0, props.locale) + " " + t.pausedDeployments)),
       ),
       h(Panel, {
@@ -952,6 +1006,7 @@
     const [planDetail, setPlanDetail] = React.useState(null);
     const [detailLoading, setDetailLoading] = React.useState(false);
     const [detailError, setDetailError] = React.useState("");
+    const [syncingPlanIds, setSyncingPlanIds] = React.useState({});
 
     const load = React.useCallback(function () {
       setLoading(true);
@@ -974,12 +1029,52 @@
         .finally(function () { setDetailLoading(false); });
     }
 
+    function syncExternalProgress(plan) {
+      const planId = plan.planId;
+      setSyncingPlanIds(function (current) { return Object.assign({}, current, { [planId]: true }); });
+      return api("/plans/" + encodeURIComponent(plan.planId) + "/sync-and-continue", { method: "POST" })
+        .then(function () {
+          setError("");
+          window.setTimeout(load, 1000);
+          window.setTimeout(load, 5000);
+          window.setTimeout(load, 15000);
+          window.setTimeout(load, 30000);
+          window.setTimeout(function () {
+            setSyncingPlanIds(function (current) {
+              const next = Object.assign({}, current);
+              delete next[planId];
+              return next;
+            });
+          }, 12 * 60 * 1000);
+        })
+        .catch(function (cause) {
+          setError(String(cause));
+          setSyncingPlanIds(function (current) {
+            const next = Object.assign({}, current);
+            delete next[planId];
+            return next;
+          });
+        });
+    }
+
     function closePlan() {
       setDetailPlanId(null);
       setPlanDetail(null);
       setDetailError("");
       setDetailLoading(false);
     }
+
+    React.useEffect(function () {
+      if (!data) return;
+      setSyncingPlanIds(function (current) {
+        const next = Object.assign({}, current);
+        let changed = false;
+        (data.plans || []).forEach(function (plan) {
+          if (next[plan.planId] && plan.status !== "BLOCKED") { delete next[plan.planId]; changed = true; }
+        });
+        return changed ? next : current;
+      });
+    }, [data]);
 
     React.useEffect(function () {
       load();
@@ -1011,7 +1106,7 @@
         ),
       ),
       error ? h("div", { className: "hao-error" }, error) : null,
-      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan }),
+      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan, onContinuePlan: syncExternalProgress, syncingPlanIds: syncingPlanIds }),
       detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t: t, locale: locale, now: now }) : null,
     );
   }

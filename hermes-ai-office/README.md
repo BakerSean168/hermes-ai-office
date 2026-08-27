@@ -45,7 +45,7 @@ only smoke-proven workers are enabled by default.
 
 AI Office exposes two views:
 
-- **Overview** — active tasks, full execution history, start time, live elapsed time, duration, token usage, cost, route, readiness, and runtime health.
+- **Overview** — active tasks, portfolio-sorted fixed-size plan cards, project running/completed/blocked statistics, execution history, usage/cost, provider health, and runtime health.
 - **Analytics** — aggregates by project, logical model, physical model, provider/channel, and phase.
 
 Provider configuration is managed in LiteLLM Admin. AI Office reads the LiteLLM registry and spend logs but never duplicates provider mutation.
@@ -56,6 +56,7 @@ The dashboard keeps the overview payload compact and loads an on-demand plan tim
 The plan detail also exposes a read-only engineering audit projection: failure-to-repair chains, per-batch duration/token/cost/failure/repair totals, and the durable policy evidence explaining every strong-model decision.
 The audit also assigns deterministic P0/P1/P2/P3 priorities and a deterministic 0–100 health score; plan cards expose the current score and highest-priority unresolved issue without loading full history.
 Audit findings and strong-model decisions are directly navigable to their timeline executions. Client-side filters can isolate failures, repairs/retries, strong-model executions, or one batch without issuing new control-plane requests or mutating plan state.
+Blocked plan cards expose an explicit **Sync external progress & continue** action. The Control Plane first discovers descendant repository refs with durable-ticket evidence, then runs a premium read-only `INVESTIGATE_PLAN` audit at the pinned candidate revision. Only model-verified completed work and dependency-valid batches are adopted into the existing durable plan; the candidate becomes the new baseline, and Pixel Agent resumes from the first work item that is still `NOT_VERIFIED`. Commit subjects are discovery hints only and can never mark a ticket complete by themselves.
 
 `contracts/dashboard.schema.json` is the single backend-to-frontend DTO contract for the console. `dashboard/plugin_api.py` produces that shape and `dashboard/dist/index.js` consumes it. Field aliases and compatibility fallbacks are intentionally unsupported: a shape change must update the producer, contract, consumer, and contract tests together.
 

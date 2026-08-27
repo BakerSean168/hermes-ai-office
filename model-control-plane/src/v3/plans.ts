@@ -628,6 +628,129 @@ export class PlanRepository {
     ).map((row) => row.execution_id);
   }
 
+  adoptExternalProgress(
+    planId: string,
+    input: {
+      revision: string;
+      ref: string;
+      blockedBatchKey: string;
+      verifiedWorkItems: Array<{ key: string; evidence: string }>;
+      auditExecutionId: string;
+      analysisSummary: string;
+    },
+  ): { adoptedWorkItems: string[]; adoptedBatches: string[] } {
+    const plan = this.get(planId);
+    if (!plan) throw new Error('PLAN_NOT_FOUND');
+    if (plan.status !== 'BLOCKED') throw new Error('EXTERNAL_PROGRESS_PLAN_NOT_BLOCKED');
+    const batchesBefore = this.batches(planId);
+    const blockedBatch = batchesBefore.find(
+      (batch) => batch.key === input.blockedBatchKey && batch.status === 'BLOCKED',
+    );
+    if (!blockedBatch) throw new Error('EXTERNAL_PROGRESS_BLOCKED_BATCH_MISSING');
+    const itemByKey = new Map<string, WorkItemRecord>();
+    for (const batch of batchesBefore) {
+      for (const item of this.workItems(batch.batchId)) itemByKey.set(item.key, item);
+    }
+    const verified = input.verifiedWorkItems.filter((item) => itemByKey.has(item.key));
+    const verifiedKeys = new Set(verified.map((item) => item.key));
+    const blockedItems = this.workItems(blockedBatch.batchId);
+    if (
+      !blockedItems.every(
+        (item) => item.status === 'SUCCEEDED' || verifiedKeys.has(item.key),
+      )
+    ) {
+      throw new Error('EXTERNAL_PROGRESS_BLOCKED_BATCH_UNVERIFIED');
+    }
+
+    const adoptedWorkItems: string[] = [];
+    const adoptedBatches: string[] = [];
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const item of verified) {
+        const current = itemByKey.get(item.key)!;
+        if (current.status === 'SUCCEEDED') continue;
+        if (current.status === 'CANCELLED') throw new Error('EXTERNAL_PROGRESS_ITEM_CANCELLED');
+        this.#db
+          .prepare(
+            "UPDATE v3_plan_work_items SET status='SUCCEEDED',blocked_reason=NULL,updated_at=? WHERE work_item_id=?",
+          )
+          .run(now, current.workItemId);
+        adoptedWorkItems.push(item.key);
+        this.appendEvent(
+          planId,
+          'EXTERNAL_WORK_ITEM_ADOPTED',
+          {
+            key: item.key,
+            revision: input.revision,
+            ref: input.ref,
+            evidence: item.evidence.slice(0, 2_000),
+          },
+          { batchId: current.batchId, workItemId: current.workItemId, executionId: input.auditExecutionId },
+        );
+      }
+
+      let changed = true;
+      while (changed) {
+        changed = false;
+        const batches = this.batches(planId).sort((left, right) => left.ordinal - right.ordinal);
+        const statusByKey = new Map(batches.map((batch) => [batch.key, batch.status]));
+        for (const batch of batches) {
+          if (batch.status === 'SUCCEEDED' || batch.status === 'CANCELLED') continue;
+          const items = this.workItems(batch.batchId);
+          const itemsComplete = items.length > 0 && items.every((item) => item.status === 'SUCCEEDED');
+          const dependenciesComplete = batch.dependsOn.every(
+            (dependency) => statusByKey.get(dependency) === 'SUCCEEDED',
+          );
+          if (!itemsComplete || !dependenciesComplete) continue;
+          this.#db
+            .prepare(
+              `UPDATE v3_plan_batches
+               SET status='SUCCEEDED',base_revision=COALESCE(base_revision,?),integrated_revision=?,integration_ref=?,blocked_reason=NULL,updated_at=?
+               WHERE batch_id=?`,
+            )
+            .run(plan.currentRevision, input.revision, input.ref, now, batch.batchId);
+          adoptedBatches.push(batch.key);
+          statusByKey.set(batch.key, 'SUCCEEDED');
+          this.appendEvent(
+            planId,
+            'EXTERNAL_BATCH_ADOPTED',
+            { key: batch.key, revision: input.revision, ref: input.ref },
+            { batchId: batch.batchId, executionId: input.auditExecutionId },
+          );
+          changed = true;
+        }
+      }
+      if (!adoptedBatches.includes(blockedBatch.key)) {
+        throw new Error('EXTERNAL_PROGRESS_BLOCKED_BATCH_UNVERIFIED');
+      }
+      this.#db
+        .prepare(
+          "UPDATE v3_plans SET current_revision=?,status='RUNNING',blocked_reason=NULL,updated_at=? WHERE plan_id=?",
+        )
+        .run(input.revision, now, planId);
+      this.appendEvent(
+        planId,
+        'EXTERNAL_PROGRESS_ADOPTED',
+        {
+          revision: input.revision,
+          ref: input.ref,
+          previousRevision: plan.currentRevision,
+          blockedBatchKey: input.blockedBatchKey,
+          adoptedWorkItems,
+          adoptedBatches,
+          analysisSummary: input.analysisSummary.slice(0, 4_000),
+        },
+        { executionId: input.auditExecutionId },
+      );
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+    return { adoptedWorkItems, adoptedBatches };
+  }
+
   setPlanStatus(planId: string, status: PlanStatus, blockedReason?: string): void {
     this.#db
       .prepare('UPDATE v3_plans SET status=?,blocked_reason=?,updated_at=? WHERE plan_id=?')

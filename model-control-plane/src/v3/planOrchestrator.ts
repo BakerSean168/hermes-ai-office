@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
 import {
@@ -36,14 +38,28 @@ function isPostMergeDeliveryRepairItem(item: Pick<WorkItemRecord, 'key'>): boole
   return item.key.startsWith(POST_MERGE_DELIVERY_REPAIR_ITEM_PREFIX);
 }
 
-export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
+export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY' | 'SYNC_EXTERNAL';
 
 interface OrchestrationProposal {
   analysisSummary: string;
   batches: CreatePlanInput['batches'];
 }
 
-function parseOrchestrationProposal(finalText: string): OrchestrationProposal {
+
+interface ExternalProgressAudit {
+  candidateRevision: string;
+  safeToAdopt: boolean;
+  analysisSummary: string;
+  blockedBatch: { key: string; resolved: boolean; evidence: string };
+  workItems: Array<{
+    key: string;
+    status: 'VERIFIED_COMPLETE' | 'NOT_VERIFIED';
+    evidence: string;
+  }>;
+  risks: string[];
+}
+
+function extractJsonObject(finalText: string, missingCode: string): Record<string, unknown> {
   let text = finalText.trim();
   if (text.startsWith('```')) {
     text = text
@@ -53,8 +69,80 @@ function parseOrchestrationProposal(finalText: string): OrchestrationProposal {
   }
   const first = text.indexOf('{');
   const last = text.lastIndexOf('}');
-  if (first < 0 || last <= first) throw new Error('PLAN_ORCHESTRATION_JSON_MISSING');
-  const parsed = JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>;
+  if (first < 0 || last <= first) throw new Error(missingCode);
+  const parsed = JSON.parse(text.slice(first, last + 1)) as unknown;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(missingCode);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function parseExternalProgressAudit(
+  finalText: string,
+  expectedRevision: string,
+  blockedBatchKey: string,
+  allowedWorkItemKeys: Set<string>,
+): ExternalProgressAudit {
+  const parsed = extractJsonObject(finalText, 'EXTERNAL_PROGRESS_AUDIT_JSON_MISSING');
+  const candidateRevision = String(parsed.candidateRevision ?? '').trim();
+  if (candidateRevision !== expectedRevision) {
+    throw new Error('EXTERNAL_PROGRESS_AUDIT_REVISION_MISMATCH');
+  }
+  const analysisSummary = String(parsed.analysisSummary ?? '').trim();
+  if (!analysisSummary) throw new Error('EXTERNAL_PROGRESS_AUDIT_SUMMARY_REQUIRED');
+  const blockedRaw = parsed.blockedBatch;
+  if (!blockedRaw || typeof blockedRaw !== 'object' || Array.isArray(blockedRaw)) {
+    throw new Error('EXTERNAL_PROGRESS_AUDIT_BLOCKED_BATCH_REQUIRED');
+  }
+  const blocked = blockedRaw as Record<string, unknown>;
+  const blockedKey = String(blocked.key ?? '').trim();
+  if (blockedKey !== blockedBatchKey) {
+    throw new Error('EXTERNAL_PROGRESS_AUDIT_BLOCKED_BATCH_MISMATCH');
+  }
+  const workItemsRaw = parsed.workItems;
+  if (!Array.isArray(workItemsRaw)) throw new Error('EXTERNAL_PROGRESS_AUDIT_WORK_ITEMS_REQUIRED');
+  const seen = new Set<string>();
+  const workItems = workItemsRaw.map((raw) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error('EXTERNAL_PROGRESS_AUDIT_WORK_ITEM_INVALID');
+    }
+    const item = raw as Record<string, unknown>;
+    const key = String(item.key ?? '').trim();
+    if (!allowedWorkItemKeys.has(key) || seen.has(key)) {
+      throw new Error('EXTERNAL_PROGRESS_AUDIT_WORK_ITEM_UNKNOWN');
+    }
+    seen.add(key);
+    const status = String(item.status ?? '').trim().toUpperCase();
+    if (!['VERIFIED_COMPLETE', 'NOT_VERIFIED'].includes(status)) {
+      throw new Error('EXTERNAL_PROGRESS_AUDIT_WORK_ITEM_STATUS_INVALID');
+    }
+    return {
+      key,
+      status: status as 'VERIFIED_COMPLETE' | 'NOT_VERIFIED',
+      evidence: String(item.evidence ?? '').trim().slice(0, 2_000),
+    };
+  });
+  if (seen.size !== allowedWorkItemKeys.size) {
+    throw new Error('EXTERNAL_PROGRESS_AUDIT_INCOMPLETE');
+  }
+  return {
+    candidateRevision,
+    safeToAdopt: parsed.safeToAdopt === true,
+    analysisSummary: analysisSummary.slice(0, 12_000),
+    blockedBatch: {
+      key: blockedKey,
+      resolved: blocked.resolved === true,
+      evidence: String(blocked.evidence ?? '').trim().slice(0, 4_000),
+    },
+    workItems,
+    risks: Array.isArray(parsed.risks)
+      ? parsed.risks.map((risk) => String(risk).trim().slice(0, 2_000)).filter(Boolean).slice(0, 24)
+      : [],
+  };
+}
+
+function parseOrchestrationProposal(finalText: string): OrchestrationProposal {
+  const parsed = extractJsonObject(finalText, 'PLAN_ORCHESTRATION_JSON_MISSING');
   const analysisSummary = String(parsed.analysisSummary ?? '').trim();
   if (!analysisSummary) throw new Error('PLAN_ANALYSIS_REQUIRED');
   if (!Array.isArray(parsed.batches) || parsed.batches.length === 0) {
@@ -1265,6 +1353,203 @@ export class DurablePlanOrchestrator {
     }
   }
 
+  async #reconcileExternalProgress(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    blockedBatch: ReturnType<PlanRepository['batches']>[number],
+  ): Promise<boolean> {
+    if (!this.#workspace.discoverExternalProgress) {
+      this.#repository.appendEvent(plan.planId, 'EXTERNAL_PROGRESS_SYNC_UNAVAILABLE', {
+        previousReason: plan.blockedReason,
+      });
+      return false;
+    }
+    const batches = this.#repository.batches(plan.planId);
+    const allItems = batches.flatMap((batch) => this.#repository.workItems(batch.batchId));
+    const candidate = await this.#workspace.discoverExternalProgress({
+      repositoryPath: plan.repositoryPath,
+      currentRevision: plan.currentRevision,
+      workItemKeys: allItems.map((item) => item.key),
+    });
+    if (!candidate) {
+      this.#repository.appendEvent(plan.planId, 'EXTERNAL_PROGRESS_SYNC_NO_CANDIDATE', {
+        previousReason: plan.blockedReason,
+        currentRevision: plan.currentRevision,
+      });
+      return false;
+    }
+
+    const targetItems = batches
+      .filter((batch) => batch.ordinal >= blockedBatch.ordinal && batch.status !== 'CANCELLED')
+      .flatMap((batch) => this.#repository.workItems(batch.batchId))
+      .filter((item) => item.status !== 'CANCELLED');
+    const targetKeys = new Set(targetItems.map((item) => item.key));
+    const targets = targetItems.map((item) => ({
+      key: item.key,
+      title: item.title,
+      status: item.status,
+      objective: item.objective.slice(0, 1_600),
+      acceptanceCriteria: item.acceptanceCriteria,
+    }));
+    const schemaExample = JSON.stringify({
+      candidateRevision: candidate.revision,
+      safeToAdopt: true,
+      analysisSummary: 'Repository-backed assessment of the external continuation.',
+      blockedBatch: {
+        key: blockedBatch.key,
+        resolved: true,
+        evidence: 'Evidence that the previously blocked batch is coherently integrated.',
+      },
+      workItems: targets.map((item) => ({
+        key: item.key,
+        status: 'VERIFIED_COMPLETE',
+        evidence: 'Concrete code/test evidence for this work item.',
+      })),
+      risks: [],
+    });
+    const objective = [
+      'Reconcile externally completed engineering work back into this durable Pixel Agent plan before continuing.',
+      `Durable plan: ${plan.planId}`,
+      `Previous durable revision: ${plan.currentRevision}`,
+      `Mechanically selected descendant ref: ${candidate.ref}`,
+      `Candidate revision: ${candidate.revision}`,
+      `Commits ahead: ${candidate.aheadBy}`,
+      `Previously blocked batch: ${blockedBatch.key} (${plan.blockedReason ?? blockedBatch.blockedReason ?? 'BLOCKED'})`,
+      '',
+      'Mechanically observed commit subjects:',
+      ...candidate.commitSubjects.map((subject) => `- ${subject}`),
+      '',
+      'Work items that must be checked against repository evidence:',
+      JSON.stringify(targets),
+      '',
+      'Rules:',
+      '- Keep the repository read-only. Inspect the candidate revision, active plan docs, diffs, implementation, and focused tests where practical.',
+      '- Commit messages are discovery hints only; never mark a work item complete from its subject alone.',
+      '- VERIFIED_COMPLETE requires concrete repository evidence that the supplied acceptance criteria are satisfied at the candidate revision.',
+      '- blockedBatch.resolved may be true only if the combined candidate resolves the former integration block and preserves the already-reviewed work together.',
+      '- safeToAdopt may be true only if this candidate is a coherent continuation of the durable revision and adopting the whole candidate as the new baseline is safe.',
+      '- If evidence is incomplete, use NOT_VERIFIED. Do not invent completion.',
+      '- Return only one JSON object with camelCase fields exactly matching this shape:',
+      schemaExample,
+    ].join('\n');
+
+    const priorSyncAttempts = this.#repository
+      .events(plan.planId)
+      .filter((event) => {
+        if (event.type !== 'EXTERNAL_PROGRESS_SYNC_STARTED') return false;
+        const detail = event.detail;
+        return (
+          detail !== null &&
+          typeof detail === 'object' &&
+          !Array.isArray(detail) &&
+          String((detail as Record<string, unknown>).candidateRevision ?? '') === candidate.revision
+        );
+      }).length;
+    const auditAttempt = priorSyncAttempts + 1;
+    const commandKey = `${plan.planId}:EXTERNAL_PROGRESS:${candidate.revision}:${auditAttempt}`;
+    let snapshot = await this.#executions.start(
+      {
+        phase: 'INVESTIGATE_PLAN',
+        objective,
+        projectKey: plan.projectKey,
+        repository: { path: plan.repositoryPath, baseRevision: candidate.revision },
+        hints: { risk: 'HIGH', quality: 'PREMIUM', budget: 'NORMAL' },
+        override: { backend: 'openhands-builtin', modelClass: 'gpt-5.6-sol' },
+        await: false,
+      },
+      commandKey,
+    );
+    this.#repository.appendEvent(
+      plan.planId,
+      'EXTERNAL_PROGRESS_SYNC_STARTED',
+      {
+        candidateRevision: candidate.revision,
+        candidateRef: candidate.ref,
+        aheadBy: candidate.aheadBy,
+        matchedWorkItemKeys: candidate.matchedWorkItemKeys,
+        attempt: auditAttempt,
+      },
+      { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+    );
+
+    const deadline = Date.now() + 12 * 60_000;
+    while (!PLAN_TERMINAL_EXECUTION_STATUSES.has(snapshot.status) && Date.now() < deadline) {
+      await sleep(2_000);
+      const refreshed = await this.#executions.get(snapshot.executionId);
+      if (!refreshed) throw new Error('EXTERNAL_PROGRESS_AUDIT_EXECUTION_MISSING');
+      snapshot = refreshed;
+    }
+    if (!PLAN_TERMINAL_EXECUTION_STATUSES.has(snapshot.status)) {
+      this.#repository.appendEvent(
+        plan.planId,
+        'EXTERNAL_PROGRESS_SYNC_FAILED',
+        { reason: 'EXTERNAL_PROGRESS_AUDIT_TIMEOUT', candidateRevision: candidate.revision },
+        { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+      );
+      return true;
+    }
+    if (snapshot.status !== 'SUCCEEDED' || !snapshot.result?.finalText) {
+      this.#repository.appendEvent(
+        plan.planId,
+        'EXTERNAL_PROGRESS_SYNC_FAILED',
+        {
+          reason: snapshot.error?.code ?? `EXTERNAL_PROGRESS_AUDIT_${snapshot.status}`,
+          candidateRevision: candidate.revision,
+        },
+        { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+      );
+      return true;
+    }
+
+    let audit: ExternalProgressAudit;
+    try {
+      audit = parseExternalProgressAudit(
+        snapshot.result.finalText,
+        candidate.revision,
+        blockedBatch.key,
+        targetKeys,
+      );
+    } catch (error) {
+      this.#repository.appendEvent(
+        plan.planId,
+        'EXTERNAL_PROGRESS_SYNC_FAILED',
+        {
+          reason: error instanceof Error ? error.message : String(error),
+          candidateRevision: candidate.revision,
+        },
+        { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+      );
+      return true;
+    }
+    if (!audit.safeToAdopt || !audit.blockedBatch.resolved) {
+      this.#repository.appendEvent(
+        plan.planId,
+        'EXTERNAL_PROGRESS_SYNC_REJECTED',
+        {
+          candidateRevision: candidate.revision,
+          candidateRef: candidate.ref,
+          safeToAdopt: audit.safeToAdopt,
+          blockedBatchResolved: audit.blockedBatch.resolved,
+          blockedBatchEvidence: audit.blockedBatch.evidence,
+          risks: audit.risks,
+        },
+        { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+      );
+      return true;
+    }
+    const verifiedWorkItems = audit.workItems
+      .filter((item) => item.status === 'VERIFIED_COMPLETE')
+      .map((item) => ({ key: item.key, evidence: item.evidence }));
+    this.#repository.adoptExternalProgress(plan.planId, {
+      revision: candidate.revision,
+      ref: candidate.ref,
+      blockedBatchKey: blockedBatch.key,
+      verifiedWorkItems,
+      auditExecutionId: snapshot.executionId,
+      analysisSummary: audit.analysisSummary,
+    });
+    return true;
+  }
+
   async #recoverBlockedPlan(
     planId: string,
     recoveryMode: PlanRecoveryMode = 'AUTO',
@@ -1295,6 +1580,10 @@ export class DurablePlanOrchestrator {
       return;
     }
     if (!batch) return;
+    if (recoveryMode === 'SYNC_EXTERNAL') {
+      const handled = await this.#reconcileExternalProgress(blocked, batch);
+      if (handled) return;
+    }
     const items = this.#repository.workItems(batch.batchId);
     if (items.every((item) => item.status === 'SUCCEEDED')) {
       this.#repository.setPlanStatus(planId, 'RUNNING');

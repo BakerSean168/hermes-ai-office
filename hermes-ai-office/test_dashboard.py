@@ -31,6 +31,12 @@ except ModuleNotFoundError:
                 return fn
             return decorator
 
+        def post(self, path: str):
+            def decorator(fn):
+                self.routes.append(types.SimpleNamespace(path=path, endpoint=fn))
+                return fn
+            return decorator
+
     fastapi_stub.APIRouter = APIRouter
     fastapi_stub.HTTPException = HTTPException
     sys.modules["fastapi"] = fastapi_stub
@@ -46,9 +52,9 @@ spec.loader.exec_module(api)
 
 
 class DashboardTest(unittest.TestCase):
-    def test_dashboard_exposes_only_read_only_v3_routes(self) -> None:
+    def test_dashboard_exposes_read_projections_and_one_explicit_plan_action(self) -> None:
         paths = {route.path for route in api.router.routes}
-        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}"})
+        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}", "/plans/{plan_id}/sync-and-continue"})
         source = API_PATH.read_text(encoding="utf-8")
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
@@ -740,6 +746,18 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(health["topPriority"], "P1")
         self.assertEqual(health["topIssue"]["batchKey"], "batch-1")
 
+    def test_sync_and_continue_proxies_explicit_external_progress_reconciliation(self) -> None:
+        paths = {route.path for route in api.router.routes}
+        self.assertIn("/plans/{plan_id}/sync-and-continue", paths)
+        with mock.patch.object(api, "_post_json", return_value={"accepted": True, "planId": "plan-1"}) as post:
+            result = asyncio.run(api.sync_and_continue("plan-1"))
+        self.assertTrue(result["accepted"])
+        post.assert_called_once_with(
+            "/api/v3/development/plans/plan-1/reconcile",
+            {"mode": "sync_external"},
+            timeout=12.0,
+        )
+
     def test_plan_detail_endpoint_is_read_only_and_fetches_one_plan_on_demand(self) -> None:
         paths = {route.path for route in api.router.routes}
         self.assertIn("/plans/{plan_id}", paths)
@@ -770,6 +788,14 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("decisionReasonLabel", source)
         self.assertIn(".hao-audit-metrics", styles)
         self.assertIn(".hao-audit-attention", styles)
+        self.assertIn('api("/plans/" + encodeURIComponent(plan.planId) + "/sync-and-continue"', source)
+        self.assertIn("syncExternalProgress", source)
+        self.assertIn("hao-plan-card-actions", source)
+        self.assertIn("hao-plan-details-button", source)
+        self.assertIn("projectStats", source)
+        self.assertIn("portfolioHealthRank", source)
+        self.assertNotIn('h("span", null, t.readiness)', source)
+        self.assertIn("height: 270px", styles)
 
     def test_plan_detail_supports_audit_filters_and_direct_timeline_navigation(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
@@ -801,14 +827,14 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.6.0")
+        self.assertEqual(manifest["version"], "1.7.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
         self.assertIn("const fetchJSON = SDK.fetchJSON", source)
-        self.assertIn("return fetchJSON(API_ROOT + path)", source)
+        self.assertIn("return fetchJSON(API_ROOT + path, init)", source)
         self.assertNotIn('fetch(API_ROOT + path, { credentials: "same-origin" })', source)
         self.assertIn('root.getPropertyValue("--background-base")', source)
         self.assertIn('"data-theme-mode": themeMode', source)

@@ -400,3 +400,51 @@ test('repaired batch integration rejects a repair head that drops an approved so
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('external progress discovery selects the descendant ref with the strongest durable-plan ticket evidence', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-external-progress-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  git(source, 'checkout', '-b', 'external-short');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'task\n');
+  git(source, 'commit', '-am', 'feat(task): external progress TASK-1001');
+
+  git(source, 'checkout', '-b', 'external-continuation', base);
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'goal\n');
+  git(source, 'commit', '-am', 'feat(goal): external progress GOAL-2001');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'planner\n');
+  git(source, 'commit', '-am', 'feat(planner): external progress PLAN-3001');
+  const expected = git(source, 'rev-parse', 'HEAD');
+  git(source, 'checkout', 'external-short');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const candidate = await provisioner.discoverExternalProgress?.({
+      repositoryPath: source,
+      currentRevision: base,
+      workItemKeys: ['TASK-1001', 'GOAL-2001', 'PLAN-3001', 'OTHER-9999'],
+    });
+    assert.ok(candidate);
+    assert.equal(candidate.revision, expected);
+    assert.equal(candidate.ref, 'external-continuation');
+    assert.equal(candidate.aheadBy, 2);
+    assert.deepEqual(candidate.matchedWorkItemKeys.sort(), ['GOAL-2001', 'PLAN-3001']);
+    assert.ok(candidate.commitSubjects.some((subject) => subject.includes('PLAN-3001')));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

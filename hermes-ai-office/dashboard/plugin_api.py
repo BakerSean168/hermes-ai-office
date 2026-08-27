@@ -1,8 +1,9 @@
 """AI Office V3 dashboard backend.
 
-This module is deliberately read-only. It projects authoritative V3 execution facts
-and LiteLLM registry/usage facts into one operational dashboard payload. Provider
-mutation belongs to LiteLLM Admin; AI Office owns no parallel provider state.
+This module primarily projects authoritative V3 execution facts and LiteLLM
+registry/usage facts into one operational dashboard payload. Explicit user plan
+actions are proxied to the authoritative V3 Control Plane; provider mutation still
+belongs to LiteLLM Admin and AI Office owns no parallel provider state.
 """
 from __future__ import annotations
 
@@ -41,6 +42,22 @@ def _fetch_json(path: str, *, timeout: float = 12.0) -> Dict[str, Any]:
     if not path.startswith("/api/v3/") and path != "/api/health":
         raise ValueError("dashboard may access only V3 control-plane APIs")
     request = urllib.request.Request(_BASE_URL + path, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        value = json.load(response)
+    if not isinstance(value, dict):
+        raise RuntimeError("control plane returned a non-object payload")
+    return value
+
+
+def _post_json(path: str, payload: Mapping[str, Any], *, timeout: float = 12.0) -> Dict[str, Any]:
+    if not path.startswith("/api/v3/"):
+        raise ValueError("dashboard actions may access only V3 control-plane APIs")
+    request = urllib.request.Request(
+        _BASE_URL + path,
+        data=json.dumps(dict(payload)).encode("utf-8"),
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         value = json.load(response)
     if not isinstance(value, dict):
@@ -667,7 +684,7 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
             }
         )
         summary["total"] += 1
-        if status in {"PENDING", "RUNNING"}:
+        if status in {"ORCHESTRATING", "PENDING", "RUNNING"}:
             summary["active"] += 1
         elif status == "BLOCKED":
             summary["blocked"] += 1
@@ -1056,6 +1073,33 @@ async def health() -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+
+
+@router.post("/plans/{plan_id}/sync-and-continue")
+async def sync_and_continue(plan_id: str) -> Dict[str, Any]:
+    safe_plan_id = urllib.parse.quote(str(plan_id), safe="")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v3/development/plans/{safe_plan_id}/reconcile",
+            {"mode": "sync_external"},
+            timeout=12.0,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(status_code=404, detail="plan not found") from exc
+        if exc.code in {400, 409, 422}:
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+                detail = body.get("error", {}).get("code") if isinstance(body, dict) else None
+            except Exception:
+                detail = None
+            raise HTTPException(status_code=exc.code, detail=detail or str(exc)) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.get("/plans/{plan_id}")

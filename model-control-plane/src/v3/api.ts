@@ -224,7 +224,7 @@ export function registerV3Routes(
       const requestedMode = String(request.body?.mode ?? 'auto')
         .trim()
         .toLowerCase();
-      if (!['auto', 'retry_review', 'retry_delivery'].includes(requestedMode)) {
+      if (!['auto', 'retry_review', 'retry_delivery', 'sync_external'].includes(requestedMode)) {
         reply.code(400);
         return { error: { code: 'PLAN_RECOVERY_MODE_INVALID' } };
       }
@@ -233,7 +233,9 @@ export function registerV3Routes(
           ? 'RETRY_REVIEW'
           : requestedMode === 'retry_delivery'
             ? 'RETRY_DELIVERY'
-            : 'AUTO';
+            : requestedMode === 'sync_external'
+              ? 'SYNC_EXTERNAL'
+              : 'AUTO';
       void service
         .reconcilePlans(request.params.planId, true, recoveryMode)
         .catch((error) => request.log.error(error, 'V3 requested plan reconciliation failed'));

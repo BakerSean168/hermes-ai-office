@@ -1854,3 +1854,192 @@ test('failed post-merge checks launch a premium follow-up repair and require the
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test('sync_external audits descendant work, adopts verified progress, and continues from the new repository baseline', async () => {
+  const host = new PlanHost();
+  let failIntegration = true;
+  const externalWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async discoverExternalProgress() {
+      return {
+        revision: 'external-revision-2',
+        ref: 'core-vnext/external-continuation',
+        aheadBy: 4,
+        matchedWorkItemKeys: ['EXTERNAL-2'],
+        commitSubjects: [
+          'fix(blocker): reconcile blocked integration BLOCKER-1',
+          'feat(external): complete planned ticket EXTERNAL-2',
+        ],
+      };
+    },
+    async integrateBatch(input) {
+      if (failIntegration && input.batchKey === 'batch-1') {
+        failIntegration = false;
+        throw new Error('BATCH_INTEGRATION_FAILED:simulated shared composition conflict');
+      }
+      return {
+        revision: `integrated-${input.batchKey}`,
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: externalWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'external-progress-plan' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Continue a durable plan after external engineering progress.',
+        analysisSummary: 'Three sequential tickets.',
+        repository: { path: '/tmp/memoflow', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Previously blocked integration',
+            workItems: [
+              {
+                key: 'BLOCKER-1',
+                title: 'Blocked ticket',
+                objective: 'Implement blocked ticket.',
+                acceptanceCriteria: ['Blocked behavior is correct.'],
+              },
+            ],
+          },
+          {
+            key: 'batch-2',
+            title: 'Externally completed ticket',
+            dependsOn: ['batch-1'],
+            workItems: [
+              {
+                key: 'EXTERNAL-2',
+                title: 'External ticket',
+                objective: 'Implement external ticket.',
+                acceptanceCriteria: ['External behavior is correct.'],
+              },
+            ],
+          },
+          {
+            key: 'batch-3',
+            title: 'Remaining Pixel Agent work',
+            dependsOn: ['batch-2'],
+            workItems: [
+              {
+                key: 'REMAIN-3',
+                title: 'Remaining ticket',
+                objective: 'Implement remaining ticket.',
+                acceptanceCriteria: ['Remaining behavior is correct.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const implementation = body.batches[0].workItems[0].executions[0];
+    host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const review = body.batches[0].workItems[0].executions[1];
+    host.succeed(review.refs.openhandsConversationId, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'BATCH_INTEGRATION_FAILED');
+
+    const recoveryRequest = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/reconcile`,
+      payload: { mode: 'sync_external' },
+    });
+    assert.equal(recoveryRequest.statusCode, 202);
+    assert.equal(recoveryRequest.json().accepted, true);
+    for (let index = 0; index < 100 && host.lastCreateInput?.phase !== 'INVESTIGATE_PLAN'; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(host.lastCreateInput?.phase, 'INVESTIGATE_PLAN');
+    const auditConversationId = `conversation-${host.creates}`;
+    host.succeed(
+      auditConversationId,
+      JSON.stringify({
+        candidateRevision: 'external-revision-2',
+        safeToAdopt: true,
+        analysisSummary: 'The descendant branch resolves batch-1 and fully implements EXTERNAL-2.',
+        blockedBatch: {
+          key: 'batch-1',
+          resolved: true,
+          evidence: 'Combined code and focused tests resolve the former integration conflict.',
+        },
+        workItems: [
+          {
+            key: 'BLOCKER-1',
+            status: 'VERIFIED_COMPLETE',
+            evidence: 'Previously reviewed implementation remains correct in the combined candidate.',
+          },
+          {
+            key: 'EXTERNAL-2',
+            status: 'VERIFIED_COMPLETE',
+            evidence: 'Candidate code and focused test satisfy acceptance criteria.',
+          },
+          {
+            key: 'REMAIN-3',
+            status: 'NOT_VERIFIED',
+            evidence: 'No repository evidence that the remaining ticket is complete.',
+          },
+        ],
+        risks: [],
+      }),
+    );
+    await runtime.v3.reconcilePlans(planId);
+
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.currentRevision, 'external-revision-2');
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[0].integratedRevision, 'external-revision-2');
+    assert.equal(body.batches[1].status, 'SUCCEEDED');
+    assert.equal(body.batches[1].workItems[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[2].status, 'RUNNING');
+    assert.equal(body.batches[2].baseRevision, 'external-revision-2');
+    assert.equal(body.batches[2].workItems[0].executions[0].phase, 'IMPLEMENT');
+    assert.ok(body.events.some((event: { type: string }) => event.type === 'EXTERNAL_PROGRESS_ADOPTED'));
+    const syncEvent = body.events.find(
+      (event: { type: string }) => event.type === 'EXTERNAL_PROGRESS_SYNC_STARTED',
+    );
+    assert.ok(syncEvent?.executionId);
+    assert.equal(syncEvent.detail?.attempt, 1);
+    const auditExecution = (
+      await runtime.app.inject({
+        method: 'GET',
+        url: `/api/v3/development/executions/${syncEvent.executionId}`,
+      })
+    ).json();
+    assert.equal(auditExecution.phase, 'INVESTIGATE_PLAN');
+    assert.equal(auditExecution.selection.backend, 'openhands-builtin');
+    assert.equal(auditExecution.selection.modelClass, 'gpt-5.6-sol');
+  } finally {
+    await runtime.app.close();
+  }
+});
