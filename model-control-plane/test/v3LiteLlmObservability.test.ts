@@ -350,9 +350,13 @@ test('LiteLLM model registry deduplicates alias projections and never exposes cr
           blocked: false,
           metadata: {
             legacy_provider_key: 'teamorouter-gpt-5-6',
-            commercial_type: 'OTHER',
+            commercial_type: 'SPONSORED',
             protocol: 'openai-chat-completions',
-            supply_origin: 'UNKNOWN',
+            supply_origin: 'COMMUNITY_RELAY',
+            resource_lifecycle: 'PROMOTIONAL',
+            expires_at: '2026-08-27T23:59:59Z',
+            quota_amount: 50,
+            quota_unit: 'USD',
           },
         },
       };
@@ -394,6 +398,12 @@ test('LiteLLM model registry deduplicates alias projections and never exposes cr
     assert.deepEqual(summary.deployments.groups, { 'gpt-5.6-sol': 1 });
     assert.equal(summary.deployments.items[0]?.group, 'gpt-5.6-sol');
     assert.equal(summary.deployments.items[0]?.providerKey, 'teamorouter-gpt-5-6');
+    assert.equal(summary.deployments.items[0]?.commercialType, 'SPONSORED');
+    assert.equal(summary.deployments.items[0]?.supplyOrigin, 'COMMUNITY_RELAY');
+    assert.equal(summary.deployments.items[0]?.resourceLifecycle, 'PROMOTIONAL');
+    assert.equal(summary.deployments.items[0]?.expiresAt, '2026-08-27T23:59:59Z');
+    assert.equal(summary.deployments.items[0]?.quotaAmount, 50);
+    assert.equal(summary.deployments.items[0]?.quotaUnit, 'USD');
     assert.doesNotMatch(JSON.stringify(summary), /must-not-leak|secret\.example/);
 
     const routingIndex = await registry.providerRoutingIndex();

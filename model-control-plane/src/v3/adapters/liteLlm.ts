@@ -208,6 +208,14 @@ export class LiteLlmModelRegistry implements ModelRegistryPort {
               : {}),
             ...(metadata.protocol ? { protocol: String(metadata.protocol) } : {}),
             ...(metadata.supply_origin ? { supplyOrigin: String(metadata.supply_origin) } : {}),
+            ...(metadata.resource_lifecycle
+              ? { resourceLifecycle: String(metadata.resource_lifecycle) }
+              : {}),
+            ...(metadata.expires_at ? { expiresAt: String(metadata.expires_at) } : {}),
+            ...(Number.isFinite(Number(metadata.quota_amount))
+              ? { quotaAmount: Number(metadata.quota_amount) }
+              : {}),
+            ...(metadata.quota_unit ? { quotaUnit: String(metadata.quota_unit) } : {}),
           };
         })
         .sort(

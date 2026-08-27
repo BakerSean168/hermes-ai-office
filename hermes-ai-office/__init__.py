@@ -435,17 +435,47 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
             key = str(raw.get("providerKey") or raw.get("credential") or "unclassified")
             item = grouped.setdefault(
                 key,
-                {"providerKey": key, "active": 0, "paused": 0, "modelGroups": set(), "commercialTypes": set()},
+                {
+                    "providerKey": key,
+                    "active": 0,
+                    "paused": 0,
+                    "modelGroups": set(),
+                    "commercialTypes": set(),
+                    "resourceLifecycles": set(),
+                    "routeOrders": set(),
+                    "resourceLimits": [],
+                },
             )
             item["paused" if raw.get("blocked") is True else "active"] += 1
             if raw.get("group"):
                 item["modelGroups"].add(str(raw["group"]))
             if raw.get("commercialType"):
                 item["commercialTypes"].add(str(raw["commercialType"]))
+            if raw.get("resourceLifecycle"):
+                item["resourceLifecycles"].add(str(raw["resourceLifecycle"]))
+            if isinstance(raw.get("order"), (int, float)):
+                item["routeOrders"].add(int(raw["order"]))
+            if raw.get("expiresAt") or raw.get("quotaAmount") is not None:
+                item["resourceLimits"].append(
+                    {
+                        "modelGroup": raw.get("group"),
+                        "resourceLifecycle": raw.get("resourceLifecycle"),
+                        "expiresAt": raw.get("expiresAt"),
+                        "quotaAmount": raw.get("quotaAmount"),
+                        "quotaUnit": raw.get("quotaUnit"),
+                        "order": raw.get("order"),
+                    }
+                )
         providers = []
         for item in grouped.values():
             item["modelGroups"] = sorted(item["modelGroups"])
             item["commercialTypes"] = sorted(item["commercialTypes"])
+            item["resourceLifecycles"] = sorted(item["resourceLifecycles"])
+            item["routeOrders"] = sorted(item["routeOrders"])
+            item["resourceLimits"] = sorted(
+                item["resourceLimits"],
+                key=lambda value: (str(value.get("expiresAt") or ""), str(value.get("modelGroup") or "")),
+            )
             providers.append(item)
         providers.sort(key=lambda item: item["providerKey"])
         return json.dumps(

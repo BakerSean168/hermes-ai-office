@@ -185,7 +185,12 @@ class PluginTest(unittest.TestCase):
                         "id": "d1",
                         "group": "deepseek-v4-flash",
                         "providerKey": "teamorouter",
-                        "commercialType": "FREE",
+                        "commercialType": "SPONSORED",
+                        "resourceLifecycle": "PROMOTIONAL",
+                        "expiresAt": "2026-08-27T23:59:59Z",
+                        "quotaAmount": 50,
+                        "quotaUnit": "USD",
+                        "order": 10,
                         "blocked": False,
                     },
                     {
@@ -204,6 +209,12 @@ class PluginTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["authority"], "LITELLM")
         self.assertEqual(result["providers"][0]["providerKey"], "opencode-go")
+        promo = next(item for item in result["providers"] if item["providerKey"] == "teamorouter")
+        self.assertEqual(promo["commercialTypes"], ["SPONSORED"])
+        self.assertEqual(promo["resourceLifecycles"], ["PROMOTIONAL"])
+        self.assertEqual(promo["routeOrders"], [10])
+        self.assertEqual(promo["resourceLimits"][0]["quotaAmount"], 50)
+        self.assertEqual(promo["resourceLimits"][0]["quotaUnit"], "USD")
         request.assert_called_once_with("/api/v3/development/model-registry", timeout=5.0)
 
     def test_delegate_plan_is_thin_idempotent_and_returns_orchestrating_plan(self) -> None:

@@ -65,6 +65,10 @@ export interface ModelRegistryDeploymentSummary {
   commercialType?: string;
   protocol?: string;
   supplyOrigin?: string;
+  resourceLifecycle?: string;
+  expiresAt?: string;
+  quotaAmount?: number;
+  quotaUnit?: string;
 }
 
 export interface ModelRegistrySummary {
