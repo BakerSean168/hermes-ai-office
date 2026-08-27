@@ -2,6 +2,7 @@
 
 Date: 2026-08-27
 Status: COMPLETE
+Archived: 2026-08-27
 Baseline: `1ebdb2b` plus the production-required AppArmor profile that was previously untracked.
 
 ## Outcome
