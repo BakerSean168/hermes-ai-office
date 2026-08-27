@@ -14,7 +14,7 @@ Provider and model mutation is performed through LiteLLM Admin. AI Office only r
 
 The versioned operational importer belongs to the infrastructure authority, not this repository: `my-infrastructure/etc/server/oracle2/hermes/provideradmin/hermes-litellm-providerctl.py` is installed on Oracle2 as `/usr/local/sbin/hermes-litellm-providerctl` and is the ProviderAdmin entry point for secure credential/deployment mutation. Keeping the mutator there prevents Pixel Agent from becoming a second provider authority.
 
-The economic deployment order is encoded directly in LiteLLM deployment metadata, so fallback stays inside the gateway rather than in Hermes or AI Office.
+The economic deployment order within one logical model is encoded directly in LiteLLM deployment metadata. Provider failover therefore remains a gateway concern. Separately, the durable review coordinator owns an explicit bounded *review-class* retry ladder (`review-premium -> codex-auto-review -> gpt-5.4`) and records the selected class/backend on each execution. This prevents one exhausted premium provider from blocking a plan while keeping cross-model quality degradation visible and auditable rather than hiding it inside LiteLLM.
 
 ## Admin UI dark theme
 

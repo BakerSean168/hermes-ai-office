@@ -20,7 +20,7 @@ import { HandoffReconciler } from './plan/handoffReconciler.js';
 import { parseOrchestrationProposal } from './plan/protocol.js';
 import { PlanRecoveryCoordinator } from './plan/recoveryCoordinator.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './plan/runtime.js';
-import { WorkItemCoordinator } from './plan/workItemCoordinator.js';
+import { WorkItemCoordinator, type PhaseRetryPolicy, type PlanWorkerPhase } from './plan/workItemCoordinator.js';
 import type {
   DevelopmentExecutionSnapshot,
   ExecutionLinkRecord,
@@ -108,6 +108,7 @@ export class DurablePlanOrchestrator {
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
     governanceStatus?: GitHubGovernanceStatusPort;
     executions: PlanExecutionPort;
+    retryPolicies?: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
@@ -125,6 +126,7 @@ export class DurablePlanOrchestrator {
       executions: this.#executions,
       workspace: this.#workspace,
       pullRequestRepairPublisher: options.pullRequestRepairPublisher,
+      retryPolicies: options.retryPolicies,
     });
     this.#batches = new BatchCoordinator({
       repository: this.#repository,

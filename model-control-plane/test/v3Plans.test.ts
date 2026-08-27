@@ -655,7 +655,8 @@ test('a durable plan survives worker timeout, failed review, integration failure
     ).json();
     const fallbackReview = body.batches[0].workItems[0].executions[3];
     assert.equal(fallbackReview.phase, 'VERIFY_REVIEW');
-    assert.equal(fallbackReview.selection.backend, 'openhands-builtin');
+    assert.equal(fallbackReview.selection.backend, 'claude-code-review-headless');
+    assert.equal(fallbackReview.selection.modelClass, 'review-premium');
 
     host.fail(fallbackReview.refs.openhandsConversationId, {
       code: 'LLMServiceUnavailableError',
@@ -670,6 +671,7 @@ test('a durable plan survives worker timeout, failed review, integration failure
     const failedFallbackReview = body.batches[0].workItems[0].executions[3];
     assert.equal(retriedFallbackReview.phase, 'VERIFY_REVIEW');
     assert.equal(retriedFallbackReview.selection.backend, 'openhands-builtin');
+    assert.equal(retriedFallbackReview.selection.modelClass, 'codex-auto-review');
     assert.equal(failedFallbackReview.error.code, 'LLMServiceUnavailableError');
     assert.equal(failedFallbackReview.error.retryable, true);
 
@@ -1462,7 +1464,7 @@ test('batch Git conflicts schedule a premium LLM integration repair and only int
     const batchReview = batchReviewItem.executions.at(-1);
     assert.equal(batchReview.phase, 'BATCH_VERIFY');
     assert.equal(batchReview.selection.backend, 'codex-review-headless');
-    assert.equal(batchReview.selection.modelClass, 'gpt-5.6-sol');
+    assert.equal(batchReview.selection.modelClass, 'review-premium');
     assert.match(
       batchReviewItem.objective,
       /Integrated candidate revision: integrated-after-repair/,
@@ -1589,7 +1591,7 @@ test('clean multi-item integration is aggregate-reviewed and semantic FAIL sched
     const firstAggregateReview = firstAggregateItem.executions.at(-1);
     assert.equal(firstAggregateReview.phase, 'BATCH_VERIFY');
     assert.equal(firstAggregateReview.selection.backend, 'codex-review-headless');
-    assert.equal(firstAggregateReview.selection.modelClass, 'gpt-5.6-sol');
+    assert.equal(firstAggregateReview.selection.modelClass, 'review-premium');
     host.succeed(
       firstAggregateReview.refs.openhandsConversationId,
       'FAIL\nTask and Goal register competing ownership for the same shared adapter.',
@@ -1838,7 +1840,7 @@ test('failed post-merge checks launch a premium follow-up repair and require the
     const repairReview = body.batches[1].workItems[0].executions.at(-1);
     assert.equal(repairReview.phase, 'VERIFY_REVIEW');
     assert.equal(repairReview.selection.backend, 'codex-review-headless');
-    assert.equal(repairReview.selection.modelClass, 'gpt-5.6-sol');
+    assert.equal(repairReview.selection.modelClass, 'review-premium');
     host.succeed(repairReview.refs.openhandsConversationId, 'PASS\nFollow-up repair verified.');
 
     await runtime.v3.reconcilePlans(planId); // integrate repair
@@ -2382,7 +2384,8 @@ test('normal TASK review keeps legacy INVALID-as-UNKNOWN retry semantics', async
     assert.equal(body.status, 'RUNNING');
     assert.equal(retried.phase, 'VERIFY_REVIEW');
     assert.notEqual(retried.executionId, review.executionId);
-    assert.equal(retried.selection.backend, 'openhands-builtin');
+    assert.equal(retried.selection.backend, 'claude-code-review-headless');
+    assert.equal(retried.selection.modelClass, 'review-premium');
   } finally {
     await runtime.app.close();
   }

@@ -1672,7 +1672,7 @@ test('V3 review snapshot freezes current implementation HEAD and preserves origi
     });
     assert.equal(review.statusCode, 201);
     assert.equal(review.json().selection.backend, 'codex-review-headless');
-    assert.equal(review.json().selection.modelClass, 'gpt-5.6-sol');
+    assert.equal(review.json().selection.modelClass, 'review-premium');
 
     const reviewProvision = provisions.find((item) => item.phaseWorkspace === 'review_snapshot');
     assert.ok(reviewProvision);

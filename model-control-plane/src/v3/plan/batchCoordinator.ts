@@ -334,7 +334,9 @@ export class BatchCoordinator {
           'BATCH_VERIFY',
           undefined,
           attempts + 1,
-          'openhands-builtin',
+          this.#workItems.retryOverride('BATCH_VERIFY', records, {
+            advanceModel: snapshot.error?.retryable === true,
+          }),
         );
         return;
       }
@@ -359,7 +361,7 @@ export class BatchCoordinator {
           'BATCH_VERIFY',
           undefined,
           attempts + 1,
-          'openhands-builtin',
+          this.#workItems.retryOverride('BATCH_VERIFY', records),
         );
         return;
       }

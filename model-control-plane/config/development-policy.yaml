@@ -69,7 +69,10 @@ phases:
       - codex-review-headless
       - claude-code-review-headless
       - openhands-builtin
-    model_class: gpt-5.6-sol
+    model_class: review-premium
+    model_fallbacks:
+      - codex-auto-review
+      - gpt-5.4
     transport_preference:
       - LITELLM_MANAGED
       - PROVIDER_NATIVE
@@ -81,7 +84,10 @@ phases:
       - codex-review-headless
       - claude-code-review-headless
       - openhands-builtin
-    model_class: gpt-5.6-sol
+    model_class: review-premium
+    model_fallbacks:
+      - codex-auto-review
+      - gpt-5.4
     transport_preference:
       - LITELLM_MANAGED
     workspace_mode: read_oriented

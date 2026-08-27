@@ -21,6 +21,16 @@ export type PlanWorkerPhase =
   | 'VERIFY_REVIEW'
   | 'BATCH_VERIFY';
 
+export interface PhaseRetryPolicy {
+  backendCandidates: string[];
+  modelClasses: string[];
+}
+
+export interface WorkerLaunchOverride {
+  backend?: string;
+  modelClass?: string;
+}
+
 export interface ApprovedImplementationEvidence {
   workspaceRef: string;
   sourceRevision: string;
@@ -34,6 +44,7 @@ export class WorkItemCoordinator {
   readonly #executions: PlanExecutionPort;
   readonly #workspace: WorkspaceProvisioningPort;
   readonly #pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+  readonly #retryPolicies: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
 
   constructor(options: {
     repository: PlanRepository;
@@ -41,12 +52,33 @@ export class WorkItemCoordinator {
     executions: PlanExecutionPort;
     workspace: WorkspaceProvisioningPort;
     pullRequestRepairPublisher?: GitHubPullRequestRepairPublisherPort;
+    retryPolicies?: Partial<Record<PlanWorkerPhase, PhaseRetryPolicy>>;
   }) {
     this.#repository = options.repository;
     this.#links = options.links;
     this.#executions = options.executions;
     this.#workspace = options.workspace;
     this.#pullRequestRepairPublisher = options.pullRequestRepairPublisher;
+    this.#retryPolicies = options.retryPolicies ?? {};
+  }
+
+  retryOverride(
+    phase: PlanWorkerPhase,
+    records: ExecutionLinkRecord[],
+    options: { advanceModel?: boolean } = {},
+  ): WorkerLaunchOverride | undefined {
+    const policy = this.#retryPolicies[phase];
+    if (!policy?.backendCandidates.length || !policy.modelClasses.length) return undefined;
+    const latest = [...records].reverse().find((record) => record.phase === phase);
+    const backendIndex = latest ? policy.backendCandidates.indexOf(latest.backend) : -1;
+    const backend = policy.backendCandidates[(backendIndex + 1) % policy.backendCandidates.length];
+    const currentModelIndex = latest ? policy.modelClasses.indexOf(latest.logicalModelClass) : -1;
+    let modelClass = currentModelIndex >= 0 ? policy.modelClasses[currentModelIndex] : policy.modelClasses[0];
+    if (options.advanceModel) {
+      const nextIndex = currentModelIndex >= 0 ? currentModelIndex + 1 : 1;
+      modelClass = policy.modelClasses[Math.min(nextIndex, policy.modelClasses.length - 1)];
+    }
+    return { backend, modelClass };
   }
 
   sourceBackend(plan: PlanRecord, phase: PlanWorkerPhase): string | undefined {
@@ -63,7 +95,7 @@ export class WorkItemCoordinator {
     phase: PlanWorkerPhase,
     previousExecutionId: string | undefined,
     attempt: number,
-    overrideBackend?: string,
+    override?: string | WorkerLaunchOverride,
     replayExisting = false,
   ) {
     const commandKey = `${plan.planId}:${batch.key}:${item.key}:${phase}:${attempt}`;
@@ -71,6 +103,8 @@ export class WorkItemCoordinator {
     const externalReview = external && phase === 'VERIFY_REVIEW';
     const repositoryEntry = phase === 'ADOPT_CHANGE' || phase === 'IMPLEMENT' || phase === 'BATCH_VERIFY';
     const sourceOverride = this.sourceBackend(plan, phase);
+    const launchOverride: WorkerLaunchOverride | undefined =
+      typeof override === 'string' ? { backend: override } : override;
     const snapshot = await this.#executions.start(
       {
         phase,
@@ -107,8 +141,11 @@ export class WorkItemCoordinator {
                 backend: INTEGRATION_REPAIR_BACKEND,
                 modelClass: INTEGRATION_REPAIR_MODEL_CLASS,
               }
-            : overrideBackend || sourceOverride
-              ? { backend: overrideBackend ?? sourceOverride! }
+            : launchOverride || sourceOverride
+              ? {
+                  ...(sourceOverride ? { backend: sourceOverride } : {}),
+                  ...(launchOverride ?? {}),
+                }
               : undefined,
         await: false,
         plan: {
@@ -177,15 +214,19 @@ export class WorkItemCoordinator {
         ? PLAN_LIMITS.retryableTransportAttemptsPerParent
         : PLAN_LIMITS.transportAttemptsPerParent;
       if (sameParentAttempts < attemptLimit) {
+        const phase = latest.phase as PlanWorkerPhase;
+        const retryOverride =
+          phase === 'VERIFY_REVIEW' && plan.source.kind !== 'EXTERNAL_CHANGE'
+            ? this.retryOverride(phase, records, { advanceModel: snapshot.error?.retryable === true })
+            : this.sourceBackend(plan, phase);
         await this.launch(
           plan,
           batch,
           item,
-          latest.phase as PlanWorkerPhase,
+          phase,
           latest.previousExecutionId,
           totalPhaseAttempts + 1,
-          this.sourceBackend(plan, latest.phase as PlanWorkerPhase) ??
-            (latest.phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined),
+          retryOverride,
         );
         return;
       }
@@ -257,6 +298,10 @@ export class WorkItemCoordinator {
       ).length;
       if (sameParentReviews < PLAN_LIMITS.transportAttemptsPerParent) {
         const reviewAttempt = records.filter((record) => record.phase === 'VERIFY_REVIEW').length + 1;
+        const retryOverride =
+          plan.source.kind === 'EXTERNAL_CHANGE'
+            ? this.sourceBackend(plan, 'VERIFY_REVIEW')
+            : this.retryOverride('VERIFY_REVIEW', records);
         await this.launch(
           plan,
           batch,
@@ -264,7 +309,7 @@ export class WorkItemCoordinator {
           'VERIFY_REVIEW',
           latest.previousExecutionId,
           reviewAttempt,
-          this.sourceBackend(plan, 'VERIFY_REVIEW') ?? 'openhands-builtin',
+          retryOverride,
         );
         return;
       }

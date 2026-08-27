@@ -71,17 +71,29 @@ test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
   assert.equal(selected.workspaceMode, 'read_oriented');
 });
 
-test('implementation prefers OpenCode and review prefers headless Codex with GPT-5.6 Sol', () => {
+test('implementation prefers OpenCode and review uses the premium logical review route', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   assert.equal(policy.select('IMPLEMENT', {}, allAvailable).backend, 'opencode-acp');
   assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'opencode-acp');
   const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
   assert.equal(review.backend, 'codex-review-headless');
-  assert.equal(review.modelClass, 'gpt-5.6-sol');
+  assert.equal(review.modelClass, 'review-premium');
   const batchReview = policy.select('BATCH_VERIFY', {}, allAvailable);
   assert.equal(batchReview.backend, 'codex-review-headless');
-  assert.equal(batchReview.modelClass, 'gpt-5.6-sol');
+  assert.equal(batchReview.modelClass, 'review-premium');
   assert.equal(batchReview.workspaceMode, 'read_oriented');
+});
+
+
+
+test('review retry candidates preserve backend order and expose bounded model fallbacks', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  const retry = policy.retryCandidates('VERIFY_REVIEW', {
+    ...allAvailable,
+    'claude-code-review-headless': false,
+  });
+  assert.deepEqual(retry.backendCandidates, ['codex-review-headless', 'openhands-builtin']);
+  assert.deepEqual(retry.modelClasses, ['review-premium', 'codex-auto-review', 'gpt-5.4']);
 });
 
 test('review falls back from headless Codex to Claude Code and then OpenHands', () => {
@@ -95,7 +107,7 @@ test('review falls back from headless Codex to Claude Code and then OpenHands', 
     },
   );
   assert.equal(claude.backend, 'claude-code-review-headless');
-  assert.equal(claude.modelClass, 'gpt-5.6-sol');
+  assert.equal(claude.modelClass, 'review-premium');
 
   const openhands = policy.select(
     'VERIFY_REVIEW',
@@ -107,7 +119,7 @@ test('review falls back from headless Codex to Claude Code and then OpenHands', 
     },
   );
   assert.equal(openhands.backend, 'openhands-builtin');
-  assert.equal(openhands.modelClass, 'gpt-5.6-sol');
+  assert.equal(openhands.modelClass, 'review-premium');
 });
 
 test('development policy falls back through enabled implementation workers to OpenHands', () => {

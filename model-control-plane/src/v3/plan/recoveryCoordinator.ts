@@ -95,7 +95,9 @@ export class PlanRecoveryCoordinator {
         'BATCH_VERIFY',
         undefined,
         attempt,
-        'openhands-builtin',
+        this.#workItems.retryOverride('BATCH_VERIFY', records, {
+          advanceModel: latest.errorRetryable === true,
+        }),
       );
       return;
     }
@@ -139,6 +141,15 @@ export class PlanRecoveryCoordinator {
           },
           { batchId: batch.batchId, workItemId: target.item.workItemId },
         );
+        const latestReview = [...target.records]
+          .reverse()
+          .find((record) => record.phase === 'VERIFY_REVIEW');
+        const recoveryOverride =
+          blocked.source.kind === 'EXTERNAL_CHANGE'
+            ? this.#workItems.sourceBackend(blocked, 'VERIFY_REVIEW')
+            : this.#workItems.retryOverride('VERIFY_REVIEW', target.records, {
+                advanceModel: latestReview?.errorRetryable === true,
+              });
         await this.#workItems.launch(
           blocked,
           batch,
@@ -146,7 +157,7 @@ export class PlanRecoveryCoordinator {
           'VERIFY_REVIEW',
           implementation.executionId,
           attempt,
-          this.#workItems.sourceBackend(blocked, 'VERIFY_REVIEW'),
+          recoveryOverride,
         );
       }
       return;
@@ -181,6 +192,12 @@ export class PlanRecoveryCoordinator {
         { previousReason: item.blockedReason, phase, attempt },
         { batchId: batch.batchId, workItemId: item.workItemId },
       );
+      const retryOverride =
+        phase === 'VERIFY_REVIEW' && blocked.source.kind !== 'EXTERNAL_CHANGE'
+          ? this.#workItems.retryOverride('VERIFY_REVIEW', records, {
+              advanceModel: latest.errorRetryable === true,
+            })
+          : this.#workItems.sourceBackend(blocked, phase);
       await this.#workItems.launch(
         blocked,
         batch,
@@ -188,8 +205,7 @@ export class PlanRecoveryCoordinator {
         phase,
         previousExecutionId,
         attempt,
-        this.#workItems.sourceBackend(blocked, phase) ??
-          (phase === 'VERIFY_REVIEW' ? 'openhands-builtin' : undefined),
+        retryOverride,
       );
     }
   }

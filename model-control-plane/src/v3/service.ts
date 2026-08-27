@@ -181,6 +181,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     this.#workspace = options.workspace;
     this.#gateway = options.gateway;
     this.#observability = options.observability ?? new UnconfiguredObservability();
+    this.#backendAvailability = options.backendAvailability ?? {};
     this.#planOrchestrator = new DurablePlanOrchestrator({
       repository: options.plans,
       links: options.links,
@@ -189,8 +190,11 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       pullRequestRepairPublisher: options.pullRequestRepairPublisher,
       governanceStatus: options.governanceStatus,
       executions: this,
+      retryPolicies: {
+        VERIFY_REVIEW: this.#policy.retryCandidates('VERIFY_REVIEW', this.#backendAvailability),
+        BATCH_VERIFY: this.#policy.retryCandidates('BATCH_VERIFY', this.#backendAvailability),
+      },
     });
-    this.#backendAvailability = options.backendAvailability ?? {};
   }
 
   #requirePreviousImplementation(input: StartDevelopmentExecutionInput): ExecutionLinkRecord {

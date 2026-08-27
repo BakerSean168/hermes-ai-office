@@ -41,9 +41,10 @@ export interface BackendPolicyConfig {
   supports?: BackendSupportsConfig;
 }
 
-interface PhasePolicyConfig {
+export interface PhasePolicyConfig {
   backend_candidates: string[];
   model_class: string;
+  model_fallbacks?: string[];
   transport_preference: TransportMode[];
   workspace_mode: WorkspaceMode;
   session_policy: SessionPolicy;
@@ -113,6 +114,14 @@ function validateConfig(raw: unknown): DevelopmentPolicyConfig {
     }
     if (typeof item.model_class !== 'string' || !item.model_class.trim()) {
       throw new Error(`V3_POLICY_MODEL_CLASS_MISSING:${phase}`);
+    }
+    if (item.model_fallbacks != null) {
+      if (
+        !Array.isArray(item.model_fallbacks) ||
+        item.model_fallbacks.some((value) => typeof value !== 'string' || !value.trim())
+      ) {
+        throw new Error(`V3_POLICY_MODEL_FALLBACKS_INVALID:${phase}`);
+      }
     }
     if (!Array.isArray(item.transport_preference) || item.transport_preference.length === 0) {
       throw new Error(`V3_POLICY_TRANSPORT_MISSING:${phase}`);
@@ -185,6 +194,25 @@ export class DevelopmentPolicy {
 
   backend(name: string): BackendPolicyConfig | undefined {
     return this.config.backends[name];
+  }
+
+  retryCandidates(
+    phase: DevelopmentPhase,
+    availability: Readonly<Record<string, boolean>> = {},
+  ): { backendCandidates: string[]; modelClasses: string[] } {
+    if (!isDevelopmentPhase(phase)) throw new Error('V3_PHASE_INVALID');
+    const phasePolicy = this.config.phases[phase];
+    const backendCandidates = phasePolicy.backend_candidates.filter((name) => {
+      const backend = this.config.backends[name];
+      if (!backend?.enabled) return false;
+      if (availability[name] === false) return false;
+      if (WRITER_PHASES.has(phase) && backend.supports?.write !== true) return false;
+      return true;
+    });
+    return {
+      backendCandidates,
+      modelClasses: [phasePolicy.model_class, ...(phasePolicy.model_fallbacks ?? [])],
+    };
   }
 
   select(
