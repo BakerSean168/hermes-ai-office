@@ -790,6 +790,7 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(".hao-audit-attention", styles)
         self.assertIn('api("/plans/" + encodeURIComponent(plan.planId) + "/sync-and-continue"', source)
         self.assertIn("syncExternalProgress", source)
+        self.assertIn("continueExternalConfirm", source)
         self.assertIn("hao-plan-card-actions", source)
         self.assertIn("hao-plan-details-button", source)
         self.assertIn("projectStats", source)
@@ -827,7 +828,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.7.0")
+        self.assertEqual(manifest["version"], "1.7.1")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

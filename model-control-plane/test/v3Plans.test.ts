@@ -1858,9 +1858,11 @@ test('failed post-merge checks launch a premium follow-up repair and require the
 test('sync_external audits descendant work, adopts verified progress, and continues from the new repository baseline', async () => {
   const host = new PlanHost();
   let failIntegration = true;
+  let discoveryCalls = 0;
   const externalWorkspace: WorkspaceProvisioningPort = {
     ...workspace,
     async discoverExternalProgress() {
+      discoveryCalls += 1;
       return {
         revision: 'external-revision-2',
         ref: 'core-vnext/external-continuation',
@@ -2039,6 +2041,7 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     assert.equal(auditExecution.phase, 'INVESTIGATE_PLAN');
     assert.equal(auditExecution.selection.backend, 'openhands-builtin');
     assert.equal(auditExecution.selection.modelClass, 'gpt-5.6-sol');
+    assert.equal(discoveryCalls, 2, 'candidate must be re-discovered before adoption');
   } finally {
     await runtime.app.close();
   }

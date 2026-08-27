@@ -124,6 +124,7 @@
       details: "View details",
       continueExternal: "Sync external progress & continue",
       syncingExternal: "Syncing external progress…",
+      continueExternalConfirm: "This takes over from the latest committed external progress. Make sure other coding agents have stopped or committed their work. Continue?",
       projectStats: "Projects",
       implementingProjects: "implementing",
       completedProjects: "completed",
@@ -233,6 +234,7 @@
       details: "查看详情",
       continueExternal: "同步外部进度并继续",
       syncingExternal: "正在同步外部进度…",
+      continueExternalConfirm: "将从最新已提交的外部进度接管并继续。请确认其他编码 Agent 已停止写入或已提交当前工作。继续吗？",
       projectStats: "项目",
       implementingProjects: "实施中",
       completedProjects: "已完成",
@@ -1030,6 +1032,7 @@
     }
 
     function syncExternalProgress(plan) {
+      if (window.confirm && !window.confirm(t.continueExternalConfirm)) return Promise.resolve();
       const planId = plan.planId;
       setSyncingPlanIds(function (current) { return Object.assign({}, current, { [planId]: true }); });
       return api("/plans/" + encodeURIComponent(plan.planId) + "/sync-and-continue", { method: "POST" })

@@ -1536,6 +1536,26 @@ export class DurablePlanOrchestrator {
       );
       return true;
     }
+    const currentCandidate = await this.#workspace.discoverExternalProgress({
+      repositoryPath: plan.repositoryPath,
+      currentRevision: plan.currentRevision,
+      workItemKeys: allItems.map((item) => item.key),
+    });
+    if (!currentCandidate || currentCandidate.revision !== candidate.revision) {
+      this.#repository.appendEvent(
+        plan.planId,
+        'EXTERNAL_PROGRESS_CANDIDATE_MOVED',
+        {
+          auditedRevision: candidate.revision,
+          auditedRef: candidate.ref,
+          currentRevision: currentCandidate?.revision ?? null,
+          currentRef: currentCandidate?.ref ?? null,
+          reason: 'EXTERNAL_PROGRESS_CHANGED_DURING_AUDIT',
+        },
+        { batchId: blockedBatch.batchId, executionId: snapshot.executionId },
+      );
+      return true;
+    }
     const verifiedWorkItems = audit.workItems
       .filter((item) => item.status === 'VERIFIED_COMPLETE')
       .map((item) => ({ key: item.key, evidence: item.evidence }));
