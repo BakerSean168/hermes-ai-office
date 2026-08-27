@@ -737,6 +737,22 @@ class DashboardTest(unittest.TestCase):
         self.assertIn(".hao-audit-metrics", styles)
         self.assertIn(".hao-audit-attention", styles)
 
+    def test_plan_detail_supports_audit_filters_and_direct_timeline_navigation(self) -> None:
+        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("function AuditFilters", source)
+        self.assertIn("function jumpToTimelineTarget", source)
+        self.assertIn('setAuditFilter("failures")', source)
+        self.assertIn('setAuditFilter("repairs")', source)
+        self.assertIn('setAuditFilter("strong")', source)
+        self.assertIn('className: "hao-audit-filter"', source)
+        self.assertIn('data-execution-id', source)
+        self.assertIn('data-batch-key', source)
+        self.assertIn("scrollIntoView", source)
+        self.assertIn(".hao-audit-finding-button", styles)
+        self.assertIn(".hao-audit-filters", styles)
+        self.assertIn(".hao-timeline-step.is-target", styles)
+
     def test_frontend_is_two_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('setView("overview")', source)
@@ -748,7 +764,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.4.0")
+        self.assertEqual(manifest["version"], "1.5.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

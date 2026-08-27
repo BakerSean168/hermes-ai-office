@@ -104,6 +104,17 @@
       decisionIndependentReview: "Independent premium review",
       decisionFailedVerificationRepair: "Premium repair after failed verification",
       decisionStrongModelPolicy: "Strong-model policy decision",
+      auditFilterAll: "All",
+      auditFilterFailures: "Failures",
+      auditFilterRepairs: "Repairs",
+      auditFilterStrong: "Strong model",
+      auditFilterBatch: "Batch",
+      auditFilterAllBatches: "All batches",
+      jumpFailure: "Open failure",
+      jumpRepair: "Open repair",
+      jumpExecution: "Open execution",
+      jumpBatch: "Open batch",
+      filteredTimelineEmpty: "No timeline entries match this filter",
     },
     zh: {
       overview: "总览",
@@ -188,6 +199,17 @@
       decisionIndependentReview: "独立高质量审查",
       decisionFailedVerificationRepair: "审查失败后的高质量修复",
       decisionStrongModelPolicy: "强模型策略决策",
+      auditFilterAll: "全部",
+      auditFilterFailures: "失败",
+      auditFilterRepairs: "修复",
+      auditFilterStrong: "强模型",
+      auditFilterBatch: "批次",
+      auditFilterAllBatches: "全部批次",
+      jumpFailure: "定位失败",
+      jumpRepair: "定位修复",
+      jumpExecution: "定位执行",
+      jumpBatch: "定位批次",
+      filteredTimelineEmpty: "当前过滤条件下没有时间线记录",
     },
   };
 
@@ -450,6 +472,76 @@
     return labels[reason] || String(reason || "").replace(/_/g, " ");
   }
 
+  function isFailureExecution(item) {
+    const status = String((item && item.status) || "").toUpperCase();
+    return status === "FAILED" || status === "STUCK" || status === "CANCELLED" || String((item && item.verdict) || "").toUpperCase() === "FAIL" || Boolean(item && item.errorCode);
+  }
+
+  function isRepairExecution(item, repairIds) {
+    if (!item) return false;
+    if (repairIds && repairIds.has(item.executionId)) return true;
+    if (String(item.phase || "").toUpperCase() === "IMPLEMENT_FIX") return true;
+    return ["FAILED_VERIFICATION_REPAIR", "INTEGRATION_REPAIR", "POST_MERGE_RECOVERY", "DELIVERY_REPAIR"].includes(String(item.decisionReason || "").toUpperCase());
+  }
+
+  function executionMatchesAuditFilter(item, filter, repairIds) {
+    if (filter === "failures") return isFailureExecution(item);
+    if (filter === "repairs") return isRepairExecution(item, repairIds);
+    if (filter === "strong") return Boolean(item && item.strongModel);
+    return true;
+  }
+
+  function jumpToTimelineTarget(executionId, batchKey, controls) {
+    if (!controls) return;
+    controls.setAuditFilter("all");
+    if (batchKey) controls.setBatchFilter(batchKey);
+    controls.setTargetExecutionId(executionId || null);
+    window.setTimeout(function () {
+      const target = executionId
+        ? document.getElementById("hao-exec-" + executionId)
+        : batchKey ? document.getElementById("hao-batch-" + batchKey) : null;
+      if (!target) return;
+      const batch = target.closest ? target.closest("details") : null;
+      if (batch) batch.open = true;
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (executionId) {
+        window.setTimeout(function () { controls.setTargetExecutionId(null); }, 1800);
+      }
+    }, 80);
+  }
+
+  function AuditFilters(props) {
+    const filters = [
+      ["all", props.t.auditFilterAll],
+      ["failures", props.t.auditFilterFailures],
+      ["repairs", props.t.auditFilterRepairs],
+      ["strong", props.t.auditFilterStrong],
+    ];
+    return h("section", { className: "hao-audit-filters" },
+      h("div", { className: "hao-audit-filter-group" }, filters.map(function (item) {
+        return h("button", {
+          type: "button",
+          className: "hao-audit-filter" + (props.auditFilter === item[0] ? " is-active" : ""),
+          key: item[0],
+          onClick: function () {
+            if (item[0] === "failures") props.setAuditFilter("failures");
+            else if (item[0] === "repairs") props.setAuditFilter("repairs");
+            else if (item[0] === "strong") props.setAuditFilter("strong");
+            else props.setAuditFilter("all");
+            props.setTargetExecutionId(null);
+          },
+        }, item[1]);
+      })),
+      h("label", { className: "hao-audit-batch-filter" },
+        h("span", null, props.t.auditFilterBatch),
+        h("select", { value: props.batchFilter, onChange: function (event) { props.setBatchFilter(event.target.value); props.setTargetExecutionId(null); } },
+          h("option", { value: "all" }, props.t.auditFilterAllBatches),
+          (props.batches || []).map(function (batch) { return h("option", { value: batch.key, key: batch.key }, batch.key + " · " + batch.title); })
+        )
+      )
+    );
+  }
+
   function AuditOverview(props) {
     const summary = (props.audit && props.audit.summary) || {};
     const metrics = [
@@ -483,6 +575,11 @@
             h("div", { className: "hao-audit-finding-head" }, h("strong", null, label), h(Badge, { value: item.resolved ? "SUCCEEDED" : "BLOCKED" })),
             h("div", { className: "hao-audit-path" }, [item.batchKey, item.workItemKey, item.sourcePhase].filter(Boolean).join(" · ")),
             item.reason ? h("div", { className: "hao-plan-reason" }, item.reason) : null,
+            h("div", { className: "hao-audit-jumps" },
+              item.sourceExecutionId ? h("button", { type: "button", className: "hao-audit-finding-button", onClick: function () { props.onJump(item.sourceExecutionId, item.batchKey); } }, props.t.jumpFailure) : null,
+              item.repairExecutionId ? h("button", { type: "button", className: "hao-audit-finding-button", onClick: function () { props.onJump(item.repairExecutionId, item.batchKey); } }, props.t.jumpRepair) : null,
+              !item.sourceExecutionId && item.batchKey ? h("button", { type: "button", className: "hao-audit-finding-button", onClick: function () { props.onJump(null, item.batchKey); } }, props.t.jumpBatch) : null
+            ),
             item.repairExecutionId ? h("div", { className: "hao-audit-link" }, shortRevision(item.sourceExecutionId) + " → " + shortRevision(item.repairExecutionId)) : null
           );
         }))
@@ -493,7 +590,8 @@
           return h("article", { className: "hao-audit-decision", key: item.executionId },
             h("div", { className: "hao-audit-finding-head" }, h("strong", null, decisionReasonLabel(item.reason, props.t)), h("span", { className: "hao-plan-chip" }, item.model || "—")),
             h("div", { className: "hao-audit-path" }, [item.batchKey, item.workItemKey, item.phase, item.backend].filter(Boolean).join(" · ")),
-            (item.policyReasons || []).length ? h("div", { className: "hao-plan-meta" }, item.policyReasons.map(function (reason) { return h("span", { className: "hao-plan-chip", key: reason }, reason); })) : null
+            (item.policyReasons || []).length ? h("div", { className: "hao-plan-meta" }, item.policyReasons.map(function (reason) { return h("span", { className: "hao-plan-chip", key: reason }, reason); })) : null,
+            h("div", { className: "hao-audit-jumps" }, h("button", { type: "button", className: "hao-audit-finding-button", onClick: function () { props.onJump(item.executionId, item.batchKey); } }, props.t.jumpExecution))
           );
         }))
       ) : null
@@ -509,7 +607,12 @@
     chips.push(duration(runningElapsed(item, props.now)));
     chips.push(compact(item.totalTokens || 0, props.locale) + " tok");
     chips.push(money(item.costUsd));
-    return h("div", { className: "hao-timeline-step" },
+    return h("div", {
+      id: "hao-exec-" + item.executionId,
+      className: "hao-timeline-step" + (props.targetExecutionId === item.executionId ? " is-target" : ""),
+      "data-execution-id": item.executionId,
+      "data-batch-key": props.batchKey || "",
+    },
       h("div", { className: "hao-timeline-step-head" },
         h("span", { className: "hao-phase" }, item.phase || "EXECUTION"),
         h(Badge, { value: item.status }),
@@ -549,6 +652,9 @@
   function PlanDetail(props) {
     const detail = props.detail;
     const t = props.t;
+    const [auditFilter, setAuditFilter] = React.useState("all");
+    const [batchFilter, setBatchFilter] = React.useState("all");
+    const [targetExecutionId, setTargetExecutionId] = React.useState(null);
     if (props.loading) {
       return h("div", { className: "hao-plan-detail-backdrop", onClick: props.onClose },
         h("section", { className: "hao-plan-detail", onClick: function (event) { event.stopPropagation(); } },
@@ -557,6 +663,21 @@
       );
     }
     const plan = detail && detail.plan;
+    const audit = (detail && detail.audit) || {};
+    const repairIds = new Set((audit.attention || []).map(function (item) { return item.repairExecutionId; }).filter(Boolean));
+    const controls = { setAuditFilter: setAuditFilter, setBatchFilter: setBatchFilter, setTargetExecutionId: setTargetExecutionId };
+    function onJump(executionId, batchKey) { jumpToTimelineTarget(executionId, batchKey, controls); }
+    const visibleBatches = !detail ? [] : (detail.batches || []).map(function (batch) {
+      if (batchFilter !== "all" && batch.key !== batchFilter) return null;
+      const controlFailure = (audit.attention || []).some(function (item) { return item.kind === "CONTROL_PLANE_FAILURE" && item.batchKey === batch.key && !item.resolved; });
+      const workItems = (batch.workItems || []).map(function (work) {
+        const executions = (work.executions || []).filter(function (execution) { return executionMatchesAuditFilter(execution, auditFilter, repairIds); });
+        if (auditFilter !== "all" && !executions.length) return null;
+        return Object.assign({}, work, { executions: executions });
+      }).filter(Boolean);
+      if (auditFilter !== "all" && !workItems.length && !(auditFilter === "failures" && controlFailure)) return null;
+      return Object.assign({}, batch, { workItems: workItems, showEvents: auditFilter === "all" || (auditFilter === "failures" && controlFailure) });
+    }).filter(Boolean);
     return h("div", { className: "hao-plan-detail-backdrop", onClick: props.onClose },
       h("section", { className: "hao-plan-detail", role: "dialog", "aria-modal": "true", onClick: function (event) { event.stopPropagation(); } },
         h("header", { className: "hao-plan-detail-head" },
@@ -569,17 +690,18 @@
         ),
         props.error ? h("div", { className: "hao-error" }, props.error) : null,
         detail ? h("div", { className: "hao-plan-detail-body" },
-          h(AuditOverview, { audit: detail.audit, t: t, locale: props.locale }),
-          h(AuditAttention, { audit: detail.audit, t: t, locale: props.locale }),
-          (detail.batches || []).length
-            ? h("div", { className: "hao-timeline" }, (detail.batches || []).map(function (batch) {
-                const isOpen = batch.status === "RUNNING" || batch.status === "BLOCKED";
-                const batchAudit = ((((detail.audit || {}).batches) || []).find(function (item) { return item.key === batch.key; })) || {};
+          h(AuditOverview, { audit: audit, t: t, locale: props.locale }),
+          h(AuditAttention, { audit: audit, t: t, locale: props.locale, onJump: onJump }),
+          h(AuditFilters, { auditFilter: auditFilter, setAuditFilter: setAuditFilter, batchFilter: batchFilter, setBatchFilter: setBatchFilter, setTargetExecutionId: setTargetExecutionId, batches: detail.batches || [], t: t }),
+          visibleBatches.length
+            ? h("div", { className: "hao-timeline" }, visibleBatches.map(function (batch) {
+                const isOpen = batch.status === "RUNNING" || batch.status === "BLOCKED" || batchFilter !== "all" || Boolean(targetExecutionId);
+                const batchAudit = ((audit.batches || []).find(function (item) { return item.key === batch.key; })) || {};
                 const auditChips = [duration(batchAudit.durationMs || 0), compact(batchAudit.totalTokens || 0, props.locale) + " tok", money(batchAudit.costUsd || 0)];
                 if (batchAudit.failures) auditChips.push(batchAudit.failures + " " + t.failures);
                 if (batchAudit.repairs) auditChips.push(batchAudit.repairs + " " + t.repairs);
                 if (batchAudit.strongModelExecutions) auditChips.push(batchAudit.strongModelExecutions + " " + t.strongModelUses);
-                return h("details", { className: "hao-timeline-batch", key: batch.key, open: isOpen },
+                return h("details", { id: "hao-batch-" + batch.key, className: "hao-timeline-batch", key: batch.key, open: isOpen, "data-batch-key": batch.key },
                   h("summary", null,
                     h("div", { className: "hao-timeline-batch-summary" },
                       h(Badge, { value: batch.status }),
@@ -602,13 +724,13 @@
                         ),
                         (work.executions || []).length
                           ? h("div", { className: "hao-timeline-executions" }, (work.executions || []).map(function (execution) {
-                              return h(TimelineExecution, { key: execution.executionId, execution: execution, t: t, locale: props.locale, now: props.now });
+                              return h(TimelineExecution, { key: execution.executionId, execution: execution, t: t, locale: props.locale, now: props.now, targetExecutionId: targetExecutionId, batchKey: batch.key });
                             }))
                           : h("div", { className: "hao-muted hao-timeline-none" }, t.noTimeline),
                         work.blockedReason ? h("div", { className: "hao-plan-reason" }, work.blockedReason) : null
                       );
                     }),
-                    (batch.events || []).length
+                    batch.showEvents && (batch.events || []).length
                       ? h("div", { className: "hao-timeline-events" }, (batch.events || []).map(function (event, index) {
                           return h(TimelineEvent, { key: event.type + index, event: event, t: t, locale: props.locale });
                         }))
@@ -617,8 +739,8 @@
                   )
                 );
               }))
-            : h("div", { className: "hao-empty" }, t.noTimeline),
-          (detail.deliveryEvents || []).length
+            : h("div", { className: "hao-empty" }, t.filteredTimelineEmpty),
+          auditFilter === "all" && batchFilter === "all" && (detail.deliveryEvents || []).length
             ? h("section", { className: "hao-timeline-delivery" },
                 h("h3", null, t.deliveryTimeline),
                 (detail.deliveryEvents || []).map(function (event, index) {

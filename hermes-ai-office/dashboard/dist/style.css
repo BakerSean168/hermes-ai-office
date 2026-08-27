@@ -224,3 +224,21 @@
   .hao-audit-grid { grid-template-columns: 1fr; }
   .hao-audit-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Audit quick navigation and filters */
+.hao-audit-filters { position: sticky; z-index: 4; top: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; padding: 8px 10px; border: 1px solid var(--hao-border); border-radius: 9px; background: color-mix(in srgb, var(--hao-bg) 92%, transparent); backdrop-filter: blur(8px); }
+.hao-audit-filter-group { display: flex; flex-wrap: wrap; gap: 4px; }
+.hao-audit-filter { min-height: 28px; padding: 4px 9px; border: 1px solid var(--hao-border); border-radius: 999px; background: var(--hao-surface); color: var(--hao-muted); font: inherit; font-size: 9.5px; cursor: pointer; }
+.hao-audit-filter:hover, .hao-audit-filter.is-active { border-color: var(--hao-accent); color: var(--hao-text); background: var(--hao-accent-soft); }
+.hao-audit-batch-filter { display: flex; align-items: center; gap: 6px; color: var(--hao-muted); font-size: 9.5px; }
+.hao-audit-batch-filter select { max-width: 260px; min-height: 28px; padding: 3px 26px 3px 8px; border: 1px solid var(--hao-border); border-radius: 7px; background: var(--hao-surface); color: var(--hao-text); font: inherit; font-size: 9.5px; }
+.hao-audit-jumps { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.hao-audit-finding-button { padding: 4px 7px; border: 1px solid var(--hao-border); border-radius: 6px; background: var(--hao-surface); color: var(--hao-info); font: inherit; font-size: 9px; cursor: pointer; }
+.hao-audit-finding-button:hover { border-color: var(--hao-info); background: var(--hao-info-soft); }
+.hao-timeline-step.is-target { border-color: var(--hao-accent); box-shadow: 0 0 0 2px var(--hao-accent-soft); animation: hao-target-pulse .8s ease-out 2; }
+@keyframes hao-target-pulse { 0% { box-shadow: 0 0 0 0 var(--hao-accent-soft); } 100% { box-shadow: 0 0 0 8px transparent; } }
+@media (max-width: 720px) {
+  .hao-audit-filters { position: static; align-items: stretch; flex-direction: column; }
+  .hao-audit-batch-filter { justify-content: space-between; }
+  .hao-audit-batch-filter select { max-width: 70%; }
+}
