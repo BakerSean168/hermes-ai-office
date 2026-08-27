@@ -242,3 +242,18 @@
   .hao-audit-batch-filter { justify-content: space-between; }
   .hao-audit-batch-filter select { max-width: 70%; }
 }
+
+/* Deterministic engineering health */
+.hao-running-top-left, .hao-audit-finding-status { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.hao-health { display: inline-flex; align-items: center; gap: 5px; min-height: 22px; padding: 3px 7px; border: 1px solid var(--hao-border); border-radius: 999px; background: var(--hao-surface-2); color: var(--hao-muted); font-size: 9px; white-space: nowrap; }
+.hao-health strong { color: var(--hao-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; }
+.hao-health-healthy { border-color: var(--hao-good); background: var(--hao-good-soft); }
+.hao-health-watch { border-color: var(--hao-info); background: var(--hao-info-soft); }
+.hao-health-degraded { border-color: var(--hao-warn); background: var(--hao-warn-soft); }
+.hao-health-critical { border-color: var(--hao-bad); background: var(--hao-bad-soft); }
+.hao-health-priority { display: inline-flex; align-items: center; min-height: 17px; padding: 1px 5px; border: 1px solid var(--hao-border); border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 8.5px; font-weight: 800; }
+.hao-health-priority-p0 { color: var(--hao-bad); border-color: var(--hao-bad); background: var(--hao-bad-soft); }
+.hao-health-priority-p1 { color: var(--hao-warn); border-color: var(--hao-warn); background: var(--hao-warn-soft); }
+.hao-health-priority-p2 { color: var(--hao-info); border-color: var(--hao-info); background: var(--hao-info-soft); }
+.hao-health-priority-p3 { color: var(--hao-muted); }
+.hao-plan-health-issue { display: flex; align-items: flex-start; gap: 7px; }

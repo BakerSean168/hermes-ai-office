@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 7
+      "const": 8
     },
     "generatedAt": {
       "type": "string",
@@ -605,7 +605,7 @@
     "Plan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "systemBatches", "workItems", "systemWorkItems", "currentBatch", "currentActivity"],
+      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "systemBatches", "workItems", "systemWorkItems", "currentBatch", "currentActivity", "health"],
       "properties": {
         "planId": {"type": "string", "minLength": 1},
         "projectKey": {"type": "string", "minLength": 1},
@@ -639,7 +639,39 @@
             }
           ]
         },
-        "currentActivity": {"$ref": "#/$defs/PlanActivity"}
+        "currentActivity": {"$ref": "#/$defs/PlanActivity"},
+        "health": {"$ref": "#/$defs/PlanHealth"}
+      }
+    },
+    "PlanHealthIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["priority", "kind", "reason", "batchKey", "workItemKey", "sourceExecutionId", "sourcePhase"],
+      "properties": {
+        "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+        "kind": {"type": "string"},
+        "reason": {"type": ["string", "null"]},
+        "batchKey": {"type": ["string", "null"]},
+        "workItemKey": {"type": ["string", "null"]},
+        "sourceExecutionId": {"type": ["string", "null"]},
+        "sourcePhase": {"type": ["string", "null"]}
+      }
+    },
+    "PlanHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "state", "topPriority", "issueCount", "topIssue"],
+      "properties": {
+        "score": {"type": "integer", "minimum": 0, "maximum": 100},
+        "state": {"type": "string", "enum": ["HEALTHY", "WATCH", "DEGRADED", "CRITICAL"]},
+        "topPriority": {"type": ["string", "null"], "enum": ["P0", "P1", "P2", "P3", null]},
+        "issueCount": {"type": "integer", "minimum": 0},
+        "topIssue": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/PlanHealthIssue"}
+          ]
+        }
       }
     },
     "PlanActivity": {
@@ -769,7 +801,7 @@
     "PlanAuditAttention": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "batchKey", "workItemKey", "sourceExecutionId", "sourcePhase", "reason", "repairExecutionId", "resolved"],
+      "required": ["kind", "batchKey", "workItemKey", "sourceExecutionId", "sourcePhase", "reason", "repairExecutionId", "resolved", "priority"],
       "properties": {
         "kind": {"type": "string", "enum": ["FAILURE_REPAIR", "CONTROL_PLANE_FAILURE"]},
         "batchKey": {"type": "string"},
@@ -778,7 +810,8 @@
         "sourcePhase": {"type": ["string", "null"]},
         "reason": {"type": ["string", "null"]},
         "repairExecutionId": {"type": ["string", "null"]},
-        "resolved": {"type": "boolean"}
+        "resolved": {"type": "boolean"},
+        "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]}
       }
     },
     "PlanStrongModelDecision": {
@@ -802,12 +835,13 @@
     "PlanAudit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["summary", "batches", "attention", "strongModelDecisions"],
+      "required": ["summary", "batches", "attention", "strongModelDecisions", "health"],
       "properties": {
         "summary": {"$ref": "#/$defs/PlanAuditMetrics"},
         "batches": {"type": "array", "items": {"$ref": "#/$defs/PlanAuditBatch"}},
         "attention": {"type": "array", "items": {"$ref": "#/$defs/PlanAuditAttention"}},
-        "strongModelDecisions": {"type": "array", "items": {"$ref": "#/$defs/PlanStrongModelDecision"}}
+        "strongModelDecisions": {"type": "array", "items": {"$ref": "#/$defs/PlanStrongModelDecision"}},
+        "health": {"$ref": "#/$defs/PlanHealth"}
       }
     },
     "PlanDetailResponse": {
@@ -815,7 +849,7 @@
       "additionalProperties": false,
       "required": ["schemaVersion", "generatedAt", "plan", "batches", "deliveryEvents", "audit"],
       "properties": {
-        "schemaVersion": {"const": 7},
+        "schemaVersion": {"const": 8},
         "generatedAt": {"type": "string", "format": "date-time"},
         "plan": {"$ref": "#/$defs/Plan"},
         "batches": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineBatch"}},

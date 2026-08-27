@@ -495,6 +495,121 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
     }
 
 
+_HEALTH_PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+_HEALTH_PRIORITY_PENALTY = {"P0": 60, "P1": 35, "P2": 15, "P3": 5}
+
+
+def _issue_priority(issue: Mapping[str, Any]) -> str:
+    reason = str(issue.get("reason") or "").upper()
+    phase = str(issue.get("sourcePhase") or "").upper()
+    kind = str(issue.get("kind") or "").upper()
+    if reason == "DELIVERY_POST_MERGE_CHECKS_FAILED" or (
+        "POST_MERGE" in phase and "FAILED" in reason
+    ):
+        return "P0"
+    if (
+        "LIMIT_EXCEEDED" in reason
+        or reason in {
+            "BATCH_INTEGRATION_FAILED",
+            "BATCH_AGGREGATE_REVIEW_FAILED",
+            "BATCH_VERIFY_VERDICT_UNKNOWN",
+            "REVIEW_VERDICT_UNKNOWN",
+            "PLAN_ORCHESTRATION_FAILED",
+            "PLAN_ORCHESTRATION_INVALID",
+            "DELIVERY_ADAPTER_UNCONFIGURED",
+        }
+        or kind == "CONTROL_PLANE_FAILURE"
+    ):
+        return "P1"
+    if (
+        reason == "FAIL"
+        or reason.endswith("CHECKS_FAILED")
+        or phase in {"VERIFY_REVIEW", "IMPLEMENT", "IMPLEMENT_FIX", "BATCH_VERIFY"}
+    ):
+        return "P2"
+    return "P3"
+
+
+def _health_state(score: int) -> str:
+    if score >= 100:
+        return "HEALTHY"
+    if score >= 85:
+        return "WATCH"
+    if score >= 60:
+        return "DEGRADED"
+    return "CRITICAL"
+
+
+def _health_from_attention(attention: list[Mapping[str, Any]]) -> Dict[str, Any]:
+    open_items = []
+    for item in attention:
+        if item.get("resolved"):
+            continue
+        priority = str(item.get("priority") or _issue_priority(item))
+        open_items.append((priority, item))
+    open_items.sort(key=lambda pair: _HEALTH_PRIORITY_ORDER.get(pair[0], 99))
+    score = max(
+        0,
+        100 - sum(_HEALTH_PRIORITY_PENALTY.get(priority, 0) for priority, _item in open_items),
+    )
+    top_issue = None
+    top_priority = None
+    if open_items:
+        top_priority, item = open_items[0]
+        top_issue = {
+            "priority": top_priority,
+            "kind": str(item.get("kind") or ""),
+            "reason": str(item.get("reason") or "") or None,
+            "batchKey": str(item.get("batchKey") or "") or None,
+            "workItemKey": str(item.get("workItemKey") or "") or None,
+            "sourceExecutionId": str(item.get("sourceExecutionId") or "") or None,
+            "sourcePhase": str(item.get("sourcePhase") or "") or None,
+        }
+    return {
+        "score": score,
+        "state": _health_state(score),
+        "topPriority": top_priority,
+        "issueCount": len(open_items),
+        "topIssue": top_issue,
+    }
+
+
+def _summary_plan_health(status: str, activity: Mapping[str, Any]) -> Dict[str, Any]:
+    if status == "SUCCEEDED":
+        return _health_from_attention([])
+    kind = str(activity.get("kind") or "").upper()
+    reason = activity.get("reason")
+    if status == "BLOCKED":
+        issue = {
+            "kind": "CONTROL_PLANE_FAILURE",
+            "reason": reason or status,
+            "sourcePhase": activity.get("phase") or kind,
+            "batchKey": activity.get("batchKey"),
+            "workItemKey": activity.get("workItemKey"),
+            "sourceExecutionId": activity.get("executionId"),
+            "resolved": False,
+        }
+        return _health_from_attention([issue])
+    if kind in {"TICKET_FIX", "INTEGRATION_REPAIR", "POST_MERGE_REPAIR", "DELIVERY_REPAIR"}:
+        issue = {
+            "kind": "FAILURE_REPAIR",
+            "reason": reason or kind,
+            "sourcePhase": activity.get("phase") or kind,
+            "batchKey": activity.get("batchKey"),
+            "workItemKey": activity.get("workItemKey"),
+            "sourceExecutionId": activity.get("executionId"),
+            "resolved": False,
+        }
+        health = _health_from_attention([issue])
+        # An active repair is already making forward progress; keep the plan in WATCH
+        # unless the underlying reason itself is critical (for example post-merge CI).
+        if health["topPriority"] == "P2":
+            health["score"] = 85
+            health["state"] = "WATCH"
+        return health
+    return _health_from_attention([])
+
+
 def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
     plans = []
     summary = {"total": 0, "active": 0, "blocked": 0, "succeeded": 0}
@@ -518,6 +633,7 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
             current = next((batch for batch in batches if str(batch.get("status") or "").upper() == "BLOCKED"), None)
         if current is None:
             current = next((batch for batch in batches if str(batch.get("status") or "").upper() == "PENDING"), None)
+        activity = _current_activity(raw, current)
         plans.append(
             {
                 "planId": _required_string(raw, "planId", "plan"),
@@ -546,7 +662,8 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
                     if current
                     else None
                 ),
-                "currentActivity": _current_activity(raw, current),
+                "currentActivity": activity,
+                "health": _summary_plan_health(status, activity),
             }
         )
         summary["total"] += 1
@@ -723,13 +840,15 @@ def _plan_detail(raw: Mapping[str, Any]) -> Dict[str, Any]:
         if any(str(event.get("type") or "").startswith(prefix) for prefix in _TIMELINE_DELIVERY_EVENT_PREFIXES)
         or str(event.get("type") or "") in {"PLAN_SUCCEEDED"}
     ]
+    audit = _plan_audit(batches)
+    projected[0]["health"] = audit["health"]
     return {
         "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
         "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "plan": projected[0],
         "batches": batches,
         "deliveryEvents": delivery_events,
-        "audit": _plan_audit(batches),
+        "audit": audit,
     }
 
 
@@ -835,11 +954,14 @@ def _plan_audit(batches: list[Mapping[str, Any]]) -> Dict[str, Any]:
                 "repairExecutionId": None,
                 "resolved": str(batch.get("status") or "").upper() == "SUCCEEDED",
             })
+    for item in attention:
+        item["priority"] = _issue_priority(item)
     return {
         "summary": _audit_metrics(all_executions, all_keys),
         "batches": batch_metrics,
         "attention": attention,
         "strongModelDecisions": strong_decisions,
+        "health": _health_from_attention(attention),
     }
 
 

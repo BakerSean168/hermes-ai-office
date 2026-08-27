@@ -706,6 +706,40 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(audit["attention"][0]["repairExecutionId"], "retry")
         self.assertTrue(audit["attention"][0]["resolved"])
 
+    def test_plan_health_prioritizes_open_engineering_failures_deterministically(self) -> None:
+        health = api._health_from_attention([
+            {"kind": "FAILURE_REPAIR", "batchKey": "batch-1", "workItemKey": "TASK-1", "sourceExecutionId": "e1", "sourcePhase": "VERIFY_REVIEW", "reason": "FAIL", "repairExecutionId": "e2", "resolved": True},
+            {"kind": "CONTROL_PLANE_FAILURE", "batchKey": "batch-2", "workItemKey": None, "sourceExecutionId": None, "sourcePhase": "BATCH_INTEGRATION_BLOCKED", "reason": "BATCH_INTEGRATION_FAILED", "repairExecutionId": None, "resolved": False},
+        ])
+        self.assertEqual(health["score"], 65)
+        self.assertEqual(health["state"], "DEGRADED")
+        self.assertEqual(health["topPriority"], "P1")
+        self.assertEqual(health["issueCount"], 1)
+        self.assertEqual(health["topIssue"]["reason"], "BATCH_INTEGRATION_FAILED")
+
+        critical = api._health_from_attention([
+            {"kind": "CONTROL_PLANE_FAILURE", "batchKey": "delivery", "workItemKey": None, "sourceExecutionId": None, "sourcePhase": "POST_MERGE_CHECKS", "reason": "DELIVERY_POST_MERGE_CHECKS_FAILED", "repairExecutionId": None, "resolved": False},
+        ])
+        self.assertEqual(critical["score"], 40)
+        self.assertEqual(critical["state"], "CRITICAL")
+        self.assertEqual(critical["topPriority"], "P0")
+
+    def test_plan_summary_exposes_current_health_without_loading_full_history(self) -> None:
+        plans, _ = api._plans([{
+            "planId": "plan-health", "projectKey": "memo", "objective": "Ship",
+            "status": "BLOCKED", "currentRevision": "abc", "blockedReason": "BATCH_INTEGRATION_FAILED",
+            "deliveryStage": None, "pullRequestUrl": None, "mergeRevision": None, "createdAt": 1, "updatedAt": 2,
+            "batches": [{
+                "batchId": "b1", "key": "batch-1", "title": "Integrate", "status": "BLOCKED",
+                "blockedReason": "BATCH_INTEGRATION_FAILED", "integratedRevision": None, "workItems": []
+            }],
+        }])
+        health = plans[0]["health"]
+        self.assertEqual(health["score"], 65)
+        self.assertEqual(health["state"], "DEGRADED")
+        self.assertEqual(health["topPriority"], "P1")
+        self.assertEqual(health["topIssue"]["batchKey"], "batch-1")
+
     def test_plan_detail_endpoint_is_read_only_and_fetches_one_plan_on_demand(self) -> None:
         paths = {route.path for route in api.router.routes}
         self.assertIn("/plans/{plan_id}", paths)
@@ -741,6 +775,9 @@ class DashboardTest(unittest.TestCase):
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
         self.assertIn("function AuditFilters", source)
+        self.assertIn("function HealthSummary", source)
+        self.assertIn("health.topIssue", source)
+        self.assertIn("hao-health-priority", source)
         self.assertIn("function jumpToTimelineTarget", source)
         self.assertIn('setAuditFilter("failures")', source)
         self.assertIn('setAuditFilter("repairs")', source)
@@ -764,7 +801,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.5.0")
+        self.assertEqual(manifest["version"], "1.6.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

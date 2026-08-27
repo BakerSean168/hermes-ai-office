@@ -8,7 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
-  const DASHBOARD_SCHEMA_VERSION = 7;
+  const DASHBOARD_SCHEMA_VERSION = 8;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -114,6 +114,12 @@
       jumpRepair: "Open repair",
       jumpExecution: "Open execution",
       jumpBatch: "Open batch",
+      health: "Health",
+      openIssues: "open issues",
+      healthHealthy: "Healthy",
+      healthWatch: "Watch",
+      healthDegraded: "Degraded",
+      healthCritical: "Critical",
       filteredTimelineEmpty: "No timeline entries match this filter",
     },
     zh: {
@@ -209,6 +215,12 @@
       jumpRepair: "定位修复",
       jumpExecution: "定位执行",
       jumpBatch: "定位批次",
+      health: "健康度",
+      openIssues: "个未解决问题",
+      healthHealthy: "健康",
+      healthWatch: "观察",
+      healthDegraded: "降级",
+      healthCritical: "严重",
       filteredTimelineEmpty: "当前过滤条件下没有时间线记录",
     },
   };
@@ -472,6 +484,21 @@
     return labels[reason] || String(reason || "").replace(/_/g, " ");
   }
 
+  function healthStateLabel(state, t) {
+    const labels = { HEALTHY: t.healthHealthy, WATCH: t.healthWatch, DEGRADED: t.healthDegraded, CRITICAL: t.healthCritical };
+    return labels[String(state || "").toUpperCase()] || String(state || "").replace(/_/g, " ");
+  }
+
+  function HealthSummary(props) {
+    const health = props.health || {};
+    const state = String(health.state || "HEALTHY").toLowerCase();
+    return h("div", { className: "hao-health hao-health-" + state },
+      h("strong", null, String(health.score == null ? 100 : health.score) + "/100"),
+      h("span", null, healthStateLabel(health.state || "HEALTHY", props.t)),
+      health.topPriority ? h("span", { className: "hao-health-priority hao-health-priority-" + String(health.topPriority).toLowerCase() }, health.topPriority) : null
+    );
+  }
+
   function isFailureExecution(item) {
     const status = String((item && item.status) || "").toUpperCase();
     return status === "FAILED" || status === "STUCK" || status === "CANCELLED" || String((item && item.verdict) || "").toUpperCase() === "FAIL" || Boolean(item && item.errorCode);
@@ -544,6 +571,7 @@
 
   function AuditOverview(props) {
     const summary = (props.audit && props.audit.summary) || {};
+    const health = (props.audit && props.audit.health) || {};
     const metrics = [
       [props.t.auditExecutions, integer(summary.executions || 0, props.locale)],
       [props.t.failures, integer(summary.failures || 0, props.locale)],
@@ -554,7 +582,7 @@
       [props.t.cost, money(summary.costUsd || 0)],
     ];
     return h("section", { className: "hao-audit" },
-      h("div", { className: "hao-audit-head" }, h("h3", null, props.t.auditTitle)),
+      h("div", { className: "hao-audit-head" }, h("h3", null, props.t.auditTitle), h(HealthSummary, { health: health, t: props.t })),
       h("div", { className: "hao-audit-metrics" }, metrics.map(function (item) {
         return h("div", { className: "hao-audit-metric", key: item[0] }, h("span", null, item[0]), h("strong", null, item[1]));
       }))
@@ -572,7 +600,10 @@
         h("div", { className: "hao-audit-attention" }, attention.map(function (item, index) {
           const label = item.kind === "CONTROL_PLANE_FAILURE" ? props.t.controlPlaneFailure : props.t.failureToRepair;
           return h("article", { className: "hao-audit-finding" + (item.resolved ? " is-resolved" : " is-open"), key: item.kind + index },
-            h("div", { className: "hao-audit-finding-head" }, h("strong", null, label), h(Badge, { value: item.resolved ? "SUCCEEDED" : "BLOCKED" })),
+            h("div", { className: "hao-audit-finding-head" },
+              h("strong", null, label),
+              h("div", { className: "hao-audit-finding-status" }, h("span", { className: "hao-health-priority hao-health-priority-" + String(item.priority || "P3").toLowerCase() }, item.priority || "P3"), h(Badge, { value: item.resolved ? "SUCCEEDED" : "BLOCKED" }))
+            ),
             h("div", { className: "hao-audit-path" }, [item.batchKey, item.workItemKey, item.sourcePhase].filter(Boolean).join(" · ")),
             item.reason ? h("div", { className: "hao-plan-reason" }, item.reason) : null,
             h("div", { className: "hao-audit-jumps" },
@@ -760,6 +791,8 @@
     return h("div", { className: "hao-running-grid" }, rows.map(function (plan) {
       const batch = plan.currentBatch || {};
       const activity = plan.currentActivity || {};
+      const health = plan.health || {};
+      const topIssue = health.topIssue || {};
       const activityTitle = activity.workItemTitle || activity.batchTitle || batch.title || "All batches complete";
       const phase = activity.phase || plan.deliveryStage;
       const meta = [];
@@ -787,8 +820,8 @@
         },
       },
         h("div", { className: "hao-running-top" },
-          h(Badge, { value: plan.status }),
-          h("span", { className: "hao-phase" }, phase || batch.key || "complete")
+          h("div", { className: "hao-running-top-left" }, h(Badge, { value: plan.status }), h("span", { className: "hao-phase" }, phase || batch.key || "complete")),
+          h(HealthSummary, { health: health, t: t })
         ),
         h("h3", null, plan.objective),
         h("div", { className: "hao-running-project" }, plan.projectKey),
@@ -800,8 +833,11 @@
           return h("span", { className: "hao-plan-chip", key: value + index }, value);
         })) : null,
         h("div", { className: "hao-plan-progress" }, progress.join(" · ")),
-        activity.reason || plan.blockedReason
-          ? h("div", { className: "hao-plan-reason" }, activity.reason || plan.blockedReason)
+        topIssue.reason || activity.reason || plan.blockedReason
+          ? h("div", { className: "hao-plan-reason hao-plan-health-issue" },
+              topIssue.priority ? h("span", { className: "hao-health-priority hao-health-priority-" + String(topIssue.priority).toLowerCase() }, topIssue.priority) : null,
+              h("span", null, topIssue.reason || activity.reason || plan.blockedReason)
+            )
           : null,
         plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", {
           href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer",
