@@ -12,6 +12,8 @@ Logical aliases used by AI Office:
 
 Provider and model mutation is performed through LiteLLM Admin. AI Office only reads the registry and correlated spend facts.
 
+The versioned operational importer belongs to the infrastructure authority, not this repository: `my-infrastructure/etc/server/oracle2/hermes/provideradmin/hermes-litellm-providerctl.py` is installed on Oracle2 as `/usr/local/sbin/hermes-litellm-providerctl` and is the ProviderAdmin entry point for secure credential/deployment mutation. Keeping the mutator there prevents Pixel Agent from becoming a second provider authority.
+
 The economic deployment order is encoded directly in LiteLLM deployment metadata, so fallback stays inside the gateway rather than in Hermes or AI Office.
 
 ## Admin UI dark theme
