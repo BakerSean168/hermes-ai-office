@@ -203,6 +203,159 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(plans[0]["currentBatch"]["key"], "batch-1")
         self.assertNotIn("readiness", plans[0])
 
+    def test_plan_projection_exposes_system_work_without_polluting_business_progress(self) -> None:
+        plans, _summary = api._plans(
+            [
+                {
+                    "planId": "plan-aggregate",
+                    "projectKey": "memoflow",
+                    "objective": "Integrate parallel changes",
+                    "status": "RUNNING",
+                    "currentRevision": "base-1",
+                    "batches": [
+                        {
+                            "batchId": "batch-1",
+                            "key": "batch-1",
+                            "title": "Parallel domain work",
+                            "status": "RUNNING",
+                            "integratedRevision": "candidate-2",
+                            "workItems": [
+                                {"workItemId": "work-a", "key": "TASK-1", "title": "Task", "status": "SUCCEEDED", "executions": []},
+                                {"workItemId": "work-b", "key": "GOAL-1", "title": "Goal", "status": "SUCCEEDED", "executions": []},
+                                {
+                                    "workItemId": "work-verify",
+                                    "key": "batch-verify-b1-2",
+                                    "title": "Verify integrated batch",
+                                    "status": "RUNNING",
+                                    "executions": [
+                                        {
+                                            "executionId": "exec-verify",
+                                            "phase": "BATCH_VERIFY",
+                                            "status": "RUNNING",
+                                            "selection": {"backend": "codex-review-headless", "modelClass": "gpt-5.6-sol"},
+                                            "timing": {"startedAt": "2026-08-27T01:00:00Z"},
+                                        }
+                                    ],
+                                },
+                            ],
+                        }
+                    ],
+                    "events": [
+                        {
+                            "type": "BATCH_AGGREGATE_REVIEW_CREATED",
+                            "batchId": "batch-1",
+                            "workItemId": "work-verify",
+                            "detail": {"attempt": 2, "candidateRevision": "candidate-2"},
+                        }
+                    ],
+                }
+            ]
+        )
+        plan = plans[0]
+        self.assertEqual(plan["workItems"], {"total": 2, "succeeded": 2})
+        self.assertEqual(plan["systemWorkItems"], {"total": 1, "succeeded": 0})
+        self.assertEqual(plan["batches"], {"total": 1, "succeeded": 0})
+        self.assertEqual(plan["currentActivity"]["kind"], "BATCH_VERIFY")
+        self.assertEqual(plan["currentActivity"]["attempt"], 2)
+        self.assertEqual(plan["currentActivity"]["backend"], "codex-review-headless")
+        self.assertEqual(plan["currentActivity"]["model"], "gpt-5.6-sol")
+        self.assertEqual(plan["currentActivity"]["revision"], "candidate-2")
+        self.assertEqual(set(plan), set(CONTRACT["$defs"]["Plan"]["properties"]))
+        self.assertEqual(set(plan["currentActivity"]), set(CONTRACT["$defs"]["PlanActivity"]["properties"]))
+
+    def test_plan_projection_identifies_post_merge_repair_and_failed_merge_revision(self) -> None:
+        plans, _summary = api._plans(
+            [
+                {
+                    "planId": "plan-post-merge",
+                    "projectKey": "pixel-agents",
+                    "objective": "Ship safely",
+                    "status": "RUNNING",
+                    "currentRevision": "repair-base",
+                    "deliveryStage": "PENDING",
+                    "mergeRevision": "merge-bad-123",
+                    "batches": [
+                        {"batchId": "batch-main", "key": "batch-main", "title": "Main", "status": "SUCCEEDED", "workItems": [{"workItemId": "work-main", "key": "MAIN-1", "title": "Main", "status": "SUCCEEDED", "executions": []}]},
+                        {
+                            "batchId": "batch-fix",
+                            "key": "delivery-fix-1",
+                            "title": "Repair post-merge checks",
+                            "status": "RUNNING",
+                            "workItems": [
+                                {
+                                    "workItemId": "work-fix",
+                                    "key": "post-merge-fix-1",
+                                    "title": "Repair failed post-merge checks",
+                                    "status": "RUNNING",
+                                    "executions": [
+                                        {
+                                            "executionId": "exec-fix",
+                                            "phase": "IMPLEMENT",
+                                            "status": "RUNNING",
+                                            "selection": {"backend": "openhands-builtin", "modelClass": "gpt-5.6-sol"},
+                                            "timing": {"startedAt": "2026-08-27T02:00:00Z"},
+                                        }
+                                    ],
+                                }
+                            ],
+                        },
+                    ],
+                    "events": [
+                        {
+                            "type": "PLAN_DELIVERY_REPAIR_SCHEDULED",
+                            "batchId": "batch-fix",
+                            "detail": {"reason": "DELIVERY_POST_MERGE_CHECKS_FAILED", "stage": "POST_MERGE_CHECKS"},
+                        },
+                        {
+                            "type": "EXECUTION_STARTED",
+                            "batchId": "batch-fix",
+                            "workItemId": "work-fix",
+                            "executionId": "exec-fix",
+                            "detail": {"phase": "IMPLEMENT", "attempt": 1},
+                        },
+                    ],
+                }
+            ]
+        )
+        plan = plans[0]
+        self.assertEqual(plan["batches"], {"total": 1, "succeeded": 1})
+        self.assertEqual(plan["systemWorkItems"], {"total": 1, "succeeded": 0})
+        self.assertEqual(plan["currentActivity"]["kind"], "POST_MERGE_REPAIR")
+        self.assertEqual(plan["currentActivity"]["attempt"], 1)
+        self.assertEqual(plan["currentActivity"]["reason"], "DELIVERY_POST_MERGE_CHECKS_FAILED")
+        self.assertEqual(plan["currentActivity"]["revision"], "merge-bad-123")
+
+    def test_blocked_plan_projects_blocked_batch_even_without_synthetic_repair_item(self) -> None:
+        plans, _summary = api._plans(
+            [
+                {
+                    "planId": "plan-blocked",
+                    "projectKey": "memoflow",
+                    "objective": "Integrate batch",
+                    "status": "BLOCKED",
+                    "currentRevision": "base",
+                    "blockedReason": "BATCH_INTEGRATION_FAILED",
+                    "batches": [
+                        {
+                            "batchId": "batch-3",
+                            "key": "batch-3",
+                            "title": "Shared composition",
+                            "status": "BLOCKED",
+                            "blockedReason": "BATCH_INTEGRATION_FAILED",
+                            "workItems": [
+                                {"workItemId": "work-1", "key": "TASK-1", "title": "Task", "status": "SUCCEEDED", "executions": []}
+                            ],
+                        }
+                    ],
+                    "events": [],
+                }
+            ]
+        )
+        plan = plans[0]
+        self.assertEqual(plan["currentBatch"]["key"], "batch-3")
+        self.assertEqual(plan["currentActivity"]["kind"], "BLOCKED")
+        self.assertEqual(plan["currentActivity"]["reason"], "BATCH_INTEGRATION_FAILED")
+
     def test_contract_is_the_single_dashboard_shape_source(self) -> None:
         version = CONTRACT["properties"]["schemaVersion"]["const"]
         self.assertEqual(api._DASHBOARD_SCHEMA_VERSION, version)
@@ -301,7 +454,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.1.0")
+        self.assertEqual(manifest["version"], "1.2.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

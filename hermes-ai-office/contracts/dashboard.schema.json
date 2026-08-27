@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 4
+      "const": 5
     },
     "generatedAt": {
       "type": "string",
@@ -605,7 +605,7 @@
     "Plan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "workItems", "currentBatch"],
+      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "systemBatches", "workItems", "systemWorkItems", "currentBatch", "currentActivity"],
       "properties": {
         "planId": {"type": "string", "minLength": 1},
         "projectKey": {"type": "string", "minLength": 1},
@@ -619,22 +619,51 @@
         "createdAt": {"type": ["integer", "number", "null"]},
         "updatedAt": {"type": ["integer", "number", "null"]},
         "batches": {"$ref": "#/$defs/ProgressCount"},
+        "systemBatches": {"$ref": "#/$defs/ProgressCount"},
         "workItems": {"$ref": "#/$defs/ProgressCount"},
+        "systemWorkItems": {"$ref": "#/$defs/ProgressCount"},
         "currentBatch": {
           "oneOf": [
             {"type": "null"},
             {
               "type": "object",
               "additionalProperties": false,
-              "required": ["key", "title", "status"],
+              "required": ["key", "title", "status", "blockedReason", "integratedRevision"],
               "properties": {
                 "key": {"type": ["string", "null"]},
                 "title": {"type": ["string", "null"]},
-                "status": {"type": ["string", "null"]}
+                "status": {"type": ["string", "null"]},
+                "blockedReason": {"type": ["string", "null"]},
+                "integratedRevision": {"type": ["string", "null"]}
               }
             }
           ]
-        }
+        },
+        "currentActivity": {"$ref": "#/$defs/PlanActivity"}
+      }
+    },
+    "PlanActivity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "status", "phase", "batchKey", "batchTitle", "workItemKey", "workItemTitle", "attempt", "backend", "model", "reason", "revision", "executionId", "startedAt"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["IMPLEMENTATION", "TICKET_REVIEW", "TICKET_FIX", "INTEGRATION_REPAIR", "BATCH_VERIFY", "POST_MERGE_REPAIR", "DELIVERY_REPAIR", "INTEGRATION_CANDIDATE", "INTEGRATING", "DELIVERY", "BLOCKED", "COMPLETE", "IDLE", "WORK_ITEM"]
+        },
+        "status": {"type": ["string", "null"]},
+        "phase": {"type": ["string", "null"]},
+        "batchKey": {"type": ["string", "null"]},
+        "batchTitle": {"type": ["string", "null"]},
+        "workItemKey": {"type": ["string", "null"]},
+        "workItemTitle": {"type": ["string", "null"]},
+        "attempt": {"type": ["integer", "null"], "minimum": 1},
+        "backend": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "revision": {"type": ["string", "null"]},
+        "executionId": {"type": ["string", "null"]},
+        "startedAt": {"type": ["string", "null"]}
       }
     },
     "ProgressCount": {

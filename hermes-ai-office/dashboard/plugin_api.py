@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from pathlib import Path
 import threading
 import time
@@ -276,6 +277,214 @@ def _summary(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
     }
 
 
+_SYSTEM_WORK_ITEM_PREFIXES = (
+    "integration-repair-b",
+    "batch-verify-b",
+    "delivery-fix-",
+    "post-merge-fix-",
+)
+
+
+def _is_system_work_item(item: Mapping[str, Any]) -> bool:
+    key = str(item.get("key") or "")
+    return any(key.startswith(prefix) for prefix in _SYSTEM_WORK_ITEM_PREFIXES)
+
+
+def _is_system_batch(batch: Mapping[str, Any]) -> bool:
+    return str(batch.get("key") or "").startswith("delivery-fix-")
+
+
+def _latest_execution(item: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    executions = [value for value in item.get("executions", []) if isinstance(value, Mapping)]
+    return executions[-1] if executions else None
+
+
+def _synthetic_attempt(key: str) -> int | None:
+    if not any(key.startswith(prefix) for prefix in _SYSTEM_WORK_ITEM_PREFIXES):
+        return None
+    match = re.search(r"-(\d+)$", key)
+    return int(match.group(1)) if match else None
+
+
+def _event_detail(raw: Mapping[str, Any], *, batch_id: Any = None, work_item_id: Any = None, execution_id: Any = None) -> Mapping[str, Any]:
+    events = [event for event in raw.get("events", []) if isinstance(event, Mapping)]
+    for event in reversed(events):
+        if execution_id is not None and event.get("executionId") == execution_id:
+            detail = event.get("detail")
+            return detail if isinstance(detail, Mapping) else {}
+        if work_item_id is not None and event.get("workItemId") == work_item_id:
+            detail = event.get("detail")
+            if isinstance(detail, Mapping) and detail:
+                return detail
+        if batch_id is not None and event.get("batchId") == batch_id:
+            detail = event.get("detail")
+            if isinstance(detail, Mapping) and detail:
+                return detail
+    return {}
+
+
+def _event_reason(raw: Mapping[str, Any], *, batch_id: Any = None, work_item_id: Any = None) -> str | None:
+    events = [event for event in raw.get("events", []) if isinstance(event, Mapping)]
+    for event in reversed(events):
+        matches_item = work_item_id is not None and event.get("workItemId") == work_item_id
+        matches_batch = batch_id is not None and event.get("batchId") == batch_id
+        if not matches_item and not matches_batch:
+            continue
+        detail = event.get("detail")
+        if not isinstance(detail, Mapping):
+            continue
+        reason = detail.get("reason")
+        if isinstance(reason, str) and reason.strip():
+            return reason.strip()
+    return None
+
+
+def _activity_kind(item: Mapping[str, Any], latest: Mapping[str, Any] | None) -> str:
+    key = str(item.get("key") or "")
+    if key.startswith("post-merge-fix-"):
+        return "POST_MERGE_REPAIR"
+    if key.startswith("integration-repair-b"):
+        return "INTEGRATION_REPAIR"
+    if key.startswith("batch-verify-b"):
+        return "BATCH_VERIFY"
+    if key.startswith("delivery-fix-"):
+        return "DELIVERY_REPAIR"
+    phase = str((latest or {}).get("phase") or "").upper()
+    if phase == "IMPLEMENT_FIX":
+        return "TICKET_FIX"
+    if phase == "VERIFY_REVIEW":
+        return "TICKET_REVIEW"
+    if phase == "IMPLEMENT":
+        return "IMPLEMENTATION"
+    return "WORK_ITEM"
+
+
+def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None) -> Dict[str, Any]:
+    if current is None:
+        delivery_stage = str(raw.get("deliveryStage") or "").upper()
+        if delivery_stage:
+            return {
+                "kind": "DELIVERY",
+                "status": str(raw.get("status") or "").upper() or None,
+                "phase": delivery_stage,
+                "batchKey": None,
+                "batchTitle": None,
+                "workItemKey": None,
+                "workItemTitle": None,
+                "attempt": None,
+                "backend": None,
+                "model": None,
+                "reason": raw.get("blockedReason"),
+                "revision": raw.get("mergeRevision") or raw.get("currentRevision"),
+                "executionId": None,
+                "startedAt": None,
+            }
+        return {
+            "kind": "COMPLETE" if str(raw.get("status") or "").upper() == "SUCCEEDED" else "IDLE",
+            "status": str(raw.get("status") or "").upper() or None,
+            "phase": None,
+            "batchKey": None,
+            "batchTitle": None,
+            "workItemKey": None,
+            "workItemTitle": None,
+            "attempt": None,
+            "backend": None,
+            "model": None,
+            "reason": raw.get("blockedReason"),
+            "revision": raw.get("currentRevision"),
+            "executionId": None,
+            "startedAt": None,
+        }
+
+    items = [item for item in current.get("workItems", []) if isinstance(item, Mapping)]
+    item = next((value for value in items if str(value.get("status") or "").upper() == "RUNNING"), None)
+    if item is None:
+        item = next((value for value in items if str(value.get("status") or "").upper() == "BLOCKED"), None)
+    if item is None:
+        item = next((value for value in items if str(value.get("status") or "").upper() == "PENDING"), None)
+
+    current_status = str(current.get("status") or "").upper()
+    if item is None:
+        if current_status == "BLOCKED":
+            return {
+                "kind": "BLOCKED",
+                "status": "BLOCKED",
+                "phase": "BATCH_INTEGRATION",
+                "batchKey": current.get("key"),
+                "batchTitle": current.get("title"),
+                "workItemKey": None,
+                "workItemTitle": None,
+                "attempt": None,
+                "backend": None,
+                "model": None,
+                "reason": current.get("blockedReason") or raw.get("blockedReason"),
+                "revision": current.get("integratedRevision") or raw.get("currentRevision"),
+                "executionId": None,
+                "startedAt": None,
+            }
+        candidate = current.get("integratedRevision")
+        return {
+            "kind": "INTEGRATION_CANDIDATE" if candidate else "INTEGRATING",
+            "status": current_status or None,
+            "phase": "BATCH_VERIFY_PENDING" if candidate else "BATCH_INTEGRATE",
+            "batchKey": current.get("key"),
+            "batchTitle": current.get("title"),
+            "workItemKey": None,
+            "workItemTitle": None,
+            "attempt": None,
+            "backend": None,
+            "model": None,
+            "reason": current.get("blockedReason") or raw.get("blockedReason"),
+            "revision": candidate or raw.get("currentRevision"),
+            "executionId": None,
+            "startedAt": None,
+        }
+
+    latest = _latest_execution(item)
+    selection = (latest or {}).get("selection")
+    selection = selection if isinstance(selection, Mapping) else {}
+    timing = (latest or {}).get("timing")
+    timing = timing if isinstance(timing, Mapping) else {}
+    execution_id = (latest or {}).get("executionId")
+    execution_detail = _event_detail(raw, execution_id=execution_id) if execution_id else {}
+    item_detail = _event_detail(
+        raw,
+        batch_id=current.get("batchId"),
+        work_item_id=item.get("workItemId"),
+    )
+    key = str(item.get("key") or "")
+    attempt = execution_detail.get("attempt")
+    if not isinstance(attempt, int):
+        attempt = item_detail.get("attempt") if isinstance(item_detail.get("attempt"), int) else None
+    if attempt is None:
+        attempt = _synthetic_attempt(key)
+    reason = item.get("blockedReason") or _event_reason(
+        raw,
+        batch_id=current.get("batchId"),
+        work_item_id=item.get("workItemId"),
+    ) or current.get("blockedReason") or raw.get("blockedReason")
+    kind = _activity_kind(item, latest)
+    revision = current.get("integratedRevision")
+    if kind == "POST_MERGE_REPAIR":
+        revision = raw.get("mergeRevision") or revision
+    return {
+        "kind": kind,
+        "status": str((latest or {}).get("status") or item.get("status") or "").upper() or None,
+        "phase": str((latest or {}).get("phase") or "").upper() or None,
+        "batchKey": current.get("key"),
+        "batchTitle": current.get("title"),
+        "workItemKey": item.get("key"),
+        "workItemTitle": item.get("title"),
+        "attempt": attempt,
+        "backend": selection.get("backend"),
+        "model": selection.get("modelClass"),
+        "reason": reason,
+        "revision": revision,
+        "executionId": execution_id,
+        "startedAt": timing.get("startedAt") or (latest or {}).get("createdAt"),
+    }
+
+
 def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
     plans = []
     summary = {"total": 0, "active": 0, "blocked": 0, "succeeded": 0}
@@ -283,14 +492,22 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
         if not isinstance(raw, Mapping):
             continue
         batches = [batch for batch in raw.get("batches", []) if isinstance(batch, Mapping)]
-        work_items = [
+        business_batches = [batch for batch in batches if not _is_system_batch(batch)]
+        system_batches = [batch for batch in batches if _is_system_batch(batch)]
+        all_work_items = [
             item
             for batch in batches
             for item in batch.get("workItems", [])
             if isinstance(item, Mapping)
         ]
+        work_items = [item for item in all_work_items if not _is_system_work_item(item)]
+        system_work_items = [item for item in all_work_items if _is_system_work_item(item)]
         status = _required_string(raw, "status", "plan").upper()
-        current = next((batch for batch in batches if batch.get("status") == "RUNNING"), None)
+        current = next((batch for batch in batches if str(batch.get("status") or "").upper() == "RUNNING"), None)
+        if current is None:
+            current = next((batch for batch in batches if str(batch.get("status") or "").upper() == "BLOCKED"), None)
+        if current is None:
+            current = next((batch for batch in batches if str(batch.get("status") or "").upper() == "PENDING"), None)
         plans.append(
             {
                 "planId": _required_string(raw, "planId", "plan"),
@@ -304,17 +521,22 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
                 "mergeRevision": raw.get("mergeRevision"),
                 "createdAt": raw.get("createdAt"),
                 "updatedAt": raw.get("updatedAt"),
-                "batches": {"total": len(batches), "succeeded": sum(batch.get("status") == "SUCCEEDED" for batch in batches)},
+                "batches": {"total": len(business_batches), "succeeded": sum(batch.get("status") == "SUCCEEDED" for batch in business_batches)},
+                "systemBatches": {"total": len(system_batches), "succeeded": sum(batch.get("status") == "SUCCEEDED" for batch in system_batches)},
                 "workItems": {"total": len(work_items), "succeeded": sum(item.get("status") == "SUCCEEDED" for item in work_items)},
+                "systemWorkItems": {"total": len(system_work_items), "succeeded": sum(item.get("status") == "SUCCEEDED" for item in system_work_items)},
                 "currentBatch": (
                     {
                         "key": current.get("key"),
                         "title": current.get("title"),
                         "status": current.get("status"),
+                        "blockedReason": current.get("blockedReason"),
+                        "integratedRevision": current.get("integratedRevision"),
                     }
                     if current
                     else None
                 ),
+                "currentActivity": _current_activity(raw, current),
             }
         )
         summary["total"] += 1

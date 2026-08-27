@@ -8,7 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
-  const DASHBOARD_SCHEMA_VERSION = 4;
+  const DASHBOARD_SCHEMA_VERSION = 5;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -62,6 +62,24 @@
       output: "Output",
       activeDeployments: "active deployments",
       pausedDeployments: "paused",
+      activityImplementation: "Implementing",
+      activityTicketReview: "Ticket review",
+      activityTicketFix: "Ticket fix",
+      activityIntegrationRepair: "Integration repair",
+      activityBatchVerify: "Batch aggregate review",
+      activityPostMergeRepair: "Post-merge repair",
+      activityDeliveryRepair: "Delivery repair",
+      activityIntegrationCandidate: "Integration candidate",
+      activityIntegrating: "Integrating batch",
+      activityDelivery: "Delivery",
+      activityBlocked: "Blocked",
+      activityComplete: "Complete",
+      activityIdle: "Idle",
+      activityWorkItem: "Work item",
+      attempt: "Attempt",
+      automation: "automation",
+      items: "items",
+      batches: "batches",
     },
     zh: {
       overview: "总览",
@@ -104,6 +122,24 @@
       output: "输出",
       activeDeployments: "条活跃部署",
       pausedDeployments: "条暂停",
+      activityImplementation: "正在实施",
+      activityTicketReview: "任务审查",
+      activityTicketFix: "任务修复",
+      activityIntegrationRepair: "集成冲突修复",
+      activityBatchVerify: "批次整体审查",
+      activityPostMergeRepair: "合并后修复",
+      activityDeliveryRepair: "交付修复",
+      activityIntegrationCandidate: "待整体审查",
+      activityIntegrating: "正在集成",
+      activityDelivery: "正在交付",
+      activityBlocked: "已阻塞",
+      activityComplete: "已完成",
+      activityIdle: "空闲",
+      activityWorkItem: "工作项",
+      attempt: "第几轮",
+      automation: "自动流程",
+      items: "任务",
+      batches: "批次",
     },
   };
 
@@ -220,6 +256,29 @@
     if (!route) return "—";
     return route.providerKey + " · " + route.physicalModel;
   }
+  function activityLabel(kind, t) {
+    const labels = {
+      IMPLEMENTATION: t.activityImplementation,
+      TICKET_REVIEW: t.activityTicketReview,
+      TICKET_FIX: t.activityTicketFix,
+      INTEGRATION_REPAIR: t.activityIntegrationRepair,
+      BATCH_VERIFY: t.activityBatchVerify,
+      POST_MERGE_REPAIR: t.activityPostMergeRepair,
+      DELIVERY_REPAIR: t.activityDeliveryRepair,
+      INTEGRATION_CANDIDATE: t.activityIntegrationCandidate,
+      INTEGRATING: t.activityIntegrating,
+      DELIVERY: t.activityDelivery,
+      BLOCKED: t.activityBlocked,
+      COMPLETE: t.activityComplete,
+      IDLE: t.activityIdle,
+      WORK_ITEM: t.activityWorkItem,
+    };
+    return labels[String(kind || "").toUpperCase()] || String(kind || t.activityIdle).replace(/_/g, " ");
+  }
+  function shortRevision(value) {
+    const text = String(value || "");
+    return text ? text.slice(0, 10) : null;
+  }
 
   function Badge(props) {
     const value = String(props.value || "UNKNOWN").toUpperCase();
@@ -325,17 +384,44 @@
 
   function PlanCards(props) {
     const rows = props.rows || [];
-    if (!rows.length) return h("div", { className: "hao-empty" }, "No active plans");
+    const t = props.t;
+    if (!rows.length) return h("div", { className: "hao-empty" }, props.locale === "zh" ? "暂无项目计划" : "No development plans");
     return h("div", { className: "hao-running-grid" }, rows.map(function (plan) {
       const batch = plan.currentBatch || {};
-      return h("article", { className: "hao-running-card", key: plan.planId },
-        h("div", { className: "hao-running-top" }, h(Badge, { value: plan.status }), h("span", { className: "hao-phase" }, batch.key || plan.deliveryStage || "complete")),
+      const activity = plan.currentActivity || {};
+      const activityTitle = activity.workItemTitle || activity.batchTitle || batch.title || "All batches complete";
+      const phase = activity.phase || plan.deliveryStage;
+      const meta = [];
+      if (activity.attempt) meta.push(t.attempt + " " + activity.attempt);
+      if (activity.backend) meta.push(activity.backend);
+      if (activity.model) meta.push(activity.model);
+      const revision = shortRevision(activity.revision);
+      if (revision) meta.push(revision);
+      const progress = [
+        plan.workItems.succeeded + "/" + plan.workItems.total + " " + t.items,
+        plan.batches.succeeded + "/" + plan.batches.total + " " + t.batches,
+      ];
+      if (plan.systemWorkItems && plan.systemWorkItems.total) {
+        progress.push(plan.systemWorkItems.succeeded + "/" + plan.systemWorkItems.total + " " + t.automation);
+      }
+      return h("article", { className: "hao-running-card hao-plan-card", key: plan.planId },
+        h("div", { className: "hao-running-top" },
+          h(Badge, { value: plan.status }),
+          h("span", { className: "hao-phase" }, phase || batch.key || "complete")
+        ),
         h("h3", null, plan.objective),
         h("div", { className: "hao-running-project" }, plan.projectKey),
-        h("div", { className: "hao-running-route" },
-          (batch.title || "All batches complete") + " · " + plan.workItems.succeeded + "/" + plan.workItems.total + " items · " + plan.batches.succeeded + "/" + plan.batches.total + " batches"
+        h("div", { className: "hao-plan-activity" },
+          h("strong", null, activityLabel(activity.kind, t)),
+          h("span", null, activityTitle)
         ),
-        plan.blockedReason ? h("div", { className: "hao-running-foot" }, h("strong", null, plan.blockedReason)) : null,
+        meta.length ? h("div", { className: "hao-plan-meta" }, meta.map(function (value, index) {
+          return h("span", { className: "hao-plan-chip", key: value + index }, value);
+        })) : null,
+        h("div", { className: "hao-plan-progress" }, progress.join(" · ")),
+        activity.reason || plan.blockedReason
+          ? h("div", { className: "hao-plan-reason" }, activity.reason || plan.blockedReason)
+          : null,
         plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", { href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer" }, "Pull request")) : null,
       );
     }));
@@ -367,7 +453,7 @@
         h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) }),
       ),
       h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t: t, locale: props.locale, now: props.now })),
-      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans })),
+      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale })),
       h(
         "div",
         { className: "hao-runtime-strip" },

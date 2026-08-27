@@ -138,3 +138,14 @@
 @media (max-width: 440px) {
   .hao-metrics, .hao-analytics-notes { grid-template-columns: 1fr; }
 }
+
+/* Durable-plan workflow visibility */
+.hao-plan-card { min-height: 205px; }
+.hao-plan-activity { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: baseline; gap: 8px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--hao-border-soft); font-size: 11px; }
+.hao-plan-activity strong { color: var(--hao-text); font-size: 11px; white-space: nowrap; }
+.hao-plan-activity span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--hao-muted); }
+.hao-plan-meta { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.hao-plan-chip { max-width: 100%; padding: 3px 6px; border: 1px solid var(--hao-border); border-radius: 999px; background: var(--hao-surface); color: var(--hao-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hao-plan-progress { margin-top: 11px; color: var(--hao-muted); font-size: 10px; }
+.hao-plan-reason { margin-top: 9px; padding: 7px 8px; border: 1px solid var(--hao-warn); border-radius: 7px; background: var(--hao-warn-soft); color: var(--hao-text); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.hao-badge-blocked { color: var(--hao-bad); border-color: var(--hao-bad); background: var(--hao-bad-soft); }
