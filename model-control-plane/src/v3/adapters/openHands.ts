@@ -185,7 +185,6 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
     if (['INVESTIGATE_PLAN', 'ORCHESTRATE'].includes(input.phase)) {
       tools.push({ name: 'task_tool_set' });
     }
-    if (input.phase === 'ORCHESTRATE') tools.push({ name: 'ai_office_worker' });
     return tools;
   }
 
@@ -197,9 +196,6 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
     };
     if (['INVESTIGATE_PLAN', 'ORCHESTRATE'].includes(input.phase)) {
       modules.task_tool_set = 'openhands.tools.task.definition';
-    }
-    if (input.phase === 'ORCHESTRATE') {
-      modules.ai_office_worker = 'hermes_ai_office_tools.worker';
     }
     return modules;
   }

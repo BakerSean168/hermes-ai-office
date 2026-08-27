@@ -231,6 +231,72 @@ test('LiteLLM spend observability degrades without failing the execution facade'
   }
 });
 
+
+test('LiteLLM model registry uses credential name as provider key when legacy metadata is absent', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'litellm-provider-key-fallback-'));
+  const envFile = path.join(directory, 'litellm.env');
+  fs.writeFileSync(envFile, 'LITELLM_MASTER_KEY=admin-secret\n');
+  const server = createServer((request, response) => {
+    if (request.headers.authorization !== 'Bearer admin-secret') {
+      response.writeHead(401).end('{}');
+      return;
+    }
+    response.setHeader('content-type', 'application/json');
+    if (request.url === '/credentials') {
+      response.end(JSON.stringify({
+        credentials: [{
+          credential_name: 'ark717',
+          credential_info: { custom_llm_provider: 'openai' },
+          credential_values: { api_base: 'https://api.ark717.com/v1' },
+        }],
+      }));
+      return;
+    }
+    if (request.url === '/router/settings') {
+      response.end(JSON.stringify({ current_values: { model_group_alias: {} } }));
+      return;
+    }
+    if (request.url === '/model/info') {
+      response.end(JSON.stringify({
+        data: [{
+          model_name: 'gpt-5.6-sol',
+          litellm_params: {
+            model: 'openai/gpt-5.6-sol',
+            litellm_credential_name: 'ark717',
+            order: 1,
+          },
+          model_info: {
+            id: 'deployment-ark717',
+            db_model: true,
+            blocked: false,
+            metadata: {},
+          },
+        }],
+      }));
+      return;
+    }
+    response.writeHead(404).end('{}');
+  });
+  const port = await listen(server);
+  const registry = new LiteLlmModelRegistry({
+    baseUrl: `http://127.0.0.1:${port}`,
+    secrets: new EnvFileValueProvider(envFile),
+  });
+  try {
+    const summary = await registry.summary();
+    assert.equal(summary.deployments.items[0]?.credential, 'ark717');
+    assert.equal(summary.deployments.items[0]?.providerKey, 'ark717');
+    const routingIndex = await registry.providerRoutingIndex();
+    assert.equal(routingIndex.byDeploymentId['deployment-ark717'], 'ark717');
+    assert.equal(routingIndex.byApiBase['https://api.ark717.com/v1'], 'ark717');
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('LiteLLM model registry deduplicates alias projections and never exposes credential values', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'litellm-registry-'));
   const envFile = path.join(directory, 'litellm.env');

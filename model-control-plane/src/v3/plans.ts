@@ -4,8 +4,16 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { DeliveryStage, PlanDeliveryConfig } from './delivery.js';
 import { PLAN_LIMITS } from './planConstants.js';
 
-export type PlanStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
+export type PlanStatus =
+  'ORCHESTRATING' | 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
 export type PlanNodeStatus = 'PENDING' | 'RUNNING' | 'BLOCKED' | 'SUCCEEDED' | 'CANCELLED';
+
+export interface DelegatePlanInput {
+  projectKey: string;
+  objective: string;
+  repository: { path: string; baseRevision?: string };
+  delivery?: Partial<PlanDeliveryConfig> & Pick<PlanDeliveryConfig, 'branch'>;
+}
 
 export interface CreatePlanInput {
   projectKey: string;
@@ -276,10 +284,9 @@ export function ensurePlanSchema(db: DatabaseSync): void {
   }
 }
 
-function validateGraph(input: CreatePlanInput): void {
+function validatePlanEnvelope(input: DelegatePlanInput): void {
   if (!input.projectKey.trim()) throw new Error('PROJECT_KEY_REQUIRED');
   if (!input.objective.trim()) throw new Error('OBJECTIVE_REQUIRED');
-  if (!input.analysisSummary.trim()) throw new Error('PLAN_ANALYSIS_REQUIRED');
   if (!input.repository.path.trim()) throw new Error('REPOSITORY_PATH_REQUIRED');
   if (input.delivery) {
     if (!input.delivery.branch.trim()) throw new Error('DELIVERY_BRANCH_REQUIRED');
@@ -292,6 +299,11 @@ function validateGraph(input: CreatePlanInput): void {
       throw new Error('DELIVERY_MERGE_METHOD_INVALID');
     }
   }
+}
+
+function validateGraph(input: CreatePlanInput): void {
+  validatePlanEnvelope(input);
+  if (!input.analysisSummary.trim()) throw new Error('PLAN_ANALYSIS_REQUIRED');
   if (input.batches.length === 0) throw new Error('PLAN_BATCHES_REQUIRED');
 
   const batchKeys = new Set<string>();
@@ -428,6 +440,136 @@ export class PlanRepository {
     return { plan: this.get(planId)!, created: true };
   }
 
+  createDelegatedDraft(
+    input: DelegatePlanInput,
+    commandKey: string,
+  ): { plan: PlanRecord; created: boolean } {
+    const existing = this.findByCommandKey(commandKey);
+    if (existing) return { plan: existing, created: false };
+    validatePlanEnvelope(input);
+    const now = Date.now();
+    const planId = `plan_${randomUUID()}`;
+    const baseRevision = input.repository.baseRevision?.trim() || 'HEAD';
+    const delivery = input.delivery
+      ? {
+          remote: input.delivery.remote?.trim() || 'origin',
+          branch: input.delivery.branch.trim(),
+          targetBranch: input.delivery.targetBranch?.trim() || 'main',
+          autoMerge: true,
+          mergeMethod: input.delivery.mergeMethod ?? 'merge',
+        }
+      : undefined;
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      this.#db
+        .prepare(
+          `INSERT INTO v3_plans
+           (plan_id,command_key,project_key,objective,repository_path,base_revision,current_revision,
+            delivery_json,delivery_stage,status,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          planId,
+          commandKey,
+          input.projectKey,
+          input.objective,
+          input.repository.path,
+          baseRevision,
+          baseRevision,
+          delivery ? JSON.stringify(delivery) : null,
+          delivery ? 'PENDING' : null,
+          'ORCHESTRATING',
+          now,
+          now,
+        );
+      this.appendEvent(planId, 'PLAN_DELEGATED', { mode: 'OPENHANDS_SUPERVISOR' });
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      const raced = this.findByCommandKey(commandKey);
+      if (raced) return { plan: raced, created: false };
+      throw error;
+    }
+    return { plan: this.get(planId)!, created: true };
+  }
+
+  materializeDelegatedPlan(
+    planId: string,
+    proposal: Pick<CreatePlanInput, 'analysisSummary' | 'batches'>,
+  ): PlanRecord {
+    const plan = this.get(planId);
+    if (!plan) throw new Error('PLAN_NOT_FOUND');
+    if (plan.status !== 'ORCHESTRATING') return plan;
+    const input: CreatePlanInput = {
+      projectKey: plan.projectKey,
+      objective: plan.objective,
+      analysisSummary: proposal.analysisSummary,
+      repository: { path: plan.repositoryPath, baseRevision: plan.baseRevision },
+      delivery: plan.delivery,
+      batches: proposal.batches,
+    };
+    validateGraph(input);
+    const now = Date.now();
+    this.#db.exec('BEGIN IMMEDIATE');
+    try {
+      input.batches.forEach((batch, batchIndex) => {
+        const batchId = `batch_${randomUUID()}`;
+        this.#db
+          .prepare(
+            `INSERT INTO v3_plan_batches
+             (batch_id,plan_id,batch_key,title,ordinal,depends_on_json,status,created_at,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?)`,
+          )
+          .run(
+            batchId,
+            planId,
+            batch.key,
+            batch.title,
+            batchIndex,
+            JSON.stringify(batch.dependsOn ?? []),
+            'PENDING',
+            now,
+            now,
+          );
+        batch.workItems.forEach((item, itemIndex) => {
+          this.#db
+            .prepare(
+              `INSERT INTO v3_plan_work_items
+               (work_item_id,plan_id,batch_id,item_key,title,objective,acceptance_criteria_json,ordinal,status,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+            )
+            .run(
+              `work_${randomUUID()}`,
+              planId,
+              batchId,
+              item.key,
+              item.title,
+              item.objective,
+              JSON.stringify(item.acceptanceCriteria ?? []),
+              itemIndex,
+              'PENDING',
+              now,
+              now,
+            );
+        });
+      });
+      this.#db
+        .prepare(
+          "UPDATE v3_plans SET status='PENDING',blocked_reason=NULL,updated_at=? WHERE plan_id=?",
+        )
+        .run(now, planId);
+      this.appendEvent(planId, 'PLAN_ORCHESTRATED', {
+        batches: input.batches.length,
+        analysisSummary: input.analysisSummary.slice(0, PLAN_LIMITS.repairEvidenceCharacters),
+      });
+      this.#db.exec('COMMIT');
+    } catch (error) {
+      this.#db.exec('ROLLBACK');
+      throw error;
+    }
+    return this.get(planId)!;
+  }
+
   get(planId: string): PlanRecord | null {
     const row = this.#db.prepare('SELECT * FROM v3_plans WHERE plan_id=?').get(planId) as
       PlanRow | undefined;
@@ -443,11 +585,13 @@ export class PlanRepository {
   active(planId?: string): PlanRecord[] {
     const rows = planId
       ? (this.#db
-          .prepare("SELECT * FROM v3_plans WHERE plan_id=? AND status IN ('PENDING','RUNNING')")
+          .prepare(
+            "SELECT * FROM v3_plans WHERE plan_id=? AND status IN ('ORCHESTRATING','PENDING','RUNNING')",
+          )
           .all(planId) as unknown as PlanRow[])
       : (this.#db
           .prepare(
-            "SELECT * FROM v3_plans WHERE status IN ('PENDING','RUNNING') ORDER BY created_at",
+            "SELECT * FROM v3_plans WHERE status IN ('ORCHESTRATING','PENDING','RUNNING') ORDER BY created_at",
           )
           .all() as unknown as PlanRow[]);
     return rows.map(planFromRow);

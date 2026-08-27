@@ -7,6 +7,7 @@ Read APIs:
 - `GET /api/health`
 - `GET /api/v3/health`
 - `GET /api/v3/development/runtime-summary`
+- `POST /api/v3/development/delegations`
 - `GET /api/v3/development/readiness`
 - `GET /api/v3/development/model-registry`
 - `GET /api/v3/development/executions?limit=5000&hydrate=1`

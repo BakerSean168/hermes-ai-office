@@ -78,6 +78,222 @@ class PlanHost implements ExecutionHostPort {
   }
 }
 
+test('delegated plans persist an orchestration identity before OpenHands materializes the graph', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const request = () =>
+      runtime.app.inject({
+        method: 'POST',
+        url: '/api/v3/development/delegations',
+        headers: { 'idempotency-key': 'delegate-body-sense-active-plan' },
+        payload: {
+          projectKey: 'bodysense',
+          objective: 'Implement the engineering work in the current active plan.',
+          repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        },
+      });
+
+    const first = await request();
+    assert.equal(first.statusCode, 202);
+    const delegated = first.json();
+    assert.match(delegated.planId, /^plan_/);
+    assert.equal(delegated.status, 'ORCHESTRATING');
+    assert.deepEqual(delegated.batches, []);
+    assert.equal(delegated.orchestration.phase, 'ORCHESTRATE');
+    assert.equal(delegated.orchestration.status, 'RUNNING');
+    assert.equal(host.creates, 1);
+    assert.equal(host.lastCreateInput?.phase, 'ORCHESTRATE');
+
+    const second = await request();
+    assert.equal(second.statusCode, 202);
+    assert.equal(second.json().planId, delegated.planId);
+    assert.equal(host.creates, 1);
+
+    const conversationId = delegated.orchestration.refs.openhandsConversationId as string;
+    host.succeed(
+      conversationId,
+      JSON.stringify({
+        analysisSummary: 'One implementation ticket is sufficient after repository inspection.',
+        batches: [
+          {
+            key: 'implementation',
+            title: 'Implementation',
+            dependsOn: [],
+            workItems: [
+              {
+                key: 'change',
+                title: 'Implement change',
+                objective: 'Implement and verify the requested change.',
+                acceptanceCriteria: ['Focused regression passes.'],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await runtime.v3.reconcilePlans(delegated.planId);
+
+    const materialized = (
+      await runtime.app.inject({
+        method: 'GET',
+        url: `/api/v3/development/plans/${delegated.planId}`,
+      })
+    ).json();
+    assert.equal(materialized.status, 'RUNNING');
+    assert.equal(materialized.batches.length, 1);
+    assert.equal(materialized.batches[0].workItems.length, 1);
+    assert.equal(materialized.batches[0].workItems[0].executions[0].phase, 'IMPLEMENT');
+    assert.equal(host.creates, 2);
+    assert.ok(
+      materialized.events.some((event: { type: string }) => event.type === 'PLAN_ORCHESTRATED'),
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('delegated orchestration survives a control-plane restart without duplicating the supervisor', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-delegation-restart-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const options = {
+    dbFile,
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  } as const;
+
+  let runtime = await buildControlPlane(options);
+  try {
+    const delegated = (
+      await runtime.app.inject({
+        method: 'POST',
+        url: '/api/v3/development/delegations',
+        headers: { 'idempotency-key': 'delegate-restart-proof' },
+        payload: {
+          projectKey: 'digital-biome',
+          objective: 'Delegate a durable one-ticket change.',
+          repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        },
+      })
+    ).json();
+    const planId = delegated.planId as string;
+    const orchestrationConversation = delegated.orchestration.refs
+      .openhandsConversationId as string;
+    assert.equal(host.creates, 1);
+
+    await runtime.app.close();
+    runtime = await buildControlPlane(options);
+    await runtime.v3.reconcilePlans(planId);
+    let resumed = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(resumed.status, 'ORCHESTRATING');
+    assert.equal(resumed.orchestration.refs.openhandsConversationId, orchestrationConversation);
+    assert.equal(host.creates, 1);
+
+    host.succeed(
+      orchestrationConversation,
+      JSON.stringify({
+        analysisSummary: 'Repository evidence supports one independent ticket.',
+        batches: [
+          {
+            key: 'batch',
+            title: 'Batch',
+            dependsOn: [],
+            workItems: [
+              {
+                key: 'item',
+                title: 'Item',
+                objective: 'Implement the requested change.',
+                acceptanceCriteria: ['Focused verification passes.'],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await runtime.v3.reconcilePlans(planId);
+    resumed = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(resumed.status, 'RUNNING');
+    assert.equal(resumed.batches[0].workItems[0].executions[0].phase, 'IMPLEMENT');
+    assert.equal(host.creates, 2);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('delegated orchestration retries invalid supervisor output without starting a writer', async () => {
+  const host = new PlanHost();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+  try {
+    const delegated = (
+      await runtime.app.inject({
+        method: 'POST',
+        url: '/api/v3/development/delegations',
+        headers: { 'idempotency-key': 'delegate-invalid-first-output' },
+        payload: {
+          projectKey: 'memo-flow',
+          objective: 'Delegate a bounded refactor.',
+          repository: { path: '/tmp/repository', baseRevision: 'base-revision' },
+        },
+      })
+    ).json();
+    host.succeed(
+      delegated.orchestration.refs.openhandsConversationId,
+      'I inspected it; looks good.',
+    );
+    await runtime.v3.reconcilePlans(delegated.planId);
+    let body = (
+      await runtime.app.inject({
+        method: 'GET',
+        url: `/api/v3/development/plans/${delegated.planId}`,
+      })
+    ).json();
+    assert.equal(body.status, 'ORCHESTRATING');
+    assert.equal(body.batches.length, 0);
+    assert.equal(host.creates, 2);
+    assert.equal(body.orchestration.phase, 'ORCHESTRATE');
+    assert.equal(body.orchestration.status, 'RUNNING');
+    assert.equal(
+      body.events.filter((event: { type: string }) => event.type === 'PLAN_ORCHESTRATION_STARTED')
+        .length,
+      2,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('plan reconciliation is serialized per plan without blocking unrelated plans', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-queues-'));
   const host = new PlanHost();

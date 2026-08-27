@@ -34,7 +34,7 @@ class PluginTest(unittest.TestCase):
     def test_register_exposes_only_v3_tools_and_guidance_hook(self) -> None:
         ctx = FakeContext()
         plugin.register(ctx)
-        self.assertEqual(set(ctx.hooks), {"pre_llm_call"})
+        self.assertEqual(set(ctx.hooks), {"pre_llm_call", "pre_tool_call"})
         self.assertEqual(
             set(ctx.tools),
             {
@@ -43,6 +43,7 @@ class PluginTest(unittest.TestCase):
                 "ai_office_get_execution",
                 "ai_office_cancel_execution",
                 "ai_office_list_active",
+                "ai_office_delegate",
                 "ai_office_create_plan",
                 "ai_office_get_plan",
                 "ai_office_cancel_plan",
@@ -188,6 +189,42 @@ class PluginTest(unittest.TestCase):
         self.assertEqual(result["providers"][0]["providerKey"], "opencode-go")
         request.assert_called_once_with("/api/v3/development/model-registry", timeout=5.0)
 
+    def test_delegate_plan_is_thin_idempotent_and_returns_orchestrating_plan(self) -> None:
+        args = {
+            "project_key": "bodysense",
+            "objective": "Implement the current active plan.",
+            "repository_path": "/home/dev/projects/bodysense",
+            "active_plan_path": "docs/plan/active/current.md",
+        }
+        with mock.patch.object(
+            plugin,
+            "_control_plane_request",
+            return_value={
+                "planId": "plan-delegated",
+                "status": "ORCHESTRATING",
+                "orchestration": {
+                    "executionId": "exec-orchestrate",
+                    "phase": "ORCHESTRATE",
+                    "status": "RUNNING",
+                    "selection": {"backend": "openhands-builtin", "modelClass": "planning-premium"},
+                },
+                "batches": [],
+            },
+        ) as request:
+            first = json.loads(plugin._delegate_development_plan_tool(args, tool_call_id="call-a"))
+            first_key = request.call_args.kwargs["idempotency_key"]
+            second = json.loads(plugin._delegate_development_plan_tool(args, tool_call_id="call-b"))
+            second_key = request.call_args.kwargs["idempotency_key"]
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["status"], "ORCHESTRATING")
+        self.assertEqual(first["orchestration"]["backend"], "openhands-builtin")
+        self.assertEqual(first_key, second_key)
+        self.assertEqual(request.call_args.args[0], "/api/v3/development/delegations")
+        payload = request.call_args.kwargs["payload"]
+        self.assertNotIn("batches", payload)
+        self.assertNotIn("analysisSummary", payload)
+        self.assertIn("Active plan to inspect first", payload["objective"])
+
     def test_create_plan_uses_content_identity_and_durable_plan_api(self) -> None:
         args = {
             "project_key": "pixel-agents",
@@ -324,12 +361,62 @@ class PluginTest(unittest.TestCase):
         result = plugin._on_pre_llm_call(user_message="帮我实现并审查这个功能")
         assert result is not None
         text = result["context"]
+        self.assertIn("ai_office_delegate", text)
         self.assertIn("ai_office_create_plan", text)
+        self.assertIn("mandatory development execution authority", text)
         self.assertIn("ai_office_get_plan", text)
         self.assertIn("strict first-line PASS/FAIL", text)
         self.assertIn("LiteLLM", text)
         self.assertNotIn("Employee", text)
         self.assertNotIn("resolve_execution", text)
+
+    def test_pre_tool_call_blocks_direct_writers_for_enforced_project_profile(self) -> None:
+        plugin._CTX = FakeContext("memoflow")
+        for tool_name, args in (
+            ("write_file", {"path": "/home/dev/projects/memoflow/a.ts", "content": "x"}),
+            ("terminal", {"command": "git add packages/task/src/index.ts"}),
+            ("terminal", {"command": "codex exec --full-auto fix it"}),
+            ("delegate", {"task": "implement the fix"}),
+        ):
+            result = plugin._on_pre_tool_call(tool_name=tool_name, args=args)
+            assert result is not None
+            self.assertEqual(result["action"], "block")
+            self.assertIn("ai_office_delegate", result["message"])
+
+    def test_pre_tool_call_allows_read_only_and_bounded_verification(self) -> None:
+        plugin._CTX = FakeContext("memoflow")
+        for command in (
+            "git status -sb",
+            "git diff --check",
+            "gh pr checks 280",
+            "pnpm test:unit",
+            "pnpm exec prisma validate",
+            "docker compose ps",
+        ):
+            self.assertIsNone(plugin._on_pre_tool_call(tool_name="terminal", args={"command": command}))
+        self.assertIsNone(
+            plugin._on_pre_tool_call(
+                tool_name="read_text_file",
+                args={"path": "/home/dev/projects/memoflow/AGENTS.md"},
+            )
+        )
+        self.assertIsNone(plugin._on_pre_tool_call(tool_name="ai_office_delegate", args={}))
+
+    def test_pre_tool_call_does_not_enforce_default_profile(self) -> None:
+        plugin._CTX = FakeContext("default")
+        self.assertIsNone(
+            plugin._on_pre_tool_call(
+                tool_name="terminal",
+                args={"command": "git add README.md"},
+            )
+        )
+
+    def test_pre_llm_recognizes_pixel_agent_alias(self) -> None:
+        result = plugin._on_pre_llm_call(user_message="现在接入了 pixel-agent 了没")
+        assert result is not None
+        text = result["context"]
+        self.assertIn("Pixel Agent is the Hermes-facing name", text)
+        self.assertIn("ai_office_delegate", text)
 
     def test_pre_llm_provider_guidance_uses_litellm_snapshot(self) -> None:
         with mock.patch.object(

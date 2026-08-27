@@ -129,10 +129,10 @@ export class LiteLlmModelRegistry implements ModelRegistryPort {
       const params = asRecord(row.litellm_params);
       const metadata = asRecord(info.metadata);
       const deploymentId = String(info.id ?? '').trim();
-      const providerKey = String(metadata.legacy_provider_key ?? '').trim();
+      const credentialName = String(params.litellm_credential_name ?? '').trim();
+      const providerKey = String(metadata.legacy_provider_key ?? '').trim() || credentialName;
       if (!providerKey) continue;
       if (deploymentId) byDeploymentId[deploymentId] = providerKey;
-      const credentialName = String(params.litellm_credential_name ?? '').trim();
       const apiBase = credentialName ? apiBaseByCredential.get(credentialName) : undefined;
       if (!apiBase) continue;
       const keys = providerKeysByApiBase.get(apiBase) ?? new Set<string>();
@@ -193,18 +193,16 @@ export class LiteLlmModelRegistry implements ModelRegistryPort {
           const params = asRecord(row.litellm_params);
           const metadata = asRecord(info.metadata);
           const order = Number(params.order);
+          const credentialName = String(params.litellm_credential_name ?? '').trim();
+          const providerKey = String(metadata.legacy_provider_key ?? '').trim() || credentialName;
           return {
             id: String(info.id ?? ''),
             group: String(row.model_name ?? ''),
             ...(params.model ? { model: String(params.model) } : {}),
-            ...(params.litellm_credential_name
-              ? { credential: String(params.litellm_credential_name) }
-              : {}),
+            ...(credentialName ? { credential: credentialName } : {}),
             ...(Number.isFinite(order) ? { order } : {}),
             blocked: info.blocked === true,
-            ...(metadata.legacy_provider_key
-              ? { providerKey: String(metadata.legacy_provider_key) }
-              : {}),
+            ...(providerKey ? { providerKey } : {}),
             ...(metadata.commercial_type
               ? { commercialType: String(metadata.commercial_type) }
               : {}),

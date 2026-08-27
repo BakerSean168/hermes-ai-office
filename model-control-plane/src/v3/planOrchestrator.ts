@@ -1,6 +1,11 @@
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
-import { PlanRepository, type CreatePlanInput, type WorkItemRecord } from './plans.js';
+import {
+  PlanRepository,
+  type CreatePlanInput,
+  type DelegatePlanInput,
+  type WorkItemRecord,
+} from './plans.js';
 import { PLAN_LIMITS } from './planConstants.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type {
@@ -14,6 +19,74 @@ import type { WorkspaceProvisioningPort } from './workspace.js';
 const PLAN_TERMINAL_EXECUTION_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 
 export type PlanRecoveryMode = 'AUTO' | 'RETRY_REVIEW' | 'RETRY_DELIVERY';
+
+interface OrchestrationProposal {
+  analysisSummary: string;
+  batches: CreatePlanInput['batches'];
+}
+
+function parseOrchestrationProposal(finalText: string): OrchestrationProposal {
+  let text = finalText.trim();
+  if (text.startsWith('```')) {
+    text = text
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/, '')
+      .trim();
+  }
+  const first = text.indexOf('{');
+  const last = text.lastIndexOf('}');
+  if (first < 0 || last <= first) throw new Error('PLAN_ORCHESTRATION_JSON_MISSING');
+  const parsed = JSON.parse(text.slice(first, last + 1)) as Record<string, unknown>;
+  const analysisSummary = String(parsed.analysisSummary ?? '').trim();
+  if (!analysisSummary) throw new Error('PLAN_ANALYSIS_REQUIRED');
+  if (!Array.isArray(parsed.batches) || parsed.batches.length === 0) {
+    throw new Error('PLAN_BATCHES_REQUIRED');
+  }
+  const batches = parsed.batches.slice(0, 24).map((rawBatch) => {
+    if (!rawBatch || typeof rawBatch !== 'object' || Array.isArray(rawBatch)) {
+      throw new Error('PLAN_BATCH_INVALID');
+    }
+    const batch = rawBatch as Record<string, unknown>;
+    if (!Array.isArray(batch.workItems) || batch.workItems.length === 0) {
+      throw new Error('PLAN_WORK_ITEMS_REQUIRED');
+    }
+    return {
+      key: String(batch.key ?? '')
+        .trim()
+        .slice(0, 160),
+      title: String(batch.title ?? batch.key ?? '')
+        .trim()
+        .slice(0, 500),
+      dependsOn: Array.isArray(batch.dependsOn)
+        ? batch.dependsOn.map((item) => String(item).trim().slice(0, 160)).filter(Boolean)
+        : [],
+      workItems: batch.workItems.slice(0, 48).map((rawItem) => {
+        if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
+          throw new Error('PLAN_WORK_ITEM_INVALID');
+        }
+        const item = rawItem as Record<string, unknown>;
+        return {
+          key: String(item.key ?? '')
+            .trim()
+            .slice(0, 160),
+          title: String(item.title ?? item.key ?? '')
+            .trim()
+            .slice(0, 500),
+          objective: String(item.objective ?? '')
+            .trim()
+            .slice(0, 20_000),
+          acceptanceCriteria: Array.isArray(item.acceptanceCriteria)
+            ? item.acceptanceCriteria
+                .map((criterion) => String(criterion).trim().slice(0, 2_000))
+                .filter(Boolean)
+                .slice(0, 24)
+            : [],
+        };
+      }),
+    };
+  });
+  return { analysisSummary: analysisSummary.slice(0, 12_000), batches };
+}
 
 interface PlanExecutionPort {
   start(
@@ -109,6 +182,149 @@ export class DurablePlanOrchestrator {
     return (await this.getPlan(plan.planId))!;
   }
 
+  async delegatePlan(input: DelegatePlanInput, commandKey: string) {
+    if (!commandKey.trim()) throw new Error('IDEMPOTENCY_KEY_REQUIRED');
+    const { plan } = this.#repository.createDelegatedDraft(input, commandKey);
+    try {
+      await this.#ensureOrchestration(plan.planId);
+    } catch (error) {
+      // The durable plan identity is the public acknowledgement boundary. A transient
+      // supervisor/provider outage must not make Hermes believe delegation itself was lost;
+      // periodic reconciliation will retry the ORCHESTRATE launch from this same planId.
+      this.#repository.appendEvent(plan.planId, 'PLAN_ORCHESTRATION_START_DEFERRED', {
+        reason: (error instanceof Error ? error.message : String(error)).slice(
+          0,
+          PLAN_LIMITS.errorDetailCharacters,
+        ),
+      });
+    }
+    return (await this.getPlan(plan.planId))!;
+  }
+
+  async #startOrchestration(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+    attempt: number,
+    correction?: string,
+  ): Promise<DevelopmentExecutionSnapshot> {
+    const commandKey = `${plan.planId}:ORCHESTRATE:${attempt}`;
+    const schemaExample = JSON.stringify({
+      analysisSummary: 'Repository-backed summary justifying the graph.',
+      batches: [
+        {
+          key: 'batch-1',
+          title: 'Outcome-oriented batch title',
+          dependsOn: [],
+          workItems: [
+            {
+              key: 'ticket-1',
+              title: 'Outcome-oriented ticket title',
+              objective: 'Concrete implementation objective grounded in the repository.',
+              acceptanceCriteria: ['Observable verification criterion.'],
+            },
+          ],
+        },
+      ],
+    });
+    const objective = [
+      plan.objective,
+      '',
+      'Produce the complete execution graph for the durable AI Office plan.',
+      'Inspect the repository and any active plan documents before deciding the graph.',
+      'Do not launch coding workers in ORCHESTRATE; the durable Control Plane launches implementation and review only after this graph validates.',
+      'Use dependency edges to expose safe parallelism: independent work belongs in the same dependency-ready batch; dependent work goes in later batches.',
+      'Return only one JSON object, with camelCase fields exactly matching this shape:',
+      schemaExample,
+      correction ? `Previous orchestration output was invalid: ${correction}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const snapshot = await this.#executions.start(
+      {
+        phase: 'ORCHESTRATE',
+        objective,
+        projectKey: plan.projectKey,
+        repository: { path: plan.repositoryPath, baseRevision: plan.baseRevision },
+        await: false,
+      },
+      commandKey,
+    );
+    this.#repository.appendEvent(
+      plan.planId,
+      'PLAN_ORCHESTRATION_STARTED',
+      { attempt },
+      { executionId: snapshot.executionId },
+    );
+    return snapshot;
+  }
+
+  async #ensureOrchestration(planId: string): Promise<void> {
+    const plan = this.#repository.get(planId);
+    if (!plan || plan.status !== 'ORCHESTRATING') return;
+    const starts = this.#repository
+      .events(planId)
+      .filter((event) => event.type === 'PLAN_ORCHESTRATION_STARTED');
+    if (starts.length === 0) await this.#startOrchestration(plan, 1);
+  }
+
+  async #reconcileOrchestration(
+    plan: Exclude<ReturnType<PlanRepository['get']>, null>,
+  ): Promise<void> {
+    const starts = this.#repository
+      .events(plan.planId)
+      .filter((event) => event.type === 'PLAN_ORCHESTRATION_STARTED');
+    if (starts.length === 0) {
+      await this.#startOrchestration(plan, 1);
+      return;
+    }
+    const latest = starts.at(-1)!;
+    const executionId = String(latest.executionId ?? '');
+    if (!executionId) throw new Error('PLAN_ORCHESTRATION_EXECUTION_MISSING');
+    const snapshot = await this.#executions.get(executionId);
+    if (!snapshot || !PLAN_TERMINAL_EXECUTION_STATUSES.has(snapshot.status)) return;
+    const attempt = starts.length;
+    if (snapshot.status !== 'SUCCEEDED') {
+      const limit = snapshot.error?.retryable
+        ? PLAN_LIMITS.retryableTransportAttemptsPerParent
+        : PLAN_LIMITS.transportAttemptsPerParent;
+      if (attempt < limit) {
+        await this.#startOrchestration(plan, attempt + 1, snapshot.error?.code ?? snapshot.status);
+        return;
+      }
+      this.#repository.setPlanStatus(plan.planId, 'BLOCKED', 'PLAN_ORCHESTRATION_FAILED');
+      this.#repository.appendEvent(
+        plan.planId,
+        'PLAN_ORCHESTRATION_BLOCKED',
+        { reason: snapshot.error?.code ?? snapshot.status, attempt },
+        { executionId },
+      );
+      return;
+    }
+    try {
+      const proposal = parseOrchestrationProposal(snapshot.result?.finalText ?? '');
+      this.#repository.materializeDelegatedPlan(plan.planId, proposal);
+      this.#repository.appendEvent(
+        plan.planId,
+        'PLAN_ORCHESTRATION_ACCEPTED',
+        { attempt },
+        { executionId },
+      );
+      await this.#reconcilePlan(plan.planId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (attempt < PLAN_LIMITS.transportAttemptsPerParent) {
+        await this.#startOrchestration(plan, attempt + 1, reason.slice(0, 500));
+        return;
+      }
+      this.#repository.setPlanStatus(plan.planId, 'BLOCKED', 'PLAN_ORCHESTRATION_INVALID');
+      this.#repository.appendEvent(
+        plan.planId,
+        'PLAN_ORCHESTRATION_BLOCKED',
+        { reason: reason.slice(0, PLAN_LIMITS.errorDetailCharacters), attempt },
+        { executionId },
+      );
+    }
+  }
+
   async getPlan(planId: string, hydrateExecutions = false) {
     const plan = this.#repository.get(planId);
     if (!plan) return null;
@@ -130,10 +346,26 @@ export class DurablePlanOrchestrator {
       }
       batches.push({ ...batch, workItems });
     }
+    const events = this.#repository.events(planId);
+    const orchestrationEvent = [...events]
+      .reverse()
+      .find((event) => event.type === 'PLAN_ORCHESTRATION_STARTED');
+    const orchestrationExecutionId = orchestrationEvent?.executionId
+      ? String(orchestrationEvent.executionId)
+      : undefined;
+    const orchestration = orchestrationExecutionId
+      ? hydrateExecutions
+        ? await this.#executions.get(orchestrationExecutionId)
+        : (() => {
+            const record = this.#links.get(orchestrationExecutionId);
+            return record ? durableSnapshot(record) : null;
+          })()
+      : null;
     return {
       ...plan,
+      orchestration,
       batches,
-      events: this.#repository.events(planId),
+      events,
     };
   }
 
@@ -150,6 +382,20 @@ export class DurablePlanOrchestrator {
     const plan = this.#repository.get(planId);
     if (!plan) return null;
     if (['SUCCEEDED', 'CANCELLED'].includes(plan.status)) return this.getPlan(planId);
+    const orchestrationIds = this.#repository
+      .events(planId)
+      .filter((event) => event.type === 'PLAN_ORCHESTRATION_STARTED' && event.executionId)
+      .map((event) => String(event.executionId));
+    for (const executionId of orchestrationIds) {
+      const record = this.#links.get(executionId);
+      if (record && !PLAN_TERMINAL_EXECUTION_STATUSES.has(record.statusCache)) {
+        try {
+          await this.#executions.cancel(executionId);
+        } catch {
+          // The plan cancellation below remains authoritative even if a remote supervisor is unreachable.
+        }
+      }
+    }
     this.#repository.cancel(planId);
     for (const batch of this.#repository.batches(planId)) {
       for (const item of this.#repository.workItems(batch.batchId)) {
@@ -430,7 +676,12 @@ export class DurablePlanOrchestrator {
 
   async #reconcilePlan(planId: string): Promise<void> {
     const plan = this.#repository.get(planId);
-    if (!plan || !['PENDING', 'RUNNING'].includes(plan.status)) return;
+    if (!plan) return;
+    if (plan.status === 'ORCHESTRATING') {
+      await this.#reconcileOrchestration(plan);
+      return;
+    }
+    if (!['PENDING', 'RUNNING'].includes(plan.status)) return;
     if (plan.status === 'PENDING') this.#repository.setPlanStatus(plan.planId, 'RUNNING');
     const batches = this.#repository.batches(plan.planId);
     if (batches.every((batch) => batch.status === 'SUCCEEDED')) {

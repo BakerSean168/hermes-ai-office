@@ -14,6 +14,7 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 import re
+import shlex
 import time
 from typing import Any
 import urllib.parse
@@ -117,6 +118,39 @@ _LIST_PROVIDERS_SCHEMA = {
     "parameters": {"type": "object", "properties": {}},
 }
 
+_DELEGATE_PLAN_SCHEMA = {
+    "name": "ai_office_delegate",
+    "description": (
+        "Delegate a complete development objective to the OpenHands supervisor. Hermes supplies only the objective and repository; "
+        "OpenHands inspects the repository and produces the dependency-aware batch graph, then the durable Control Plane automatically runs implementation, review/fix, integration, and optional delivery."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "project_key": {"type": "string"},
+            "objective": {"type": "string"},
+            "repository_path": {"type": "string"},
+            "base_revision": {"type": "string"},
+            "active_plan_path": {
+                "type": "string",
+                "description": "Optional repository-relative active-plan path the OpenHands supervisor should inspect.",
+            },
+            "delivery": {
+                "type": "object",
+                "properties": {
+                    "remote": {"type": "string"},
+                    "branch": {"type": "string"},
+                    "target_branch": {"type": "string"},
+                    "auto_merge": {"type": "boolean", "const": True},
+                    "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
+                },
+                "required": ["branch", "auto_merge"],
+            },
+        },
+        "required": ["objective", "repository_path"],
+    },
+}
+
 _CREATE_PLAN_SCHEMA = {
     "name": "ai_office_create_plan",
     "description": (
@@ -215,10 +249,224 @@ _AI_OFFICE_RE = re.compile(r"\bai[\s_-]*office\b", re.IGNORECASE)
 _PROVIDER_RE = re.compile(r"provider|supplier|channel|model|供应商|提供商|渠道|模型", re.IGNORECASE)
 _PROVIDER_STATUS_RE = re.compile(r"status|health|available|list|current|状态|健康|可用|列表|当前|哪些", re.IGNORECASE)
 _DEVELOPMENT_RE = re.compile(
+    r"pixel[- ]?agent|ai[ _-]?office|ai_office_delegate|"
     r"implement|review|plan|debug|test|fix|refactor|code|coding|"
     r"实施|实现|审查|评审|规划|计划|调试|测试|修复|重构|编码|代码",
     re.IGNORECASE,
 )
+_ENFORCED_PROFILES = {
+    item.strip().lower()
+    for item in os.environ.get(
+        "HERMES_AI_OFFICE_ENFORCED_PROFILES",
+        "memoflow,bodysense,digital-biome",
+    ).split(",")
+    if item.strip()
+}
+_DIRECT_AGENT_NAMES = {
+    "agy",
+    "antigravity",
+    "claude",
+    "codex",
+    "dsh",
+    "openhands",
+    "opencode",
+    "zcode",
+}
+_READ_ONLY_TOOL_FRAGMENTS = (
+    "read_file",
+    "read_text_file",
+    "read_media_file",
+    "search_files",
+    "list_directory",
+    "directory_tree",
+    "get_file_info",
+)
+_PACKAGE_VERIFY_SCRIPT_RE = re.compile(
+    r"^(?:test|typecheck|lint|build|check|verify|ci|e2e|db:test|prisma:(?:validate|generate))(?:[:_-].*)?$",
+    re.IGNORECASE,
+)
+
+
+def _profile_enforces_ai_office() -> bool:
+    return _active_profile_name().strip().lower() in _ENFORCED_PROFILES
+
+
+def _is_safe_terminal_command(command: str) -> bool:
+    """Allow inspection/verification, but never direct implementation or delivery."""
+    value = str(command or "").strip()
+    if not value:
+        return False
+    # Compound shell syntax makes a read-looking command able to hide a writer.
+    if re.search(r"(?:&&|\|\||[;|><`]|\$\(|\n|\r)", value):
+        return False
+    try:
+        tokens = shlex.split(value)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    command_name = Path(tokens[0]).name.lower()
+    if command_name in _DIRECT_AGENT_NAMES:
+        return False
+    if command_name in {
+        "pwd",
+        "hostname",
+        "whoami",
+        "date",
+        "ls",
+        "find",
+        "rg",
+        "grep",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "stat",
+        "du",
+        "df",
+        "ps",
+        "pgrep",
+        "git",
+        "gh",
+        "docker",
+        "docker-compose",
+        "systemctl",
+        "journalctl",
+        "pytest",
+        "vitest",
+        "nx",
+        "go",
+        "cargo",
+        "pnpm",
+        "npm",
+        "yarn",
+        "bun",
+        "npx",
+    }:
+        pass
+    else:
+        return False
+
+    if command_name == "git":
+        if len(tokens) < 2:
+            return False
+        subcommand = tokens[1].lower()
+        if subcommand not in {
+            "status",
+            "diff",
+            "log",
+            "show",
+            "rev-parse",
+            "remote",
+            "branch",
+            "fetch",
+            "ls-files",
+            "grep",
+            "describe",
+        }:
+            return False
+        if subcommand == "branch" and any(
+            token in {"-d", "-D", "-m", "-M", "--delete", "--move"} for token in tokens[2:]
+        ):
+            return False
+        return True
+
+    if command_name == "gh":
+        if len(tokens) < 3:
+            return False
+        return (tokens[1].lower(), tokens[2].lower()) in {
+            ("pr", "checks"),
+            ("pr", "view"),
+            ("pr", "status"),
+            ("pr", "list"),
+            ("run", "view"),
+            ("run", "list"),
+            ("run", "watch"),
+        }
+
+    if command_name == "docker":
+        if len(tokens) < 2:
+            return False
+        if tokens[1].lower() == "compose":
+            return len(tokens) >= 3 and tokens[2].lower() in {"ps", "logs", "config"}
+        return tokens[1].lower() in {"ps", "logs", "inspect", "stats"}
+
+    if command_name == "docker-compose":
+        return len(tokens) >= 2 and tokens[1].lower() in {"ps", "logs", "config"}
+
+    if command_name == "systemctl":
+        return len(tokens) >= 2 and tokens[1].lower() in {"status", "show", "is-active", "is-failed"}
+    if command_name == "journalctl":
+        return True
+    if command_name in {"pwd", "hostname", "whoami", "date", "ls", "find", "rg", "grep", "cat", "head", "tail", "wc", "stat", "du", "df", "ps", "pgrep"}:
+        return True
+    if command_name in {"pytest", "vitest"}:
+        return True
+    if command_name == "nx":
+        return len(tokens) >= 2 and tokens[1].lower() in {"test", "lint", "build", "typecheck", "affected"}
+    if command_name == "go":
+        return len(tokens) >= 2 and tokens[1].lower() in {"test", "vet"}
+    if command_name == "cargo":
+        return len(tokens) >= 2 and tokens[1].lower() in {"test", "check", "clippy"}
+
+    if command_name in {"pnpm", "npm", "yarn", "bun"}:
+        if len(tokens) < 2:
+            return False
+        if tokens[1].lower() == "exec":
+            if len(tokens) < 3:
+                return False
+            executable = Path(tokens[2]).name.lower()
+            if executable in {"vitest", "playwright", "tsc", "eslint", "nx"}:
+                return True
+            if executable == "prisma":
+                return len(tokens) >= 4 and tokens[3].lower() in {"validate", "generate"}
+            return False
+        script_index = 2 if tokens[1].lower() == "run" else 1
+        return len(tokens) > script_index and bool(_PACKAGE_VERIFY_SCRIPT_RE.fullmatch(tokens[script_index]))
+
+    if command_name == "npx":
+        if len(tokens) < 2:
+            return False
+        executable = Path(tokens[1]).name.lower()
+        if executable in {"vitest", "playwright", "tsc", "eslint", "nx"}:
+            return True
+        if executable == "prisma":
+            return len(tokens) >= 3 and tokens[2].lower() in {"validate", "generate"}
+        return False
+    return False
+
+
+def _on_pre_tool_call(tool_name: Any = "", args: Any = None, **_kwargs: Any) -> dict[str, str] | None:
+    if not _profile_enforces_ai_office():
+        return None
+    name = str(tool_name or "").strip().lower()
+    if not name or name.startswith("ai_office_"):
+        return None
+
+    if any(fragment in name for fragment in _READ_ONLY_TOOL_FRAGMENTS):
+        return None
+
+    block_message = (
+        "Direct implementation is disabled for this project profile. "
+        "Use ai_office_delegate (or an explicitly operator-authored ai_office_create_plan) so Pixel Agent / AI Office owns writers, review, integration, CI repair, and delivery. "
+        "Hermes may inspect state and run bounded read-only verification, but must not edit source, launch coding agents directly, or mutate Git/PR state."
+    )
+
+    if "terminal" in name or name in {"shell", "bash", "exec", "code_execution"}:
+        arguments = args if isinstance(args, Mapping) else {}
+        command = str(arguments.get("command") or arguments.get("cmd") or "")
+        return None if _is_safe_terminal_command(command) else {"action": "block", "message": block_message}
+
+    if any(token in name for token in ("write", "edit", "move", "delete", "remove", "patch", "apply_patch")):
+        return {"action": "block", "message": block_message}
+    if any(token in name for token in ("delegate", "subagent", "spawn", "codex", "opencode", "claude", "dsh", "zcode", "openhands")):
+        return {"action": "block", "message": block_message}
+    if "github" in name and any(token in name for token in ("create", "update", "merge", "push", "delete")):
+        return {"action": "block", "message": block_message}
+    if name in {"file", "filesystem"}:
+        return {"action": "block", "message": block_message}
+    return None
 
 
 def _control_plane_request(
@@ -324,6 +572,14 @@ def _plan_idempotency_key(payload: Mapping[str, Any]) -> str:
     return f"hermes-v3-plan-{digest}"
 
 
+def _delegation_idempotency_key(payload: Mapping[str, Any]) -> str:
+    digest = hashlib.blake2b(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        digest_size=16,
+    ).hexdigest()
+    return f"hermes-v3-delegate-{digest}"
+
+
 def _compact_plan(plan: Mapping[str, Any], *, detail: bool = True) -> dict[str, Any]:
     compact: dict[str, Any] = {
         key: plan.get(key)
@@ -394,6 +650,18 @@ def _compact_plan(plan: Mapping[str, Any], *, detail: bool = True) -> dict[str, 
             compact_batch["workItems"] = work_items
         batches.append(compact_batch)
     compact["batches"] = batches
+    orchestration = plan.get("orchestration")
+    if isinstance(orchestration, Mapping):
+        selection = orchestration.get("selection") if isinstance(orchestration.get("selection"), Mapping) else {}
+        compact["orchestration"] = {
+            key: orchestration.get(key)
+            for key in ("executionId", "phase", "status", "timing", "usage")
+            if orchestration.get(key) is not None
+        }
+        if selection.get("backend") is not None:
+            compact["orchestration"]["backend"] = selection.get("backend")
+        if selection.get("modelClass") is not None:
+            compact["orchestration"]["modelClass"] = selection.get("modelClass")
     if detail:
         compact["events"] = [
             {
@@ -611,6 +879,54 @@ def _list_shared_providers_tool(_args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
+def _delegate_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
+    try:
+        objective = str(args.get("objective") or "").strip()
+        repository_path = str(args.get("repository_path") or "").strip()
+        if not objective:
+            raise ValueError("objective is required")
+        if not repository_path:
+            raise ValueError("repository_path is required")
+        active_plan_path = str(args.get("active_plan_path") or "").strip()
+        if active_plan_path:
+            objective = f"{objective}\n\nActive plan to inspect first: {active_plan_path[:1000]}"
+        base_revision = str(args.get("base_revision") or "").strip()
+        payload: dict[str, Any] = {
+            "projectKey": _project_key(args),
+            "objective": objective[:20_000],
+            "repository": {
+                "path": repository_path,
+                **({"baseRevision": base_revision[:240]} if base_revision else {}),
+            },
+        }
+        raw_delivery = args.get("delivery")
+        if raw_delivery is not None:
+            if not isinstance(raw_delivery, Mapping):
+                raise ValueError("delivery must be an object")
+            branch = str(raw_delivery.get("branch") or "").strip()
+            if not branch:
+                raise ValueError("delivery.branch is required")
+            if raw_delivery.get("auto_merge") is not True:
+                raise ValueError("delivery.auto_merge must be explicitly true")
+            payload["delivery"] = {
+                "remote": str(raw_delivery.get("remote") or "origin")[:240],
+                "branch": branch[:240],
+                "targetBranch": str(raw_delivery.get("target_branch") or "main")[:240],
+                "autoMerge": True,
+                "mergeMethod": str(raw_delivery.get("merge_method") or "merge")[:40],
+            }
+        plan = _control_plane_request(
+            "/api/v3/development/delegations",
+            method="POST",
+            payload=payload,
+            idempotency_key=_delegation_idempotency_key(payload),
+            timeout=12.0,
+        )
+        return json.dumps({"ok": True, **_compact_plan(plan)}, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
+
+
 def _create_development_plan_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     try:
         objective = str(args.get("objective") or "").strip()
@@ -759,8 +1075,8 @@ def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] |
     sections: list[str] = []
     if development_topic:
         sections.append(
-            "AI Office is the development execution authority. For a complete multi-step task, create one durable graph with ai_office_create_plan; the control plane then automatically runs IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic batch integration, and dependent batches without Hermes polling. "
-            "Use ai_office_run_phase only for a standalone investigation or operator-directed single phase. VERIFY_REVIEW enforces a strict first-line PASS/FAIL protocol. Preserve planId across turns and recover with ai_office_get_plan or ai_office_list_plans after Telegram, Hermes, or gateway reconnects. "
+            "Pixel Agent is the Hermes-facing name for the hermes-ai-office / AI Office V3 execution path, and it is the mandatory development execution authority for enforced project profiles. For complete project work, use ai_office_delegate: provide only the objective, repository, and optional active-plan/delivery hint. OpenHands then inspects the repository and creates the dependency-aware durable graph; the Control Plane automatically runs parallel-safe IMPLEMENT workers, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic integration, and dependent batches without Hermes polling. "
+            "Use ai_office_create_plan only when an operator already has an explicit graph that must be preserved exactly. Use ai_office_run_phase only for standalone investigation or an operator-directed single phase. VERIFY_REVIEW keeps the strict first-line PASS/FAIL contract. Preserve planId across turns and recover with ai_office_get_plan or ai_office_list_plans after Telegram, Hermes, or gateway reconnects. "
             "Backend and logical model are policy decisions; physical provider selection, fallback, health, and spend are exclusively LiteLLM decisions."
         )
     if provider_topic:
@@ -785,6 +1101,7 @@ def register(ctx: Any) -> None:
     _CTX = ctx
     tools = (
         (_LIST_PROVIDERS_SCHEMA, _list_shared_providers_tool, "📡"),
+        (_DELEGATE_PLAN_SCHEMA, _delegate_development_plan_tool, "🧠"),
         (_CREATE_PLAN_SCHEMA, _create_development_plan_tool, "🗺️"),
         (_GET_PLAN_SCHEMA, _get_development_plan_tool, "🧭"),
         (_CANCEL_PLAN_SCHEMA, _cancel_development_plan_tool, "🛑"),
@@ -804,3 +1121,4 @@ def register(ctx: Any) -> None:
             emoji=emoji,
         )
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("pre_tool_call", _on_pre_tool_call)

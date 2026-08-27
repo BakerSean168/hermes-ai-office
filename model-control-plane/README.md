@@ -17,7 +17,7 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 - durable execution timing, result, LiteLLM usage, and per-deployment route usage;
 - readiness evidence.
 
-OpenHands owns supervisor and worker lifecycle. The built-in OpenHands supervisor may use `task_tool_set` for bounded analysis and the repository-owned `ai_office_worker` tool to fan out isolated ACP coding workers. LiteLLM is the only provider/model/routing/health/spend authority.
+OpenHands owns repository-aware orchestration analysis while the durable Control Plane owns execution state transitions. The built-in OpenHands supervisor uses `task_tool_set` for bounded read-only investigation and produces a dependency-aware graph; only after validation does the Control Plane fan out isolated ACP coding workers. LiteLLM is the only provider/model/routing/health/spend authority.
 
 Coding backends are defined in policy independently from runtime readiness. OpenCode and DSH are the proven default implementation workers. Codex, Claude Code, and ZCode are registered ACP backends but must pass runtime smoke before they are added to `MODEL_CP_V3_ENABLED_BACKENDS`. This keeps an installed adapter from being mistaken for a production-ready worker.
 
@@ -26,6 +26,7 @@ Coding backends are defined in policy independently from runtime readiness. Open
 - `GET /api/health`
 - `GET /api/v3/health`
 - `GET /api/v3/development/runtime-summary`
+- `POST /api/v3/development/delegations` — create an `ORCHESTRATING` plan from a thin objective/repository request; OpenHands materializes the graph asynchronously.
 - `GET /api/v3/development/readiness`
 - `GET /api/v3/development/model-registry`
 - `GET /api/v3/development/plans`

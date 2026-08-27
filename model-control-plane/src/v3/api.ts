@@ -61,6 +61,54 @@ export function registerV3Routes(
 
   app.get('/api/v3/development/runtime-summary', async () => service.runtimeSummary());
 
+  app.post('/api/v3/development/delegations', async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const header = request.headers['idempotency-key'];
+    const idempotencyKey = Array.isArray(header) ? header[0] : header;
+    if (!idempotencyKey?.trim()) {
+      reply.code(400);
+      return { error: { code: 'IDEMPOTENCY_KEY_REQUIRED' } };
+    }
+    const repository =
+      body.repository && typeof body.repository === 'object' && !Array.isArray(body.repository)
+        ? (body.repository as Record<string, unknown>)
+        : {};
+    const delivery =
+      body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery)
+        ? (body.delivery as Record<string, unknown>)
+        : undefined;
+    try {
+      const result = await service.delegatePlan(
+        {
+          projectKey: String(body.projectKey ?? ''),
+          objective: String(body.objective ?? ''),
+          repository: {
+            path: String(repository.path ?? ''),
+            baseRevision: repository.baseRevision ? String(repository.baseRevision) : undefined,
+          },
+          delivery: delivery
+            ? {
+                remote: delivery.remote ? String(delivery.remote) : undefined,
+                branch: String(delivery.branch ?? ''),
+                targetBranch: delivery.targetBranch ? String(delivery.targetBranch) : undefined,
+                autoMerge: delivery.autoMerge === true,
+                mergeMethod: delivery.mergeMethod
+                  ? (String(delivery.mergeMethod) as 'merge' | 'squash' | 'rebase')
+                  : undefined,
+              }
+            : undefined,
+        },
+        idempotencyKey,
+      );
+      reply.code(result.status === 'ORCHESTRATING' ? 202 : 200);
+      return result;
+    } catch (error) {
+      const code = errorCode(error);
+      reply.code(errorStatus(code));
+      return { error: { code } };
+    }
+  });
+
   app.post('/api/v3/development/plans', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const header = request.headers['idempotency-key'];

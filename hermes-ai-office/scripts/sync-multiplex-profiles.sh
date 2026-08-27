@@ -5,6 +5,19 @@ root="${HERMES_ROOT:-/opt/data}"
 plugin_name="hermes-ai-office"
 plugin_source="${AI_OFFICE_PLUGIN_SOURCE:-${root}/plugins/${plugin_name}}"
 hermes_bin="${HERMES_BIN:-/opt/hermes/.venv/bin/hermes}"
+required_profiles_csv="${AI_OFFICE_REQUIRED_PROFILES:-default,memoflow,bodysense}"
+
+is_required_profile() {
+  local profile_name=$1
+  local item
+  local -a required_profiles
+  IFS=',' read -r -a required_profiles <<<"${required_profiles_csv}"
+  for item in "${required_profiles[@]}"; do
+    item="${item//[[:space:]]/}"
+    [[ -n "${item}" && "${item}" == "${profile_name}" ]] && return 0
+  done
+  return 1
+}
 
 if [[ ! -d "${plugin_source}" ]]; then
   echo "AI Office plugin source not found: ${plugin_source}" >&2
@@ -13,6 +26,12 @@ fi
 if [[ ! -x "${hermes_bin}" ]]; then
   echo "Hermes executable not found: ${hermes_bin}" >&2
   exit 2
+fi
+
+if is_required_profile default && [[ -f "${root}/config.yaml" ]]; then
+  rm -f "${root}/.ai-office-disabled"
+  HERMES_HOME="${root}" "${hermes_bin}" plugins enable "${plugin_name}" >/dev/null
+  echo "enabled ${plugin_name} for default (required profile)"
 fi
 
 profiles_root="${root}/profiles"
@@ -25,8 +44,11 @@ for profile_dir in "${profiles_root}"/*; do
   mkdir -p "${profile_dir}/plugins"
   target="${profile_dir}/plugins/${plugin_name}"
   opt_out_marker="${profile_dir}/.ai-office-disabled"
+  profile_name=$(basename "${profile_dir}")
 
-  if [[ -e "${opt_out_marker}" ]]; then
+  if is_required_profile "${profile_name}"; then
+    rm -f "${opt_out_marker}"
+  elif [[ -e "${opt_out_marker}" ]]; then
     # Profile-local opt-out is durable across later AI Office deployments.
     # Disable first while the shared plugin source is still reachable, then
     # remove only the profile symlink. Never remove the shared plugin source.
@@ -37,7 +59,7 @@ for profile_dir in "${profiles_root}"/*; do
       echo "Refusing to remove non-symlink opt-out plugin path: ${target}" >&2
       exit 3
     fi
-    echo "disabled ${plugin_name} for $(basename "${profile_dir}") (profile opt-out)"
+    echo "disabled ${plugin_name} for ${profile_name} (profile opt-out)"
     continue
   fi
 
@@ -47,5 +69,9 @@ for profile_dir in "${profiles_root}"/*; do
   fi
   ln -sfn "${plugin_source}" "${target}"
   HERMES_HOME="${profile_dir}" "${hermes_bin}" plugins enable "${plugin_name}" >/dev/null
-  echo "enabled ${plugin_name} for $(basename "${profile_dir}")"
+  if is_required_profile "${profile_name}"; then
+    echo "enabled ${plugin_name} for ${profile_name} (required profile)"
+  else
+    echo "enabled ${plugin_name} for ${profile_name}"
+  fi
 done

@@ -10,7 +10,8 @@ The Hermes plugin is intentionally thin: it has no parallel provider database an
 
 ## Tools
 
-- `ai_office_create_plan`
+- `ai_office_delegate` (default: Hermes supplies only objective/repository; OpenHands builds the graph)
+- `ai_office_create_plan` (advanced: submit an already-decided graph)
 - `ai_office_get_plan`
 - `ai_office_cancel_plan`
 - `ai_office_list_plans`
@@ -20,13 +21,12 @@ The Hermes plugin is intentionally thin: it has no parallel provider database an
 - `ai_office_list_active`
 - `ai_office_list_providers`
 
-The only hook is `pre_llm_call`, which tells the Hermes Brain to use `ai_office_create_plan` for complete work, retain the returned `planId`, and recover with plan-scoped reads or reconcile instead of replaying phase calls.
+The plugin uses two enforcement hooks. `pre_llm_call` tells the Hermes Brain that `ai_office_delegate` is the mandatory execution boundary for enforced project profiles, while `pre_tool_call` blocks direct source/Git mutation and direct coding-agent launches outside AI Office. Read-only inspection and bounded verification remain available. `ai_office_create_plan` remains available only when an operator intentionally supplies the full graph.
 
 ## Development protocol
 
-- `ai_office_create_plan` is the sole public `ORCHESTRATE` boundary: Hermes analyzes
-  the objective, submits the complete batch graph once, and receives its durable
-  `planId` before any worker is launched.
+- `ai_office_delegate` is the default public orchestration boundary: Hermes submits the objective and repository, immediately receives a durable `planId` in `ORCHESTRATING`, and OpenHands inspects the repository to produce the batch graph. The Control Plane validates/materializes that graph before any writer starts.
+- `ai_office_create_plan` remains the explicit-graph escape hatch for operator-authored plans.
 - `INVESTIGATE_PLAN`
 - `IMPLEMENT`
 - `VERIFY_REVIEW`

@@ -16,7 +16,7 @@ import type {
 import { ExecutionLinkRepository } from './correlation.js';
 import type { PlanDeliveryPort } from './delivery.js';
 import { DurablePlanOrchestrator, type PlanRecoveryMode } from './planOrchestrator.js';
-import { PlanRepository, type CreatePlanInput } from './plans.js';
+import { PlanRepository, type CreatePlanInput, type DelegatePlanInput } from './plans.js';
 import { reviewVerdict } from './reviewVerdict.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
@@ -47,14 +47,11 @@ function phasePrompt(input: StartDevelopmentExecutionInput): string {
   const rules: Record<DevelopmentPhase, string[]> = {
     ORCHESTRATE: [
       'Act as the AI Office engineering supervisor for the supplied project objective or active plan.',
-      'Keep this supervisor workspace read-only. Use task_tool_set for bounded investigation and ai_office_worker for coding-agent executions.',
-      'The Worker source repository reference is a host path for ai_office_worker launches; do not try to open that host path from the supervisor container. Inspect the current mounted workspace instead.',
-      'Launch independent IMPLEMENT workers only for dependency-independent tickets; the control plane enforces workspace isolation and writer concurrency.',
-      'Prefer OpenCode or DSH workers for implementation. Use Codex or Claude Code for premium planning/review only when the runtime summary reports that backend enabled.',
-      'For every implementation, launch an independent VERIFY_REVIEW against that implementation execution; on FAIL launch IMPLEMENT_FIX and review again.',
-      'A review is usable only when its final result begins with strict PASS or FAIL. If a premium ACP reviewer times out, is cancelled/stuck/failed, or returns no strict verdict, cancel it if still active and retry VERIFY_REVIEW with openhands-builtin. Never treat transport completion as review approval.',
-      'Do not claim that FINALIZE merges code. FINALIZE currently records a verified logical completion only; report integration as pending unless a separate integration mechanism proves it happened.',
-      'Stop and report a blocking decision instead of bypassing a protected contract, review gate, writer lease, or failed verification.',
+      'Keep this supervisor workspace read-only. Use terminal and task_tool_set for bounded repository investigation.',
+      'Do not launch coding workers from ORCHESTRATE. Produce the dependency-aware execution graph; the durable Control Plane launches ACP workers, independent review, repair, integration, and delivery after the graph validates.',
+      'Put dependency-independent tickets in the same ready batch so the Control Plane may execute them in parallel within configured writer limits.',
+      'Keep acceptance criteria observable and repository-grounded. Preserve active-plan constraints and explicitly leave operator/cloud-resource-only work parked when the objective requires it.',
+      'Stop and report a blocking decision instead of inventing requirements or bypassing a protected contract.',
     ],
     INVESTIGATE_PLAN: [
       'Investigate the repository and identify evidence-backed root causes.',
@@ -690,6 +687,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
 
   createPlan(input: CreatePlanInput, commandKey: string) {
     return this.#planOrchestrator.createPlan(input, commandKey);
+  }
+
+  delegatePlan(input: DelegatePlanInput, commandKey: string) {
+    return this.#planOrchestrator.delegatePlan(input, commandKey);
   }
 
   getPlan(planId: string, hydrateExecutions = false) {

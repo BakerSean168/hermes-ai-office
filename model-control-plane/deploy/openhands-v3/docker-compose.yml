@@ -36,6 +36,14 @@ services:
     cap_drop:
       - ALL
     security_opt:
+      # Codex's workspace-write sandbox uses bubblewrap user namespaces. Docker's
+      # default seccomp profile blocks the required unshare(2) call. Ubuntu also
+      # requires an AppArmor profile that explicitly grants userns. Keep every Linux
+      # capability dropped and no-new-privileges enforced; the dedicated AppArmor
+      # profile is installed by the GCP execution-plane installer and exists only to
+      # let Codex create its nested, stricter bubblewrap sandbox.
+      - seccomp:unconfined
+      - apparmor:hermes-openhands-codex
       - no-new-privileges:true
     restart: unless-stopped
     healthcheck:

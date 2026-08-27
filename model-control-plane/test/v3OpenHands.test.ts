@@ -180,12 +180,9 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     const supervisorBody = createBody as any;
     assert.deepEqual(
       supervisorBody.agent.tools.map((tool: any) => tool.name),
-      ['terminal', 'file_editor', 'task_tracker', 'task_tool_set', 'ai_office_worker'],
+      ['terminal', 'file_editor', 'task_tracker', 'task_tool_set'],
     );
-    assert.equal(
-      supervisorBody.tool_module_qualnames.ai_office_worker,
-      'hermes_ai_office_tools.worker',
-    );
+    assert.equal(supervisorBody.tool_module_qualnames.ai_office_worker, undefined);
 
     await host.createExecution({
       executionId: 'exec_review_builtin_1',

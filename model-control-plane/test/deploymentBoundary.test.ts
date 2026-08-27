@@ -48,6 +48,29 @@ test('control-plane deployment contains no V2, CPA, or Provider Hub runtime conf
   assert.equal(fs.existsSync(path.join(root, 'scripts/migrate-provider-hub-to-litellm.py')), false);
 });
 
+test('OpenHands outer container permits Codex bubblewrap without granting Linux capabilities', () => {
+  const raw = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
+  const compose = parse(raw) as any;
+  const service = compose.services['agent-server'];
+  assert.deepEqual(service.cap_drop, ['ALL']);
+  assert.ok(service.security_opt.includes('no-new-privileges:true'));
+  assert.ok(service.security_opt.includes('seccomp:unconfined'));
+  assert.ok(service.security_opt.includes('apparmor:hermes-openhands-codex'));
+  assert.notEqual(service.privileged, true);
+  const profile = fs.readFileSync(
+    path.join(root, 'deploy/openhands-v3/hermes-openhands-codex.apparmor'),
+    'utf8',
+  );
+  assert.match(profile, /profile hermes-openhands-codex/);
+  assert.match(profile, /\buserns,/);
+  assert.doesNotMatch(profile, /capability sys_admin/);
+  const installer = fs.readFileSync(
+    path.join(root, 'deploy/gcp/install-gcp-execution-plane.sh'),
+    'utf8',
+  );
+  assert.match(installer, /apparmor_parser -r/);
+});
+
 test('OpenCode logical models correlate LiteLLM spend by execution ID', () => {
   const config = JSON.parse(
     fs.readFileSync(path.join(root, 'deploy/openhands-v3/opencode-v3.json'), 'utf8'),
