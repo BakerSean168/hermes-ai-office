@@ -872,6 +872,13 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("--hao-bg: #0f1115", styles)
         self.assertIn("--hao-bg: #f6f7f9", styles)
 
+    def test_safe_deploy_profile_reconciliation_does_not_depend_on_executable_bit(self) -> None:
+        deploy = (ROOT / "scripts" / "deploy-oracle2-safe.sh").read_text(encoding="utf-8")
+        self.assertIn(
+            'docker exec "$CONTAINER" /bin/bash /opt/data/plugins/hermes-ai-office/scripts/sync-multiplex-profiles.sh',
+            deploy,
+        )
+
     def test_contract_changes_are_dashboard_backend_only(self) -> None:
         deploy = (ROOT / "scripts" / "deploy-oracle2-safe.sh").read_text(encoding="utf-8")
         self.assertIn('path.startswith("contracts/")', deploy)

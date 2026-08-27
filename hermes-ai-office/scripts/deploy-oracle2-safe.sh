@@ -259,7 +259,7 @@ restart_dashboard_supervised() {
 }
 
 sync_profile_links() {
-  if docker exec "$CONTAINER" /opt/data/plugins/hermes-ai-office/scripts/sync-multiplex-profiles.sh >/dev/null 2>&1; then
+  if docker exec "$CONTAINER" /bin/bash /opt/data/plugins/hermes-ai-office/scripts/sync-multiplex-profiles.sh >/dev/null 2>&1; then
     log "multiplex profile plugin links reconciled"
   else
     log "WARNING: profile plugin-link reconciliation failed" >&2
