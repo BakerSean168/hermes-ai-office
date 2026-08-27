@@ -7,6 +7,7 @@ mutation belongs to LiteLLM Admin; AI Office owns no parallel provider state.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import re
@@ -30,6 +31,7 @@ _CONTRACT = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
 _DASHBOARD_SCHEMA_VERSION = int(_CONTRACT["properties"]["schemaVersion"]["const"])
 _TERMINAL = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _CACHE_LOCK = threading.Lock()
+_CACHE_BUILD_LOCK = threading.Lock()
 _CACHE: tuple[float, int, Dict[str, Any]] | None = None
 _CACHE_TTL_SECONDS = 5.0
 _HISTORY_PAGE_SIZE = 500
@@ -717,39 +719,63 @@ def _fetch_all_executions(max_items: int) -> list[Mapping[str, Any]]:
 
 def _build_dashboard(limit: int) -> Dict[str, Any]:
     global _CACHE
-    with _CACHE_LOCK:
-        if (
-            _CACHE
-            and _CACHE[1] == limit
-            and time.monotonic() - _CACHE[0] < _CACHE_TTL_SECONDS
-        ):
-            return _CACHE[2]
 
-    runtime = _fetch_json("/api/v3/development/runtime-summary")
-    readiness = _fetch_json("/api/v3/development/readiness")
-    registry = _fetch_json("/api/v3/development/model-registry")
-    plan_payload = _fetch_json("/api/v3/development/plans?limit=100&view=summary")
-    catalog = _route_catalog(registry)
-    executions = [_execution(item, catalog) for item in _fetch_all_executions(limit)]
-    active = [item for item in executions if not item["terminal"]]
-    history = [item for item in executions if item["terminal"]]
-    plans, plan_summary = _plans(plan_payload.get("items"))
-    result: Dict[str, Any] = {
-        "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
-        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "summary": _summary(executions),
-        "active": active,
-        "history": history,
-        "analytics": _analytics(executions),
-        "plans": plans,
-        "planSummary": plan_summary,
-        "runtime": runtime,
-        "readiness": readiness,
-        "registry": registry,
-    }
-    with _CACHE_LOCK:
-        _CACHE = (time.monotonic(), limit, result)
-    return result
+    def cached() -> Dict[str, Any] | None:
+        with _CACHE_LOCK:
+            if (
+                _CACHE
+                and _CACHE[1] == limit
+                and time.monotonic() - _CACHE[0] < _CACHE_TTL_SECONDS
+            ):
+                return _CACHE[2]
+        return None
+
+    hit = cached()
+    if hit is not None:
+        return hit
+
+    # Collapse concurrent cold refreshes into one rebuild. The five upstream reads
+    # are independent read-only projections, so issue them in parallel and let the
+    # slowest source define cold-load latency rather than summing all five RTTs.
+    with _CACHE_BUILD_LOCK:
+        hit = cached()
+        if hit is not None:
+            return hit
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
+            runtime_future = pool.submit(_fetch_json, "/api/v3/development/runtime-summary")
+            readiness_future = pool.submit(_fetch_json, "/api/v3/development/readiness")
+            registry_future = pool.submit(_fetch_json, "/api/v3/development/model-registry")
+            plans_future = pool.submit(
+                _fetch_json, "/api/v3/development/plans?limit=100&view=summary"
+            )
+            executions_future = pool.submit(_fetch_all_executions, limit)
+            runtime = runtime_future.result()
+            readiness = readiness_future.result()
+            registry = registry_future.result()
+            plan_payload = plans_future.result()
+            raw_executions = executions_future.result()
+
+        catalog = _route_catalog(registry)
+        executions = [_execution(item, catalog) for item in raw_executions]
+        active = [item for item in executions if not item["terminal"]]
+        history = [item for item in executions if item["terminal"]]
+        plans, plan_summary = _plans(plan_payload.get("items"))
+        result: Dict[str, Any] = {
+            "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
+            "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "summary": _summary(executions),
+            "active": active,
+            "history": history,
+            "analytics": _analytics(executions),
+            "plans": plans,
+            "planSummary": plan_summary,
+            "runtime": runtime,
+            "readiness": readiness,
+            "registry": registry,
+        }
+        with _CACHE_LOCK:
+            _CACHE = (time.monotonic(), limit, result)
+        return result
 
 
 @router.get("/health")

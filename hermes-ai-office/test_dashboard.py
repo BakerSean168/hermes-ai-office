@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -179,6 +180,38 @@ class DashboardTest(unittest.TestCase):
                 self.assertFalse(any("hydrate=1" in path for path in paths))
         finally:
             api._HISTORY_PAGE_SIZE = original_page_size
+
+    def test_dashboard_cold_refresh_reads_independent_sources_concurrently(self) -> None:
+        barrier = threading.Barrier(5, timeout=2)
+        paths: list[str] = []
+        lock = threading.Lock()
+
+        def fetch(path: str, **_kwargs: object):
+            with lock:
+                paths.append(path)
+            barrier.wait()
+            if path.endswith("runtime-summary"):
+                return {"sourceHealth": {"openhands": "OK", "litellm": "OK"}}
+            if path.endswith("readiness"):
+                return {"ready": True, "gates": {"representativeWorkflows": {"current": 1, "required": 1}}}
+            if path.endswith("model-registry"):
+                return {"deployments": {"items": []}}
+            if "/plans?" in path:
+                return {"items": []}
+            if "/executions?" in path:
+                return {"items": []}
+            raise AssertionError(path)
+
+        old_cache = api._CACHE
+        api._CACHE = None
+        try:
+            with mock.patch.object(api, "_fetch_json", side_effect=fetch):
+                value = api._build_dashboard(1)
+            self.assertEqual(value["schemaVersion"], CONTRACT["properties"]["schemaVersion"]["const"])
+            self.assertEqual(len(paths), 5)
+            self.assertEqual(barrier.n_waiting, 0)
+        finally:
+            api._CACHE = old_cache
 
     def test_dashboard_requests_compact_plan_summary_projection(self) -> None:
         paths: list[str] = []
