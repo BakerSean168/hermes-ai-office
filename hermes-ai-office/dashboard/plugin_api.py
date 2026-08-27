@@ -728,7 +728,7 @@ def _build_dashboard(limit: int) -> Dict[str, Any]:
     runtime = _fetch_json("/api/v3/development/runtime-summary")
     readiness = _fetch_json("/api/v3/development/readiness")
     registry = _fetch_json("/api/v3/development/model-registry")
-    plan_payload = _fetch_json("/api/v3/development/plans?limit=100")
+    plan_payload = _fetch_json("/api/v3/development/plans?limit=100&view=summary")
     catalog = _route_catalog(registry)
     executions = [_execution(item, catalog) for item in _fetch_all_executions(limit)]
     active = [item for item in executions if not item["terminal"]]

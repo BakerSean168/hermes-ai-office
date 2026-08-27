@@ -180,6 +180,32 @@ class DashboardTest(unittest.TestCase):
         finally:
             api._HISTORY_PAGE_SIZE = original_page_size
 
+    def test_dashboard_requests_compact_plan_summary_projection(self) -> None:
+        paths: list[str] = []
+
+        def fetch(path: str, **_kwargs: object):
+            paths.append(path)
+            if path.endswith("runtime-summary"):
+                return {"sourceHealth": {"openhands": "OK", "litellm": "OK"}}
+            if path.endswith("readiness"):
+                return {"ready": True, "gates": {"representativeWorkflows": {"current": 1, "required": 1}}}
+            if path.endswith("model-registry"):
+                return {"deployments": {"items": []}}
+            if "/plans?" in path:
+                return {"items": []}
+            if "/executions?" in path:
+                return {"items": []}
+            raise AssertionError(path)
+
+        old_cache = api._CACHE
+        api._CACHE = None
+        try:
+            with mock.patch.object(api, "_fetch_json", side_effect=fetch):
+                api._build_dashboard(1)
+            self.assertIn("/api/v3/development/plans?limit=100&view=summary", paths)
+        finally:
+            api._CACHE = old_cache
+
     def test_summary_counts_execution_usage_once(self) -> None:
         result = api._summary(
             [

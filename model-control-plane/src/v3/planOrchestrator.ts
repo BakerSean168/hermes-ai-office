@@ -387,10 +387,31 @@ export class DurablePlanOrchestrator {
     };
   }
 
-  async listPlans(limit: number = PLAN_LIMITS.listResults) {
+  async #getPlanSummary(planId: string) {
+    const plan = this.#repository.get(planId);
+    if (!plan) return null;
+    const batches = [];
+    for (const batch of this.#repository.batches(planId)) {
+      const workItems = [];
+      for (const item of this.#repository.workItems(batch.batchId)) {
+        const executionId = this.#repository.executionIds(item.workItemId).at(-1);
+        const record = executionId ? this.#links.get(executionId) : null;
+        workItems.push({
+          ...item,
+          executions: record ? [durableSnapshot(record)] : [],
+        });
+      }
+      batches.push({ ...batch, workItems });
+    }
+    return { ...plan, batches };
+  }
+
+  async listPlans(limit: number = PLAN_LIMITS.listResults, summaryOnly = false) {
     const items = [];
     for (const plan of this.#repository.list(limit)) {
-      const projection = await this.getPlan(plan.planId, false);
+      const projection = summaryOnly
+        ? await this.#getPlanSummary(plan.planId)
+        : await this.getPlan(plan.planId, false);
       if (projection) items.push(projection);
     }
     return items;

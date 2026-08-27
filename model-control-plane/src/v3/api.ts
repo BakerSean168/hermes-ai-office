@@ -198,9 +198,19 @@ export function registerV3Routes(
     },
   );
 
-  app.get('/api/v3/development/plans', async (request) => {
+  app.get('/api/v3/development/plans', async (request, reply) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
-    return { items: await service.listPlans(Number(query.limit ?? PLAN_LIMITS.listResults)) };
+    const view = String(query.view ?? 'full').trim().toLowerCase();
+    if (!['full', 'summary'].includes(view)) {
+      reply.code(400);
+      return { error: { code: 'PLAN_LIST_VIEW_INVALID' } };
+    }
+    return {
+      items: await service.listPlans(
+        Number(query.limit ?? PLAN_LIMITS.listResults),
+        view === 'summary',
+      ),
+    };
   });
 
   app.post<{ Params: { planId: string }; Body?: { mode?: string } }>(

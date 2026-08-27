@@ -707,8 +707,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#planOrchestrator.getPlan(planId, hydrateExecutions);
   }
 
-  listPlans(limit?: number) {
-    return this.#planOrchestrator.listPlans(limit);
+  listPlans(limit?: number, summaryOnly = false) {
+    return this.#planOrchestrator.listPlans(limit, summaryOnly);
   }
 
   cancelPlan(planId: string) {

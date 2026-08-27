@@ -720,6 +720,29 @@ test('a durable plan survives worker timeout, failed review, integration failure
     });
     assert.equal(listed.statusCode, 200);
     assert.equal(restartedHost.gets, getsBeforeList);
+
+    const summarized = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v3/development/plans?limit=10&view=summary',
+    });
+    assert.equal(summarized.statusCode, 200);
+    const summaryPlan = summarized.json().items.find((item: { planId: string }) => item.planId === planId);
+    assert.ok(summaryPlan);
+    assert.equal('events' in summaryPlan, false);
+    assert.equal('orchestration' in summaryPlan, false);
+    for (const summaryBatch of summaryPlan.batches) {
+      for (const summaryItem of summaryBatch.workItems) {
+        assert.ok(summaryItem.executions.length <= 1);
+      }
+    }
+    assert.equal(restartedHost.gets, getsBeforeList);
+
+    const invalidView = await runtime.app.inject({
+      method: 'GET',
+      url: '/api/v3/development/plans?view=everything',
+    });
+    assert.equal(invalidView.statusCode, 400);
+    assert.equal(invalidView.json().error.code, 'PLAN_LIST_VIEW_INVALID');
   } finally {
     await runtime.app.close();
     fs.rmSync(directory, { recursive: true, force: true });
