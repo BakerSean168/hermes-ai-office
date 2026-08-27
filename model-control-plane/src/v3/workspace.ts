@@ -38,6 +38,13 @@ export interface WriterCompletionEvidence {
   headRevision: string;
 }
 
+export interface ExternalHandoffVerification {
+  baseRevision: string;
+  headRevision: string;
+  ref?: string;
+  aheadBy: number;
+}
+
 export type { ExternalProgressCandidate } from './repositoryProgress.js';
 
 export interface WorkspaceProvisioningPort {
@@ -56,6 +63,12 @@ export interface WorkspaceProvisioningPort {
     currentRevision: string;
     workItemKeys: string[];
   }): Promise<ExternalProgressCandidate | null>;
+  verifyExternalHandoff?(input: {
+    repositoryPath: string;
+    baseRevision: string;
+    headRevision: string;
+    ref?: string;
+  }): Promise<ExternalHandoffVerification>;
   provision(input: {
     executionId: string;
     repositoryPath: string;
@@ -148,6 +161,61 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     workItemKeys: string[];
   }): Promise<ExternalProgressCandidate | null> {
     return this.#repositoryProgress.discover(input);
+  }
+
+  async verifyExternalHandoff(input: {
+    repositoryPath: string;
+    baseRevision: string;
+    headRevision: string;
+    ref?: string;
+  }): Promise<ExternalHandoffVerification> {
+    const requested = path.resolve(input.repositoryPath);
+    if (!this.#allowedRepositoryRoots.some((root) => inside(requested, root))) {
+      throw new Error('V3_REPOSITORY_PATH_NOT_ALLOWED');
+    }
+    const requestedStat = fs.statSync(requested, { throwIfNoEntry: false });
+    if (!requestedStat?.isDirectory()) throw new Error('V3_REPOSITORY_NOT_FOUND');
+    const requestedOwner = { uid: requestedStat.uid, gid: requestedStat.gid };
+    const repoRoot = path.resolve(
+      await git(requested, ['rev-parse', '--show-toplevel'], requestedOwner),
+    );
+    if (!this.#allowedRepositoryRoots.some((root) => inside(repoRoot, root))) {
+      throw new Error('V3_REPOSITORY_ROOT_NOT_ALLOWED');
+    }
+    const repoStat = fs.statSync(repoRoot);
+    const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    const baseRevision = await git(
+      repoRoot,
+      ['rev-parse', '--verify', `${input.baseRevision}^{commit}`],
+      sourceOwner,
+    );
+    const headRevision = await git(
+      repoRoot,
+      ['rev-parse', '--verify', `${input.headRevision}^{commit}`],
+      sourceOwner,
+    );
+    if (baseRevision.toLowerCase() !== input.baseRevision.toLowerCase()) {
+      throw new Error('HANDOFF_BASE_REVISION_MISMATCH');
+    }
+    if (headRevision.toLowerCase() !== input.headRevision.toLowerCase()) {
+      throw new Error('HANDOFF_HEAD_REVISION_MISMATCH');
+    }
+    try {
+      await git(repoRoot, ['merge-base', '--is-ancestor', baseRevision, headRevision], sourceOwner);
+    } catch {
+      throw new Error('HANDOFF_HEAD_NOT_DESCENDANT');
+    }
+    let ref: string | undefined;
+    if (input.ref?.trim()) {
+      ref = input.ref.trim();
+      const refRevision = await git(repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`], sourceOwner);
+      if (refRevision !== headRevision) throw new Error('HANDOFF_REF_REVISION_MISMATCH');
+    }
+    const aheadBy = Number(
+      await git(repoRoot, ['rev-list', '--count', `${baseRevision}..${headRevision}`], sourceOwner),
+    );
+    if (!Number.isFinite(aheadBy) || aheadBy <= 0) throw new Error('HANDOFF_EMPTY');
+    return { baseRevision, headRevision, ...(ref ? { ref } : {}), aheadBy };
   }
 
   async prepareWriterExecution(input: {

@@ -787,6 +787,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     return this.#planOrchestrator.cancelPlan(planId);
   }
 
+  resumePlanFromHandoff(planId: string, handoff: unknown) {
+    return this.#planOrchestrator.resumeFromHandoff(planId, handoff);
+  }
+
   reconcilePlans(planId?: string, recoverBlocked = false, recoveryMode: PlanRecoveryMode = 'AUTO') {
     return this.#planOrchestrator.reconcilePlans(planId, recoverBlocked, recoveryMode);
   }

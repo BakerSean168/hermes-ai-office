@@ -71,6 +71,33 @@ async def health() -> Dict[str, Any]:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@router.post("/plans/{plan_id}/resume-from-handoff")
+async def resume_from_handoff(plan_id: str, handoff: Dict[str, Any]) -> Dict[str, Any]:
+    safe_plan_id = urllib.parse.quote(str(plan_id), safe="")
+    try:
+        return await asyncio.to_thread(
+            _post_json,
+            f"/api/v3/development/plans/{safe_plan_id}/handoffs",
+            handoff,
+            timeout=12.0,
+        )
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(status_code=404, detail="plan not found") from exc
+        if exc.code in {400, 409, 422}:
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+                detail = body.get("error", {}).get("code") if isinstance(body, dict) else None
+            except Exception:
+                detail = None
+            raise HTTPException(status_code=exc.code, detail=detail or str(exc)) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.post("/plans/{plan_id}/sync-and-continue")
 async def sync_and_continue(plan_id: str) -> Dict[str, Any]:
     safe_plan_id = urllib.parse.quote(str(plan_id), safe="")

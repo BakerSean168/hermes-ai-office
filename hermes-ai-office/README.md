@@ -56,7 +56,26 @@ The dashboard keeps the overview payload compact and loads an on-demand plan tim
 The plan detail also exposes a read-only engineering audit projection: failure-to-repair chains, per-batch duration/token/cost/failure/repair totals, and the durable policy evidence explaining every strong-model decision.
 The audit also assigns deterministic P0/P1/P2/P3 priorities and a deterministic 0–100 health score; plan cards expose the current score and highest-priority unresolved issue without loading full history.
 Audit findings and strong-model decisions are directly navigable to their timeline executions. Client-side filters can isolate failures, repairs/retries, strong-model executions, or one batch without issuing new control-plane requests or mutating plan state.
-Blocked plan cards expose an explicit **Sync external progress & continue** action. The Control Plane first discovers descendant repository refs with durable-ticket evidence, then runs a premium read-only `INVESTIGATE_PLAN` audit at the pinned candidate revision. Only model-verified completed work and dependency-valid batches are adopted into the existing durable plan; immediately before adoption the candidate ref is re-discovered and a moved candidate is rejected fail-closed. The pinned candidate becomes the new baseline only after that race check, and Pixel Agent resumes from the first work item that is still `NOT_VERIFIED`. Commit subjects are discovery hints only and can never mark a ticket complete by themselves.
+Blocked plan cards now treat normal Agent-to-Agent ownership transfer and disaster recovery as different operations. **Resume from handoff** is the default path: the operator pastes an `AI_OFFICE_HANDOFF_V1` packet produced by ChatGPT, Codex, Claude, or another coding agent. The packet pins `planId`, the durable `baseRevision`, exact committed `headRevision`, optional Git ref, attested completed work-item keys/evidence, and an optional recommended next item. The Control Plane launches no model audit; it mechanically verifies that the base still equals the durable plan revision, the head/ref resolve exactly, and the head is a committed Git descendant, then transactionally adopts the attested checkpoint and resumes normal plan progression. The handoff is recorded as operator-submitted provenance rather than being confused with independent model verification.
+
+**Scan external progress** remains the expensive fallback for lost-context/disaster recovery. It discovers descendant repository refs with durable-ticket evidence and starts one premium read-only `INVESTIGATE_PLAN` audit at the pinned candidate revision. The request returns immediately instead of holding a 12-minute coordinator wait; periodic reconciliation harvests the same durable audit execution when it eventually succeeds, so a slow audit is not duplicated and a late success is not discarded. Only model-verified completed work and dependency-valid batches are adopted; immediately before adoption the candidate ref is re-discovered and a moved candidate is rejected fail-closed. Commit subjects are discovery hints only and can never mark a ticket complete by themselves.
+
+A minimal handoff packet is:
+
+```text
+AI_OFFICE_HANDOFF_V1
+{
+  "schemaVersion": 1,
+  "planId": "plan_...",
+  "baseRevision": "<40-hex durable revision>",
+  "headRevision": "<40-hex committed descendant>",
+  "ref": "feature/agent-continuation",
+  "completedWorkItems": [
+    { "key": "TASK-123", "evidence": ["focused checks passed"] }
+  ],
+  "recommendedNextWorkItem": "TASK-124"
+}
+```
 
 `contracts/dashboard.schema.json` is the single backend-to-frontend DTO contract for the console. `dashboard/plugin_api/` produces that shape and the modular `dashboard/src/` frontend consumes it. `dashboard/dist/index.js` is a generated browser bundle, not an editing surface. Build it with `node scripts/build-dashboard.mjs`; CI/tests use `node scripts/build-dashboard.mjs --check` so direct edits to `dist/index.js` or stale bundles fail closed. Field aliases and compatibility fallbacks are intentionally unsupported: a shape change must update the producer, contract, source consumer, generated bundle, and contract tests together.
 

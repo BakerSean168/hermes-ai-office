@@ -19,6 +19,10 @@ export function App() {
   const [detailLoading, setDetailLoading] = React.useState(false);
   const [detailError, setDetailError] = React.useState("");
   const [syncingPlanIds, setSyncingPlanIds] = React.useState({});
+  const [handoffPlan, setHandoffPlan] = React.useState(null);
+  const [handoffText, setHandoffText] = React.useState("");
+  const [handoffError, setHandoffError] = React.useState("");
+  const [handoffSubmitting, setHandoffSubmitting] = React.useState(false);
 
   const load = React.useCallback(function () {
     setLoading(true);
@@ -39,6 +43,56 @@ export function App() {
       .then(function (value) { setPlanDetail(value); })
       .catch(function (cause) { setDetailError(String(cause)); })
       .finally(function () { setDetailLoading(false); });
+  }
+
+  function extractHandoff(text) {
+    let source = String(text || "").trim();
+    const marker = source.indexOf("AI_OFFICE_HANDOFF_V1");
+    if (marker >= 0) source = source.slice(marker + "AI_OFFICE_HANDOFF_V1".length);
+    const first = source.indexOf("{");
+    const last = source.lastIndexOf("}");
+    if (first < 0 || last <= first) throw new Error(t.handoffInvalid);
+    return JSON.parse(source.slice(first, last + 1));
+  }
+
+  function openHandoff(plan) {
+    setHandoffPlan(plan);
+    setHandoffText("");
+    setHandoffError("");
+  }
+
+  function closeHandoff() {
+    if (handoffSubmitting) return;
+    setHandoffPlan(null);
+    setHandoffText("");
+    setHandoffError("");
+  }
+
+  function resumeFromHandoff() {
+    if (!handoffPlan) return Promise.resolve();
+    let handoff;
+    try {
+      handoff = extractHandoff(handoffText);
+    } catch (cause) {
+      setHandoffError(cause instanceof Error ? cause.message : t.handoffInvalid);
+      return Promise.resolve();
+    }
+    setHandoffSubmitting(true);
+    setHandoffError("");
+    return api("/plans/" + encodeURIComponent(handoffPlan.planId) + "/resume-from-handoff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(handoff),
+    })
+      .then(function () {
+        setError("");
+        setHandoffPlan(null);
+        setHandoffText("");
+        window.setTimeout(load, 500);
+        window.setTimeout(load, 2500);
+      })
+      .catch(function (cause) { setHandoffError(String(cause)); })
+      .finally(function () { setHandoffSubmitting(false); });
   }
 
   function syncExternalProgress(plan) {
@@ -103,6 +157,13 @@ export function App() {
     return function () { window.removeEventListener("keydown", onKeyDown); };
   }, [detailPlanId]);
 
+  React.useEffect(function () {
+    if (!handoffPlan) return undefined;
+    function onKeyDown(event) { if (event.key === "Escape") closeHandoff(); }
+    window.addEventListener("keydown", onKeyDown);
+    return function () { window.removeEventListener("keydown", onKeyDown); };
+  }, [handoffPlan, handoffSubmitting]);
+
   const adminUrl = data && data.registry && data.registry.adminUrl;
   return h(
     "main",
@@ -119,7 +180,29 @@ export function App() {
       ),
     ),
     error ? h("div", { className: "hao-error" }, error) : null,
-    !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan, onContinuePlan: syncExternalProgress, syncingPlanIds: syncingPlanIds }),
+    !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds: syncingPlanIds }),
     detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t: t, locale: locale, now: now }) : null,
+    handoffPlan ? h("div", { className: "hao-handoff-backdrop", role: "presentation", onMouseDown: function (event) { if (event.target === event.currentTarget) closeHandoff(); } },
+      h("section", { className: "hao-handoff-dialog", role: "dialog", "aria-modal": "true", "aria-label": t.handoffTitle },
+        h("div", { className: "hao-handoff-head" },
+          h("div", null, h("h2", null, t.handoffTitle), h("span", null, handoffPlan.projectKey)),
+          h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: closeHandoff, disabled: handoffSubmitting }, "×")
+        ),
+        h("p", { className: "hao-handoff-help" }, t.handoffHelp),
+        h("textarea", {
+          className: "hao-handoff-textarea",
+          value: handoffText,
+          placeholder: t.handoffPlaceholder,
+          spellCheck: false,
+          autoFocus: true,
+          onChange: function (event) { setHandoffText(event.target.value); setHandoffError(""); },
+        }),
+        handoffError ? h("div", { className: "hao-error hao-handoff-error" }, handoffError) : null,
+        h("div", { className: "hao-handoff-actions" },
+          h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: closeHandoff, disabled: handoffSubmitting }, t.handoffCancel),
+          h("button", { type: "button", className: "hao-button", onClick: resumeFromHandoff, disabled: handoffSubmitting || !handoffText.trim() }, handoffSubmitting ? t.handoffSubmitting : t.handoffSubmit)
+        )
+      )
+    ) : null,
   );
 }

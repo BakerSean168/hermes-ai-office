@@ -448,3 +448,69 @@ test('external progress discovery selects the descendant ref with the strongest 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('external handoff verification accepts only the exact committed descendant ref', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-handoff-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  git(source, 'checkout', '-b', 'agent-handoff');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'one\n');
+  git(source, 'commit', '-am', 'feat: external handoff one');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'two\n');
+  git(source, 'commit', '-am', 'feat: external handoff two');
+  const head = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const verified = await provisioner.verifyExternalHandoff?.({
+      repositoryPath: source,
+      baseRevision: base,
+      headRevision: head,
+      ref: 'agent-handoff',
+    });
+    assert.ok(verified);
+    assert.equal(verified.baseRevision, base);
+    assert.equal(verified.headRevision, head);
+    assert.equal(verified.ref, 'agent-handoff');
+    assert.equal(verified.aheadBy, 2);
+
+    await assert.rejects(
+      () =>
+        provisioner.verifyExternalHandoff!({
+          repositoryPath: source,
+          baseRevision: head,
+          headRevision: base,
+          ref: 'agent-handoff',
+        }),
+      /HANDOFF_HEAD_NOT_DESCENDANT/,
+    );
+
+    git(source, 'branch', 'moved-ref', base);
+    await assert.rejects(
+      () =>
+        provisioner.verifyExternalHandoff!({
+          repositoryPath: source,
+          baseRevision: base,
+          headRevision: head,
+          ref: 'moved-ref',
+        }),
+      /HANDOFF_REF_REVISION_MISMATCH/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

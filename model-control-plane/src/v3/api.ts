@@ -25,7 +25,10 @@ function errorStatus(code: string): number {
     code.endsWith('_REQUIRED') ||
     code.endsWith('_INVALID') ||
     code.includes('NOT_ALLOWED') ||
-    code.includes('UNSUPPORTED')
+    code.includes('UNSUPPORTED') ||
+    code === 'HANDOFF_WORK_ITEM_UNKNOWN' ||
+    code === 'HANDOFF_NEXT_WORK_ITEM_UNKNOWN' ||
+    code === 'HANDOFF_SYSTEM_WORK_ITEM_NOT_ALLOWED'
   )
     return 400;
   if (
@@ -34,7 +37,8 @@ function errorStatus(code: string): number {
     code.includes('MISMATCH') ||
     code.endsWith('_NOT_OPEN') ||
     code.includes('LEASE_CONFLICT') ||
-    code.includes('NOT_CONTINUABLE')
+    code.includes('NOT_CONTINUABLE') ||
+    code.includes('NOT_BLOCKED')
   )
     return 409;
   if (
@@ -477,6 +481,30 @@ export function registerV3Routes(
       ),
     };
   });
+
+  app.post<{ Params: { planId: string } }>(
+    '/api/v3/development/plans/:planId/handoffs',
+    async (request, reply) => {
+      try {
+        const plan = await service.resumePlanFromHandoff(request.params.planId, request.body);
+        if (!plan) {
+          reply.code(404);
+          return { error: { code: 'PLAN_NOT_FOUND' } };
+        }
+        return {
+          planId: plan.planId,
+          accepted: true,
+          status: plan.status,
+          currentRevision: plan.currentRevision,
+          statusUrl: `/api/v3/development/plans/${plan.planId}`,
+        };
+      } catch (error) {
+        const code = errorCode(error);
+        reply.code(errorStatus(code));
+        return { error: { code } };
+      }
+    },
+  );
 
   app.post<{ Params: { planId: string }; Body?: { mode?: string } }>(
     '/api/v3/development/plans/:planId/reconcile',

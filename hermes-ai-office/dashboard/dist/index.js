@@ -103,9 +103,17 @@
       healthCritical: "Critical",
       filteredTimelineEmpty: "No timeline entries match this filter",
       details: "View details",
-      continueExternal: "Sync external progress & continue",
-      syncingExternal: "Syncing external progress…",
-      continueExternalConfirm: "This takes over from the latest committed external progress. Make sure other coding agents have stopped or committed their work. Continue?",
+      continueHandoff: "Resume from handoff",
+      handoffTitle: "Resume from agent handoff",
+      handoffHelp: "Paste an AI_OFFICE_HANDOFF_V1 packet from ChatGPT, Codex, Claude, or another coding agent. Pixel Agent verifies Git ancestry and plan identities mechanically; this path does not launch a model audit.",
+      handoffPlaceholder: "AI_OFFICE_HANDOFF_V1 { ... }",
+      handoffSubmit: "Verify & continue",
+      handoffCancel: "Cancel",
+      handoffInvalid: "Could not parse an AI_OFFICE_HANDOFF_V1 JSON object.",
+      handoffSubmitting: "Verifying handoff…",
+      continueExternal: "Scan external progress",
+      syncingExternal: "Scanning external progress…",
+      continueExternalConfirm: "No handoff packet? This fallback scans committed external progress and launches a model-backed repository audit, which can take time and consume model quota. Continue?",
       projectStats: "Projects",
       implementingProjects: "implementing",
       completedProjects: "completed",
@@ -213,9 +221,17 @@
       healthCritical: "严重",
       filteredTimelineEmpty: "当前过滤条件下没有时间线记录",
       details: "查看详情",
-      continueExternal: "同步外部进度并继续",
-      syncingExternal: "正在同步外部进度…",
-      continueExternalConfirm: "将从最新已提交的外部进度接管并继续。请确认其他编码 Agent 已停止写入或已提交当前工作。继续吗？",
+      continueHandoff: "从交接继续",
+      handoffTitle: "从 Agent 交接继续",
+      handoffHelp: "粘贴 ChatGPT、Codex、Claude 或其他编码 Agent 给出的 AI_OFFICE_HANDOFF_V1。Pixel Agent 只做 Git 祖先关系与计划身份的机械校验，不会启动模型审计。",
+      handoffPlaceholder: "AI_OFFICE_HANDOFF_V1 { ... }",
+      handoffSubmit: "校验并继续",
+      handoffCancel: "取消",
+      handoffInvalid: "无法解析 AI_OFFICE_HANDOFF_V1 JSON。",
+      handoffSubmitting: "正在校验交接…",
+      continueExternal: "自动扫描外部进度",
+      syncingExternal: "正在扫描外部进度…",
+      continueExternalConfirm: "没有交接包时再使用此兜底方式。它会扫描已提交的外部进度，并启动模型对仓库做审计，可能耗时并消耗模型额度。继续吗？",
       projectStats: "项目",
       implementingProjects: "实施中",
       completedProjects: "已完成",
@@ -1036,7 +1052,16 @@
             disabled: syncing,
             onClick: function(event) {
               event.stopPropagation();
-              props.onContinue(plan);
+              props.onHandoff(plan);
+            }
+          }, t.continueHandoff) : null,
+          plan.status === "BLOCKED" && batch.status === "BLOCKED" ? h("button", {
+            type: "button",
+            className: "hao-button hao-button-secondary hao-plan-scan-button",
+            disabled: syncing,
+            onClick: function(event) {
+              event.stopPropagation();
+              props.onScan(plan);
             }
           }, syncing ? t.syncingExternal : t.continueExternal) : null,
           plan.pullRequestUrl ? h("a", {
@@ -1090,7 +1115,7 @@
         h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) })
       ),
       h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t, locale: props.locale, now: props.now })),
-      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t, locale: props.locale, onOpen: props.onOpenPlan, onContinue: props.onContinuePlan, syncingPlanIds: props.syncingPlanIds })),
+      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t, locale: props.locale, onOpen: props.onOpenPlan, onHandoff: props.onHandoffPlan, onScan: props.onScanPlan, syncingPlanIds: props.syncingPlanIds })),
       h(
         "div",
         { className: "hao-runtime-strip" },
@@ -1133,6 +1158,10 @@
     const [detailLoading, setDetailLoading] = React.useState(false);
     const [detailError, setDetailError] = React.useState("");
     const [syncingPlanIds, setSyncingPlanIds] = React.useState({});
+    const [handoffPlan, setHandoffPlan] = React.useState(null);
+    const [handoffText, setHandoffText] = React.useState("");
+    const [handoffError, setHandoffError] = React.useState("");
+    const [handoffSubmitting, setHandoffSubmitting] = React.useState(false);
     const load = React.useCallback(function() {
       setLoading(true);
       return api("/dashboard").then(assertDashboardContract).then(function(value) {
@@ -1155,6 +1184,53 @@
         setDetailError(String(cause));
       }).finally(function() {
         setDetailLoading(false);
+      });
+    }
+    function extractHandoff(text) {
+      let source = String(text || "").trim();
+      const marker = source.indexOf("AI_OFFICE_HANDOFF_V1");
+      if (marker >= 0) source = source.slice(marker + "AI_OFFICE_HANDOFF_V1".length);
+      const first = source.indexOf("{");
+      const last = source.lastIndexOf("}");
+      if (first < 0 || last <= first) throw new Error(t.handoffInvalid);
+      return JSON.parse(source.slice(first, last + 1));
+    }
+    function openHandoff(plan) {
+      setHandoffPlan(plan);
+      setHandoffText("");
+      setHandoffError("");
+    }
+    function closeHandoff() {
+      if (handoffSubmitting) return;
+      setHandoffPlan(null);
+      setHandoffText("");
+      setHandoffError("");
+    }
+    function resumeFromHandoff() {
+      if (!handoffPlan) return Promise.resolve();
+      let handoff;
+      try {
+        handoff = extractHandoff(handoffText);
+      } catch (cause) {
+        setHandoffError(cause instanceof Error ? cause.message : t.handoffInvalid);
+        return Promise.resolve();
+      }
+      setHandoffSubmitting(true);
+      setHandoffError("");
+      return api("/plans/" + encodeURIComponent(handoffPlan.planId) + "/resume-from-handoff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(handoff)
+      }).then(function() {
+        setError("");
+        setHandoffPlan(null);
+        setHandoffText("");
+        window.setTimeout(load, 500);
+        window.setTimeout(load, 2500);
+      }).catch(function(cause) {
+        setHandoffError(String(cause));
+      }).finally(function() {
+        setHandoffSubmitting(false);
       });
     }
     function syncExternalProgress(plan) {
@@ -1226,6 +1302,16 @@
         window.removeEventListener("keydown", onKeyDown);
       };
     }, [detailPlanId]);
+    React.useEffect(function() {
+      if (!handoffPlan) return void 0;
+      function onKeyDown(event) {
+        if (event.key === "Escape") closeHandoff();
+      }
+      window.addEventListener("keydown", onKeyDown);
+      return function() {
+        window.removeEventListener("keydown", onKeyDown);
+      };
+    }, [handoffPlan, handoffSubmitting]);
     const adminUrl = data && data.registry && data.registry.adminUrl;
     return h(
       "main",
@@ -1252,8 +1338,43 @@
         )
       ),
       error ? h("div", { className: "hao-error" }, error) : null,
-      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data, t, locale }) : h(Overview, { data, t, locale, now, onOpenPlan: openPlan, onContinuePlan: syncExternalProgress, syncingPlanIds }),
-      detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t, locale, now }) : null
+      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data, t, locale }) : h(Overview, { data, t, locale, now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds }),
+      detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t, locale, now }) : null,
+      handoffPlan ? h(
+        "div",
+        { className: "hao-handoff-backdrop", role: "presentation", onMouseDown: function(event) {
+          if (event.target === event.currentTarget) closeHandoff();
+        } },
+        h(
+          "section",
+          { className: "hao-handoff-dialog", role: "dialog", "aria-modal": "true", "aria-label": t.handoffTitle },
+          h(
+            "div",
+            { className: "hao-handoff-head" },
+            h("div", null, h("h2", null, t.handoffTitle), h("span", null, handoffPlan.projectKey)),
+            h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: closeHandoff, disabled: handoffSubmitting }, "×")
+          ),
+          h("p", { className: "hao-handoff-help" }, t.handoffHelp),
+          h("textarea", {
+            className: "hao-handoff-textarea",
+            value: handoffText,
+            placeholder: t.handoffPlaceholder,
+            spellCheck: false,
+            autoFocus: true,
+            onChange: function(event) {
+              setHandoffText(event.target.value);
+              setHandoffError("");
+            }
+          }),
+          handoffError ? h("div", { className: "hao-error hao-handoff-error" }, handoffError) : null,
+          h(
+            "div",
+            { className: "hao-handoff-actions" },
+            h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: closeHandoff, disabled: handoffSubmitting }, t.handoffCancel),
+            h("button", { type: "button", className: "hao-button", onClick: resumeFromHandoff, disabled: handoffSubmitting || !handoffText.trim() }, handoffSubmitting ? t.handoffSubmitting : t.handoffSubmit)
+          )
+        )
+      ) : null
     );
   }
 

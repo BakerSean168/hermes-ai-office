@@ -9,7 +9,8 @@ One module owns one class of state transition. Cross-cutting helpers may expose 
 | `DurablePlanOrchestrator` | plan-level next-step selection, orchestration materialization, delivery handoff, per-plan reconciliation serialization | ticket retry policy, Git repair implementation, external audit parsing |
 | `WorkItemCoordinator` | IMPLEMENT -> VERIFY_REVIEW -> IMPLEMENT_FIX transitions, retry/fix limits, work-item blocking, approved implementation evidence | batch promotion, delivery, external branch adoption |
 | `BatchCoordinator` | deterministic integration, semantic integration repair, `BATCH_VERIFY`, promotion | ordinary ticket implementation lifecycle, remote delivery |
-| `ExternalProgressReconciler` | discover pinned external checkpoint, premium read-only audit, candidate movement guard, adoption request | generic blocked recovery |
+| `HandoffReconciler` | validate operator-submitted `AI_OFFICE_HANDOFF_V1`, verify exact Git ancestry/ref identity, adopt the attested checkpoint without a model audit | repository-wide discovery/audit, normal ticket progression |
+| `ExternalProgressReconciler` | disaster-recovery discovery of a pinned external checkpoint, premium read-only audit, late-result harvesting, candidate movement guard, adoption request | normal Agent-to-Agent ownership transfer, generic blocked recovery |
 | `PlanRecoveryCoordinator` | explicit recovery-mode policy for blocked plans | normal plan progression |
 | `PlanRepository` | durable state/event persistence | model prompts, Git operations, provider selection |
 | `WorkspaceProvisioningPort` | filesystem/Git mechanics | plan semantics |

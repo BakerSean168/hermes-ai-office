@@ -81,7 +81,13 @@ function PlanCards(props) {
           type: "button",
           className: "hao-button hao-plan-continue-button",
           disabled: syncing,
-          onClick: function (event) { event.stopPropagation(); props.onContinue(plan); },
+          onClick: function (event) { event.stopPropagation(); props.onHandoff(plan); },
+        }, t.continueHandoff) : null,
+        plan.status === "BLOCKED" && batch.status === "BLOCKED" ? h("button", {
+          type: "button",
+          className: "hao-button hao-button-secondary hao-plan-scan-button",
+          disabled: syncing,
+          onClick: function (event) { event.stopPropagation(); props.onScan(plan); },
         }, syncing ? t.syncingExternal : t.continueExternal) : null,
         plan.pullRequestUrl ? h("a", {
           className: "hao-button hao-button-secondary",
@@ -124,7 +130,7 @@ export function Overview(props) {
       h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) }),
     ),
     h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t: t, locale: props.locale, now: props.now })),
-    h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale, onOpen: props.onOpenPlan, onContinue: props.onContinuePlan, syncingPlanIds: props.syncingPlanIds })),
+    h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale, onOpen: props.onOpenPlan, onHandoff: props.onHandoffPlan, onScan: props.onScanPlan, syncingPlanIds: props.syncingPlanIds })),
     h(
       "div",
       { className: "hao-runtime-strip" },

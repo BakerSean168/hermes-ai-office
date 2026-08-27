@@ -1997,6 +1997,13 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     }
     assert.equal(host.lastCreateInput?.phase, 'INVESTIGATE_PLAN');
     const auditConversationId = `conversation-${host.creates}`;
+    const createsWithAuditRunning = host.creates;
+    await runtime.v3.reconcilePlans();
+    assert.equal(
+      host.creates,
+      createsWithAuditRunning,
+      'periodic reconciliation must harvest the existing audit instead of launching another one',
+    );
     host.succeed(
       auditConversationId,
       JSON.stringify({
@@ -2028,7 +2035,7 @@ test('sync_external audits descendant work, adopts verified progress, and contin
         risks: [],
       }),
     );
-    await runtime.v3.reconcilePlans(planId);
+    await runtime.v3.reconcilePlans();
 
     body = (
       await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
@@ -2058,6 +2065,211 @@ test('sync_external audits descendant work, adopts verified progress, and contin
     assert.equal(auditExecution.selection.backend, 'openhands-builtin');
     assert.equal(auditExecution.selection.modelClass, 'gpt-5.6-sol');
     assert.equal(discoveryCalls, 2, 'candidate must be re-discovered before adoption');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('operator handoff adopts a committed descendant without launching a model audit', async () => {
+  const host = new PlanHost();
+  const BASE = '1111111111111111111111111111111111111111';
+  const HEAD = '2222222222222222222222222222222222222222';
+  let failIntegration = true;
+  let handoffChecks = 0;
+  const handoffWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyExternalHandoff(input) {
+      handoffChecks += 1;
+      assert.equal(input.baseRevision, BASE);
+      assert.equal(input.headRevision, HEAD);
+      assert.equal(input.ref, 'core-vnext/agent-handoff');
+      return {
+        baseRevision: BASE,
+        headRevision: HEAD,
+        ref: input.ref,
+        aheadBy: 7,
+      };
+    },
+    async integrateBatch(input) {
+      if (failIntegration && input.batchKey === 'batch-1') {
+        failIntegration = false;
+        throw new Error('BATCH_INTEGRATION_FAILED:simulated external ownership transfer');
+      }
+      return {
+        revision: `integrated-${input.batchKey}`,
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: handoffWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'agent-handoff-plan' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Resume a durable plan from an explicit coding-agent handoff.',
+        analysisSummary: 'Three sequential batches exercise handoff adoption.',
+        repository: { path: '/tmp/memoflow', baseRevision: BASE },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Previously blocked batch',
+            workItems: [
+              { key: 'BLOCKER-1', title: 'Blocked work', objective: 'Implement the blocked work.' },
+            ],
+          },
+          {
+            key: 'batch-2',
+            title: 'Externally completed work',
+            dependsOn: ['batch-1'],
+            workItems: [
+              { key: 'EXTERNAL-2', title: 'External work', objective: 'Complete this outside Pixel Agent.' },
+            ],
+          },
+          {
+            key: 'batch-3',
+            title: 'Remaining Pixel Agent work',
+            dependsOn: ['batch-2'],
+            workItems: [
+              { key: 'REMAIN-3', title: 'Remaining work', objective: 'Continue from the handoff.' },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+    let body = created.json();
+    const implementation = body.batches[0].workItems[0].executions[0];
+    host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    const review = body.batches[0].workItems[0].executions.at(-1);
+    host.succeed(review.refs.openhandsConversationId, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'BATCH_INTEGRATION_FAILED');
+
+    const createsBeforeHandoff = host.creates;
+    const resumed = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/handoffs`,
+      payload: {
+        schemaVersion: 1,
+        planId,
+        baseRevision: BASE,
+        headRevision: HEAD,
+        ref: 'core-vnext/agent-handoff',
+        summary: 'External agent completed EXTERNAL-2 and preserved the already reviewed blocked batch.',
+        completedWorkItems: [
+          {
+            key: 'EXTERNAL-2',
+            evidence: ['Committed implementation at the declared head.', 'Focused external checks passed.'],
+          },
+        ],
+        recommendedNextWorkItem: 'REMAIN-3',
+      },
+    });
+    assert.equal(resumed.statusCode, 200);
+    assert.equal(resumed.json().accepted, true);
+    assert.equal(resumed.json().currentRevision, HEAD);
+    assert.equal(handoffChecks, 1);
+
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.currentRevision, HEAD);
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[1].status, 'SUCCEEDED');
+    assert.equal(body.batches[1].workItems[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[2].status, 'RUNNING');
+    assert.equal(body.batches[2].baseRevision, HEAD);
+    assert.equal(body.batches[2].workItems[0].executions[0].phase, 'IMPLEMENT');
+    assert.equal(host.creates, createsBeforeHandoff + 1, 'only the next real implementation may launch');
+    assert.equal(
+      body.batches.flatMap((batch: any) => batch.workItems).flatMap((item: any) => item.executions)
+        .some((execution: any) => execution.phase === 'INVESTIGATE_PLAN'),
+      false,
+    );
+    assert.ok(body.events.some((event: any) => event.type === 'HANDOFF_VALIDATED'));
+    assert.ok(body.events.some((event: any) => event.type === 'HANDOFF_ADOPTED'));
+    const adopted = body.events.find((event: any) => event.type === 'EXTERNAL_PROGRESS_ADOPTED');
+    assert.equal(adopted.detail.evidenceSource, 'HANDOFF');
+    assert.deepEqual(adopted.detail.adoptedWorkItems, ['EXTERNAL-2']);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('handoff rejects stale or unknown claims before mutating durable progress', async () => {
+  const host = new PlanHost();
+  const BASE = '3333333333333333333333333333333333333333';
+  const HEAD = '4444444444444444444444444444444444444444';
+  let failIntegration = true;
+  let handoffChecks = 0;
+  const handoffWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyExternalHandoff(input) {
+      handoffChecks += 1;
+      return { baseRevision: input.baseRevision, headRevision: input.headRevision, ref: input.ref, aheadBy: 1 };
+    },
+    async integrateBatch(input) {
+      if (failIntegration) {
+        failIntegration = false;
+        throw new Error('BATCH_INTEGRATION_FAILED:simulated blocker');
+      }
+      return workspace.integrateBatch(input);
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:', logger: false, v3ExecutionHost: host, v3Workspace: handoffWorkspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': true, 'codex-review-headless': true },
+  });
+  try {
+    const plan = await runtime.v3.createPlan({
+      projectKey: 'handoff-validation',
+      objective: 'Reject invalid handoff claims.',
+      analysisSummary: 'One blocked batch is sufficient.',
+      repository: { path: '/tmp/repository', baseRevision: BASE },
+      batches: [{ key: 'batch', title: 'Batch', workItems: [{ key: 'KNOWN-1', title: 'Known', objective: 'Implement.' }] }],
+    }, 'handoff-validation-plan');
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    host.succeed(body.batches[0]!.workItems[0]!.executions[0]!.refs.openhandsConversationId!, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(plan.planId);
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    host.succeed(body.batches[0]!.workItems[0]!.executions.at(-1)!.refs.openhandsConversationId!, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    assert.equal((await runtime.v3.getPlan(plan.planId))!.status, 'BLOCKED');
+
+    const invalid = await runtime.app.inject({
+      method: 'POST', url: `/api/v3/development/plans/${plan.planId}/handoffs`,
+      payload: {
+        schemaVersion: 1,
+        planId: plan.planId,
+        baseRevision: BASE,
+        headRevision: HEAD,
+        completedWorkItems: [{ key: 'UNKNOWN-9', evidence: ['claimed'] }],
+      },
+    });
+    assert.equal(invalid.statusCode, 400);
+    assert.equal(invalid.json().error.code, 'HANDOFF_WORK_ITEM_UNKNOWN');
+    assert.equal(handoffChecks, 0, 'invalid durable identities fail before Git verification');
+    const unchanged = (await runtime.v3.getPlan(plan.planId))!;
+    assert.equal(unchanged.status, 'BLOCKED');
+    assert.equal(unchanged.currentRevision, BASE);
   } finally {
     await runtime.app.close();
   }

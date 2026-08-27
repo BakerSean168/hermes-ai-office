@@ -318,6 +318,13 @@ export class PlanRepository {
     return rows.map(planFromRow);
   }
 
+  blocked(limit = 100): PlanRecord[] {
+    const rows = this.#db
+      .prepare("SELECT * FROM v3_plans WHERE status='BLOCKED' ORDER BY updated_at DESC LIMIT ?")
+      .all(Math.min(500, Math.max(1, limit))) as unknown as PlanRow[];
+    return rows.map(planFromRow);
+  }
+
   batches(planId: string): BatchRecord[] {
     const rows = this.#db
       .prepare('SELECT * FROM v3_plan_batches WHERE plan_id=? ORDER BY ordinal')
@@ -349,8 +356,9 @@ export class PlanRepository {
       ref: string;
       blockedBatchKey: string;
       verifiedWorkItems: Array<{ key: string; evidence: string }>;
-      auditExecutionId: string;
+      auditExecutionId?: string;
       analysisSummary: string;
+      evidenceSource?: 'AUDIT' | 'HANDOFF';
     },
   ): { adoptedWorkItems: string[]; adoptedBatches: string[] } {
     const plan = this.get(planId);
@@ -400,7 +408,11 @@ export class PlanRepository {
             ref: input.ref,
             evidence: item.evidence.slice(0, 2_000),
           },
-          { batchId: current.batchId, workItemId: current.workItemId, executionId: input.auditExecutionId },
+          {
+            batchId: current.batchId,
+            workItemId: current.workItemId,
+            ...(input.auditExecutionId ? { executionId: input.auditExecutionId } : {}),
+          },
         );
       }
 
@@ -430,7 +442,10 @@ export class PlanRepository {
             planId,
             'EXTERNAL_BATCH_ADOPTED',
             { key: batch.key, revision: input.revision, ref: input.ref },
-            { batchId: batch.batchId, executionId: input.auditExecutionId },
+            {
+              batchId: batch.batchId,
+              ...(input.auditExecutionId ? { executionId: input.auditExecutionId } : {}),
+            },
           );
           changed = true;
         }
@@ -454,8 +469,9 @@ export class PlanRepository {
           adoptedWorkItems,
           adoptedBatches,
           analysisSummary: input.analysisSummary.slice(0, 4_000),
+          evidenceSource: input.evidenceSource ?? 'AUDIT',
         },
-        { executionId: input.auditExecutionId },
+        input.auditExecutionId ? { executionId: input.auditExecutionId } : {},
       );
       this.#db.exec('COMMIT');
     } catch (error) {

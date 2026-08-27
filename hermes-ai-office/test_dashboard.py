@@ -68,7 +68,7 @@ class DashboardTest(unittest.TestCase):
 
     def test_dashboard_exposes_read_projections_and_one_explicit_plan_action(self) -> None:
         paths = {route.path for route in api.router.routes}
-        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}", "/plans/{plan_id}/sync-and-continue"})
+        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}", "/plans/{plan_id}/resume-from-handoff", "/plans/{plan_id}/sync-and-continue"})
         source = API_PATH.read_text(encoding="utf-8")
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
@@ -761,6 +761,25 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(health["topPriority"], "P1")
         self.assertEqual(health["topIssue"]["batchKey"], "batch-1")
 
+    def test_resume_from_handoff_proxies_operator_attested_packet_without_model_sync(self) -> None:
+        paths = {route.path for route in api.router.routes}
+        self.assertIn("/plans/{plan_id}/resume-from-handoff", paths)
+        handoff = {
+            "schemaVersion": 1,
+            "planId": "plan-1",
+            "baseRevision": "1" * 40,
+            "headRevision": "2" * 40,
+            "completedWorkItems": [{"key": "TASK-1", "evidence": ["committed"]}],
+        }
+        with mock.patch.object(api, "_post_json", return_value={"accepted": True, "planId": "plan-1"}) as post:
+            result = asyncio.run(api.resume_from_handoff("plan-1", handoff))
+        self.assertTrue(result["accepted"])
+        post.assert_called_once_with(
+            "/api/v3/development/plans/plan-1/handoffs",
+            handoff,
+            timeout=12.0,
+        )
+
     def test_sync_and_continue_proxies_explicit_external_progress_reconciliation(self) -> None:
         paths = {route.path for route in api.router.routes}
         self.assertIn("/plans/{plan_id}/sync-and-continue", paths)
@@ -803,6 +822,9 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("decisionReasonLabel", source)
         self.assertIn(".hao-audit-metrics", styles)
         self.assertIn(".hao-audit-attention", styles)
+        self.assertIn('api("/plans/" + encodeURIComponent(handoffPlan.planId) + "/resume-from-handoff"', source)
+        self.assertIn("AI_OFFICE_HANDOFF_V1", source)
+        self.assertIn("resumeFromHandoff", source)
         self.assertIn('api("/plans/" + encodeURIComponent(plan.planId) + "/sync-and-continue"', source)
         self.assertIn("syncExternalProgress", source)
         self.assertIn("continueExternalConfirm", source)

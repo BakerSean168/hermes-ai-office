@@ -16,6 +16,7 @@ import {
 import { BatchCoordinator } from './plan/batchCoordinator.js';
 import { ExternalProgressReconciler } from './plan/externalProgress.js';
 import { GovernanceCoordinator } from './plan/governanceCoordinator.js';
+import { HandoffReconciler } from './plan/handoffReconciler.js';
 import { parseOrchestrationProposal } from './plan/protocol.js';
 import { PlanRecoveryCoordinator } from './plan/recoveryCoordinator.js';
 import { PLAN_TERMINAL_EXECUTION_STATUSES, type PlanExecutionPort } from './plan/runtime.js';
@@ -96,6 +97,7 @@ export class DurablePlanOrchestrator {
   readonly #batches: BatchCoordinator;
   readonly #recovery: PlanRecoveryCoordinator;
   readonly #governance: GovernanceCoordinator;
+  readonly #handoff: HandoffReconciler;
   readonly #planReconcileTails = new Map<string, Promise<void>>();
 
   constructor(options: {
@@ -140,6 +142,10 @@ export class DurablePlanOrchestrator {
     this.#governance = new GovernanceCoordinator({
       repository: this.#repository,
       status: options.governanceStatus,
+    });
+    this.#handoff = new HandoffReconciler({
+      repository: this.#repository,
+      workspace: this.#workspace,
     });
   }
 
@@ -367,6 +373,15 @@ export class DurablePlanOrchestrator {
     return items;
   }
 
+  async resumeFromHandoff(planId: string, handoff: unknown) {
+    return this.#enqueuePlanOperation(planId, async () => {
+      await this.#handoff.resume(planId, handoff);
+      await this.#reconcilePlan(planId);
+      await this.#governance.reconcile(planId);
+      return this.getPlan(planId);
+    });
+  }
+
   async cancelPlan(planId: string) {
     return this.#enqueuePlanOperation(planId, async () => {
       const plan = this.#repository.get(planId);
@@ -585,7 +600,17 @@ export class DurablePlanOrchestrator {
     recoveryMode: PlanRecoveryMode = 'AUTO',
   ): Promise<void> {
     return this.#enqueuePlanOperation(planId, async () => {
-      if (recoverBlocked) await this.#recovery.recover(planId, recoveryMode);
+      if (recoverBlocked) {
+        await this.#recovery.recover(planId, recoveryMode);
+      } else {
+        const blocked = this.#repository.get(planId);
+        if (blocked?.status === 'BLOCKED' && this.#externalProgress.hasPendingAudit(planId)) {
+          const blockedBatch = this.#repository
+            .batches(planId)
+            .find((batch) => batch.status === 'BLOCKED');
+          if (blockedBatch) await this.#externalProgress.reconcile(blocked, blockedBatch);
+        }
+      }
       await this.#reconcilePlan(planId);
       await this.#governance.reconcile(planId);
     });
@@ -600,8 +625,14 @@ export class DurablePlanOrchestrator {
       await this.#enqueuePlanReconciliation(planId, recoverBlocked, recoveryMode);
       return;
     }
+    const byId = new Map(
+      this.#repository.active().map((plan) => [plan.planId, plan] as const),
+    );
+    for (const plan of this.#repository.blocked()) {
+      if (this.#externalProgress.hasPendingAudit(plan.planId)) byId.set(plan.planId, plan);
+    }
     await Promise.all(
-      this.#repository.active().map((plan) => this.#enqueuePlanReconciliation(plan.planId, false)),
+      [...byId.values()].map((plan) => this.#enqueuePlanReconciliation(plan.planId, false)),
     );
   }
 }
