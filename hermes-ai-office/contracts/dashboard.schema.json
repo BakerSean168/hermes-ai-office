@@ -20,7 +20,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": 5
+      "const": 6
     },
     "generatedAt": {
       "type": "string",
@@ -664,6 +664,83 @@
         "revision": {"type": ["string", "null"]},
         "executionId": {"type": ["string", "null"]},
         "startedAt": {"type": ["string", "null"]}
+      }
+    },
+    "PlanTimelineExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "phase", "status", "attempt", "backend", "model", "startedAt", "endedAt", "durationMs", "totalTokens", "costUsd", "errorCode", "errorDetail", "verdict"],
+      "properties": {
+        "executionId": {"type": "string", "minLength": 1},
+        "phase": {"type": "string", "minLength": 1},
+        "status": {"type": "string", "minLength": 1},
+        "attempt": {"type": ["integer", "null"], "minimum": 1},
+        "backend": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "startedAt": {"type": ["string", "null"]},
+        "endedAt": {"type": ["string", "null"]},
+        "durationMs": {"type": ["integer", "null"], "minimum": 0},
+        "totalTokens": {"type": "integer", "minimum": 0},
+        "costUsd": {"type": "number", "minimum": 0},
+        "errorCode": {"type": ["string", "null"]},
+        "errorDetail": {"type": ["string", "null"]},
+        "verdict": {"type": ["string", "null"], "enum": ["PASS", "FAIL", null]}
+      }
+    },
+    "PlanTimelineWorkItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "status", "system", "objective", "blockedReason", "acceptanceCriteria", "executions"],
+      "properties": {
+        "key": {"type": "string"},
+        "title": {"type": "string"},
+        "status": {"type": "string"},
+        "system": {"type": "boolean"},
+        "objective": {"type": "string"},
+        "blockedReason": {"type": ["string", "null"]},
+        "acceptanceCriteria": {"type": "array", "items": {"type": "string"}},
+        "executions": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineExecution"}}
+      }
+    },
+    "PlanTimelineEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "createdAt", "reason", "message", "executionId"],
+      "properties": {
+        "type": {"type": "string", "minLength": 1},
+        "createdAt": {"type": ["string", "null"]},
+        "reason": {"type": ["string", "null"]},
+        "message": {"type": ["string", "null"]},
+        "executionId": {"type": ["string", "null"]}
+      }
+    },
+    "PlanTimelineBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "status", "system", "ordinal", "baseRevision", "integratedRevision", "blockedReason", "workItems", "events"],
+      "properties": {
+        "key": {"type": "string"},
+        "title": {"type": "string"},
+        "status": {"type": "string"},
+        "system": {"type": "boolean"},
+        "ordinal": {"type": ["integer", "null"], "minimum": 0},
+        "baseRevision": {"type": ["string", "null"]},
+        "integratedRevision": {"type": ["string", "null"]},
+        "blockedReason": {"type": ["string", "null"]},
+        "workItems": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineWorkItem"}},
+        "events": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineEvent"}}
+      }
+    },
+    "PlanDetailResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "generatedAt", "plan", "batches", "deliveryEvents"],
+      "properties": {
+        "schemaVersion": {"const": 6},
+        "generatedAt": {"type": "string", "format": "date-time"},
+        "plan": {"$ref": "#/$defs/Plan"},
+        "batches": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineBatch"}},
+        "deliveryEvents": {"type": "array", "items": {"$ref": "#/$defs/PlanTimelineEvent"}}
       }
     },
     "ProgressCount": {

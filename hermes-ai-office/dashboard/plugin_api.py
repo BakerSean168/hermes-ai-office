@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, Mapping
@@ -549,6 +550,142 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
     return plans, summary
 
 
+
+def _review_verdict(raw: Mapping[str, Any]) -> str | None:
+    result = raw.get("result")
+    if not isinstance(result, Mapping):
+        return None
+    text = str(result.get("finalText") or "")
+    for line in text.splitlines():
+        token = line.strip().upper()
+        if not token:
+            continue
+        return token if token in {"PASS", "FAIL"} else None
+    return None
+
+
+def _timeline_execution(raw: Mapping[str, Any], plan: Mapping[str, Any]) -> Dict[str, Any]:
+    selection = raw.get("selection") if isinstance(raw.get("selection"), Mapping) else {}
+    timing = raw.get("timing") if isinstance(raw.get("timing"), Mapping) else {}
+    error = raw.get("error") if isinstance(raw.get("error"), Mapping) else {}
+    usage = _usage(raw.get("usage"))
+    execution_id = _required_string(raw, "executionId", "plan.execution")
+    detail = _event_detail(plan, execution_id=execution_id)
+    attempt = detail.get("attempt") if isinstance(detail.get("attempt"), int) else None
+    return {
+        "executionId": execution_id,
+        "phase": _required_string(raw, "phase", "plan.execution"),
+        "status": _required_string(raw, "status", "plan.execution").upper(),
+        "attempt": attempt,
+        "backend": str(selection.get("backend") or "") or None,
+        "model": str(selection.get("modelClass") or "") or None,
+        "startedAt": str(timing.get("startedAt") or "") or None,
+        "endedAt": str(timing.get("endedAt") or "") or None,
+        "durationMs": int(_number(timing.get("durationMs"))) if timing.get("durationMs") is not None else None,
+        "totalTokens": usage["input"] + usage["output"],
+        "costUsd": usage["costUsd"],
+        "errorCode": str(error.get("code") or "") or None,
+        "errorDetail": str(error.get("detail") or "") or None,
+        "verdict": _review_verdict(raw),
+    }
+
+
+_TIMELINE_BATCH_EVENT_PREFIXES = (
+    "BATCH_",
+    "WORK_ITEM_",
+)
+_TIMELINE_DELIVERY_EVENT_PREFIXES = (
+    "PLAN_DELIVERY_",
+    "DELIVERY_",
+)
+
+
+def _timeline_event(event: Mapping[str, Any]) -> Dict[str, Any]:
+    detail = event.get("detail") if isinstance(event.get("detail"), Mapping) else {}
+    reason = detail.get("reason")
+    message = detail.get("message")
+    if not isinstance(reason, str) or not reason.strip():
+        reason = None
+    if not isinstance(message, str) or not message.strip():
+        message = None
+    return {
+        "type": str(event.get("type") or "UNKNOWN"),
+        "createdAt": str(event.get("createdAt") or "") or None,
+        "reason": reason,
+        "message": message,
+        "executionId": str(event.get("executionId") or "") or None,
+    }
+
+
+def _plan_detail(raw: Mapping[str, Any]) -> Dict[str, Any]:
+    projected, _summary_counts = _plans([raw])
+    if not projected:
+        raise RuntimeError("control-plane contract violation: plan detail missing plan")
+    events = [event for event in raw.get("events", []) if isinstance(event, Mapping)]
+    batches = []
+    for batch in raw.get("batches", []) if isinstance(raw.get("batches"), list) else []:
+        if not isinstance(batch, Mapping):
+            continue
+        batch_id = batch.get("batchId")
+        work_items = []
+        for item in batch.get("workItems", []) if isinstance(batch.get("workItems"), list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            work_items.append(
+                {
+                    "key": str(item.get("key") or ""),
+                    "title": str(item.get("title") or ""),
+                    "status": str(item.get("status") or "").upper(),
+                    "system": _is_system_work_item(item),
+                    "objective": str(item.get("objective") or ""),
+                    "blockedReason": str(item.get("blockedReason") or "") or None,
+                    "acceptanceCriteria": [
+                        str(value)
+                        for value in item.get("acceptanceCriteria", [])
+                        if isinstance(value, str) and value.strip()
+                    ],
+                    "executions": [
+                        _timeline_execution(execution, raw)
+                        for execution in item.get("executions", [])
+                        if isinstance(execution, Mapping)
+                    ],
+                }
+            )
+        batch_events = [
+            _timeline_event(event)
+            for event in events
+            if event.get("batchId") == batch_id
+            and any(str(event.get("type") or "").startswith(prefix) for prefix in _TIMELINE_BATCH_EVENT_PREFIXES)
+            and str(event.get("type") or "") not in {"WORK_ITEM_VERIFIED"}
+        ]
+        batches.append(
+            {
+                "key": str(batch.get("key") or ""),
+                "title": str(batch.get("title") or ""),
+                "status": str(batch.get("status") or "").upper(),
+                "system": _is_system_batch(batch),
+                "ordinal": int(batch.get("ordinal")) if isinstance(batch.get("ordinal"), int) else None,
+                "baseRevision": str(batch.get("baseRevision") or "") or None,
+                "integratedRevision": str(batch.get("integratedRevision") or "") or None,
+                "blockedReason": str(batch.get("blockedReason") or "") or None,
+                "workItems": work_items,
+                "events": batch_events,
+            }
+        )
+    delivery_events = [
+        _timeline_event(event)
+        for event in events
+        if any(str(event.get("type") or "").startswith(prefix) for prefix in _TIMELINE_DELIVERY_EVENT_PREFIXES)
+        or str(event.get("type") or "") in {"PLAN_SUCCEEDED"}
+    ]
+    return {
+        "schemaVersion": _DASHBOARD_SCHEMA_VERSION,
+        "generatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "plan": projected[0],
+        "batches": batches,
+        "deliveryEvents": delivery_events,
+    }
+
 def _fetch_all_executions(max_items: int) -> list[Mapping[str, Any]]:
     global _HISTORY_HYDRATED
     hydrate = not _HISTORY_HYDRATED
@@ -624,6 +761,22 @@ async def health() -> Dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+
+
+@router.get("/plans/{plan_id}")
+async def plan_detail(plan_id: str) -> Dict[str, Any]:
+    safe_plan_id = urllib.parse.quote(str(plan_id), safe="")
+    try:
+        raw = await asyncio.to_thread(_fetch_json, f"/api/v3/development/plans/{safe_plan_id}")
+        return _plan_detail(raw)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise HTTPException(status_code=404, detail="plan not found") from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 @router.get("/dashboard")
 async def dashboard(limit: int = 0) -> Dict[str, Any]:

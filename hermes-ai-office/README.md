@@ -52,6 +52,8 @@ Provider configuration is managed in LiteLLM Admin. AI Office reads the LiteLLM 
 
 ### Dashboard contract
 
+The dashboard keeps the overview payload compact and loads an on-demand plan timeline only when a plan card is opened. The timeline projects per-batch business/system work, model executions, usage, failures, mechanical integration events, and delivery events without mutating plan state.
+
 `contracts/dashboard.schema.json` is the single backend-to-frontend DTO contract for the console. `dashboard/plugin_api.py` produces that shape and `dashboard/dist/index.js` consumes it. Field aliases and compatibility fallbacks are intentionally unsupported: a shape change must update the producer, contract, consumer, and contract tests together.
 
 Plan cards project the durable workflow state rather than guessing from batch names. Business progress excludes synthetic control-plane work, while `currentActivity` exposes integration repair, aggregate `BATCH_VERIFY`, delivery repair, post-merge repair, backend/model, attempt, revision, and blocking reason as a stable read-only dashboard contract.

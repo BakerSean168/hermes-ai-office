@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -46,7 +47,7 @@ spec.loader.exec_module(api)
 class DashboardTest(unittest.TestCase):
     def test_dashboard_exposes_only_read_only_v3_routes(self) -> None:
         paths = {route.path for route in api.router.routes}
-        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry"})
+        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}"})
         source = API_PATH.read_text(encoding="utf-8")
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
@@ -443,6 +444,158 @@ class DashboardTest(unittest.TestCase):
                 {},
             )
 
+    def test_plan_detail_projects_execution_timeline_with_model_usage_and_failure_reason(self) -> None:
+        raw = {
+            "planId": "plan-detail",
+            "projectKey": "memoflow",
+            "objective": "Ship durable reminders",
+            "status": "RUNNING",
+            "currentRevision": "rev-current",
+            "blockedReason": None,
+            "deliveryStage": None,
+            "pullRequestUrl": None,
+            "mergeRevision": None,
+            "createdAt": 1,
+            "updatedAt": 2,
+            "batches": [
+                {
+                    "batchId": "batch-1-id",
+                    "key": "batch-1",
+                    "title": "Reminder handlers",
+                    "status": "RUNNING",
+                    "baseRevision": "base",
+                    "integratedRevision": "candidate",
+                    "blockedReason": None,
+                    "workItems": [
+                        {
+                            "workItemId": "work-1-id",
+                            "key": "TASK-1",
+                            "title": "Implement task reminder",
+                            "objective": "Implement it.",
+                            "acceptanceCriteria": ["Focused test passes."],
+                            "status": "SUCCEEDED",
+                            "blockedReason": None,
+                            "executions": [
+                                {
+                                    "executionId": "exec-1",
+                                    "projectKey": "memoflow",
+                                    "objectiveSummary": "Implement it.",
+                                    "phase": "IMPLEMENT",
+                                    "status": "FAILED",
+                                    "selection": {
+                                        "backend": "opencode-acp",
+                                        "modelClass": "implementation-efficient",
+                                        "workspaceMode": "isolated_write",
+                                    },
+                                    "timing": {
+                                        "startedAt": "2026-08-27T01:00:00Z",
+                                        "endedAt": "2026-08-27T01:02:00Z",
+                                        "durationMs": 120000,
+                                    },
+                                    "usage": {"input": 100, "output": 20, "calls": 2, "costUsd": 0.03},
+                                    "error": {"code": "WRITER_COMPLETION_NO_COMMIT", "detail": "No commit", "retryable": False},
+                                },
+                                {
+                                    "executionId": "exec-2",
+                                    "projectKey": "memoflow",
+                                    "objectiveSummary": "Review it.",
+                                    "phase": "VERIFY_REVIEW",
+                                    "status": "SUCCEEDED",
+                                    "selection": {
+                                        "backend": "codex-review-headless",
+                                        "modelClass": "gpt-5.6-sol",
+                                        "workspaceMode": "review_snapshot",
+                                    },
+                                    "timing": {"startedAt": "2026-08-27T01:03:00Z", "endedAt": "2026-08-27T01:04:00Z", "durationMs": 60000},
+                                    "usage": {"input": 50, "output": 5, "calls": 1, "costUsd": 0.01},
+                                    "result": {"finalText": "PASS\nVerified."},
+                                },
+                            ],
+                        },
+                        {
+                            "workItemId": "work-v-id",
+                            "key": "batch-verify-b1-1",
+                            "title": "Aggregate review",
+                            "objective": "Review combined batch.",
+                            "acceptanceCriteria": [],
+                            "status": "RUNNING",
+                            "blockedReason": None,
+                            "executions": [
+                                {
+                                    "executionId": "exec-v",
+                                    "projectKey": "memoflow",
+                                    "objectiveSummary": "Review combined batch.",
+                                    "phase": "BATCH_VERIFY",
+                                    "status": "RUNNING",
+                                    "selection": {
+                                        "backend": "codex-review-headless",
+                                        "modelClass": "gpt-5.6-sol",
+                                        "workspaceMode": "review_snapshot",
+                                    },
+                                    "timing": {"startedAt": "2026-08-27T01:05:00Z"},
+                                    "usage": {},
+                                }
+                            ],
+                        },
+                    ],
+                }
+            ],
+            "events": [
+                {"type": "EXECUTION_STARTED", "batchId": "batch-1-id", "workItemId": "work-1-id", "executionId": "exec-1", "detail": {"phase": "IMPLEMENT", "attempt": 2}, "createdAt": "2026-08-27T01:00:00Z"},
+                {"type": "BATCH_INTEGRATED", "batchId": "batch-1-id", "workItemId": None, "executionId": None, "detail": {"revision": "candidate"}, "createdAt": "2026-08-27T01:04:30Z"},
+            ],
+        }
+        detail = api._plan_detail(raw)
+        self.assertEqual(set(detail), set(CONTRACT["$defs"]["PlanDetailResponse"]["properties"]))
+        self.assertEqual(detail["schemaVersion"], CONTRACT["properties"]["schemaVersion"]["const"])
+        self.assertEqual(detail["plan"]["planId"], "plan-detail")
+        self.assertEqual(len(detail["batches"]), 1)
+        batch = detail["batches"][0]
+        self.assertEqual(set(batch), set(CONTRACT["$defs"]["PlanTimelineBatch"]["properties"]))
+        self.assertFalse(batch["system"])
+        self.assertEqual(len(batch["workItems"]), 2)
+        failed = batch["workItems"][0]["executions"][0]
+        self.assertEqual(set(failed), set(CONTRACT["$defs"]["PlanTimelineExecution"]["properties"]))
+        self.assertEqual(failed["attempt"], 2)
+        self.assertEqual(failed["backend"], "opencode-acp")
+        self.assertEqual(failed["model"], "implementation-efficient")
+        self.assertEqual(failed["durationMs"], 120000)
+        self.assertEqual(failed["totalTokens"], 120)
+        self.assertAlmostEqual(failed["costUsd"], 0.03)
+        self.assertEqual(failed["errorCode"], "WRITER_COMPLETION_NO_COMMIT")
+        self.assertEqual(failed["errorDetail"], "No commit")
+        approved = batch["workItems"][0]["executions"][1]
+        self.assertEqual(approved["verdict"], "PASS")
+        aggregate = batch["workItems"][1]
+        self.assertTrue(aggregate["system"])
+        self.assertEqual(aggregate["executions"][0]["phase"], "BATCH_VERIFY")
+        self.assertEqual(batch["events"][0]["type"], "BATCH_INTEGRATED")
+
+    def test_plan_detail_endpoint_is_read_only_and_fetches_one_plan_on_demand(self) -> None:
+        paths = {route.path for route in api.router.routes}
+        self.assertIn("/plans/{plan_id}", paths)
+        raw = {
+            "planId": "plan-1", "projectKey": "example", "objective": "Ship", "status": "SUCCEEDED",
+            "currentRevision": "abc", "blockedReason": None, "deliveryStage": "SUCCEEDED",
+            "pullRequestUrl": "https://github.test/pull/1", "mergeRevision": "merged",
+            "createdAt": 1, "updatedAt": 2, "batches": [], "events": []
+        }
+        with mock.patch.object(api, "_fetch_json", return_value=raw) as fetch:
+            detail = asyncio.run(api.plan_detail("plan-1"))
+        self.assertEqual(detail["plan"]["planId"], "plan-1")
+        fetch.assert_called_once_with("/api/v3/development/plans/plan-1")
+
+    def test_frontend_plan_cards_open_on_demand_timeline_detail(self) -> None:
+        source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
+        styles = (ROOT / "dashboard" / "dist" / "style.css").read_text(encoding="utf-8")
+        self.assertIn('api("/plans/" + encodeURIComponent(plan.planId))', source)
+        self.assertIn("function PlanDetail", source)
+        self.assertIn("function TimelineExecution", source)
+        self.assertIn('className: "hao-plan-detail"', source)
+        self.assertIn('className: "hao-timeline"', source)
+        self.assertIn(".hao-plan-detail", styles)
+        self.assertIn(".hao-timeline-step", styles)
+
     def test_frontend_is_two_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('setView("overview")', source)
@@ -454,7 +607,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(manifest["version"], "1.3.0")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

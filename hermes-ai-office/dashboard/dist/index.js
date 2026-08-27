@@ -8,7 +8,7 @@
   const h = React.createElement;
   const fetchJSON = SDK.fetchJSON;
   const API_ROOT = "/api/plugins/hermes-ai-office";
-  const DASHBOARD_SCHEMA_VERSION = 5;
+  const DASHBOARD_SCHEMA_VERSION = 6;
   if (typeof fetchJSON !== "function") return;
 
   function useLocale() {
@@ -80,6 +80,13 @@
       automation: "automation",
       items: "items",
       batches: "batches",
+      planDetail: "Plan timeline",
+      close: "Close",
+      systemWork: "System workflow",
+      businessWork: "Business work",
+      mechanicalEvent: "Control-plane event",
+      deliveryTimeline: "Delivery timeline",
+      noTimeline: "No execution timeline yet",
     },
     zh: {
       overview: "总览",
@@ -140,6 +147,13 @@
       automation: "自动流程",
       items: "任务",
       batches: "批次",
+      planDetail: "计划时间线",
+      close: "关闭",
+      systemWork: "系统自动流程",
+      businessWork: "业务任务",
+      mechanicalEvent: "控制面事件",
+      deliveryTimeline: "交付时间线",
+      noTimeline: "暂无执行时间线",
     },
   };
 
@@ -151,6 +165,13 @@
     if (!value || value.schemaVersion !== DASHBOARD_SCHEMA_VERSION) {
       const actual = value && value.schemaVersion != null ? value.schemaVersion : "missing";
       throw new Error("AI Office dashboard contract mismatch: expected v" + DASHBOARD_SCHEMA_VERSION + ", received v" + actual);
+    }
+    return value;
+  }
+
+  function assertPlanDetailContract(value) {
+    if (!value || value.schemaVersion !== DASHBOARD_SCHEMA_VERSION || !value.plan || !Array.isArray(value.batches)) {
+      throw new Error("AI Office plan detail contract mismatch");
     }
     return value;
   }
@@ -382,6 +403,122 @@
     );
   }
 
+  function TimelineExecution(props) {
+    const item = props.execution || {};
+    const chips = [];
+    if (item.attempt) chips.push(props.t.attempt + " " + item.attempt);
+    if (item.backend) chips.push(item.backend);
+    if (item.model) chips.push(item.model);
+    chips.push(duration(runningElapsed(item, props.now)));
+    chips.push(compact(item.totalTokens || 0, props.locale) + " tok");
+    chips.push(money(item.costUsd));
+    return h("div", { className: "hao-timeline-step" },
+      h("div", { className: "hao-timeline-step-head" },
+        h("span", { className: "hao-phase" }, item.phase || "EXECUTION"),
+        h(Badge, { value: item.status }),
+        item.verdict ? h("span", { className: "hao-timeline-verdict" }, item.verdict) : null,
+        h("span", { className: "hao-timeline-time" }, dateTime(item.startedAt, props.locale))
+      ),
+      h("div", { className: "hao-plan-meta" }, chips.map(function (value, index) {
+        return h("span", { className: "hao-plan-chip", key: value + index }, value);
+      })),
+      item.errorCode || item.errorDetail
+        ? h("div", { className: "hao-plan-reason" }, [item.errorCode, item.errorDetail].filter(Boolean).join(" · "))
+        : null,
+    );
+  }
+
+  function TimelineEvent(props) {
+    const item = props.event || {};
+    return h("div", { className: "hao-timeline-step hao-timeline-event" },
+      h("div", { className: "hao-timeline-step-head" },
+        h("span", { className: "hao-phase" }, props.t.mechanicalEvent),
+        h("strong", null, String(item.type || "EVENT").replace(/_/g, " ")),
+        h("span", { className: "hao-timeline-time" }, dateTime(item.createdAt, props.locale))
+      ),
+      item.reason || item.message
+        ? h("div", { className: "hao-plan-reason" }, [item.reason, item.message].filter(Boolean).join(" · "))
+        : null,
+    );
+  }
+
+  function PlanDetail(props) {
+    const detail = props.detail;
+    const t = props.t;
+    if (props.loading) {
+      return h("div", { className: "hao-plan-detail-backdrop", onClick: props.onClose },
+        h("section", { className: "hao-plan-detail", onClick: function (event) { event.stopPropagation(); } },
+          h("div", { className: "hao-loading" }, "Loading…")
+        )
+      );
+    }
+    const plan = detail && detail.plan;
+    return h("div", { className: "hao-plan-detail-backdrop", onClick: props.onClose },
+      h("section", { className: "hao-plan-detail", role: "dialog", "aria-modal": "true", onClick: function (event) { event.stopPropagation(); } },
+        h("header", { className: "hao-plan-detail-head" },
+          h("div", null,
+            h("div", { className: "hao-running-top" }, plan ? h(Badge, { value: plan.status }) : null, h("span", { className: "hao-phase" }, t.planDetail)),
+            h("h2", null, plan ? plan.objective : t.planDetail),
+            plan ? h("div", { className: "hao-running-project" }, plan.projectKey + " · " + shortRevision(plan.currentRevision)) : null
+          ),
+          h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: props.onClose }, t.close)
+        ),
+        props.error ? h("div", { className: "hao-error" }, props.error) : null,
+        detail ? h("div", { className: "hao-plan-detail-body" },
+          (detail.batches || []).length
+            ? h("div", { className: "hao-timeline" }, (detail.batches || []).map(function (batch) {
+                const isOpen = batch.status === "RUNNING" || batch.status === "BLOCKED";
+                return h("details", { className: "hao-timeline-batch", key: batch.key, open: isOpen },
+                  h("summary", null,
+                    h("div", { className: "hao-timeline-batch-summary" },
+                      h(Badge, { value: batch.status }),
+                      h("strong", null, batch.key),
+                      h("span", null, batch.title),
+                      batch.system ? h("span", { className: "hao-plan-chip" }, t.systemWork) : null,
+                      batch.integratedRevision ? h("span", { className: "hao-plan-chip" }, shortRevision(batch.integratedRevision)) : null
+                    )
+                  ),
+                  h("div", { className: "hao-timeline-batch-body" },
+                    (batch.workItems || []).map(function (work) {
+                      return h("section", { className: "hao-timeline-work" + (work.system ? " is-system" : ""), key: work.key },
+                        h("header", { className: "hao-timeline-work-head" },
+                          h("div", null,
+                            h("span", { className: "hao-timeline-work-kind" }, work.system ? t.systemWork : t.businessWork),
+                            h("strong", null, work.key + " · " + work.title)
+                          ),
+                          h(Badge, { value: work.status })
+                        ),
+                        (work.executions || []).length
+                          ? h("div", { className: "hao-timeline-executions" }, (work.executions || []).map(function (execution) {
+                              return h(TimelineExecution, { key: execution.executionId, execution: execution, t: t, locale: props.locale, now: props.now });
+                            }))
+                          : h("div", { className: "hao-muted hao-timeline-none" }, t.noTimeline),
+                        work.blockedReason ? h("div", { className: "hao-plan-reason" }, work.blockedReason) : null
+                      );
+                    }),
+                    (batch.events || []).length
+                      ? h("div", { className: "hao-timeline-events" }, (batch.events || []).map(function (event, index) {
+                          return h(TimelineEvent, { key: event.type + index, event: event, t: t, locale: props.locale });
+                        }))
+                      : null,
+                    batch.blockedReason ? h("div", { className: "hao-plan-reason" }, batch.blockedReason) : null
+                  )
+                );
+              }))
+            : h("div", { className: "hao-empty" }, t.noTimeline),
+          (detail.deliveryEvents || []).length
+            ? h("section", { className: "hao-timeline-delivery" },
+                h("h3", null, t.deliveryTimeline),
+                (detail.deliveryEvents || []).map(function (event, index) {
+                  return h(TimelineEvent, { key: event.type + index, event: event, t: t, locale: props.locale });
+                })
+              )
+            : null
+        ) : null
+      )
+    );
+  }
+
   function PlanCards(props) {
     const rows = props.rows || [];
     const t = props.t;
@@ -404,7 +541,17 @@
       if (plan.systemWorkItems && plan.systemWorkItems.total) {
         progress.push(plan.systemWorkItems.succeeded + "/" + plan.systemWorkItems.total + " " + t.automation);
       }
-      return h("article", { className: "hao-running-card hao-plan-card", key: plan.planId },
+      function openPlan() { props.onOpen(plan); }
+      return h("article", {
+        className: "hao-running-card hao-plan-card hao-plan-card-clickable",
+        key: plan.planId,
+        role: "button",
+        tabIndex: 0,
+        onClick: openPlan,
+        onKeyDown: function (event) {
+          if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openPlan(); }
+        },
+      },
         h("div", { className: "hao-running-top" },
           h(Badge, { value: plan.status }),
           h("span", { className: "hao-phase" }, phase || batch.key || "complete")
@@ -422,7 +569,10 @@
         activity.reason || plan.blockedReason
           ? h("div", { className: "hao-plan-reason" }, activity.reason || plan.blockedReason)
           : null,
-        plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", { href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer" }, "Pull request")) : null,
+        plan.pullRequestUrl ? h("div", { className: "hao-running-foot" }, h("a", {
+          href: plan.pullRequestUrl, target: "_blank", rel: "noreferrer",
+          onClick: function (event) { event.stopPropagation(); }
+        }, "Pull request")) : null,
       );
     }));
   }
@@ -453,7 +603,7 @@
         h(Metric, { label: t.calls, value: compact(s.calls, props.locale), hint: t.reasoning + " " + compact(s.reasoningOutput, props.locale) }),
       ),
       h(Panel, { title: t.running, className: "hao-running-panel" }, h(RunningCards, { rows: data.active, t: t, locale: props.locale, now: props.now })),
-      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale })),
+      h(Panel, { title: t.plans, className: "hao-running-panel" }, h(PlanCards, { rows: data.plans, t: t, locale: props.locale, onOpen: props.onOpenPlan })),
       h(
         "div",
         { className: "hao-runtime-strip" },
@@ -528,6 +678,10 @@
     const [error, setError] = React.useState("");
     const [loading, setLoading] = React.useState(true);
     const [now, setNow] = React.useState(Date.now());
+    const [detailPlanId, setDetailPlanId] = React.useState(null);
+    const [planDetail, setPlanDetail] = React.useState(null);
+    const [detailLoading, setDetailLoading] = React.useState(false);
+    const [detailError, setDetailError] = React.useState("");
 
     const load = React.useCallback(function () {
       setLoading(true);
@@ -538,12 +692,38 @@
         .finally(function () { setLoading(false); });
     }, []);
 
+    function openPlan(plan) {
+      setDetailPlanId(plan.planId);
+      setPlanDetail(null);
+      setDetailError("");
+      setDetailLoading(true);
+      return api("/plans/" + encodeURIComponent(plan.planId))
+        .then(assertPlanDetailContract)
+        .then(function (value) { setPlanDetail(value); })
+        .catch(function (cause) { setDetailError(String(cause)); })
+        .finally(function () { setDetailLoading(false); });
+    }
+
+    function closePlan() {
+      setDetailPlanId(null);
+      setPlanDetail(null);
+      setDetailError("");
+      setDetailLoading(false);
+    }
+
     React.useEffect(function () {
       load();
       const refresh = window.setInterval(load, 15000);
       const clock = window.setInterval(function () { setNow(Date.now()); }, 1000);
       return function () { window.clearInterval(refresh); window.clearInterval(clock); };
     }, [load]);
+
+    React.useEffect(function () {
+      if (!detailPlanId) return undefined;
+      function onKeyDown(event) { if (event.key === "Escape") closePlan(); }
+      window.addEventListener("keydown", onKeyDown);
+      return function () { window.removeEventListener("keydown", onKeyDown); };
+    }, [detailPlanId]);
 
     const adminUrl = data && data.registry && data.registry.adminUrl;
     return h(
@@ -561,7 +741,8 @@
         ),
       ),
       error ? h("div", { className: "hao-error" }, error) : null,
-      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now }),
+      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan }),
+      detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t: t, locale: locale, now: now }) : null,
     );
   }
 
