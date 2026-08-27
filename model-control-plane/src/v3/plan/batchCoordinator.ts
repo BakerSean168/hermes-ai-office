@@ -50,13 +50,28 @@ export class BatchCoordinator {
       originalItems.some(isPostMergeDeliveryRepairItem) && plan.mergeRevision
         ? plan.mergeRevision
         : undefined;
-    const sources = originalItems.map((item, index) => ({
-      index,
-      itemKey: item.key,
-      title: item.title,
-      acceptanceCriteria: item.acceptanceCriteria,
-      ...this.#workItems.approvedImplementationEvidence(item),
-    }));
+    const sources = originalItems.map((item, index) => {
+      const external = this.#workItems.externalAdoptionEvidence(item);
+      if (external) {
+        return {
+          kind: 'external' as const,
+          index,
+          itemKey: item.key,
+          title: item.title,
+          acceptanceCriteria: item.acceptanceCriteria,
+          approvedRevision: external.revision,
+          adoptionRef: external.ref,
+        };
+      }
+      return {
+        kind: 'execution' as const,
+        index,
+        itemKey: item.key,
+        title: item.title,
+        acceptanceCriteria: item.acceptanceCriteria,
+        ...this.#workItems.approvedImplementationEvidence(item),
+      };
+    });
     const aggregateReviewFailure = reason === 'BATCH_AGGREGATE_REVIEW_FAILED';
     const baseRevision =
       (aggregateReviewFailure ? batch.integratedRevision : undefined) ??
@@ -67,11 +82,13 @@ export class BatchCoordinator {
         [
           `[${source.index}] ${source.itemKey} — ${source.title}`,
           `approved revision: ${source.approvedRevision}`,
-          `workspace: ${source.workspaceRef}`,
-          aggregateReviewFailure
+          source.kind === 'external'
+            ? `baseline: already present through external adoption ref ${source.adoptionRef}`
+            : `workspace: ${source.workspaceRef}`,
+          aggregateReviewFailure || source.kind === 'external'
             ? ''
             : `fetch: git fetch ${source.workspaceRef} ${source.approvedRevision}:refs/ai-office/incoming/${source.index}`,
-          aggregateReviewFailure
+          aggregateReviewFailure || source.kind === 'external'
             ? ''
             : `merge: git merge --no-ff --no-edit refs/ai-office/incoming/${source.index}`,
           source.acceptanceCriteria.length
@@ -137,7 +154,9 @@ export class BatchCoordinator {
         sources: sources.map((source) => ({
           itemKey: source.itemKey,
           approvedRevision: source.approvedRevision,
-          workspaceRef: source.workspaceRef,
+          ...(source.kind === 'external'
+            ? { adoptionRef: source.adoptionRef, sourceKind: 'EXTERNAL_BASELINE' }
+            : { workspaceRef: source.workspaceRef, sourceKind: 'EXECUTION' }),
         })),
       },
     });
@@ -178,7 +197,19 @@ export class BatchCoordinator {
     );
     const repairItems = items.filter(isIntegrationRepairItem);
     const repairItem = repairItems.at(-1);
-    const integrationItems = repairItem ? [repairItem] : originalItems;
+    const externalBaseline = new Map(
+      originalItems
+        .map((item) => [item.workItemId, this.#workItems.externalAdoptionEvidence(item)] as const)
+        .filter((entry): entry is readonly [string, NonNullable<typeof entry[1]>] => Boolean(entry[1])),
+    );
+    // External handoff/audit work is already present in the durable baseline.
+    // Do not demand a synthetic implementation workspace for it; integrate only
+    // work that actually has independent execution lineage. A zero-input batch
+    // integration is an intentional no-op that pins a durable batch ref at the
+    // current baseline before normal aggregate verification.
+    const integrationItems = repairItem
+      ? [repairItem]
+      : originalItems.filter((item) => !externalBaseline.has(item.workItemId));
     const implementations = integrationItems.map((item) => {
       const evidence = this.#workItems.approvedImplementationEvidence(item);
       return {
@@ -195,8 +226,9 @@ export class BatchCoordinator {
     const requiredAncestorRevisions = repairItem
       ? [
           ...new Set([
-            ...originalItems.map(
-              (item) => this.#workItems.approvedImplementationEvidence(item).approvedRevision,
+            ...originalItems.map((item) =>
+              externalBaseline.get(item.workItemId)?.revision ??
+              this.#workItems.approvedImplementationEvidence(item).approvedRevision,
             ),
             ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
           ]),
@@ -225,6 +257,9 @@ export class BatchCoordinator {
             repaired: Boolean(repairItem),
             repairWorkItemKey: repairItem?.key,
             aggregateReviewRequired: true,
+            externalBaselineItems: originalItems
+              .filter((item) => externalBaseline.has(item.workItemId))
+              .map((item) => item.key),
           },
           { batchId: batch.batchId },
         );
@@ -243,6 +278,9 @@ export class BatchCoordinator {
           repaired: Boolean(repairItem),
           repairWorkItemKey: repairItem?.key,
           aggregateReviewRequired: false,
+          externalBaselineItems: originalItems
+            .filter((item) => externalBaseline.has(item.workItemId))
+            .map((item) => item.key),
         },
         { batchId: batch.batchId },
       );

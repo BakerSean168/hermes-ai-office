@@ -2216,6 +2216,180 @@ test('operator handoff adopts a committed descendant without launching a model a
   }
 });
 
+test('deferred externally adopted work integrates from the later durable baseline without synthetic execution evidence', async () => {
+  const host = new PlanHost();
+  const BASE = '5555555555555555555555555555555555555555';
+  const HEAD = '6666666666666666666666666666666666666666';
+  let failBlockedIntegration = true;
+  const integrations: Array<{
+    batchKey: string;
+    baseRevision: string;
+    implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+  }> = [];
+  const deferredWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyExternalHandoff(input) {
+      assert.equal(input.baseRevision, BASE);
+      assert.equal(input.headRevision, HEAD);
+      return { baseRevision: BASE, headRevision: HEAD, ref: input.ref, aheadBy: 4 };
+    },
+    async integrateBatch(input) {
+      integrations.push({
+        batchKey: input.batchKey,
+        baseRevision: input.baseRevision,
+        implementations: input.implementations,
+      });
+      if (input.batchKey === 'batch-1' && failBlockedIntegration) {
+        failBlockedIntegration = false;
+        throw new Error('BATCH_INTEGRATION_FAILED:simulated ownership transfer');
+      }
+      if (input.batchKey === 'batch-3') {
+        assert.deepEqual(
+          input.implementations,
+          [],
+          'externally adopted work is already present in the durable baseline and must not require a fake workspace',
+        );
+        return {
+          revision: input.baseRevision,
+          ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+        };
+      }
+      return {
+        revision: `integrated-${input.batchKey}`,
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: deferredWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'deferred-agent-handoff-plan' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Keep a future externally completed ticket durable while an intervening Pixel batch still needs work.',
+        analysisSummary: 'Four sequential batches isolate deferred external adoption from normal implementation.',
+        repository: { path: '/tmp/memoflow', baseRevision: BASE },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Blocked ownership transfer',
+            workItems: [{ key: 'BLOCKER-1', title: 'Blocked work', objective: 'Implement the blocked work.' }],
+          },
+          {
+            key: 'batch-2',
+            title: 'Intervening Pixel work',
+            dependsOn: ['batch-1'],
+            workItems: [{ key: 'PIXEL-2', title: 'Pixel work', objective: 'Implement after the handoff.' }],
+          },
+          {
+            key: 'batch-3',
+            title: 'Deferred external work',
+            dependsOn: ['batch-2'],
+            workItems: [{ key: 'EXTERNAL-3', title: 'External work', objective: 'Already completed by another agent.' }],
+          },
+          {
+            key: 'batch-4',
+            title: 'Remaining work',
+            dependsOn: ['batch-3'],
+            workItems: [{ key: 'REMAIN-4', title: 'Remaining work', objective: 'Continue after deferred adoption.' }],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+    let body = created.json();
+
+    const blockerImplementation = body.batches[0].workItems[0].executions[0];
+    host.succeed(blockerImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    const blockerReview = body.batches[0].workItems[0].executions.at(-1);
+    host.succeed(blockerReview.refs.openhandsConversationId, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(planId);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'BATCH_INTEGRATION_FAILED');
+
+    const resumed = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/handoffs`,
+      payload: {
+        schemaVersion: 1,
+        planId,
+        baseRevision: BASE,
+        headRevision: HEAD,
+        ref: 'core-vnext/deferred-agent-handoff',
+        summary: 'The external agent completed EXTERNAL-3 while PIXEL-2 remains intentionally unfinished.',
+        completedWorkItems: [
+          {
+            key: 'EXTERNAL-3',
+            evidence: ['Committed at the declared head.', 'Focused external verification passed.'],
+          },
+        ],
+        recommendedNextWorkItem: 'PIXEL-2',
+      },
+    });
+    assert.equal(resumed.statusCode, 200);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    assert.equal(body.currentRevision, HEAD);
+    assert.equal(body.batches[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[1].status, 'RUNNING');
+    assert.equal(body.batches[2].status, 'PENDING');
+    assert.equal(body.batches[2].workItems[0].status, 'SUCCEEDED');
+    assert.equal(body.batches[2].workItems[0].executions.length, 0);
+
+    const pixelImplementation = body.batches[1].workItems[0].executions.at(-1);
+    assert.equal(pixelImplementation.phase, 'IMPLEMENT');
+    host.succeed(pixelImplementation.refs.openhandsConversationId, 'IMPLEMENTED');
+    await runtime.v3.reconcilePlans(planId);
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    const pixelReview = body.batches[1].workItems[0].executions.at(-1);
+    assert.equal(pixelReview.phase, 'VERIFY_REVIEW');
+    host.succeed(pixelReview.refs.openhandsConversationId, 'PASS\nVerified.');
+    await runtime.v3.reconcilePlans(planId); // integrate batch-2
+    await runtime.v3.reconcilePlans(planId); // no-op integrate deferred batch-3
+    await runtime.v3.reconcilePlans(planId); // start batch-4
+
+    body = (await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.batches[1].status, 'SUCCEEDED');
+    assert.equal(body.batches[2].status, 'SUCCEEDED');
+    assert.equal(body.batches[2].integratedRevision, 'integrated-batch-2');
+    assert.equal(body.batches[3].status, 'RUNNING');
+    assert.equal(body.batches[3].baseRevision, 'integrated-batch-2');
+    assert.equal(body.batches[3].workItems[0].executions.at(-1).phase, 'IMPLEMENT');
+
+    const deferredIntegration = integrations.find((item) => item.batchKey === 'batch-3');
+    assert.ok(deferredIntegration);
+    assert.equal(deferredIntegration.baseRevision, 'integrated-batch-2');
+    assert.deepEqual(deferredIntegration.implementations, []);
+    const integratedEvent = body.events.find(
+      (event: any) => event.type === 'BATCH_INTEGRATED' && event.batchId === body.batches[2].batchId,
+    );
+    assert.deepEqual(integratedEvent.detail.externalBaselineItems, ['EXTERNAL-3']);
+    assert.equal(
+      body.batches[2].workItems[0].executions.some((execution: any) => execution.phase === 'INVESTIGATE_PLAN'),
+      false,
+    );
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('handoff rejects stale or unknown claims before mutating durable progress', async () => {
   const host = new PlanHost();
   const BASE = '3333333333333333333333333333333333333333';

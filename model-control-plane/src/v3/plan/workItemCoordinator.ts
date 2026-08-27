@@ -39,6 +39,12 @@ export interface ApprovedImplementationEvidence {
   approvedRevision: string;
 }
 
+export interface ExternalAdoptionEvidence {
+  revision: string;
+  ref: string;
+  evidence: string;
+}
+
 export class WorkItemCoordinator {
   readonly #repository: PlanRepository;
   readonly #links: ExecutionLinkRepository;
@@ -448,6 +454,30 @@ export class WorkItemCoordinator {
       { reason },
       { batchId, workItemId, executionId },
     );
+  }
+
+  externalAdoptionEvidence(item: WorkItemRecord): ExternalAdoptionEvidence | undefined {
+    // An externally adopted item intentionally has no implementation/review
+    // execution lineage of its own. If execution lineage exists, prefer that
+    // newer concrete evidence and do not treat the item as baseline-only.
+    if (this.#repository.executionIds(item.workItemId).length > 0) return undefined;
+    const event = [...this.#repository.events(item.planId)]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.type === 'EXTERNAL_WORK_ITEM_ADOPTED' &&
+          candidate.workItemId === item.workItemId,
+      );
+    if (!event) return undefined;
+    const detail =
+      event.detail && typeof event.detail === 'object' && !Array.isArray(event.detail)
+        ? (event.detail as Record<string, unknown>)
+        : {};
+    const revision = typeof detail.revision === 'string' ? detail.revision.trim() : '';
+    const ref = typeof detail.ref === 'string' ? detail.ref.trim() : '';
+    const evidence = typeof detail.evidence === 'string' ? detail.evidence : '';
+    if (!revision || !ref) return undefined;
+    return { revision, ref, evidence };
   }
 
   approvedImplementationEvidence(item: WorkItemRecord): ApprovedImplementationEvidence {
