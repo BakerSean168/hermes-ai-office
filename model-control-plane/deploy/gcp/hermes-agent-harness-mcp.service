@@ -1,0 +1,22 @@
+[Unit]
+Description=Agent Harness shared MCP gateway for OpenHands workers
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=dev
+Group=dev
+WorkingDirectory=/home/dev/projects/agent-harness
+Environment=DOCKER_MCP_IN_CONTAINER=1
+ExecStart=/usr/bin/docker mcp gateway run --profile common --transport streaming --host 127.0.0.1 --port 18330 --allow-unauthenticated
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target

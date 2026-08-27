@@ -71,6 +71,52 @@ test('OpenHands outer container permits Codex bubblewrap without granting Linux 
   assert.match(installer, /apparmor_parser -r/);
 });
 
+test('OpenHands coding workers launch through Agent Harness capability materialization', () => {
+  const policyRaw = fs.readFileSync(path.join(root, 'config/development-policy.yaml'), 'utf8');
+  const policy = parse(policyRaw) as any;
+  const composeRaw = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
+  const compose = parse(composeRaw) as any;
+  const tooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
+  const launcher = fs.readFileSync(path.join(root, 'openhands_tools/harness_agent_launcher.sh'), 'utf8');
+  const gatewayUnit = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-agent-harness-mcp.service'), 'utf8');
+
+  assert.deepEqual(policy.backends['opencode-acp'].command, [
+    '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
+    'opencode',
+    'acp',
+  ]);
+  assert.deepEqual(policy.backends['codex-acp'].command, [
+    '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
+    'codex-acp',
+  ]);
+  assert.deepEqual(policy.backends['claude-code-acp'].command, [
+    '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
+    'claude-acp',
+  ]);
+  assert.deepEqual(policy.backends['dsh-acp'].command, [
+    '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
+    'dsh-acp',
+  ]);
+  assert.ok(
+    compose.services['agent-server'].volumes.includes(
+      '/home/dev/projects/agent-harness:/opt/agent-harness:ro',
+    ),
+  );
+  assert.match(launcher, /prepare \"\$PWD\" --profile openhands --host \"\$host\" --execution/);
+  assert.match(launcher, /prepare_root opencode/);
+  assert.match(launcher, /prepare_root codex/);
+  assert.match(launcher, /prepare_root claude/);
+  assert.match(launcher, /prepare_root dsh/);
+  assert.match(launcher, /unset OPENCODE_CONFIG/);
+  assert.match(launcher, /AGENT_HARNESS_STATE/);
+  assert.match(tooling, /@colbymchenry\/codegraph@\$CODEGRAPH_VERSION/);
+  assert.match(tooling, /mcp-remote@\$MCP_REMOTE_VERSION/);
+  assert.match(tooling, /nx-mcp@\$NX_MCP_VERSION/);
+  assert.match(gatewayUnit, /--transport streaming/);
+  assert.match(gatewayUnit, /--host 127\.0\.0\.1 --port 18330/);
+  assert.match(gatewayUnit, /--allow-unauthenticated/);
+});
+
 test('OpenCode logical models correlate LiteLLM spend by execution ID', () => {
   const config = JSON.parse(
     fs.readFileSync(path.join(root, 'deploy/openhands-v3/opencode-v3.json'), 'utf8'),
@@ -88,12 +134,16 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   );
 
   assert.match(adapter, /lastMessage,\s*'-',\s*\],\s*input: reviewPrompt/);
-  assert.match(adapter, /command: CLAUDE_BIN,\s*args: \[\s*'-p',\s*'--bare'/);
+  assert.match(adapter, /command: CLAUDE_BIN,\s*args: \[\s*'-p',\s*'--mcp-config'/);
   assert.equal(adapter.match(/input: reviewPrompt/g)?.length, 2);
   assert.match(adapter, /stdio: \['pipe', 'pipe', 'pipe'\]/);
   assert.match(adapter, /child\.stdin\.end\(spec\.input\)/);
   assert.doesNotMatch(adapter, /lastMessage,\s*reviewPrompt/);
   assert.doesNotMatch(adapter, /'-p',\s*reviewPrompt/);
+  assert.match(adapter, /prepareHarness\(session, 'codex'\)/);
+  assert.match(adapter, /prepareHarness\(session, 'claude'\)/);
+  assert.match(adapter, /--profile',\s*HARNESS_PROFILE/);
+  assert.match(adapter, /--execution/);
   assert.match(adapter, /sandbox_mode = \"workspace-write\"/);
   assert.match(adapter, /'--sandbox',\s*'workspace-write'/);
   assert.match(adapter, /refs\/ai-office\/review-base..HEAD/);
@@ -123,7 +173,9 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.match(adapter, /HEADLESS_TRANSPORT === 'provider-native'/);
   assert.match(adapter, /HEADLESS_REVIEW_CODEX_AUTH_MISSING/);
   assert.match(adapter, /delete env\.CODEX_API_KEY/);
-  assert.match(adapter, /--ignore-user-config/);
+  assert.doesNotMatch(adapter, /--ignore-user-config/);
+  assert.match(adapter, /safeSymlink\(authFile, path.join\(codexHome, 'auth.json'\)\)/);
+  assert.match(adapter, /path.join\(codexHome, 'skills', '\.system'\)/);
 });
 
 

@@ -143,7 +143,8 @@ backends:
     kind: acp
     enabled: true
     command:
-      - /openhands-state/tooling/node_modules/.bin/opencode
+      - /opt/hermes-ai-office-tools/harness_agent_launcher.sh
+      - opencode
       - acp
     acp_server: custom
     managed_model_prefix: litellm-v3/
@@ -225,7 +226,8 @@ backends:
     kind: acp
     enabled: true
     command:
-      - /openhands-state/tooling/node_modules/.bin/codex-acp
+      - /opt/hermes-ai-office-tools/harness_agent_launcher.sh
+      - codex-acp
     acp_server: codex
     managed_model_prefix: ''
     managed_env:
@@ -243,7 +245,8 @@ backends:
     kind: acp
     enabled: true
     command:
-      - /openhands-state/tooling/node_modules/.bin/claude-agent-acp
+      - /opt/hermes-ai-office-tools/harness_agent_launcher.sh
+      - claude-acp
     acp_server: claude-code
     managed_model_prefix: ''
     managed_env:
@@ -261,9 +264,8 @@ backends:
     kind: acp
     enabled: true
     command:
-      - /openhands-state/tooling/node_modules/.bin/dsh-acp-server
-      - --patch
-      - /etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml
+      - /opt/hermes-ai-office-tools/harness_agent_launcher.sh
+      - dsh-acp
     acp_server: custom
     managed_model_prefix: ''
     managed_env:

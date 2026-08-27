@@ -12,6 +12,8 @@ const LITELLM_BASE_URL = (process.env.AI_OFFICE_LITELLM_BASE_URL ?? '').replace(
 const LITELLM_API_KEY = process.env.AI_OFFICE_LITELLM_API_KEY ?? '';
 const HEADLESS_TRANSPORT = process.env.AI_OFFICE_HEADLESS_TRANSPORT ?? 'litellm-managed';
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
+const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
+const HARNESS_PROFILE = process.env.AI_OFFICE_HARNESS_PROFILE ?? 'openhands';
 const CODEX_BIN =
   process.env.AI_OFFICE_CODEX_BIN ?? '/openhands-state/tooling/node_modules/.bin/codex';
 const CLAUDE_BIN =
@@ -74,6 +76,72 @@ function assertWorkspace(cwd) {
     throw new Error('HEADLESS_REVIEW_WORKSPACE_NOT_ALLOWED');
   }
   return resolved;
+}
+
+function prepareHarness(session, host) {
+  if (!fs.existsSync(HARNESS_CTL)) throw new Error('HEADLESS_REVIEW_HARNESS_MISSING');
+  const executionRoot = path.dirname(session.cwd);
+  const privateRoot = path.join(executionRoot, '.agent-harness');
+  const home = path.join(privateRoot, 'home');
+  const state = path.join(privateRoot, 'state');
+  const share = path.join(privateRoot, 'share');
+  for (const directory of [privateRoot, home, state, share]) {
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  }
+  const env = {
+    ...process.env,
+    HOME: home,
+    AGENT_HARNESS_STATE: state,
+    AGENT_HARNESS_SHARE: share,
+    PATH: [
+      '/openhands-state/tooling/node_modules/.bin',
+      '/openhands-state/dsh-cli/node_modules/.bin',
+      '/usr/local/bin',
+      '/usr/bin',
+      '/bin',
+    ].join(':'),
+  };
+  delete env.OPENCODE_CONFIG;
+  const prepared = spawnSync(
+    '/usr/local/bin/python3',
+    [
+      HARNESS_CTL,
+      '--state-root',
+      state,
+      'prepare',
+      session.cwd,
+      '--profile',
+      HARNESS_PROFILE,
+      '--host',
+      host,
+      '--execution',
+      '--json',
+    ],
+    {
+      cwd: session.cwd,
+      env,
+      encoding: 'utf8',
+      timeout: 60_000,
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  );
+  if (prepared.error) throw prepared.error;
+  if (prepared.status !== 0) {
+    throw new Error(`HEADLESS_REVIEW_HARNESS_BLOCKED:${redact(prepared.stderr || prepared.stdout)}`);
+  }
+  const payload = JSON.parse(prepared.stdout);
+  if (payload?.admission?.status !== 'READY') {
+    throw new Error('HEADLESS_REVIEW_HARNESS_NOT_READY');
+  }
+  const root = String(payload?.environment?.root ?? '');
+  if (!root || !path.isAbsolute(root)) throw new Error('HEADLESS_REVIEW_HARNESS_ROOT_MISSING');
+  return { root, env };
+}
+
+function safeSymlink(source, destination) {
+  if (!fs.existsSync(source) || fs.existsSync(destination)) return;
+  fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+  fs.symlinkSync(source, destination);
 }
 
 function git(cwd, args, options = {}) {
@@ -315,19 +383,19 @@ function codexIndependentActivity(stdout) {
 function codexCommand(session, prompt, evidence) {
   const sessionDir = safeSessionDirectory(session.id);
   const native = HEADLESS_TRANSPORT === 'provider-native';
-  const codexHome = native ? path.resolve(CODEX_AUTH_HOME) : path.join(sessionDir, 'codex-home');
+  const harness = prepareHarness(session, 'codex');
+  const codexHome = path.join(harness.root, 'codex');
+  fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
   if (native) {
     if (!CODEX_AUTH_HOME) throw new Error('HEADLESS_REVIEW_CODEX_AUTH_HOME_MISSING');
-    const authFile = path.join(codexHome, 'auth.json');
+    const authFile = path.join(CODEX_AUTH_HOME, 'auth.json');
     if (!fs.existsSync(authFile)) throw new Error('HEADLESS_REVIEW_CODEX_AUTH_MISSING');
+    safeSymlink(authFile, path.join(codexHome, 'auth.json'));
+    safeSymlink(path.join(CODEX_AUTH_HOME, 'skills', '.system'), path.join(codexHome, 'skills', '.system'));
   } else {
-    fs.mkdirSync(codexHome, { recursive: true, mode: 0o700 });
-  }
-  const schemaPath = path.join(sessionDir, 'review-schema.json');
-  fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
-  if (!native) {
     const baseUrl = LITELLM_BASE_URL.endsWith('/v1') ? LITELLM_BASE_URL : `${LITELLM_BASE_URL}/v1`;
     const configPath = path.join(codexHome, 'config.toml');
+    const harnessConfig = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf8') : '';
     fs.writeFileSync(
       configPath,
       [
@@ -347,14 +415,18 @@ function codexCommand(session, prompt, evidence) {
         '[features]',
         'multi_agent = false',
         '',
+        harnessConfig.trim(),
+        '',
       ].join('\n'),
       { mode: 0o600 },
     );
   }
+  const schemaPath = path.join(sessionDir, 'review-schema.json');
+  fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
   const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   const env = {
-    ...process.env,
+    ...harness.env,
     CODEX_HOME: codexHome,
   };
   if (native) {
@@ -369,7 +441,6 @@ function codexCommand(session, prompt, evidence) {
     args: [
       'exec',
       '--ephemeral',
-      ...(native ? ['--ignore-user-config'] : []),
       '--ignore-rules',
       '--sandbox',
       'workspace-write',
@@ -390,12 +461,18 @@ function codexCommand(session, prompt, evidence) {
 }
 
 function claudeCommand(session, prompt, evidence) {
+  const harness = prepareHarness(session, 'claude');
+  const claudeRoot = path.join(harness.root, 'claude');
   const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   return {
     command: CLAUDE_BIN,
     args: [
       '-p',
-      '--bare',
+      '--mcp-config',
+      path.join(claudeRoot, 'mcp.json'),
+      '--strict-mcp-config',
+      '--add-dir',
+      path.join(claudeRoot, 'instructions'),
       '--model',
       session.model,
       '--effort',
@@ -411,7 +488,8 @@ function claudeCommand(session, prompt, evidence) {
     ],
     input: reviewPrompt,
     env: {
-      ...process.env,
+      ...harness.env,
+      HOME: path.join(claudeRoot, 'home'),
       ANTHROPIC_API_KEY: LITELLM_API_KEY,
       ANTHROPIC_BASE_URL: LITELLM_BASE_URL,
       ANTHROPIC_MODEL: session.model,

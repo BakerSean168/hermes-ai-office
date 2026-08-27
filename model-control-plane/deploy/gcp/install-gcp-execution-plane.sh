@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 unit_src="$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service"
 unit_dst="/etc/systemd/system/hermes-model-control-plane.service"
+harness_mcp_unit_src="$repo_root/model-control-plane/deploy/gcp/hermes-agent-harness-mcp.service"
+harness_mcp_unit_dst="/etc/systemd/system/hermes-agent-harness-mcp.service"
 secrets_dir="/srv/hermes-personal/secrets"
 data_dir="/srv/hermes-personal/data/model-control-plane"
 workspace_root="/opt/data/hermes-ai-office-v3"
@@ -34,8 +36,10 @@ install -m 0644 "$apparmor_src" "$apparmor_dst"
 apparmor_parser -r "$apparmor_dst"
 
 install -m 0644 "$unit_src" "$unit_dst"
+install -m 0644 "$harness_mcp_unit_src" "$harness_mcp_unit_dst"
 systemctl daemon-reload
-systemctl enable hermes-model-control-plane.service
+systemctl enable hermes-agent-harness-mcp.service hermes-model-control-plane.service
+systemctl restart hermes-agent-harness-mcp.service
 systemctl restart hermes-model-control-plane.service
 
 for _ in $(seq 1 30); do

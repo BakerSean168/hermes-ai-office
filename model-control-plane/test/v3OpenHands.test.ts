@@ -230,6 +230,11 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     assert.equal(acpCreated.status, 'RUNNING');
     const acpBody = createBody as any;
     assert.equal(acpBody.agent.kind, 'ACPAgent');
+    assert.deepEqual(acpBody.agent.acp_command, [
+      '/opt/hermes-ai-office-tools/harness_agent_launcher.sh',
+      'opencode',
+      'acp',
+    ]);
     assert.equal(acpBody.agent.acp_model, 'litellm-v3/implementation-efficient');
     assert.deepEqual(acpBody.secrets.HERMES_V3_EXECUTION_ID, {
       kind: 'StaticSecret',

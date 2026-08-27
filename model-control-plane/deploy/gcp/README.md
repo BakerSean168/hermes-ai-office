@@ -16,6 +16,14 @@ Hermes on Oracle2
 
 Do not run a second mutable AI Office execution plane on Oracle2. Workspace provisioning and OpenHands must remain colocated.
 
+## Agent Harness capability boundary
+
+OpenCode, Codex, Claude Code, and DSH coding/review harnesses must not be launched with a bare user configuration. The execution plane mounts `/home/dev/projects/agent-harness` read-only at `/opt/agent-harness`, resolves the disposable Git clone back to its canonical project manifest, performs required-capability admission, and materializes a per-execution environment under `/workspace/executions/<id>/.agent-harness/`. AI Office continues to own backend/model/provider routing; Agent Harness owns the effective Skills, MCP, and project-instruction projection.
+
+For OpenHands workers the `openhands` Harness profile keeps project-scoped CodeGraph/Nx MCP ownership while bridging the shared Context7 Docker MCP gateway over host-loopback streaming HTTP. `hermes-agent-harness-mcp.service` owns that loopback gateway on `127.0.0.1:18330`; the worker container uses host networking but receives no Docker socket. Missing required runtimes, MCP commands, Skills, or instruction sources fail admission before the coding harness starts.
+
+The provider-native Business Codex reviewer keeps OAuth only in `/openhands-state/codex-business`. Harness materialization receives a symlink to that persisted `auth.json` plus the same per-project Skills/MCP/instructions; credentials are never copied into the repository or execution capability manifest. External/untrusted-change policy continues to reject this backend.
+
 ## Backend readiness
 
 A backend can be present in `config/development-policy.yaml` without being production-enabled. `MODEL_CP_V3_ENABLED_BACKENDS` is the runtime readiness gate. Enable a coding harness only after an end-to-end smoke verifies startup, model routing, repository operations, terminal completion, and review semantics where applicable.
