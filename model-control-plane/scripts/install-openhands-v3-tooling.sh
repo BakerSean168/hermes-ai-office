@@ -10,7 +10,7 @@ CLAUDE_ACP_VERSION="${CLAUDE_ACP_VERSION:-0.70.0}"
 ACP_SDK_VERSION="${ACP_SDK_VERSION:-1.4.0}"
 CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-0.148.0}"
 CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-2.1.237}"
-DSH_VERSION="${DSH_VERSION:-0.1.0-rc.7}"
+DSH_VERSION="${DSH_VERSION:-0.1.1-rc.2}"
 DSH_ACP_VERSION="${DSH_ACP_VERSION:-0.10.0}"
 ZCODE_ACP_VERSION="${ZCODE_ACP_VERSION:-0.11.5}"
 CODEGRAPH_VERSION="${CODEGRAPH_VERSION:-1.5.0}"
@@ -34,9 +34,13 @@ docker exec "$CONTAINER" sh -lc \
     'nx-mcp@$NX_MCP_VERSION' \
     >/tmp/ai-office-tooling-install.log 2>&1"
 
-docker exec "$CONTAINER" sh -lc \
-  "mkdir -p '$DSH_ROOT' && npm install --prefix '$DSH_ROOT' --no-audit --no-fund \
-    '@deepseek-ai/dsh@$DSH_VERSION' >/tmp/dsh-cli-install.log 2>&1"
+current_dsh="$(docker exec "$CONTAINER" sh -lc \
+  "'$DSH_ROOT/node_modules/.bin/dsh' --version 2>/dev/null | head -1" 2>/dev/null || true)"
+if [[ "$current_dsh" != "$DSH_VERSION" ]]; then
+  docker exec "$CONTAINER" sh -lc \
+    "mkdir -p '$DSH_ROOT' && npm install --prefix '$DSH_ROOT' --no-audit --no-fund \
+      '@deepseek-ai/dsh@$DSH_VERSION' >/tmp/dsh-cli-install.log 2>&1"
+fi
 
 docker exec "$CONTAINER" test -x "$DSH_ROOT/node_modules/.bin/dsh"
 printf '%-20s' "dsh"
