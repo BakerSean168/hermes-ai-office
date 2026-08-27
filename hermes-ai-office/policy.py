@@ -18,8 +18,38 @@ _PROVIDER_RE = re.compile(r"provider|supplier|channel|model|供应商|提供商|
 _PROVIDER_STATUS_RE = re.compile(r"status|health|available|list|current|状态|健康|可用|列表|当前|哪些", re.IGNORECASE)
 _DEVELOPMENT_RE = re.compile(
     r"pixel[- ]?agent|ai[ _-]?office|ai_office_delegate|"
-    r"implement|review|plan|debug|test|fix|refactor|code|coding|"
-    r"实施|实现|审查|评审|规划|计划|调试|测试|修复|重构|编码|代码",
+    r"implement|develop|debug|fix|refactor|code|coding|code review|"
+    r"实现|开发|调试|修复|重构|编码|代码|代码审查",
+    re.IGNORECASE,
+)
+_CODING_ACTION_RE = re.compile(
+    r"implement|develop|debug|fix|refactor|review|edit|write|change|add|remove|"
+    r"实现|开发|调试|修复|重构|审查|评审|编辑|修改|编写|添加|删除|实施",
+    re.IGNORECASE,
+)
+_CODING_OBJECT_RE = re.compile(
+    r"source(?: code)?|code|feature|bug|repository|repo|branch|worktree|pull request|"
+    r"function|class|module|component|endpoint|schema|migration|unit test|test case|CI|"
+    r"源码|代码|功能|bug|仓库|分支|工作树|函数|类|模块|组件|端点|契约|迁移|"
+    r"单元测试|测试用例|CI",
+    re.IGNORECASE,
+)
+_STRONG_CODING_RE = re.compile(
+    r"write\s+code|code\s+review|code\s+change|fix\s+(?:a\s+)?bug|"
+    r"implement\s+(?:a\s+)?feature|refactor|git\s+(?:commit|push|merge)|"
+    r"写代码|改代码|代码审查|代码改动|重构|修复.{0,12}bug|实现.{0,12}功能|"
+    r"提交.{0,12}代码|推送.{0,12}分支|合并.{0,12}分支",
+    re.IGNORECASE,
+)
+_CODING_CONTINUATION_RE = re.compile(
+    r"(?:继续|接着|开始|推进|完成|收尾|剩余|下一步).{0,20}(?:实施|实现|修复|开发|重构|审查|评审)|"
+    r"(?:continue|resume|finish|proceed).{0,30}(?:implement|develop|fix|refactor|review)",
+    re.IGNORECASE,
+)
+_NON_CODING_OPS_RE = re.compile(
+    r"ssh|private key|secret|credential|server|vps|service|systemd|firewall|dns|domain|"
+    r"tls|certificate|deploy|deployment|production|staging|backup|log|process|port|"
+    r"私钥|密钥|凭证|服务器|运维|部署|服务|防火墙|域名|证书|备份|日志|进程|端口",
     re.IGNORECASE,
 )
 _ENFORCED_PROFILES = {
@@ -54,9 +84,9 @@ _PACKAGE_VERIFY_SCRIPT_RE = re.compile(
     re.IGNORECASE,
 )
 _BLOCK_MESSAGE = (
-    "Direct implementation is disabled for this project profile. "
-    "Use ai_office_delegate (or an explicitly operator-authored ai_office_create_plan) so Pixel Agent / AI Office owns writers, review, integration, CI repair, and delivery. "
-    "Hermes may inspect state and run bounded read-only verification, but must not edit source, launch coding agents directly, or mutate Git/PR state."
+    "Direct software-development implementation is disabled for this coding turn. "
+    "Use ai_office_delegate (or an explicitly operator-authored ai_office_create_plan) so Pixel Agent / AI Office owns source writers, review, integration, CI repair, and code delivery. "
+    "This restriction applies to coding work only; ordinary SSH, secrets, deployment, service administration, and non-code file operations are not forced through Pixel Agent."
 )
 
 
@@ -71,6 +101,31 @@ def provider_topic(text: str) -> bool:
 
 def development_topic(text: str) -> bool:
     return bool(_DEVELOPMENT_RE.search(str(text or "")))
+
+
+def coding_task_topic(text: str, context_text: str = "") -> bool:
+    """Classify software-development intent without treating generic operations as coding.
+
+    The current turn wins. Short continuation prompts such as ``继续实施`` inherit coding
+    intent only when the recent conversation already contains a concrete coding object.
+    SSH setup, secret storage, deployment operations, service administration, and generic
+    file management therefore stay outside the Pixel Agent mandatory boundary.
+    """
+    value = str(text or "").strip()
+    if not value:
+        return False
+    if _STRONG_CODING_RE.search(value):
+        return True
+    if _CODING_ACTION_RE.search(value) and _CODING_OBJECT_RE.search(value):
+        return True
+    if _NON_CODING_OPS_RE.search(value):
+        return False
+    context = str(context_text or "")
+    if _CODING_CONTINUATION_RE.search(value) and _CODING_OBJECT_RE.search(context):
+        return True
+    if len(value) <= 80 and _CODING_ACTION_RE.search(value) and _CODING_OBJECT_RE.search(context):
+        return True
+    return False
 
 
 def is_safe_terminal_command(command: str) -> bool:
@@ -175,8 +230,14 @@ def is_safe_terminal_command(command: str) -> bool:
     return False
 
 
-def pre_tool_call(profile_name: str, tool_name: Any = "", args: Any = None) -> dict[str, str] | None:
-    if not enforces_profile(profile_name):
+def pre_tool_call(
+    profile_name: str,
+    tool_name: Any = "",
+    args: Any = None,
+    *,
+    coding_turn: bool = False,
+) -> dict[str, str] | None:
+    if not enforces_profile(profile_name) or not coding_turn:
         return None
     name = str(tool_name or "").strip().lower()
     if not name or name.startswith("ai_office_"):

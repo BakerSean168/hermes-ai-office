@@ -391,28 +391,68 @@ class PluginTest(unittest.TestCase):
         text = result["context"]
         self.assertIn("ai_office_delegate", text)
         self.assertIn("ai_office_create_plan", text)
-        self.assertIn("mandatory development execution authority", text)
+        self.assertIn("mandatory only for software-development/coding work", text)
         self.assertIn("ai_office_get_plan", text)
         self.assertIn("strict first-line PASS/FAIL", text)
         self.assertIn("LiteLLM", text)
         self.assertNotIn("Employee", text)
         self.assertNotIn("resolve_execution", text)
 
-    def test_pre_tool_call_blocks_direct_writers_for_enforced_project_profile(self) -> None:
+    def test_pre_tool_call_blocks_direct_writers_for_coding_turn_in_enforced_profile(self) -> None:
         plugin._CTX = FakeContext("memoflow")
+        plugin._on_pre_llm_call(
+            user_message="修复 Task 模块的代码并提交",
+            session_id="coding-session",
+            turn_id="coding-turn",
+        )
         for tool_name, args in (
             ("write_file", {"path": "/home/dev/projects/memoflow/a.ts", "content": "x"}),
             ("terminal", {"command": "git add packages/task/src/index.ts"}),
             ("terminal", {"command": "codex exec --full-auto fix it"}),
             ("delegate", {"task": "implement the fix"}),
         ):
-            result = plugin._on_pre_tool_call(tool_name=tool_name, args=args)
+            result = plugin._on_pre_tool_call(
+                tool_name=tool_name,
+                args=args,
+                session_id="coding-session",
+                turn_id="coding-turn",
+            )
             assert result is not None
             self.assertEqual(result["action"], "block")
             self.assertIn("ai_office_delegate", result["message"])
 
-    def test_pre_tool_call_allows_read_only_and_bounded_verification(self) -> None:
+    def test_pre_tool_call_allows_non_coding_operations_in_enforced_profile(self) -> None:
+        plugin._CTX = FakeContext("bodysense")
+        self.assertIsNone(
+            plugin._on_pre_llm_call(
+                user_message="在 gcp-dev 保存阿里云 SSH 私钥并配置 ali-bodysense 连接信息",
+                session_id="ops-session",
+                turn_id="ops-turn",
+            )
+        )
+        for tool_name, args in (
+            ("write_file", {"path": "/home/dev/projects/bodysense/.secrets/body.pem", "content": "secret"}),
+            ("terminal", {"command": "mkdir -p /home/dev/projects/bodysense/.secrets"}),
+            ("terminal", {"command": "chmod 600 /home/dev/projects/bodysense/.secrets/body.pem"}),
+            ("terminal", {"command": "ssh -F /home/dev/projects/bodysense/.secrets/ssh_config ali-bodysense true"}),
+        ):
+            self.assertIsNone(
+                plugin._on_pre_tool_call(
+                    tool_name=tool_name,
+                    args=args,
+                    session_id="ops-session",
+                    turn_id="ops-turn",
+                )
+            )
+
+    def test_pre_tool_call_allows_read_only_and_bounded_verification_during_coding_turn(self) -> None:
         plugin._CTX = FakeContext("memoflow")
+        plugin._on_pre_llm_call(
+            user_message="继续修复代码",
+            conversation_history=[{"role": "user", "content": "Task repository code refactor"}],
+            session_id="verify-session",
+            turn_id="verify-turn",
+        )
         for command in (
             "git status -sb",
             "git diff --check",
@@ -421,14 +461,30 @@ class PluginTest(unittest.TestCase):
             "pnpm exec prisma validate",
             "docker compose ps",
         ):
-            self.assertIsNone(plugin._on_pre_tool_call(tool_name="terminal", args={"command": command}))
+            self.assertIsNone(
+                plugin._on_pre_tool_call(
+                    tool_name="terminal",
+                    args={"command": command},
+                    session_id="verify-session",
+                    turn_id="verify-turn",
+                )
+            )
         self.assertIsNone(
             plugin._on_pre_tool_call(
                 tool_name="read_text_file",
                 args={"path": "/home/dev/projects/memoflow/AGENTS.md"},
+                session_id="verify-session",
+                turn_id="verify-turn",
             )
         )
-        self.assertIsNone(plugin._on_pre_tool_call(tool_name="ai_office_delegate", args={}))
+        self.assertIsNone(
+            plugin._on_pre_tool_call(
+                tool_name="ai_office_delegate",
+                args={},
+                session_id="verify-session",
+                turn_id="verify-turn",
+            )
+        )
 
     def test_pre_tool_call_does_not_enforce_default_profile(self) -> None:
         plugin._CTX = FakeContext("default")

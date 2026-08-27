@@ -21,7 +21,7 @@ The Hermes plugin is intentionally thin: it has no parallel provider database an
 - `ai_office_list_active`
 - `ai_office_list_providers`
 
-The plugin uses two enforcement hooks. `pre_llm_call` tells the Hermes Brain that `ai_office_delegate` is the mandatory execution boundary for enforced project profiles, while `pre_tool_call` blocks direct source/Git mutation and direct coding-agent launches outside AI Office. Read-only inspection and bounded verification remain available. `ai_office_create_plan` remains available only when an operator intentionally supplies the full graph.
+The plugin uses two enforcement hooks. `pre_llm_call` classifies the current turn and marks **software-development/coding work only** as requiring `ai_office_delegate` in enforced project profiles. `pre_tool_call` then blocks direct source/Git mutation and direct coding-agent launches only for that coding turn. Ordinary SSH setup, secret/credential storage, deployment and service administration, operational file changes, backups, and other non-coding work remain directly executable by Hermes. Read-only inspection and bounded verification remain available during coding turns. `ai_office_create_plan` remains available only when an operator intentionally supplies the full graph.
 
 ## Development protocol
 

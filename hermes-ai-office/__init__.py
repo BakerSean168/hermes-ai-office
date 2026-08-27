@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from pathlib import Path
 import re
 import shlex
+import threading
 import time
 from typing import Any
 import urllib.parse
@@ -24,6 +25,10 @@ _CONTROL_PLANE_BASE = os.environ.get(
     "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
 ).rstrip("/")
 _CTX: Any = None
+_CODING_INTENT_LOCK = threading.Lock()
+_CODING_INTENT_BY_TURN: dict[tuple[str, str], bool] = {}
+_CODING_INTENT_BY_SESSION: dict[str, bool] = {}
+_MAX_CODING_INTENT_ENTRIES = 512
 
 from .protocol import (
     _CANCEL_EXECUTION_SCHEMA,
@@ -44,6 +49,7 @@ from .protocol import (
 )
 
 from .policy import (
+    coding_task_topic as _coding_task_topic,
     development_topic as _development_topic,
     enforces_profile as _enforces_profile,
     is_safe_terminal_command as _is_safe_terminal_command,
@@ -56,8 +62,43 @@ def _profile_enforces_ai_office() -> bool:
     return _enforces_profile(_active_profile_name())
 
 
-def _on_pre_tool_call(tool_name: Any = "", args: Any = None, **_kwargs: Any) -> dict[str, str] | None:
-    return _policy_pre_tool_call(_active_profile_name(), tool_name, args)
+def _intent_ids(kwargs: Mapping[str, Any]) -> tuple[str, str]:
+    session_id = str(kwargs.get("session_id") or "").strip()[:200]
+    turn_id = str(kwargs.get("turn_id") or kwargs.get("task_id") or "").strip()[:200]
+    return session_id, turn_id
+
+
+def _remember_coding_intent(kwargs: Mapping[str, Any], coding: bool) -> None:
+    session_id, turn_id = _intent_ids(kwargs)
+    if not session_id:
+        return
+    with _CODING_INTENT_LOCK:
+        _CODING_INTENT_BY_SESSION[session_id] = bool(coding)
+        if turn_id:
+            _CODING_INTENT_BY_TURN[(session_id, turn_id)] = bool(coding)
+        while len(_CODING_INTENT_BY_TURN) > _MAX_CODING_INTENT_ENTRIES:
+            _CODING_INTENT_BY_TURN.pop(next(iter(_CODING_INTENT_BY_TURN)))
+        while len(_CODING_INTENT_BY_SESSION) > _MAX_CODING_INTENT_ENTRIES:
+            _CODING_INTENT_BY_SESSION.pop(next(iter(_CODING_INTENT_BY_SESSION)))
+
+
+def _coding_intent_for_tool_call(kwargs: Mapping[str, Any]) -> bool:
+    session_id, turn_id = _intent_ids(kwargs)
+    if not session_id:
+        return False
+    with _CODING_INTENT_LOCK:
+        if turn_id and (session_id, turn_id) in _CODING_INTENT_BY_TURN:
+            return _CODING_INTENT_BY_TURN[(session_id, turn_id)]
+        return _CODING_INTENT_BY_SESSION.get(session_id, False)
+
+
+def _on_pre_tool_call(tool_name: Any = "", args: Any = None, **kwargs: Any) -> dict[str, str] | None:
+    return _policy_pre_tool_call(
+        _active_profile_name(),
+        tool_name,
+        args,
+        coding_turn=_coding_intent_for_tool_call(kwargs),
+    )
 
 
 def _control_plane_request(
@@ -684,19 +725,39 @@ def _list_development_plans_tool(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"ok": False, "error": type(exc).__name__, "message": str(exc)[:500]}, ensure_ascii=False)
 
 
-def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] | None:
+def _recent_conversation_text(value: Any, *, limit: int = 12) -> str:
+    if not isinstance(value, list):
+        return ""
+    chunks: list[str] = []
+    for item in value[-limit:]:
+        if not isinstance(item, Mapping):
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            chunks.append(content[:2000])
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, Mapping) and isinstance(part.get("text"), str):
+                    chunks.append(str(part["text"])[:2000])
+    return "\n".join(chunks)[-12000:]
+
+
+def _on_pre_llm_call(user_message: Any = "", **kwargs: Any) -> dict[str, str] | None:
     text = str(user_message or "").strip()
     if not text:
         return None
+    recent_context = _recent_conversation_text(kwargs.get("conversation_history"))
+    coding_turn = _coding_task_topic(text, recent_context)
+    _remember_coding_intent(kwargs, coding_turn)
     provider_topic = _provider_topic(text)
     development_topic = _development_topic(text)
-    if not provider_topic and not development_topic:
+    if not provider_topic and not development_topic and not coding_turn:
         return None
 
     sections: list[str] = []
-    if development_topic:
+    if development_topic or coding_turn:
         sections.append(
-            "Pixel Agent is the Hermes-facing name for the hermes-ai-office / AI Office V3 execution path, and it is the mandatory development execution authority for enforced project profiles. For complete project work, use ai_office_delegate: provide only the objective, repository, and optional active-plan/delivery hint. OpenHands then inspects the repository and creates the dependency-aware durable graph; the Control Plane automatically runs parallel-safe IMPLEMENT workers, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic integration, premium aggregate BATCH_VERIFY for multi-item batches, bounded integration repair after aggregate FAIL, and dependent batches without Hermes polling. "
+            "Pixel Agent is the Hermes-facing name for the hermes-ai-office / AI Office V3 execution path. It is mandatory only for software-development/coding work in enforced project profiles; ordinary SSH setup, secret storage, deployment/service administration, operational file changes, and other non-coding work may be executed directly by Hermes. For coding project work, use ai_office_delegate: provide only the objective, repository, and optional active-plan/delivery hint. OpenHands then inspects the repository and creates the dependency-aware durable graph; the Control Plane automatically runs parallel-safe IMPLEMENT workers, independent VERIFY_REVIEW, IMPLEMENT_FIX after FAIL, deterministic integration, premium aggregate BATCH_VERIFY for multi-item batches, bounded integration repair after aggregate FAIL, and dependent batches without Hermes polling. "
             "Use ai_office_create_plan only when an operator already has an explicit graph that must be preserved exactly. Use ai_office_run_phase only for standalone investigation or an operator-directed single phase. VERIFY_REVIEW keeps the strict first-line PASS/FAIL contract. Preserve planId across turns and recover with ai_office_get_plan or ai_office_list_plans after Telegram, Hermes, or gateway reconnects. "
             "Backend and logical model are policy decisions; physical provider selection, fallback, health, and spend are exclusively LiteLLM decisions."
         )
