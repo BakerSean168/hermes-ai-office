@@ -32,7 +32,6 @@ _TERMINAL = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
 _CACHE_LOCK = threading.Lock()
 _CACHE: tuple[float, int, Dict[str, Any]] | None = None
 _CACHE_TTL_SECONDS = 5.0
-_HISTORY_HYDRATED = False
 _HISTORY_PAGE_SIZE = 500
 
 
@@ -687,32 +686,24 @@ def _plan_detail(raw: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 def _fetch_all_executions(max_items: int) -> list[Mapping[str, Any]]:
-    global _HISTORY_HYDRATED
-    hydrate = not _HISTORY_HYDRATED
-    exhausted = False
+    # Dashboard reads must remain observational. Execution-host hydration can block on
+    # remote workers and belongs to explicit control-plane reconciliation, not UI loads.
     offset = 0
     items: list[Mapping[str, Any]] = []
     while max_items == 0 or len(items) < max_items:
         page_limit = _HISTORY_PAGE_SIZE
         if max_items:
             page_limit = min(page_limit, max_items - len(items))
-        query = {
-            "limit": page_limit,
-            "offset": offset,
-            "hydrate": "1" if hydrate else "0",
-        }
+        query = {"limit": page_limit, "offset": offset, "hydrate": "0"}
         payload = _fetch_json(
             "/api/v3/development/executions?" + urllib.parse.urlencode(query),
-            timeout=45.0,
+            timeout=12.0,
         )
         page = [item for item in payload.get("items", []) if isinstance(item, Mapping)]
         items.extend(page)
         if len(page) < page_limit:
-            exhausted = True
             break
         offset += len(page)
-    if hydrate and exhausted:
-        _HISTORY_HYDRATED = True
     return items
 
 

@@ -125,11 +125,9 @@ class DashboardTest(unittest.TestCase):
         self.assertIsNone(providers["paid"]["successRate"])
         self.assertEqual(result["logicalModels"][0]["totalTokens"], 330)
 
-    def test_fetch_all_executions_pages_until_history_is_exhausted(self) -> None:
+    def test_fetch_all_executions_pages_without_hydrating_execution_hosts(self) -> None:
         original_page_size = api._HISTORY_PAGE_SIZE
-        original_hydrated = api._HISTORY_HYDRATED
         api._HISTORY_PAGE_SIZE = 2
-        api._HISTORY_HYDRATED = False
         paths: list[str] = []
 
         def fetch(path: str, **_kwargs: object):
@@ -142,26 +140,17 @@ class DashboardTest(unittest.TestCase):
 
         try:
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
-                limited_first = api._fetch_all_executions(2)
-                self.assertEqual([item["executionId"] for item in limited_first], ["e3", "e2"])
-                self.assertTrue(all("hydrate=1" in path for path in paths))
-                self.assertFalse(api._HISTORY_HYDRATED)
+                limited = api._fetch_all_executions(2)
+                self.assertEqual([item["executionId"] for item in limited], ["e3", "e2"])
+                self.assertTrue(all("hydrate=0" in path for path in paths))
 
                 paths.clear()
                 items = api._fetch_all_executions(0)
                 self.assertEqual([item["executionId"] for item in items], ["e3", "e2", "e1"])
-                self.assertTrue(all("hydrate=1" in path for path in paths))
-                self.assertTrue(api._HISTORY_HYDRATED)
-
-                paths.clear()
-                limited_after_full_hydration = api._fetch_all_executions(2)
-                self.assertEqual(
-                    [item["executionId"] for item in limited_after_full_hydration], ["e3", "e2"]
-                )
                 self.assertTrue(all("hydrate=0" in path for path in paths))
+                self.assertFalse(any("hydrate=1" in path for path in paths))
         finally:
             api._HISTORY_PAGE_SIZE = original_page_size
-            api._HISTORY_HYDRATED = original_hydrated
 
     def test_summary_counts_execution_usage_once(self) -> None:
         result = api._summary(
