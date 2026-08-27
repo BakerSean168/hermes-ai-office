@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from pathlib import Path
 import re
 import unittest
 from unittest import mock
 
 PLUGIN_PATH = Path(__file__).with_name("__init__.py")
-spec = importlib.util.spec_from_file_location("hermes_ai_office_plugin", PLUGIN_PATH)
+PLUGIN_DIR = PLUGIN_PATH.parent
+MODULE_NAME = "hermes_ai_office_plugin"
+spec = importlib.util.spec_from_file_location(
+    MODULE_NAME,
+    PLUGIN_PATH,
+    submodule_search_locations=[str(PLUGIN_DIR)],
+)
 assert spec and spec.loader
 plugin = importlib.util.module_from_spec(spec)
+plugin.__package__ = MODULE_NAME
+plugin.__path__ = [str(PLUGIN_DIR)]
+sys.modules[MODULE_NAME] = plugin
 spec.loader.exec_module(plugin)
 
 
@@ -30,6 +40,13 @@ class FakeContext:
 class PluginTest(unittest.TestCase):
     def setUp(self) -> None:
         plugin._CTX = FakeContext("test-profile")
+
+    def test_plugin_facade_delegates_protocol_and_execution_policy_to_owned_modules(self) -> None:
+        source = PLUGIN_PATH.read_text(encoding="utf-8")
+        self.assertIn("from .protocol import", source)
+        self.assertIn("from .policy import", source)
+        self.assertNotIn("_PACKAGE_VERIFY_SCRIPT_RE =", source)
+        self.assertNotIn('"name": "ai_office_run_phase"', source)
 
     def test_register_exposes_only_v3_tools_and_guidance_hook(self) -> None:
         ctx = FakeContext()

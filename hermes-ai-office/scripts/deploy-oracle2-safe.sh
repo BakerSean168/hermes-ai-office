@@ -190,7 +190,7 @@ def non_runtime(path: str) -> bool:
 runtime = any(not non_runtime(p) for p in changed) or bool(legacy_backups)
 dashboard = any(p.startswith("dashboard/") for p in changed)
 dashboard_backend = any(
-    p == "dashboard/plugin_api.py" or p == "dashboard/manifest.json" or p.startswith("contracts/")
+    p == "dashboard/plugin_api.py" or p.startswith("dashboard/plugin_api/") or p == "dashboard/manifest.json" or p.startswith("contracts/")
     for p in changed
 )
 if runtime:

@@ -42,16 +42,30 @@ except ModuleNotFoundError:
     sys.modules["fastapi"] = fastapi_stub
 
 ROOT = Path(__file__).resolve().parent
-API_PATH = ROOT / "dashboard" / "plugin_api.py"
+API_PATH = ROOT / "dashboard" / "plugin_api" / "__init__.py"
 CONTRACT_PATH = ROOT / "contracts" / "dashboard.schema.json"
 CONTRACT = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 spec = importlib.util.spec_from_file_location("hermes_ai_office_dashboard", API_PATH)
 assert spec and spec.loader
 api = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = api
 spec.loader.exec_module(api)
 
 
 class DashboardTest(unittest.TestCase):
+    def test_dashboard_backend_is_a_real_package_with_separate_projection_owners(self) -> None:
+        manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["api"], "plugin_api/__init__.py")
+        package = ROOT / "dashboard" / "plugin_api"
+        self.assertEqual(
+            {path.name for path in package.glob("*.py")},
+            {"__init__.py", "assembly.py", "common.py", "config.py", "detail.py", "executions.py", "plans.py", "transport.py"},
+        )
+        facade = (package / "__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("def _plan_audit(", facade)
+        self.assertNotIn("def _execution(", facade)
+        self.assertNotIn("ThreadPoolExecutor", facade)
+
     def test_dashboard_exposes_read_projections_and_one_explicit_plan_action(self) -> None:
         paths = {route.path for route in api.router.routes}
         self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}", "/plans/{plan_id}/sync-and-continue"})
@@ -161,8 +175,8 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(result["logicalModels"][0]["totalTokens"], 330)
 
     def test_fetch_all_executions_pages_without_hydrating_execution_hosts(self) -> None:
-        original_page_size = api._HISTORY_PAGE_SIZE
-        api._HISTORY_PAGE_SIZE = 2
+        original_page_size = api._config.HISTORY_PAGE_SIZE
+        api._config.HISTORY_PAGE_SIZE = 2
         paths: list[str] = []
 
         def fetch(path: str, **_kwargs: object):
@@ -185,7 +199,7 @@ class DashboardTest(unittest.TestCase):
                 self.assertTrue(all("hydrate=0" in path for path in paths))
                 self.assertFalse(any("hydrate=1" in path for path in paths))
         finally:
-            api._HISTORY_PAGE_SIZE = original_page_size
+            api._config.HISTORY_PAGE_SIZE = original_page_size
 
     def test_dashboard_cold_refresh_reads_independent_sources_concurrently(self) -> None:
         barrier = threading.Barrier(5, timeout=2)
@@ -208,8 +222,8 @@ class DashboardTest(unittest.TestCase):
                 return {"items": []}
             raise AssertionError(path)
 
-        old_cache = api._CACHE
-        api._CACHE = None
+        old_cache = api._assembly._CACHE
+        api._assembly._CACHE = None
         try:
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
                 value = api._build_dashboard(1)
@@ -217,7 +231,7 @@ class DashboardTest(unittest.TestCase):
             self.assertEqual(len(paths), 5)
             self.assertEqual(barrier.n_waiting, 0)
         finally:
-            api._CACHE = old_cache
+            api._assembly._CACHE = old_cache
 
     def test_dashboard_requests_compact_plan_summary_projection(self) -> None:
         paths: list[str] = []
@@ -236,14 +250,14 @@ class DashboardTest(unittest.TestCase):
                 return {"items": []}
             raise AssertionError(path)
 
-        old_cache = api._CACHE
-        api._CACHE = None
+        old_cache = api._assembly._CACHE
+        api._assembly._CACHE = None
         try:
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
                 api._build_dashboard(1)
             self.assertIn("/api/v3/development/plans?limit=100&view=summary", paths)
         finally:
-            api._CACHE = old_cache
+            api._assembly._CACHE = old_cache
 
     def test_summary_counts_execution_usage_once(self) -> None:
         result = api._summary(
@@ -441,7 +455,7 @@ class DashboardTest(unittest.TestCase):
 
     def test_contract_is_the_single_dashboard_shape_source(self) -> None:
         version = CONTRACT["properties"]["schemaVersion"]["const"]
-        self.assertEqual(api._DASHBOARD_SCHEMA_VERSION, version)
+        self.assertEqual(api._config.DASHBOARD_SCHEMA_VERSION, version)
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn(f"const DASHBOARD_SCHEMA_VERSION = {version};", source)
         self.assertIn(".then(assertDashboardContract)", source)
@@ -828,7 +842,7 @@ class DashboardTest(unittest.TestCase):
         for legacy in ("organization", "workforce", "incidents", "runtime policy", "employee dossier"):
             self.assertNotIn(legacy, source.lower())
         manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "1.7.1")
+        self.assertEqual(manifest["version"], "1.7.2")
         self.assertIn("Execution console", manifest["description"])
 
     def test_frontend_uses_hermes_auth_and_tracks_host_light_dark_mode(self) -> None:

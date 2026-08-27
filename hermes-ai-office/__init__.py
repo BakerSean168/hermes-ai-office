@@ -23,450 +23,41 @@ import urllib.request
 _CONTROL_PLANE_BASE = os.environ.get(
     "HERMES_AI_OFFICE_CONTROL_PLANE_URL", "http://127.0.0.1:8320"
 ).rstrip("/")
-_V3_PHASES = {"INVESTIGATE_PLAN", "IMPLEMENT", "IMPLEMENT_FIX", "VERIFY_REVIEW", "FINALIZE"}
-_V3_TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
-_V3_ATTENTION_STATUSES = {"PAUSED", "WAITING_FOR_CONFIRMATION"}
-_V3_DEFAULT_AWAIT = {
-    "INVESTIGATE_PLAN": True,
-    "IMPLEMENT": False,
-    "IMPLEMENT_FIX": False,
-    "VERIFY_REVIEW": True,
-    "FINALIZE": True,
-}
-_V3_DEFAULT_WAIT_SECONDS = {
-    "INVESTIGATE_PLAN": 240.0,
-    "IMPLEMENT": 0.0,
-    "IMPLEMENT_FIX": 0.0,
-    "VERIFY_REVIEW": 240.0,
-    "FINALIZE": 30.0,
-}
 _CTX: Any = None
 
-_RUN_PHASE_SCHEMA = {
-    "name": "ai_office_run_phase",
-    "description": (
-        "Run one AI Office development phase. AI Office chooses the execution backend and logical model, "
-        "OpenHands owns lifecycle/workspaces, and LiteLLM owns provider routing and spend."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "phase": {"type": "string", "enum": sorted(_V3_PHASES)},
-            "objective": {"type": "string"},
-            "project_key": {"type": "string"},
-            "repository_path": {
-                "type": "string",
-                "description": "Required for initial INVESTIGATE_PLAN or IMPLEMENT.",
-            },
-            "base_revision": {"type": "string"},
-            "previous_execution_id": {
-                "type": "string",
-                "description": "Causal parent execution for phase handoff.",
-            },
-            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-            "complexity_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
-            "risk_hint": {"type": "string", "enum": ["LOW", "MEDIUM", "HIGH"]},
-            "quality_hint": {"type": "string", "enum": ["FAST", "STANDARD", "PREMIUM"]},
-            "budget_hint": {"type": "string", "enum": ["LOW", "NORMAL", "HIGH"]},
-            "parallelism": {"type": "integer", "minimum": 1, "maximum": 16},
-            "preferred_backend": {"type": "string"},
-            "preferred_model_class": {"type": "string"},
-            "await": {"type": "boolean"},
-            "wait_timeout_seconds": {"type": "number", "minimum": 0, "maximum": 600},
-        },
-        "required": ["phase", "objective"],
-    },
-}
-
-_GET_EXECUTION_SCHEMA = {
-    "name": "ai_office_get_execution",
-    "description": "Get authoritative status, result, usage, timing, route, and workspace metadata for an execution.",
-    "parameters": {
-        "type": "object",
-        "properties": {"execution_id": {"type": "string"}},
-        "required": ["execution_id"],
-    },
-}
-
-_CANCEL_EXECUTION_SCHEMA = {
-    "name": "ai_office_cancel_execution",
-    "description": "Cancel a non-terminal AI Office execution.",
-    "parameters": {
-        "type": "object",
-        "properties": {"execution_id": {"type": "string"}},
-        "required": ["execution_id"],
-    },
-}
-
-_LIST_ACTIVE_SCHEMA = {
-    "name": "ai_office_list_active",
-    "description": "List current non-terminal AI Office executions, optionally scoped to one project.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "project_key": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        },
-    },
-}
-
-_LIST_PROVIDERS_SCHEMA = {
-    "name": "ai_office_list_providers",
-    "description": (
-        "Read the authoritative LiteLLM provider/model registry. Provider mutation belongs in LiteLLM Admin, not AI Office."
-    ),
-    "parameters": {"type": "object", "properties": {}},
-}
-
-_DELEGATE_PLAN_SCHEMA = {
-    "name": "ai_office_delegate",
-    "description": (
-        "Delegate a complete development objective to the OpenHands supervisor. Hermes supplies only the objective and repository; "
-        "OpenHands inspects the repository and produces the dependency-aware batch graph, then the durable Control Plane automatically runs implementation, review/fix, integration, and optional delivery."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "project_key": {"type": "string"},
-            "objective": {"type": "string"},
-            "repository_path": {"type": "string"},
-            "base_revision": {"type": "string"},
-            "active_plan_path": {
-                "type": "string",
-                "description": "Optional repository-relative active-plan path the OpenHands supervisor should inspect.",
-            },
-            "delivery": {
-                "type": "object",
-                "properties": {
-                    "remote": {"type": "string"},
-                    "branch": {"type": "string"},
-                    "target_branch": {"type": "string"},
-                    "auto_merge": {"type": "boolean", "const": True},
-                    "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
-                },
-                "required": ["branch", "auto_merge"],
-            },
-        },
-        "required": ["objective", "repository_path"],
-    },
-}
-
-_CREATE_PLAN_SCHEMA = {
-    "name": "ai_office_create_plan",
-    "description": (
-        "Submit the analyzed ORCHESTRATE proposal as one durable development plan. The control plane validates and persists the graph before it automatically runs each work item through "
-        "IMPLEMENT, independent VERIFY_REVIEW, IMPLEMENT_FIX when needed, deterministic batch integration, premium aggregate BATCH_VERIFY for multi-item batches, integration repair when aggregate review fails, dependent batches, "
-        "and, when explicitly authorized, remote checks and merge."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "project_key": {"type": "string"},
-            "objective": {"type": "string"},
-            "analysis_summary": {
-                "type": "string",
-                "description": "Concise repository-backed analysis that justifies this batch graph and is persisted with PLAN_CREATED.",
-            },
-            "repository_path": {"type": "string"},
-            "base_revision": {"type": "string"},
-            "delivery": {
-                "type": "object",
-                "description": "Optional explicit authorization to push, open/reuse a PR, wait for checks, merge, verify post-merge checks, and create bounded reviewed follow-up repair PRs when those checks fail.",
-                "properties": {
-                    "remote": {"type": "string"},
-                    "branch": {"type": "string"},
-                    "target_branch": {"type": "string"},
-                    "auto_merge": {"type": "boolean", "const": True},
-                    "merge_method": {"type": "string", "enum": ["merge", "squash", "rebase"]},
-                },
-                "required": ["branch", "auto_merge"],
-            },
-            "batches": {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "key": {"type": "string"},
-                        "title": {"type": "string"},
-                        "depends_on": {"type": "array", "items": {"type": "string"}},
-                        "work_items": {
-                            "type": "array",
-                            "minItems": 1,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "key": {"type": "string"},
-                                    "title": {"type": "string"},
-                                    "objective": {"type": "string"},
-                                    "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-                                },
-                                "required": ["key", "title", "objective"],
-                            },
-                        },
-                    },
-                    "required": ["key", "title", "work_items"],
-                },
-            },
-        },
-        "required": ["objective", "analysis_summary", "repository_path", "batches"],
-    },
-}
-
-_GET_PLAN_SCHEMA = {
-    "name": "ai_office_get_plan",
-    "description": "Get the durable plan, batch, work-item, execution, review-gate, and integration projection.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "plan_id": {"type": "string"},
-            "reconcile": {"type": "boolean", "description": "Request an immediate recovery/reconcile pass before reading."},
-        },
-        "required": ["plan_id"],
-    },
-}
-
-_CANCEL_PLAN_SCHEMA = {
-    "name": "ai_office_cancel_plan",
-    "description": "Cancel a durable plan and all of its non-terminal worker executions.",
-    "parameters": {
-        "type": "object",
-        "properties": {"plan_id": {"type": "string"}},
-        "required": ["plan_id"],
-    },
-}
-
-_LIST_PLANS_SCHEMA = {
-    "name": "ai_office_list_plans",
-    "description": "List durable development plans for recovery after Telegram, Hermes, or gateway reconnects.",
-    "parameters": {
-        "type": "object",
-        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
-    },
-}
-
-_AI_OFFICE_RE = re.compile(r"\bai[\s_-]*office\b", re.IGNORECASE)
-_PROVIDER_RE = re.compile(r"provider|supplier|channel|model|供应商|提供商|渠道|模型", re.IGNORECASE)
-_PROVIDER_STATUS_RE = re.compile(r"status|health|available|list|current|状态|健康|可用|列表|当前|哪些", re.IGNORECASE)
-_DEVELOPMENT_RE = re.compile(
-    r"pixel[- ]?agent|ai[ _-]?office|ai_office_delegate|"
-    r"implement|review|plan|debug|test|fix|refactor|code|coding|"
-    r"实施|实现|审查|评审|规划|计划|调试|测试|修复|重构|编码|代码",
-    re.IGNORECASE,
+from .protocol import (
+    _CANCEL_EXECUTION_SCHEMA,
+    _CANCEL_PLAN_SCHEMA,
+    _CREATE_PLAN_SCHEMA,
+    _DELEGATE_PLAN_SCHEMA,
+    _GET_EXECUTION_SCHEMA,
+    _GET_PLAN_SCHEMA,
+    _LIST_ACTIVE_SCHEMA,
+    _LIST_PLANS_SCHEMA,
+    _LIST_PROVIDERS_SCHEMA,
+    _RUN_PHASE_SCHEMA,
+    _V3_ATTENTION_STATUSES,
+    _V3_DEFAULT_AWAIT,
+    _V3_DEFAULT_WAIT_SECONDS,
+    _V3_PHASES,
+    _V3_TERMINAL_STATUSES,
 )
-_ENFORCED_PROFILES = {
-    item.strip().lower()
-    for item in os.environ.get(
-        "HERMES_AI_OFFICE_ENFORCED_PROFILES",
-        "memoflow,bodysense,digital-biome",
-    ).split(",")
-    if item.strip()
-}
-_DIRECT_AGENT_NAMES = {
-    "agy",
-    "antigravity",
-    "claude",
-    "codex",
-    "dsh",
-    "openhands",
-    "opencode",
-    "zcode",
-}
-_READ_ONLY_TOOL_FRAGMENTS = (
-    "read_file",
-    "read_text_file",
-    "read_media_file",
-    "search_files",
-    "list_directory",
-    "directory_tree",
-    "get_file_info",
-)
-_PACKAGE_VERIFY_SCRIPT_RE = re.compile(
-    r"^(?:test|typecheck|lint|build|check|verify|ci|e2e|db:test|prisma:(?:validate|generate))(?:[:_-].*)?$",
-    re.IGNORECASE,
+
+from .policy import (
+    development_topic as _development_topic,
+    enforces_profile as _enforces_profile,
+    is_safe_terminal_command as _is_safe_terminal_command,
+    pre_tool_call as _policy_pre_tool_call,
+    provider_topic as _provider_topic,
 )
 
 
 def _profile_enforces_ai_office() -> bool:
-    return _active_profile_name().strip().lower() in _ENFORCED_PROFILES
-
-
-def _is_safe_terminal_command(command: str) -> bool:
-    """Allow inspection/verification, but never direct implementation or delivery."""
-    value = str(command or "").strip()
-    if not value:
-        return False
-    # Compound shell syntax makes a read-looking command able to hide a writer.
-    if re.search(r"(?:&&|\|\||[;|><`]|\$\(|\n|\r)", value):
-        return False
-    try:
-        tokens = shlex.split(value)
-    except ValueError:
-        return False
-    if not tokens:
-        return False
-
-    command_name = Path(tokens[0]).name.lower()
-    if command_name in _DIRECT_AGENT_NAMES:
-        return False
-    if command_name in {
-        "pwd",
-        "hostname",
-        "whoami",
-        "date",
-        "ls",
-        "find",
-        "rg",
-        "grep",
-        "cat",
-        "head",
-        "tail",
-        "wc",
-        "stat",
-        "du",
-        "df",
-        "ps",
-        "pgrep",
-        "git",
-        "gh",
-        "docker",
-        "docker-compose",
-        "systemctl",
-        "journalctl",
-        "pytest",
-        "vitest",
-        "nx",
-        "go",
-        "cargo",
-        "pnpm",
-        "npm",
-        "yarn",
-        "bun",
-        "npx",
-    }:
-        pass
-    else:
-        return False
-
-    if command_name == "git":
-        if len(tokens) < 2:
-            return False
-        subcommand = tokens[1].lower()
-        if subcommand not in {
-            "status",
-            "diff",
-            "log",
-            "show",
-            "rev-parse",
-            "remote",
-            "branch",
-            "fetch",
-            "ls-files",
-            "grep",
-            "describe",
-        }:
-            return False
-        if subcommand == "branch" and any(
-            token in {"-d", "-D", "-m", "-M", "--delete", "--move"} for token in tokens[2:]
-        ):
-            return False
-        return True
-
-    if command_name == "gh":
-        if len(tokens) < 3:
-            return False
-        return (tokens[1].lower(), tokens[2].lower()) in {
-            ("pr", "checks"),
-            ("pr", "view"),
-            ("pr", "status"),
-            ("pr", "list"),
-            ("run", "view"),
-            ("run", "list"),
-            ("run", "watch"),
-        }
-
-    if command_name == "docker":
-        if len(tokens) < 2:
-            return False
-        if tokens[1].lower() == "compose":
-            return len(tokens) >= 3 and tokens[2].lower() in {"ps", "logs", "config"}
-        return tokens[1].lower() in {"ps", "logs", "inspect", "stats"}
-
-    if command_name == "docker-compose":
-        return len(tokens) >= 2 and tokens[1].lower() in {"ps", "logs", "config"}
-
-    if command_name == "systemctl":
-        return len(tokens) >= 2 and tokens[1].lower() in {"status", "show", "is-active", "is-failed"}
-    if command_name == "journalctl":
-        return True
-    if command_name in {"pwd", "hostname", "whoami", "date", "ls", "find", "rg", "grep", "cat", "head", "tail", "wc", "stat", "du", "df", "ps", "pgrep"}:
-        return True
-    if command_name in {"pytest", "vitest"}:
-        return True
-    if command_name == "nx":
-        return len(tokens) >= 2 and tokens[1].lower() in {"test", "lint", "build", "typecheck", "affected"}
-    if command_name == "go":
-        return len(tokens) >= 2 and tokens[1].lower() in {"test", "vet"}
-    if command_name == "cargo":
-        return len(tokens) >= 2 and tokens[1].lower() in {"test", "check", "clippy"}
-
-    if command_name in {"pnpm", "npm", "yarn", "bun"}:
-        if len(tokens) < 2:
-            return False
-        if tokens[1].lower() == "exec":
-            if len(tokens) < 3:
-                return False
-            executable = Path(tokens[2]).name.lower()
-            if executable in {"vitest", "playwright", "tsc", "eslint", "nx"}:
-                return True
-            if executable == "prisma":
-                return len(tokens) >= 4 and tokens[3].lower() in {"validate", "generate"}
-            return False
-        script_index = 2 if tokens[1].lower() == "run" else 1
-        return len(tokens) > script_index and bool(_PACKAGE_VERIFY_SCRIPT_RE.fullmatch(tokens[script_index]))
-
-    if command_name == "npx":
-        if len(tokens) < 2:
-            return False
-        executable = Path(tokens[1]).name.lower()
-        if executable in {"vitest", "playwright", "tsc", "eslint", "nx"}:
-            return True
-        if executable == "prisma":
-            return len(tokens) >= 3 and tokens[2].lower() in {"validate", "generate"}
-        return False
-    return False
+    return _enforces_profile(_active_profile_name())
 
 
 def _on_pre_tool_call(tool_name: Any = "", args: Any = None, **_kwargs: Any) -> dict[str, str] | None:
-    if not _profile_enforces_ai_office():
-        return None
-    name = str(tool_name or "").strip().lower()
-    if not name or name.startswith("ai_office_"):
-        return None
-
-    if any(fragment in name for fragment in _READ_ONLY_TOOL_FRAGMENTS):
-        return None
-
-    block_message = (
-        "Direct implementation is disabled for this project profile. "
-        "Use ai_office_delegate (or an explicitly operator-authored ai_office_create_plan) so Pixel Agent / AI Office owns writers, review, integration, CI repair, and delivery. "
-        "Hermes may inspect state and run bounded read-only verification, but must not edit source, launch coding agents directly, or mutate Git/PR state."
-    )
-
-    if "terminal" in name or name in {"shell", "bash", "exec", "code_execution"}:
-        arguments = args if isinstance(args, Mapping) else {}
-        command = str(arguments.get("command") or arguments.get("cmd") or "")
-        return None if _is_safe_terminal_command(command) else {"action": "block", "message": block_message}
-
-    if any(token in name for token in ("write", "edit", "move", "delete", "remove", "patch", "apply_patch")):
-        return {"action": "block", "message": block_message}
-    if any(token in name for token in ("delegate", "subagent", "spawn", "codex", "opencode", "claude", "dsh", "zcode", "openhands")):
-        return {"action": "block", "message": block_message}
-    if "github" in name and any(token in name for token in ("create", "update", "merge", "push", "delete")):
-        return {"action": "block", "message": block_message}
-    if name in {"file", "filesystem"}:
-        return {"action": "block", "message": block_message}
-    return None
+    return _policy_pre_tool_call(_active_profile_name(), tool_name, args)
 
 
 def _control_plane_request(
@@ -1067,8 +658,8 @@ def _on_pre_llm_call(user_message: Any = "", **_kwargs: Any) -> dict[str, str] |
     text = str(user_message or "").strip()
     if not text:
         return None
-    provider_topic = bool(_AI_OFFICE_RE.search(text) or (_PROVIDER_RE.search(text) and _PROVIDER_STATUS_RE.search(text)))
-    development_topic = bool(_DEVELOPMENT_RE.search(text))
+    provider_topic = _provider_topic(text)
+    development_topic = _development_topic(text)
     if not provider_topic and not development_topic:
         return None
 
