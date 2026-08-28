@@ -37,29 +37,27 @@ phases:
 
   IMPLEMENT:
     backend_candidates:
-      - codex-business-worker-headless
-      - opencode-acp
       - dsh-acp
+      - opencode-acp
+      - openhands-builtin
       - zcode-acp
       - claude-code-acp
       - codex-acp
-      - openhands-builtin
     model_class: implementation-efficient
     transport_preference:
-      - PROVIDER_NATIVE
       - LITELLM_MANAGED
+      - PROVIDER_NATIVE
     workspace_mode: isolated_write
     session_policy: fresh
 
   IMPLEMENT_FIX:
     backend_candidates:
-      - codex-business-worker-headless
-      - opencode-acp
       - dsh-acp
+      - opencode-acp
+      - openhands-builtin
       - zcode-acp
       - claude-code-acp
       - codex-acp
-      - openhands-builtin
     model_class: implementation-efficient
     transport_preference:
       - LITELLM_MANAGED
@@ -159,6 +157,10 @@ backends:
       litellm_managed: true
       write: true
 
+  # Business Team implementation is deliberately opt-in rather than part of the
+  # automatic managed-worker ladder. When explicitly selected, use Luna at the
+  # highest reasoning effort; ordinary implementation stays on the economical
+  # LiteLLM-managed DeepSeek -> GLM path.
   codex-business-worker-headless:
     kind: acp
     enabled: true
@@ -166,12 +168,13 @@ backends:
       - /usr/local/bin/node
       - /opt/hermes-ai-office-tools/headless_review_acp.mjs
     acp_server: custom
-    default_model: gpt-5.6-sol
+    default_model: gpt-5.6-luna
     static_env:
       AI_OFFICE_HEADLESS_DRIVER: codex
       AI_OFFICE_HEADLESS_ROLE: worker
       AI_OFFICE_HEADLESS_TRANSPORT: provider-native
-      AI_OFFICE_HEADLESS_MODEL: gpt-5.6-sol
+      AI_OFFICE_HEADLESS_MODEL: gpt-5.6-luna
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: xhigh
       AI_OFFICE_CODEX_AUTH_HOME: /openhands-state/codex-business
       AI_OFFICE_CODEX_BIN: /openhands-state/tooling/node_modules/.bin/codex
       AI_OFFICE_WORKSPACE_ROOT: /workspace
@@ -194,6 +197,7 @@ backends:
       AI_OFFICE_HEADLESS_DRIVER: codex
       AI_OFFICE_HEADLESS_TRANSPORT: provider-native
       AI_OFFICE_HEADLESS_MODEL: gpt-5.6-sol
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: medium
       AI_OFFICE_CODEX_AUTH_HOME: /openhands-state/codex-business
       AI_OFFICE_CODEX_BIN: /openhands-state/tooling/node_modules/.bin/codex
       AI_OFFICE_WORKSPACE_ROOT: /workspace

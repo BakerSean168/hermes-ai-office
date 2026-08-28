@@ -182,13 +182,16 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   const worker = policy.backends['codex-business-worker-headless'];
 
   assert.equal(worker.kind, 'acp');
-  assert.equal(worker.default_model, 'gpt-5.6-sol');
+  assert.equal(worker.default_model, 'gpt-5.6-luna');
   assert.equal(worker.supports.provider_native, true);
   assert.equal(worker.supports.write, true);
   assert.equal(worker.supports.untrusted_external, false);
   assert.equal(worker.static_env.AI_OFFICE_HEADLESS_ROLE, 'worker');
-  assert.equal(policy.phases.IMPLEMENT.backend_candidates[0], 'codex-business-worker-headless');
-  assert.equal(policy.phases.IMPLEMENT_FIX.backend_candidates[0], 'codex-business-worker-headless');
+  assert.equal(policy.phases.IMPLEMENT.backend_candidates[0], 'dsh-acp');
+  assert.equal(policy.phases.IMPLEMENT_FIX.backend_candidates[0], 'dsh-acp');
+  assert.equal(policy.phases.IMPLEMENT.backend_candidates.includes('codex-business-worker-headless'), false);
+  assert.equal(worker.static_env.AI_OFFICE_HEADLESS_MODEL, 'gpt-5.6-luna');
+  assert.equal(worker.static_env.AI_OFFICE_HEADLESS_REASONING_EFFORT, 'xhigh');
 
   assert.equal(backend.kind, 'acp');
   assert.equal(backend.default_model, 'gpt-5.6-sol');
@@ -196,9 +199,12 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.equal(backend.supports.litellm_managed, false);
   assert.equal(backend.supports.untrusted_external, false);
   assert.equal(backend.static_env.AI_OFFICE_CODEX_AUTH_HOME, '/openhands-state/codex-business');
+  assert.equal(backend.static_env.AI_OFFICE_HEADLESS_REASONING_EFFORT, 'medium');
   assert.equal(policy.phases.VERIFY_REVIEW.backend_candidates[0], 'codex-business-review-headless');
   assert.equal(policy.phases.BATCH_VERIFY.backend_candidates[0], 'codex-business-review-headless');
   assert.match(adapter, /HEADLESS_TRANSPORT === 'provider-native'/);
+  assert.match(adapter, /AI_OFFICE_HEADLESS_REASONING_EFFORT/);
+  assert.match(adapter, /model_reasoning_effort=\$\{JSON\.stringify\(HEADLESS_REASONING_EFFORT\)\}/);
   assert.match(adapter, /HEADLESS_REVIEW_CODEX_AUTH_MISSING/);
   assert.match(adapter, /delete env\.CODEX_API_KEY/);
   assert.doesNotMatch(adapter, /--ignore-user-config/);

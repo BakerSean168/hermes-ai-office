@@ -278,6 +278,7 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'codex');
     assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value, 'provider-native');
     assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(codexBusinessBody.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value, 'medium');
     assert.equal(
       codexBusinessBody.secrets.AI_OFFICE_CODEX_AUTH_HOME.value,
       '/openhands-state/codex-business',
@@ -294,7 +295,7 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       repositoryPath: '/workspace/executions/exec_codex_business_worker_1/repo',
       selection: {
         backend: 'codex-business-worker-headless',
-        modelClass: 'gpt-5.6-sol',
+        modelClass: 'gpt-5.6-luna',
         transportMode: 'PROVIDER_NATIVE',
         workspaceMode: 'isolated_write',
         sessionPolicy: 'fresh',
@@ -307,7 +308,7 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
     const codexBusinessWorkerBody = createBody as any;
     assert.equal(codexBusinessWorkerBody.agent.acp_server, 'custom');
-    assert.equal(codexBusinessWorkerBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.equal(codexBusinessWorkerBody.agent.acp_model, 'gpt-5.6-luna');
     assert.deepEqual(codexBusinessWorkerBody.agent.acp_command, [
       '/usr/local/bin/node',
       '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
@@ -318,7 +319,11 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value,
       'provider-native',
     );
-    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-luna');
+    assert.equal(
+      codexBusinessWorkerBody.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value,
+      'xhigh',
+    );
     assert.equal(
       codexBusinessWorkerBody.secrets.AI_OFFICE_CODEX_AUTH_HOME.value,
       '/openhands-state/codex-business',
@@ -504,6 +509,44 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       detail: 'Error code: 503 - No available channel for model',
       retryable: true,
     });
+
+    const connectionClosedServer = createServer((request, response) => {
+      response.setHeader('content-type', 'application/json');
+      if (request.url?.includes('/events/search')) {
+        response.end(
+          JSON.stringify({
+            items: [
+              { kind: 'ConversationStateUpdateEvent', key: 'execution_status', value: 'error' },
+              { kind: 'ConversationErrorEvent', code: 'ACPInitError', detail: 'Connection closed' },
+            ],
+          }),
+        );
+        return;
+      }
+      if (request.url?.startsWith('/api/conversations/')) {
+        response.end(JSON.stringify({ id: created.conversationId, execution_status: 'error' }));
+        return;
+      }
+      response.writeHead(404).end('{}');
+    });
+    const connectionPort = await listen(connectionClosedServer);
+    try {
+      const connectionHost = new OpenHandsExecutionHost({
+        baseUrl: `http://127.0.0.1:${connectionPort}`,
+        secrets: new EnvFileValueProvider(envFile),
+        policy,
+      });
+      const connectionFailure = await connectionHost.getExecution(created.conversationId);
+      assert.deepEqual(connectionFailure.error, {
+        code: 'ACPInitError',
+        detail: 'Connection closed',
+        retryable: true,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        connectionClosedServer.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
   } finally {
     await new Promise<void>((resolve, reject) =>
       server.close((error) => (error ? reject(error) : resolve())),

@@ -107,12 +107,13 @@ export class WorkItemCoordinator {
     if (!policy?.backendCandidates.length || !policy.modelClasses.length) {
       return PLAN_LIMITS.transportAttemptsPerParent;
     }
+    const routeLimit =
+      phase === 'VERIFY_REVIEW' || phase === 'BATCH_VERIFY'
+        ? PLAN_LIMITS.reviewRouteAttemptsPerParent
+        : PLAN_LIMITS.implementationRouteAttemptsPerParent;
     return Math.max(
       PLAN_LIMITS.transportAttemptsPerParent,
-      Math.min(
-        PLAN_LIMITS.reviewRouteAttemptsPerParent,
-        policy.backendCandidates.length * policy.modelClasses.length,
-      ),
+      Math.min(routeLimit, policy.backendCandidates.length * policy.modelClasses.length),
     );
   }
 
@@ -252,18 +253,20 @@ export class WorkItemCoordinator {
           record.previousExecutionId === latest.previousExecutionId,
       ).length;
       const totalPhaseAttempts = records.filter((record) => record.phase === latest.phase).length;
+      const phase = latest.phase as PlanWorkerPhase;
+      const routeManagedPhase = ['IMPLEMENT', 'IMPLEMENT_FIX', 'VERIFY_REVIEW'].includes(phase);
       const attemptLimit =
-        snapshot.error?.retryable && latest.phase === 'VERIFY_REVIEW'
-          ? this.retryAttemptLimit('VERIFY_REVIEW')
+        routeManagedPhase && plan.source.kind !== 'EXTERNAL_CHANGE'
+          ? this.retryAttemptLimit(phase)
           : snapshot.error?.retryable
             ? PLAN_LIMITS.retryableTransportAttemptsPerParent
             : PLAN_LIMITS.transportAttemptsPerParent;
       if (sameParentAttempts < attemptLimit) {
-        const phase = latest.phase as PlanWorkerPhase;
         const retryOverride =
-          phase === 'VERIFY_REVIEW' && plan.source.kind !== 'EXTERNAL_CHANGE'
+          plan.source.kind !== 'EXTERNAL_CHANGE' && routeManagedPhase
             ? this.retryOverride(phase, records, {
-                advanceModel: snapshot.error?.retryable === true,
+                advanceModel:
+                  phase === 'VERIFY_REVIEW' && snapshot.error?.retryable === true,
               })
             : this.sourceBackend(plan, phase);
         await this.launch(

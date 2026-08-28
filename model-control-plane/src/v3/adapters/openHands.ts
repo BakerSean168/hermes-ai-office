@@ -60,9 +60,10 @@ function executionFailure(value: unknown): ExecutionFailure | undefined {
           .replace(/\b(?:sk|sess)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
           .slice(0, 2_000)
       : '';
+  const failureText = `${code} ${detail}`;
   const retryable =
-    /(?:ServiceUnavailable|RateLimit|Timeout|Connection|InternalServer)/i.test(code) ||
-    /(?:HTTP\s*429|HTTP\s*5\d\d|Error code:\s*(?:429|5\d\d)|No available channel)/i.test(detail);
+    /(?:ServiceUnavailable|RateLimit|Timeout|Connection|InternalServer)/i.test(failureText) ||
+    /(?:HTTP\s*429|HTTP\s*5\d\d|Error code:\s*(?:429|5\d\d)|No available channel)/i.test(failureText);
   return { code, ...(detail ? { detail } : {}), retryable };
 }
 

@@ -2,6 +2,7 @@ export const PLAN_LIMITS = {
   transportAttemptsPerParent: 2,
   retryableTransportAttemptsPerParent: 4,
   reviewRouteAttemptsPerParent: 6,
+  implementationRouteAttemptsPerParent: 8,
   reviewFixAttempts: 3,
   batchIntegrationRepairAttempts: 3,
   deliveryRepairAttempts: 3,

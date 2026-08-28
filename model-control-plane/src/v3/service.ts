@@ -194,6 +194,8 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       executions: this,
       reviewStrategy: options.reviewStrategy,
       retryPolicies: {
+        IMPLEMENT: this.#policy.retryCandidates('IMPLEMENT', this.#backendAvailability),
+        IMPLEMENT_FIX: this.#policy.retryCandidates('IMPLEMENT_FIX', this.#backendAvailability),
         VERIFY_REVIEW: this.#policy.retryCandidates('VERIFY_REVIEW', this.#backendAvailability),
         BATCH_VERIFY: this.#policy.retryCandidates('BATCH_VERIFY', this.#backendAvailability),
       },

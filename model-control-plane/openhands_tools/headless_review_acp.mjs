@@ -13,6 +13,8 @@ const LITELLM_API_KEY = process.env.AI_OFFICE_LITELLM_API_KEY ?? '';
 const HEADLESS_TRANSPORT = process.env.AI_OFFICE_HEADLESS_TRANSPORT ?? 'litellm-managed';
 const HEADLESS_ROLE = process.env.AI_OFFICE_HEADLESS_ROLE ?? 'review';
 const IS_WORKER = HEADLESS_ROLE === 'worker';
+const HEADLESS_REASONING_EFFORT =
+  process.env.AI_OFFICE_HEADLESS_REASONING_EFFORT ?? (IS_WORKER ? 'xhigh' : 'medium');
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
 const HARNESS_PROFILE = process.env.AI_OFFICE_HARNESS_PROFILE ?? 'openhands';
@@ -462,7 +464,7 @@ function codexCommand(session, prompt, evidence) {
       [
         `model = ${JSON.stringify(session.model)}`,
         'model_provider = "hermes-litellm"',
-        `model_reasoning_effort = ${JSON.stringify(IS_WORKER ? 'medium' : 'high')}`,
+        `model_reasoning_effort = ${JSON.stringify(HEADLESS_REASONING_EFFORT)}`,
         'model_verbosity = "high"',
         'approval_policy = "never"',
         'sandbox_mode = "workspace-write"',
@@ -506,6 +508,8 @@ function codexCommand(session, prompt, evidence) {
         'workspace-write',
         ...codexWritableArgs(session, harness),
         ...(native ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+        '-c',
+        `model_reasoning_effort=${JSON.stringify(HEADLESS_REASONING_EFFORT)}`,
         '--model',
         session.model,
         '--json',
@@ -532,6 +536,8 @@ function codexCommand(session, prompt, evidence) {
       'workspace-write',
       ...codexWritableArgs(session, harness),
       ...(native ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+      '-c',
+      `model_reasoning_effort=${JSON.stringify(HEADLESS_REASONING_EFFORT)}`,
       '--model',
       session.model,
       '--output-schema',

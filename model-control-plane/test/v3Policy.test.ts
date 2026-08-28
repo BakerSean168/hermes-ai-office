@@ -23,16 +23,16 @@ const allAvailable = {
   'zcode-acp': true,
 };
 
-test('development policy keeps managed coding routes and prefers provider-native Business review', () => {
+test('development policy keeps managed implementation routes and provider-native Business review', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   for (const phase of ['ORCHESTRATE', 'INVESTIGATE_PLAN'] as const) {
     assert.equal(policy.select(phase, {}, allAvailable).transportMode, 'LITELLM_MANAGED');
   }
   for (const phase of ['IMPLEMENT', 'IMPLEMENT_FIX'] as const) {
     const selected = policy.select(phase, {}, allAvailable);
-    assert.equal(selected.backend, 'codex-business-worker-headless');
-    assert.equal(selected.transportMode, 'PROVIDER_NATIVE');
-    assert.equal(selected.modelClass, 'gpt-5.6-sol');
+    assert.equal(selected.backend, 'dsh-acp');
+    assert.equal(selected.transportMode, 'LITELLM_MANAGED');
+    assert.equal(selected.modelClass, 'implementation-efficient');
   }
   for (const phase of ['VERIFY_REVIEW', 'BATCH_VERIFY'] as const) {
     const selected = policy.select(phase, {}, allAvailable);
@@ -67,16 +67,21 @@ test('ORCHESTRATE is owned by the OpenHands supervisor', () => {
   assert.equal(selected.workspaceMode, 'read_oriented');
 });
 
-test('implementation and review prefer authenticated provider-native Business Codex routes', () => {
+test('implementation defaults to managed workers while Business Codex remains an explicit Luna xhigh route', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);
   const implement = policy.select('IMPLEMENT', {}, allAvailable);
-  assert.equal(implement.backend, 'codex-business-worker-headless');
-  assert.equal(implement.transportMode, 'PROVIDER_NATIVE');
-  assert.equal(implement.modelClass, 'gpt-5.6-sol');
-  assert.equal(
-    policy.select('IMPLEMENT_FIX', {}, allAvailable).backend,
-    'codex-business-worker-headless',
+  assert.equal(implement.backend, 'dsh-acp');
+  assert.equal(implement.transportMode, 'LITELLM_MANAGED');
+  assert.equal(implement.modelClass, 'implementation-efficient');
+  assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'dsh-acp');
+  const business = policy.select(
+    'IMPLEMENT',
+    { backend: 'codex-business-worker-headless' },
+    allAvailable,
   );
+  assert.equal(business.backend, 'codex-business-worker-headless');
+  assert.equal(business.transportMode, 'PROVIDER_NATIVE');
+  assert.equal(business.modelClass, 'gpt-5.6-luna');
   const review = policy.select('VERIFY_REVIEW', {}, allAvailable);
   assert.equal(review.backend, 'codex-business-review-headless');
   assert.equal(review.modelClass, 'gpt-5.6-sol');
@@ -86,6 +91,20 @@ test('implementation and review prefer authenticated provider-native Business Co
   assert.equal(batchReview.modelClass, 'gpt-5.6-sol');
   assert.equal(batchReview.transportMode, 'PROVIDER_NATIVE');
   assert.equal(batchReview.workspaceMode, 'read_oriented');
+});
+
+
+test('implementation retry candidates rotate managed agents on the implementation-efficient model class', () => {
+  const policy = DevelopmentPolicy.fromFile(policyFile);
+  const retry = policy.retryCandidates('IMPLEMENT', {
+    ...allAvailable,
+    'zcode-acp': false,
+    'claude-code-acp': false,
+    'codex-acp': false,
+  });
+  assert.deepEqual(retry.backendCandidates, ['dsh-acp', 'opencode-acp', 'openhands-builtin']);
+  assert.deepEqual(retry.modelClasses, ['implementation-efficient']);
+  assert.equal(retry.backendCandidates.includes('codex-business-worker-headless'), false);
 });
 
 test('review retry candidates preserve backend order and expose bounded model fallbacks', () => {

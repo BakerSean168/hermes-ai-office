@@ -102,8 +102,13 @@ test('delegated plans persist an orchestration identity before OpenHands materia
     v3ExecutionHost: host,
     v3Workspace: workspace,
     v3BackendAvailability: {
-      'openhands-builtin': true,
+      'dsh-acp': true,
       'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'codex-business-worker-headless': false,
       'codex-review-headless': true,
     },
   });
@@ -190,8 +195,13 @@ test('delegated orchestration survives a control-plane restart without duplicati
     v3ExecutionHost: host,
     v3Workspace: workspace,
     v3BackendAvailability: {
-      'openhands-builtin': true,
+      'dsh-acp': true,
       'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'codex-business-worker-headless': false,
       'codex-review-headless': true,
     },
   } as const;
@@ -423,8 +433,13 @@ test('durable plans retry a writer instead of reviewing a no-commit success', as
     v3ExecutionHost: host,
     v3Workspace: noCommitWorkspace,
     v3BackendAvailability: {
-      'openhands-builtin': true,
+      'dsh-acp': true,
       'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'codex-business-worker-headless': false,
       'codex-review-headless': true,
     },
   });
@@ -457,6 +472,8 @@ test('durable plans retry a writer instead of reviewing a no-commit success', as
     ).json();
     const firstWriter = body.batches[0].workItems[0].executions[0];
     assert.equal(firstWriter.phase, 'IMPLEMENT');
+    assert.equal(firstWriter.selection.backend, 'dsh-acp');
+    assert.equal(firstWriter.selection.modelClass, 'implementation-efficient');
 
     host.succeed(firstWriter.refs.openhandsConversationId, 'Planned only; no commit produced.');
     await runtime.v3.reconcilePlans(planId);
@@ -468,6 +485,8 @@ test('durable plans retry a writer instead of reviewing a no-commit success', as
     assert.equal(executions[0].status, 'FAILED');
     assert.equal(executions[0].error.code, 'WRITER_COMPLETION_NO_COMMIT');
     assert.equal(executions[1].phase, 'IMPLEMENT');
+    assert.equal(executions[1].selection.backend, 'opencode-acp');
+    assert.equal(executions[1].selection.modelClass, 'implementation-efficient');
     assert.equal(
       executions.some((execution: { phase: string }) => execution.phase === 'VERIFY_REVIEW'),
       false,
@@ -491,8 +510,12 @@ test('batch-only review strategy self-verifies implementation and uses one indep
     v3ExecutionHost: host,
     v3Workspace: workspace,
     v3BackendAvailability: {
-      'openhands-builtin': true,
+      'dsh-acp': true,
       'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
       'codex-business-worker-headless': true,
       'codex-business-review-headless': true,
       'codex-review-headless': true,
@@ -535,8 +558,9 @@ test('batch-only review strategy self-verifies implementation and uses one indep
     ).json();
     const implementation = body.batches[0].workItems[0].executions[0];
     assert.equal(implementation.phase, 'IMPLEMENT');
-    assert.equal(implementation.selection.backend, 'codex-business-worker-headless');
-    assert.equal(implementation.selection.transportMode, 'PROVIDER_NATIVE');
+    assert.equal(implementation.selection.backend, 'dsh-acp');
+    assert.equal(implementation.selection.modelClass, 'implementation-efficient');
+    assert.equal(implementation.selection.transportMode, 'LITELLM_MANAGED');
     host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED, TESTED, AND COMMITTED');
 
     await runtime.v3.reconcilePlans(planId);
