@@ -16,6 +16,7 @@ import argparse
 import getpass
 import json
 import os
+import platform
 import re
 import stat
 import subprocess
@@ -30,9 +31,43 @@ from typing import Any, Iterable
 
 DEFAULT_ADMIN_URL = "http://127.0.0.1:4000"
 DEFAULT_CONTAINER = "hermes-litellm"
-PROTOCOL = "openai-chat-completions"
+PROTOCOL_CHAT_COMPLETIONS = "openai-chat-completions"
+PROTOCOL_RESPONSES = "openai-responses"
+PROTOCOLS = {
+    "chat-completions": PROTOCOL_CHAT_COMPLETIONS,
+    "responses": PROTOCOL_RESPONSES,
+}
 OWNER = "litellm-provider-registry"
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+CODEX_ORIGINATOR = "codex_exec"
+CODEX_VERSION_FALLBACK = "0.149.1"
+
+def detect_codex_version() -> str:
+    override = os.environ.get("HERMES_PROVIDERCTL_CODEX_VERSION", "").strip()
+    if override:
+        return override
+    try:
+        raw = subprocess.check_output(
+            ["codex", "--version"], text=True, stderr=subprocess.DEVNULL, timeout=3
+        ).strip()
+        match = re.search(r"(\d+\.\d+\.\d+)", raw)
+        if match:
+            return match.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return CODEX_VERSION_FALLBACK
+
+def codex_user_agent(version: str | None = None) -> str:
+    version = version or detect_codex_version()
+    arch = platform.machine() or "unknown"
+    system = platform.system() or "unknown"
+    return f"codex_exec/{version} ({system}; {arch}) unknown (codex_exec; {version})"
+
+CODEX_CLIENT_VERSION = detect_codex_version()
+DEFAULT_USER_AGENT = os.environ.get(
+    "HERMES_PROVIDERCTL_USER_AGENT", codex_user_agent(CODEX_CLIENT_VERSION)
+)
+EDGE_ERROR_KEY = "__providerctl_edge_error__"
 COMMERCIAL_ORDER = {
     "FREE": 20,
     "SPONSORED": 20,
@@ -61,9 +96,13 @@ def json_request(
     headers: dict[str, str] | None = None,
     body: Any | None = None,
     timeout: float = 20.0,
+    user_agent: str | None = None,
 ) -> tuple[int, Any]:
     payload = None if body is None else json.dumps(body).encode("utf-8")
-    merged = {"Accept": "application/json", "User-Agent": "hermes-litellm-providerctl/1"}
+    # urllib's Python-urllib/* fingerprint is rejected by some API edges before
+    # provider authentication. Use the same client identity as Codex CLI by
+    # default; callers may still override it explicitly.
+    merged = {"Accept": "*/*", "User-Agent": user_agent or DEFAULT_USER_AGENT}
     if headers:
         merged.update(headers)
     if payload is not None:
@@ -85,7 +124,10 @@ def json_request(
         # Never propagate or print upstream/admin response bodies. Some proxy
         # errors echo request metadata and credential-bearing admin responses
         # may contain decrypted values.
-        exc.read(8192)
+        raw = exc.read(8192)
+        lowered = raw.lower()
+        if b"error code: 1010" in lowered or b"error 1010" in lowered:
+            return exc.code, {EDGE_ERROR_KEY: "cloudflare_1010"}
         return exc.code, None
     except urllib.error.URLError as exc:
         raise ProviderCtlError(f"network error contacting {safe_origin(url)}: {exc.reason}") from None
@@ -133,22 +175,44 @@ def parse_model_catalog(payload: Any) -> tuple[str, ...] | None:
     return tuple(result)
 
 
-def probe_openai_models(base_url: str, api_key: str, *, timeout: float = 20.0) -> ProbeResult:
+def probe_openai_models(
+    base_url: str,
+    api_key: str,
+    *,
+    timeout: float = 20.0,
+    user_agent: str | None = None,
+) -> ProbeResult:
     failures: list[tuple[str, int]] = []
+    edge_errors: set[str] = set()
     candidates = base_candidates(base_url)
     for index, candidate in enumerate(candidates):
-        status, payload = json_request(
-            candidate + "/models",
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
+        separator = "&" if "?" in candidate else "?"
+        models_url = candidate + "/models" + separator + urllib.parse.urlencode(
+            {"client_version": CODEX_CLIENT_VERSION}
         )
+        status, payload = json_request(
+            models_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Originator": CODEX_ORIGINATOR,
+            },
+            timeout=timeout,
+            user_agent=user_agent,
+        )
+        if isinstance(payload, dict) and isinstance(payload.get(EDGE_ERROR_KEY), str):
+            edge_errors.add(payload[EDGE_ERROR_KEY])
         models = parse_model_catalog(payload)
         if 200 <= status < 300 and models:
             return ProbeResult(candidate, models, used_fallback=index > 0)
         failures.append((candidate, status))
 
     statuses = {status for _, status in failures}
-    if 401 in statuses or 403 in statuses:
+    if "cloudflare_1010" in edge_errors:
+        reason = (
+            "provider edge rejected the HTTP client before API authentication "
+            "(Cloudflare 1010); use --user-agent or provider-specific headers"
+        )
+    elif 401 in statuses or 403 in statuses:
         reason = "credential rejected (HTTP 401/403)"
     elif 429 in statuses:
         reason = "provider rate-limited the catalog probe (HTTP 429)"
@@ -290,6 +354,7 @@ def create_credential(
     display_name: str,
     base_url: str,
     api_key: str,
+    protocol: str,
     commercial_type: str,
     supply_origin: str,
 ) -> None:
@@ -302,7 +367,7 @@ def create_credential(
                 "custom_llm_provider": "openai",
                 "metadata": {
                     "owner": OWNER,
-                    "protocol": PROTOCOL,
+                    "protocol": protocol,
                     "source": "hermes-litellm-providerctl",
                     "legacy_provider_key": name,
                     "provider_display_name": display_name,
@@ -320,34 +385,46 @@ def deployment_payload(
     provider_name: str,
     display_name: str,
     model: str,
+    protocol: str,
     commercial_type: str,
     supply_origin: str,
 ) -> dict[str, Any]:
     order = COMMERCIAL_ORDER[commercial_type]
+    litellm_params: dict[str, Any] = {
+        "model": f"openai/{model}",
+        "litellm_credential_name": provider_name,
+        # Keep runtime requests aligned with Codex as well as the catalog probe.
+        "extra_headers": {
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Originator": CODEX_ORIGINATOR,
+        },
+        "timeout": 120.0,
+        "max_retries": 1,
+        "order": order,
+        "tags": [
+            "ai-office",
+            f"provider:{provider_name}",
+            f"protocol:{protocol}",
+            f"commercial:{commercial_type.lower()}",
+            f"origin:{supply_origin.lower()}",
+        ],
+    }
+    # This flag makes LiteLLM emulate /responses through /chat/completions.
+    # Omit it for providers with a native Responses endpoint so the native
+    # protocol can be preserved end to end.
+    if protocol == PROTOCOL_CHAT_COMPLETIONS:
+        litellm_params["use_chat_completions_api"] = True
+
     return {
         "model_name": model,
-        "litellm_params": {
-            "model": f"openai/{model}",
-            "litellm_credential_name": provider_name,
-            "use_chat_completions_api": True,
-            "timeout": 120.0,
-            "max_retries": 1,
-            "order": order,
-            "tags": [
-                "ai-office",
-                f"provider:{provider_name}",
-                f"protocol:{PROTOCOL}",
-                f"commercial:{commercial_type.lower()}",
-                f"origin:{supply_origin.lower()}",
-            ],
-        },
+        "litellm_params": litellm_params,
         "model_info": {
             "id": str(uuid.uuid4()),
             "blocked": False,
             "mode": "chat",
             "metadata": {
                 "owner": OWNER,
-                "protocol": PROTOCOL,
+                "protocol": protocol,
                 "display_name": display_name,
                 "supplier_name": display_name,
                 "supplier_slug": provider_name,
@@ -369,7 +446,13 @@ def run_import(args: argparse.Namespace) -> None:
         raise ProviderCtlError("unsupported commercial type")
 
     upstream_key = read_secret(args.key_file)
-    probe = probe_openai_models(args.base_url, upstream_key, timeout=args.timeout)
+    protocol = PROTOCOLS[args.protocol]
+    probe = probe_openai_models(
+        args.base_url,
+        upstream_key,
+        timeout=args.timeout,
+        user_agent=args.user_agent,
+    )
     models = select_models(probe.models, args.family, args.model)
     display_name = args.display_name or args.name
 
@@ -377,6 +460,7 @@ def run_import(args: argparse.Namespace) -> None:
     print(f"canonical_base={probe.base_url}")
     print(f"catalog_models={len(probe.models)} selected_models={len(models)}")
     print(f"commercial_type={commercial_type} order={COMMERCIAL_ORDER[commercial_type]}")
+    print(f"protocol={protocol}")
     if probe.used_fallback:
         print("base_url_normalized=true")
     for model in models:
@@ -408,6 +492,7 @@ def run_import(args: argparse.Namespace) -> None:
             display_name=display_name,
             base_url=probe.base_url,
             api_key=upstream_key,
+            protocol=protocol,
             commercial_type=commercial_type,
             supply_origin=supply_origin,
         )
@@ -435,6 +520,7 @@ def run_import(args: argparse.Namespace) -> None:
                 provider_name=args.name,
                 display_name=display_name,
                 model=model,
+                protocol=protocol,
                 commercial_type=commercial_type,
                 supply_origin=supply_origin,
             ),
@@ -454,6 +540,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--key-file", help="mode-0600 upstream key file; otherwise stdin/TTY prompt")
     parser.add_argument("--family", choices=("gpt", "all-chat"), default="gpt")
     parser.add_argument("--model", action="append", default=[], help="exact advertised model; repeatable")
+    parser.add_argument(
+        "--protocol",
+        choices=tuple(PROTOCOLS),
+        default="chat-completions",
+        help="upstream OpenAI wire protocol; responses preserves native /responses when supported",
+    )
+    parser.add_argument(
+        "--user-agent",
+        default=DEFAULT_USER_AGENT,
+        help="HTTP User-Agent for provider probes (default: current Codex CLI shape)",
+    )
     parser.add_argument(
         "--commercial-type",
         choices=tuple(COMMERCIAL_ORDER),

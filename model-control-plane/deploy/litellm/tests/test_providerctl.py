@@ -5,6 +5,7 @@ import json
 import threading
 import unittest
 import sys
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,8 +21,16 @@ class CatalogHandler(BaseHTTPRequestHandler):
     requests = []
 
     def do_GET(self):
-        type(self).requests.append((self.path, self.headers.get("Authorization")))
-        if self.path == "/models":
+        type(self).requests.append(
+            (
+                self.path,
+                self.headers.get("Authorization"),
+                self.headers.get("User-Agent"),
+                self.headers.get("Originator"),
+            )
+        )
+        path = self.path.split("?", 1)[0]
+        if path == "/models":
             body = b"<html>landing page</html>"
             self.send_response(200)
             self.send_header("content-type", "text/html")
@@ -29,7 +38,7 @@ class CatalogHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/v1/models":
+        if path == "/v1/models":
             body = json.dumps(
                 {
                     "data": [
@@ -73,8 +82,27 @@ class ProviderCtlTests(unittest.TestCase):
         self.assertIn("gpt-5.6-sol", result.models)
         self.assertEqual(
             CatalogHandler.requests,
-            [("/models", "Bearer secret-value"), ("/v1/models", "Bearer secret-value")],
+            [
+                (
+                    f"/models?client_version={providerctl.CODEX_CLIENT_VERSION}",
+                    "Bearer secret-value",
+                    providerctl.DEFAULT_USER_AGENT,
+                    providerctl.CODEX_ORIGINATOR,
+                ),
+                (
+                    f"/v1/models?client_version={providerctl.CODEX_CLIENT_VERSION}",
+                    "Bearer secret-value",
+                    providerctl.DEFAULT_USER_AGENT,
+                    providerctl.CODEX_ORIGINATOR,
+                ),
+            ],
         )
+
+    def test_probe_reports_cloudflare_1010_as_edge_rejection_not_bad_key(self):
+        edge = {providerctl.EDGE_ERROR_KEY: "cloudflare_1010"}
+        with mock.patch.object(providerctl, "json_request", return_value=(403, edge)):
+            with self.assertRaisesRegex(providerctl.ProviderCtlError, "Cloudflare 1010"):
+                providerctl.probe_openai_models("https://example.test/v1", "secret-value")
 
     def test_gpt_filter_excludes_non_chat_surfaces(self):
         selected = providerctl.select_models(
@@ -89,6 +117,7 @@ class ProviderCtlTests(unittest.TestCase):
             provider_name="pqh",
             display_name="PQH",
             model="gpt-5.6-sol",
+            protocol=providerctl.PROTOCOL_CHAT_COMPLETIONS,
             commercial_type="METERED",
             supply_origin="COMMERCIAL_RELAY",
         )
@@ -96,10 +125,30 @@ class ProviderCtlTests(unittest.TestCase):
         self.assertEqual(payload["litellm_params"]["model"], "openai/gpt-5.6-sol")
         self.assertEqual(payload["litellm_params"]["litellm_credential_name"], "pqh")
         self.assertEqual(payload["litellm_params"]["order"], 40)
+        self.assertEqual(
+            payload["litellm_params"]["extra_headers"],
+            {
+                "User-Agent": providerctl.DEFAULT_USER_AGENT,
+                "Originator": providerctl.CODEX_ORIGINATOR,
+            },
+        )
         metadata = payload["model_info"]["metadata"]
         self.assertEqual(metadata["legacy_provider_key"], "pqh")
         self.assertEqual(metadata["commercial_type"], "METERED")
         self.assertEqual(metadata["supply_origin"], "COMMERCIAL_RELAY")
+
+    def test_responses_deployment_preserves_native_responses_api(self):
+        payload = providerctl.deployment_payload(
+            provider_name="modelflare",
+            display_name="Modelflare",
+            model="gpt-5.6-sol",
+            protocol=providerctl.PROTOCOL_RESPONSES,
+            commercial_type="METERED",
+            supply_origin="COMMERCIAL_RELAY",
+        )
+        self.assertNotIn("use_chat_completions_api", payload["litellm_params"])
+        self.assertIn("protocol:openai-responses", payload["litellm_params"]["tags"])
+        self.assertEqual(payload["model_info"]["metadata"]["protocol"], "openai-responses")
 
     def test_exact_model_requires_catalog_advertisement(self):
         with self.assertRaises(providerctl.ProviderCtlError):
