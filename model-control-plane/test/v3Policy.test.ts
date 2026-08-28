@@ -76,6 +76,16 @@ test('implementation defaults to managed workers while Business Codex remains an
   assert.equal(implement.transportMode, 'LITELLM_MANAGED');
   assert.equal(implement.modelClass, 'implementation-efficient');
   assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'dsh-acp');
+  const managedCodex = policy.select('IMPLEMENT', { backend: 'codex-acp' }, allAvailable);
+  assert.equal(managedCodex.backend, 'codex-acp');
+  assert.equal(managedCodex.modelClass, 'implementation-efficient');
+  assert.equal(managedCodex.transportMode, 'LITELLM_MANAGED');
+  assert.deepEqual(policy.backend('codex-acp')?.managed_model_overrides, {
+    'implementation-efficient': 'gpt-5.6-luna',
+  });
+  assert.deepEqual(policy.backend('codex-acp')?.managed_reasoning_effort_overrides, {
+    'implementation-efficient': 'xhigh',
+  });
   const businessPlanner = policy.select(
     'INVESTIGATE_PLAN',
     { backend: 'codex-business-planner-headless' },
@@ -103,7 +113,6 @@ test('implementation defaults to managed workers while Business Codex remains an
   assert.equal(batchReview.transportMode, 'PROVIDER_NATIVE');
   assert.equal(batchReview.workspaceMode, 'read_oriented');
 });
-
 
 test('implementation retry candidates rotate managed agents on the implementation-efficient model class', () => {
   const policy = DevelopmentPolicy.fromFile(policyFile);

@@ -474,6 +474,28 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
 
     await host.createExecution({
+      executionId: 'exec_codex_luna_1',
+      projectKey: 'pixel-agents',
+      phase: 'IMPLEMENT',
+      objective: 'Implement with managed Codex Luna.',
+      repositoryPath: '/workspace/executions/exec_codex_luna_1/repo',
+      selection: {
+        backend: 'codex-acp',
+        modelClass: 'implementation-efficient',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'isolated_write',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_codex_luna_1', phase: 'IMPLEMENT' },
+    });
+    const codexLunaBody = createBody as any;
+    assert.equal(codexLunaBody.agent.acp_model, 'gpt-5.6-luna');
+    const codexLunaConfig = JSON.parse(codexLunaBody.secrets.CODEX_CONFIG.value);
+    assert.equal(codexLunaConfig.model, 'gpt-5.6-luna');
+    assert.equal(codexLunaConfig.model_reasoning_effort, 'xhigh');
+
+    await host.createExecution({
       executionId: 'exec_claude_1',
       projectKey: 'pixel-agents',
       phase: 'VERIFY_REVIEW',

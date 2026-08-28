@@ -291,6 +291,12 @@ backends:
       - codex-acp
     acp_server: codex
     managed_model_prefix: ''
+    # IMPLEMENT remains one capability tier. Codex materializes that tier onto
+    # Luna/xhigh; DSH/OpenCode keep the gateway's DeepSeek -> GLM route.
+    managed_model_overrides:
+      implementation-efficient: gpt-5.6-luna
+    managed_reasoning_effort_overrides:
+      implementation-efficient: xhigh
     managed_env:
       CODEX_API_KEY: litellm_api_key
       CODEX_CONFIG: codex_config

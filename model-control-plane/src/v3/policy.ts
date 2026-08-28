@@ -36,6 +36,8 @@ export interface BackendPolicyConfig {
   acp_server?: string;
   default_model?: string;
   managed_model_prefix?: string;
+  managed_model_overrides?: Record<string, string>;
+  managed_reasoning_effort_overrides?: Record<string, string>;
   managed_env?: Record<string, ManagedEnvironmentSource>;
   static_env?: Record<string, string>;
   supports?: BackendSupportsConfig;
@@ -161,6 +163,24 @@ function validateConfig(raw: unknown): DevelopmentPolicyConfig {
         }
       }
     }
+    for (const field of [
+      'managed_model_overrides',
+      'managed_reasoning_effort_overrides',
+    ] as const) {
+      const overrides = rawBackend[field];
+      if (overrides != null) {
+        if (typeof overrides !== 'object' || Array.isArray(overrides)) {
+          throw new Error(`V3_POLICY_${field.toUpperCase()}_INVALID:${name}`);
+        }
+        if (
+          Object.entries(overrides as Record<string, unknown>).some(
+            ([key, value]) => !key.trim() || typeof value !== 'string' || !value.trim(),
+          )
+        ) {
+          throw new Error(`V3_POLICY_${field.toUpperCase()}_VALUE_INVALID:${name}`);
+        }
+      }
+    }
     const staticEnv = rawBackend.static_env;
     if (staticEnv != null) {
       if (typeof staticEnv !== 'object' || Array.isArray(staticEnv)) {
@@ -245,7 +265,8 @@ export class DevelopmentPolicy {
 
     return {
       backend: backendName,
-      modelClass: override.modelClass?.trim() || backend.default_model?.trim() || phasePolicy.model_class,
+      modelClass:
+        override.modelClass?.trim() || backend.default_model?.trim() || phasePolicy.model_class,
       transportMode,
       workspaceMode: phasePolicy.workspace_mode,
       sessionPolicy: phasePolicy.session_policy,

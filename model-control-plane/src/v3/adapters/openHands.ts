@@ -63,7 +63,9 @@ function executionFailure(value: unknown): ExecutionFailure | undefined {
   const failureText = `${code} ${detail}`;
   const retryable =
     /(?:ServiceUnavailable|RateLimit|Timeout|Connection|InternalServer)/i.test(failureText) ||
-    /(?:HTTP\s*429|HTTP\s*5\d\d|Error code:\s*(?:429|5\d\d)|No available channel)/i.test(failureText);
+    /(?:HTTP\s*429|HTTP\s*5\d\d|Error code:\s*(?:429|5\d\d)|No available channel)/i.test(
+      failureText,
+    );
   return { code, ...(detail ? { detail } : {}), retryable };
 }
 
@@ -203,6 +205,9 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
 
   #managedValue(source: ManagedEnvironmentSource, input: ExecutionHostCreateInput): string {
     const baseUrl = this.#secrets.read(this.#liteLlmBaseUrlName).replace(/\/$/, '');
+    const backend = this.#policy.backend(input.selection.backend);
+    const managedModel =
+      backend?.managed_model_overrides?.[input.selection.modelClass] ?? input.selection.modelClass;
     switch (source) {
       case 'litellm_api_key':
         return this.#secrets.read(this.#liteLlmKeyName);
@@ -211,12 +216,18 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       case 'litellm_base_url_v1':
         return baseUrl.endsWith('/v1') ? baseUrl : `${baseUrl}/v1`;
       case 'logical_model':
-        return input.selection.modelClass;
+        return managedModel;
       case 'execution_id':
         return input.executionId;
       case 'codex_config':
         return JSON.stringify({
-          model: input.selection.modelClass,
+          model: managedModel,
+          ...(backend?.managed_reasoning_effort_overrides?.[input.selection.modelClass]
+            ? {
+                model_reasoning_effort:
+                  backend.managed_reasoning_effort_overrides[input.selection.modelClass],
+              }
+            : {}),
           model_provider: 'hermes-litellm',
           // AI Office owns project-level delegation. Disable Codex's nested
           // multi-agent namespace so its Responses tool schema stays portable
@@ -311,7 +322,9 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
         // managed environment mapping.
         throw new Error('ACP_MANAGED_TRANSPORT_NOT_MATERIALIZED');
       }
-      config.acp_model = `${backend.managed_model_prefix ?? ''}${input.selection.modelClass}`;
+      const managedModel =
+        backend.managed_model_overrides?.[input.selection.modelClass] ?? input.selection.modelClass;
+      config.acp_model = `${backend.managed_model_prefix ?? ''}${managedModel}`;
     } else if (input.selection.transportMode === 'PROVIDER_NATIVE') {
       config.acp_model = input.selection.modelClass;
     }
