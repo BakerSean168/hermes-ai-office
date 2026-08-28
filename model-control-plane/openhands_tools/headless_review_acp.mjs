@@ -177,6 +177,26 @@ function optionalGit(cwd, args) {
   return result.stdout.trim();
 }
 
+function codexWorkerWritableArgs(session, harness) {
+  if (!IS_WORKER) return [];
+  const executionRoot = path.dirname(session.cwd);
+  const gitDir = path.resolve(git(session.cwd, ['rev-parse', '--absolute-git-dir']).trim());
+  const roots = [
+    gitDir,
+    harness.env.HOME,
+    harness.env.AGENT_HARNESS_STATE,
+    harness.env.AGENT_HARNESS_SHARE,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => path.resolve(value));
+  for (const root of roots) {
+    if (!isInside(root, executionRoot)) {
+      throw new Error(`HEADLESS_WORKER_WRITABLE_ROOT_NOT_ALLOWED:${root}`);
+    }
+  }
+  return [...new Set(roots)].flatMap((root) => ['--add-dir', root]);
+}
+
 function collectEvidence(cwd) {
   const sections = [];
   const implementationHead = git(cwd, ['rev-parse', 'HEAD']).trim();
@@ -484,6 +504,7 @@ function codexCommand(session, prompt, evidence) {
         '--ignore-rules',
         '--sandbox',
         'workspace-write',
+        ...codexWorkerWritableArgs(session, harness),
         '--model',
         session.model,
         '--json',
