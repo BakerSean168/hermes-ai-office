@@ -177,12 +177,12 @@ function optionalGit(cwd, args) {
   return result.stdout.trim();
 }
 
-function codexWorkerWritableArgs(session, harness) {
-  if (!IS_WORKER) return [];
+function codexWritableArgs(session, harness) {
   const executionRoot = path.dirname(session.cwd);
-  const gitDir = path.resolve(git(session.cwd, ['rev-parse', '--absolute-git-dir']).trim());
   const roots = [
-    gitDir,
+    ...(IS_WORKER
+      ? [path.resolve(git(session.cwd, ['rev-parse', '--absolute-git-dir']).trim())]
+      : []),
     harness.env.HOME,
     harness.env.AGENT_HARNESS_STATE,
     harness.env.AGENT_HARNESS_SHARE,
@@ -504,7 +504,8 @@ function codexCommand(session, prompt, evidence) {
         '--ignore-rules',
         '--sandbox',
         'workspace-write',
-        ...codexWorkerWritableArgs(session, harness),
+        ...codexWritableArgs(session, harness),
+        ...(native ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
         '--model',
         session.model,
         '--json',
@@ -529,6 +530,8 @@ function codexCommand(session, prompt, evidence) {
       '--ignore-rules',
       '--sandbox',
       'workspace-write',
+      ...codexWritableArgs(session, harness),
+      ...(native ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
       '--model',
       session.model,
       '--output-schema',

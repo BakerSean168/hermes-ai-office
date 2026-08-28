@@ -160,10 +160,11 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.match(adapter, /'--sandbox',\s*'workspace-write'/);
   assert.match(adapter, /rev-parse', '--absolute-git-dir'/);
   assert.match(adapter, /HEADLESS_WORKER_WRITABLE_ROOT_NOT_ALLOWED/);
-  assert.match(adapter, /\.\.\.codexWorkerWritableArgs\(session, harness\)/);
+  assert.match(adapter, /\.\.\.codexWritableArgs\(session, harness\)/);
   assert.match(adapter, /harness\.env\.HOME/);
   assert.match(adapter, /harness\.env\.AGENT_HARNESS_STATE/);
   assert.match(adapter, /harness\.env\.AGENT_HARNESS_SHARE/);
+  assert.equal(adapter.match(/sandbox_workspace_write\.network_access=true/g)?.length, 2);
   assert.match(adapter, /refs\/ai-office\/review-base..HEAD/);
   assert.match(adapter, /reviewer completed without independent repository command activity/);
   assert.match(adapter, /item\?\.type === 'command_execution'/);
