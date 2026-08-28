@@ -119,6 +119,8 @@ test('OpenHands coding workers launch through Agent Harness capability materiali
   assert.match(launcher, /prepare_root codex/);
   assert.match(launcher, /prepare_root claude/);
   assert.match(launcher, /prepare_root dsh/);
+  assert.match(launcher, /if \[\[ ! -d "\$DSH_HOME\/profiles\/acp" \]\]/);
+  assert.match(launcher, /plugin --profile acp add \/openhands-state\/tooling\/node_modules\/dsh-acp-server/);
   assert.match(launcher, /unset OPENCODE_CONFIG/);
   assert.match(launcher, /AGENT_HARNESS_STATE/);
   assert.match(tooling, /@colbymchenry\/codegraph@\$CODEGRAPH_VERSION/);
