@@ -57,11 +57,34 @@ def detect_codex_version() -> str:
         pass
     return CODEX_VERSION_FALLBACK
 
+def codex_platform_label() -> str:
+    arch = platform.machine() or "unknown"
+    try:
+        release = platform.freedesktop_os_release()
+        name = str(release.get("NAME") or "").strip()
+        version_id = str(release.get("VERSION_ID") or "").strip()
+        if name and version_id:
+            parts = []
+            for raw in version_id.split("."):
+                try:
+                    parts.append(str(int(raw)))
+                except ValueError:
+                    parts.append(raw)
+            while len(parts) < 3:
+                parts.append("0")
+            return f"{name} {'.'.join(parts[:3])}; {arch}"
+    except (AttributeError, OSError):
+        pass
+    system = platform.system() or "unknown"
+    return f"{system}; {arch}"
+
+
 def codex_user_agent(version: str | None = None) -> str:
     version = version or detect_codex_version()
-    arch = platform.machine() or "unknown"
-    system = platform.system() or "unknown"
-    return f"codex_exec/{version} ({system}; {arch}) unknown (codex_exec; {version})"
+    return (
+        f"codex_exec/{version} ({codex_platform_label()}) "
+        f"unknown (codex_exec; {version})"
+    )
 
 CODEX_CLIENT_VERSION = detect_codex_version()
 DEFAULT_USER_AGENT = os.environ.get(
@@ -327,6 +350,11 @@ class LiteLlmAdmin:
             raise ProviderCtlError("LiteLLM returned an unexpected model registry payload")
         return [row for row in rows if isinstance(row, dict)]
 
+    def patch_deployment(self, model_id: str, body: dict[str, Any]) -> Any:
+        if not model_id:
+            raise ProviderCtlError("cannot reconcile deployment without model_info.id")
+        return self.request("PATCH", f"/model/{urllib.parse.quote(model_id, safe='')}/update", body)
+
 
 def credential_base_matches(row: dict[str, Any], name: str, base_url: str) -> bool:
     if row.get("credential_name") != name:
@@ -345,6 +373,45 @@ def deployment_key(row: dict[str, Any]) -> tuple[str, str, str]:
         str(params.get("litellm_credential_name") or ""),
         str(metadata.get("legacy_provider_key") or ""),
     )
+
+
+def find_existing_deployment(
+    rows: Iterable[dict[str, Any]],
+    *,
+    model: str,
+    provider_name: str,
+) -> dict[str, Any] | None:
+    exact: dict[str, Any] | None = None
+    fallback: dict[str, Any] | None = None
+    for row in rows:
+        group, credential, provider = deployment_key(row)
+        if group != model or credential != provider_name:
+            continue
+        if provider == provider_name:
+            exact = row
+            break
+        if fallback is None:
+            fallback = row
+    return exact or fallback
+
+
+def deployment_reconcile_patch(row: dict[str, Any], *, protocol: str) -> dict[str, Any]:
+    params = row.get("litellm_params") if isinstance(row.get("litellm_params"), dict) else {}
+    desired_headers = {
+        "User-Agent": DEFAULT_USER_AGENT,
+        "Originator": CODEX_ORIGINATOR,
+    }
+    updates: dict[str, Any] = {}
+    if params.get("extra_headers") != desired_headers:
+        updates["extra_headers"] = desired_headers
+    if protocol == PROTOCOL_CHAT_COMPLETIONS:
+        if params.get("use_chat_completions_api") is not True:
+            updates["use_chat_completions_api"] = True
+    elif params.get("use_chat_completions_api") is True:
+        # False preserves native Responses routing; PATCH cannot remove an
+        # arbitrary field with null because LiteLLM excludes nulls from updates.
+        updates["use_chat_completions_api"] = False
+    return {"litellm_params": updates} if updates else {}
 
 
 def create_credential(
@@ -499,19 +566,22 @@ def run_import(args: argparse.Namespace) -> None:
         print("credential=created")
 
     deployments = admin.deployments()
-    existing = {deployment_key(row) for row in deployments}
     created = 0
     reused = 0
+    reconciled = 0
     for model in models:
-        key = (model, args.name, args.name)
-        # Backward-compatible duplicate check: a deployment may predate
-        # legacy_provider_key but still use the same credential/model group.
-        already = key in existing or any(
-            group == model and credential == args.name
-            for group, credential, _provider in existing
+        current = find_existing_deployment(
+            deployments, model=model, provider_name=args.name
         )
-        if already:
-            reused += 1
+        if current is not None:
+            patch = deployment_reconcile_patch(current, protocol=protocol)
+            if patch:
+                info = current.get("model_info") if isinstance(current.get("model_info"), dict) else {}
+                model_id = str(info.get("id") or "")
+                admin.patch_deployment(model_id, patch)
+                reconciled += 1
+            else:
+                reused += 1
             continue
         admin.request(
             "POST",
@@ -526,7 +596,10 @@ def run_import(args: argparse.Namespace) -> None:
             ),
         )
         created += 1
-    print(f"deployments_created={created} deployments_reused={reused}")
+    print(
+        f"deployments_created={created} deployments_reused={reused} "
+        f"deployments_reconciled={reconciled}"
+    )
     print("import=complete")
 
 

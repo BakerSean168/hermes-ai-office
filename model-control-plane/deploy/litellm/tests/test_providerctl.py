@@ -98,6 +98,17 @@ class ProviderCtlTests(unittest.TestCase):
             ],
         )
 
+    def test_codex_user_agent_matches_captured_shape(self):
+        with mock.patch.object(
+            providerctl.platform,
+            "freedesktop_os_release",
+            return_value={"NAME": "Ubuntu", "VERSION_ID": "24.04"},
+        ), mock.patch.object(providerctl.platform, "machine", return_value="aarch64"):
+            self.assertEqual(
+                providerctl.codex_user_agent("0.149.1"),
+                "codex_exec/0.149.1 (Ubuntu 24.4.0; aarch64) unknown (codex_exec; 0.149.1)",
+            )
+
     def test_probe_reports_cloudflare_1010_as_edge_rejection_not_bad_key(self):
         edge = {providerctl.EDGE_ERROR_KEY: "cloudflare_1010"}
         with mock.patch.object(providerctl, "json_request", return_value=(403, edge)):
@@ -149,6 +160,51 @@ class ProviderCtlTests(unittest.TestCase):
         self.assertNotIn("use_chat_completions_api", payload["litellm_params"])
         self.assertIn("protocol:openai-responses", payload["litellm_params"]["tags"])
         self.assertEqual(payload["model_info"]["metadata"]["protocol"], "openai-responses")
+
+
+    def test_reconcile_patch_adds_codex_headers_without_replacing_other_params(self):
+        row = {
+            "model_name": "gpt-5.6-sol",
+            "litellm_params": {
+                "model": "openai/gpt-5.6-sol",
+                "litellm_credential_name": "modelflare",
+                "timeout": 120.0,
+            },
+            "model_info": {"id": "deployment-1"},
+        }
+        patch = providerctl.deployment_reconcile_patch(
+            row, protocol=providerctl.PROTOCOL_RESPONSES
+        )
+        self.assertEqual(
+            patch,
+            {
+                "litellm_params": {
+                    "extra_headers": {
+                        "User-Agent": providerctl.DEFAULT_USER_AGENT,
+                        "Originator": providerctl.CODEX_ORIGINATOR,
+                    }
+                }
+            },
+        )
+        self.assertNotIn("model", patch["litellm_params"])
+        self.assertNotIn("litellm_credential_name", patch["litellm_params"])
+
+    def test_reconcile_responses_disables_old_chat_bridge(self):
+        row = {
+            "litellm_params": {
+                "extra_headers": {
+                    "User-Agent": providerctl.DEFAULT_USER_AGENT,
+                    "Originator": providerctl.CODEX_ORIGINATOR,
+                },
+                "use_chat_completions_api": True,
+            }
+        }
+        patch = providerctl.deployment_reconcile_patch(
+            row, protocol=providerctl.PROTOCOL_RESPONSES
+        )
+        self.assertEqual(
+            patch["litellm_params"]["use_chat_completions_api"], False
+        )
 
     def test_exact_model_requires_catalog_advertisement(self):
         with self.assertRaises(providerctl.ProviderCtlError):
