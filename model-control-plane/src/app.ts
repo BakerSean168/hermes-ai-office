@@ -37,6 +37,7 @@ import { PLAN_RECONCILE_INTERVAL_MS } from './v3/planConstants.js';
 import { loadV3ReadinessEvidence } from './v3/readiness.js';
 import { DevelopmentExecutionService, UnconfiguredObservability } from './v3/service.js';
 import { WorkspaceProvisioner, type WorkspaceProvisioningPort } from './v3/workspace.js';
+import { ExecutionWorkspaceRetention } from './v3/workspaceRetention.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -190,10 +191,12 @@ export async function buildControlPlane(
     ]),
   );
 
+  const links = new ExecutionLinkRepository(db);
+  const plans = new PlanRepository(db);
   const v3 = new DevelopmentExecutionService({
     policy,
-    links: new ExecutionLinkRepository(db),
-    plans: new PlanRepository(db),
+    links,
+    plans,
     delivery: options.v3Delivery ?? new GitHubPlanDelivery({ home: env.MODEL_CP_V3_DELIVERY_HOME }),
     pullRequestRepairPublisher:
       options.v3PullRequestRepairPublisher ??
@@ -252,6 +255,40 @@ export async function buildControlPlane(
   );
   reconcileInterval.unref();
 
+  const workspaceRetention = new ExecutionWorkspaceRetention({
+    links,
+    plans,
+    workspace,
+    standaloneSuccessTtlMs: Number(
+      env.MODEL_CP_V3_WORKSPACE_SUCCESS_TTL_MS ?? 6 * 60 * 60_000,
+    ),
+    standaloneFailureTtlMs: Number(
+      env.MODEL_CP_V3_WORKSPACE_FAILURE_TTL_MS ?? 60 * 60_000,
+    ),
+    terminalPlanTtlMs: Number(
+      env.MODEL_CP_V3_WORKSPACE_TERMINAL_PLAN_TTL_MS ?? 60 * 60_000,
+    ),
+    recoverablePlanArtifactTtlMs: Number(
+      env.MODEL_CP_V3_WORKSPACE_RECOVERABLE_ARTIFACT_TTL_MS ?? 60 * 60_000,
+    ),
+  });
+  const collectWorkspaces = () =>
+    void workspaceRetention
+      .collect()
+      .then((summary) => {
+        if (summary.deleted || summary.pruned) {
+          app.log.info(summary, 'V3 execution workspace retention completed');
+        }
+      })
+      .catch((error) => app.log.error(error, 'V3 execution workspace retention failed'));
+  const workspaceRetentionStartup = setTimeout(collectWorkspaces, 5_000);
+  workspaceRetentionStartup.unref();
+  const workspaceRetentionInterval = setInterval(
+    collectWorkspaces,
+    Math.max(60_000, Number(env.MODEL_CP_V3_WORKSPACE_GC_INTERVAL_MS ?? 15 * 60_000)),
+  );
+  workspaceRetentionInterval.unref();
+
   app.get('/api/health', async () => ({
     status: 'ok',
     service: 'hermes-model-control-plane',
@@ -263,6 +300,8 @@ export async function buildControlPlane(
 
   app.addHook('onClose', async () => {
     clearInterval(reconcileInterval);
+    clearTimeout(workspaceRetentionStartup);
+    clearInterval(workspaceRetentionInterval);
     db.close();
   });
 

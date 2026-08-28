@@ -76,6 +76,8 @@ export interface WorkspaceProvisioningPort {
     workspaceMode: WorkspaceMode;
     reviewBaseRevision?: string;
   }): Promise<ProvisionedWorkspace>;
+  pruneExecutionArtifacts?(input: { executionId: string; workspaceRef: string }): Promise<boolean>;
+  removeExecutionWorkspace?(executionId: string): Promise<boolean>;
   integrateBatch(input: {
     planId: string;
     batchKey: string;
@@ -393,6 +395,38 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
     });
     return { hostPath, executionPath, sourceRevision: resolvedRevision };
+  }
+
+  async pruneExecutionArtifacts(input: {
+    executionId: string;
+    workspaceRef: string;
+  }): Promise<boolean> {
+    const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
+    if (!fs.existsSync(hostPath)) return false;
+    const gitDirectory = path.join(hostPath, '.git');
+    if (!fs.existsSync(gitDirectory)) return false;
+    await execFileAsync(
+      'git',
+      ['-c', `safe.directory=${hostPath}`, '-C', hostPath, 'clean', '-ffdX'],
+      {
+        encoding: 'utf8',
+        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+      },
+    );
+    return true;
+  }
+
+  async removeExecutionWorkspace(executionId: string): Promise<boolean> {
+    const hostPath = this.hostPathForExecution(executionId);
+    const executionDirectory = path.dirname(hostPath);
+    const executionsRoot = path.join(this.#hostRoot, 'executions');
+    if (!inside(executionDirectory, executionsRoot)) {
+      throw new Error('V3_EXECUTION_WORKSPACE_NOT_ALLOWED');
+    }
+    if (!fs.existsSync(executionDirectory)) return false;
+    fs.rmSync(executionDirectory, { recursive: true, force: true });
+    return true;
   }
 
   async integrateBatch(input: {

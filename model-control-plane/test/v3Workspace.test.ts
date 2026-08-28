@@ -514,3 +514,56 @@ test('external handoff verification accepts only the exact committed descendant 
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('workspace retention pruning removes only ignored artifacts and can release the execution directory', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-retention-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, '.gitignore'), 'node_modules/\n.cache/\n');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'retention-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.mkdirSync(path.join(implementation.hostPath, 'node_modules', 'pkg'), { recursive: true });
+    fs.writeFileSync(path.join(implementation.hostPath, 'node_modules', 'pkg', 'index.js'), 'cache\n');
+    fs.mkdirSync(path.join(implementation.hostPath, '.cache'), { recursive: true });
+    fs.writeFileSync(path.join(implementation.hostPath, '.cache', 'state'), 'cache\n');
+    fs.writeFileSync(path.join(implementation.hostPath, 'untracked.txt'), 'preserve me\n');
+
+    assert.equal(
+      await provisioner.pruneExecutionArtifacts({
+        executionId: 'retention-1',
+        workspaceRef: implementation.executionPath,
+      }),
+      true,
+    );
+    assert.equal(fs.existsSync(path.join(implementation.hostPath, 'node_modules')), false);
+    assert.equal(fs.existsSync(path.join(implementation.hostPath, '.cache')), false);
+    assert.equal(fs.readFileSync(path.join(implementation.hostPath, 'untracked.txt'), 'utf8'), 'preserve me\n');
+    assert.equal(fs.readFileSync(path.join(implementation.hostPath, 'tracked.txt'), 'utf8'), 'base\n');
+
+    assert.equal(await provisioner.removeExecutionWorkspace('retention-1'), true);
+    assert.equal(fs.existsSync(path.dirname(implementation.hostPath)), false);
+    assert.equal(await provisioner.removeExecutionWorkspace('retention-1'), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
