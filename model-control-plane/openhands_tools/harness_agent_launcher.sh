@@ -8,15 +8,21 @@ if [[ -z "$mode" ]]; then
 fi
 shift
 
-case "$PWD" in
-  /workspace/executions/*/repo) ;;
-  *)
-    echo "agent-harness launch requires an isolated /workspace/executions/<id>/repo workspace" >&2
+execution_id="${HERMES_V3_EXECUTION_ID:-}"
+case "$execution_id" in
+  ""|*[!a-zA-Z0-9._-]*)
+    echo "agent-harness launch requires a valid HERMES_V3_EXECUTION_ID" >&2
     exit 2
     ;;
 esac
 
-execution_root="$(dirname -- "$PWD")"
+workspace_repo="/workspace/executions/$execution_id/repo"
+if [[ ! -d "$workspace_repo" ]]; then
+  echo "agent-harness execution workspace is missing: $workspace_repo" >&2
+  exit 2
+fi
+cd -- "$workspace_repo"
+execution_root="$(dirname -- "$workspace_repo")"
 harness_home="$execution_root/.agent-harness/home"
 harness_state="$execution_root/.agent-harness/state"
 harness_share="$execution_root/.agent-harness/share"
