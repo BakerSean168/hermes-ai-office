@@ -250,6 +250,39 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     });
 
     await host.createExecution({
+      executionId: 'exec_codex_business_planner_1',
+      projectKey: 'pixel-agents',
+      phase: 'INVESTIGATE_PLAN',
+      objective: 'Plan with authenticated Business Codex.',
+      repositoryPath: '/workspace/executions/exec_codex_business_planner_1/repo',
+      selection: {
+        backend: 'codex-business-planner-headless',
+        modelClass: 'gpt-5.6-sol',
+        transportMode: 'PROVIDER_NATIVE',
+        workspaceMode: 'read_oriented',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+      correlationMetadata: {
+        execution_id: 'exec_codex_business_planner_1',
+        phase: 'INVESTIGATE_PLAN',
+      },
+    });
+    const codexBusinessPlannerBody = createBody as any;
+    assert.equal(codexBusinessPlannerBody.agent.acp_server, 'custom');
+    assert.equal(codexBusinessPlannerBody.agent.acp_model, 'gpt-5.6-sol');
+    assert.equal(codexBusinessPlannerBody.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'planner');
+    assert.equal(codexBusinessPlannerBody.secrets.AI_OFFICE_HEADLESS_MODEL.value, 'gpt-5.6-sol');
+    assert.equal(
+      codexBusinessPlannerBody.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value,
+      'medium',
+    );
+    assert.equal(
+      codexBusinessPlannerBody.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value,
+      'provider-native',
+    );
+
+    await host.createExecution({
       executionId: 'exec_codex_business_headless_1',
       projectKey: 'pixel-agents',
       phase: 'VERIFY_REVIEW',

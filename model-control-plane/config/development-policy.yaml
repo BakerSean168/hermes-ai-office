@@ -8,21 +8,25 @@ phases:
   ORCHESTRATE:
     backend_candidates:
       - openhands-builtin
+      - codex-business-planner-headless
     model_class: planning-premium
     transport_preference:
       - LITELLM_MANAGED
+      - PROVIDER_NATIVE
     workspace_mode: read_oriented
     session_policy: fresh
 
   INVESTIGATE_PLAN:
     backend_candidates:
       - openhands-builtin
+      - codex-business-planner-headless
       - codex-acp
       - claude-code-acp
       - opencode-acp
     model_class: planning-premium
     transport_preference:
       - LITELLM_MANAGED
+      - PROVIDER_NATIVE
     workspace_mode: read_oriented
     session_policy: fresh
 
@@ -156,6 +160,33 @@ backends:
     supports:
       litellm_managed: true
       write: true
+
+  # Business Team planning is opt-in. Default orchestration remains on the managed
+  # supervisor so an exhausted Business workspace cannot block durable plan creation.
+  # When explicitly selected, planning uses Sol at medium reasoning effort.
+  codex-business-planner-headless:
+    kind: acp
+    enabled: true
+    command:
+      - /usr/local/bin/node
+      - /opt/hermes-ai-office-tools/headless_review_acp.mjs
+    acp_server: custom
+    default_model: gpt-5.6-sol
+    static_env:
+      AI_OFFICE_HEADLESS_DRIVER: codex
+      AI_OFFICE_HEADLESS_ROLE: planner
+      AI_OFFICE_HEADLESS_TRANSPORT: provider-native
+      AI_OFFICE_HEADLESS_MODEL: gpt-5.6-sol
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: medium
+      AI_OFFICE_CODEX_AUTH_HOME: /openhands-state/codex-business
+      AI_OFFICE_CODEX_BIN: /openhands-state/tooling/node_modules/.bin/codex
+      AI_OFFICE_WORKSPACE_ROOT: /workspace
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: '1200'
+    supports:
+      litellm_managed: false
+      provider_native: true
+      write: false
+      untrusted_external: false
 
   # Business Team implementation is deliberately opt-in rather than part of the
   # automatic managed-worker ladder. When explicitly selected, use Luna at the

@@ -164,7 +164,7 @@ test('headless reviewers stream frozen evidence over stdin instead of process ar
   assert.match(adapter, /harness\.env\.HOME/);
   assert.match(adapter, /harness\.env\.AGENT_HARNESS_STATE/);
   assert.match(adapter, /harness\.env\.AGENT_HARNESS_SHARE/);
-  assert.equal(adapter.match(/sandbox_workspace_write\.network_access=true/g)?.length, 2);
+  assert.equal(adapter.match(/sandbox_workspace_write\.network_access=true/g)?.length, 3);
   assert.match(adapter, /refs\/ai-office\/review-base..HEAD/);
   assert.match(adapter, /reviewer completed without independent repository command activity/);
   assert.match(adapter, /item\?\.type === 'command_execution'/);
@@ -178,8 +178,21 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
     path.join(root, 'openhands_tools/headless_review_acp.mjs'),
     'utf8',
   );
+  const planner = policy.backends['codex-business-planner-headless'];
   const backend = policy.backends['codex-business-review-headless'];
   const worker = policy.backends['codex-business-worker-headless'];
+
+  assert.equal(planner.kind, 'acp');
+  assert.equal(planner.default_model, 'gpt-5.6-sol');
+  assert.equal(planner.supports.provider_native, true);
+  assert.equal(planner.supports.write, false);
+  assert.equal(planner.supports.untrusted_external, false);
+  assert.equal(planner.static_env.AI_OFFICE_HEADLESS_ROLE, 'planner');
+  assert.equal(planner.static_env.AI_OFFICE_HEADLESS_MODEL, 'gpt-5.6-sol');
+  assert.equal(planner.static_env.AI_OFFICE_HEADLESS_REASONING_EFFORT, 'medium');
+  assert.equal(policy.phases.ORCHESTRATE.backend_candidates[0], 'openhands-builtin');
+  assert.ok(policy.phases.ORCHESTRATE.backend_candidates.includes('codex-business-planner-headless'));
+  assert.ok(policy.phases.INVESTIGATE_PLAN.backend_candidates.includes('codex-business-planner-headless'));
 
   assert.equal(worker.kind, 'acp');
   assert.equal(worker.default_model, 'gpt-5.6-luna');
@@ -204,6 +217,8 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.equal(policy.phases.BATCH_VERIFY.backend_candidates[0], 'codex-business-review-headless');
   assert.match(adapter, /HEADLESS_TRANSPORT === 'provider-native'/);
   assert.match(adapter, /AI_OFFICE_HEADLESS_REASONING_EFFORT/);
+  assert.match(adapter, /HEADLESS_ROLE === 'planner'/);
+  assert.match(adapter, /PLAN_TRANSPORT_ERROR/);
   assert.match(adapter, /model_reasoning_effort=\$\{JSON\.stringify\(HEADLESS_REASONING_EFFORT\)\}/);
   assert.match(adapter, /HEADLESS_REVIEW_CODEX_AUTH_MISSING/);
   assert.match(adapter, /delete env\.CODEX_API_KEY/);

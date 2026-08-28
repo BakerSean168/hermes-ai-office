@@ -13,6 +13,7 @@ const allAvailable = {
   'antigravity-worker': true,
   'openhands-builtin': true,
   'opencode-acp': true,
+  'codex-business-planner-headless': true,
   'codex-business-worker-headless': true,
   'codex-business-review-headless': true,
   'codex-review-headless': true,
@@ -47,6 +48,7 @@ test('development policy keeps managed implementation routes and provider-native
     'claude-code-acp',
     'claude-code-review-headless',
     'codex-acp',
+    'codex-business-planner-headless',
     'codex-business-review-headless',
     'codex-business-worker-headless',
     'codex-review-headless',
@@ -74,6 +76,15 @@ test('implementation defaults to managed workers while Business Codex remains an
   assert.equal(implement.transportMode, 'LITELLM_MANAGED');
   assert.equal(implement.modelClass, 'implementation-efficient');
   assert.equal(policy.select('IMPLEMENT_FIX', {}, allAvailable).backend, 'dsh-acp');
+  const businessPlanner = policy.select(
+    'INVESTIGATE_PLAN',
+    { backend: 'codex-business-planner-headless' },
+    allAvailable,
+  );
+  assert.equal(businessPlanner.backend, 'codex-business-planner-headless');
+  assert.equal(businessPlanner.transportMode, 'PROVIDER_NATIVE');
+  assert.equal(businessPlanner.modelClass, 'gpt-5.6-sol');
+  assert.equal(businessPlanner.workspaceMode, 'read_oriented');
   const business = policy.select(
     'IMPLEMENT',
     { backend: 'codex-business-worker-headless' },

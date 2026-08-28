@@ -13,6 +13,7 @@ const LITELLM_API_KEY = process.env.AI_OFFICE_LITELLM_API_KEY ?? '';
 const HEADLESS_TRANSPORT = process.env.AI_OFFICE_HEADLESS_TRANSPORT ?? 'litellm-managed';
 const HEADLESS_ROLE = process.env.AI_OFFICE_HEADLESS_ROLE ?? 'review';
 const IS_WORKER = HEADLESS_ROLE === 'worker';
+const IS_PLANNER = HEADLESS_ROLE === 'planner';
 const HEADLESS_REASONING_EFFORT =
   process.env.AI_OFFICE_HEADLESS_REASONING_EFFORT ?? (IS_WORKER ? 'xhigh' : 'medium');
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
@@ -522,6 +523,32 @@ function codexCommand(session, prompt, evidence) {
     };
   }
 
+  if (IS_PLANNER) {
+    const plannerPrompt = `${prompt}\n\nYou are the planning worker. Inspect the repository and its project instructions independently before producing the requested plan or investigation result. Do not modify repository files. Use terminal/MCP inspection to ground the result in current code and contracts. Return the requested planning artifact directly without adding a review verdict.`;
+    return {
+      command: CODEX_BIN,
+      args: [
+        'exec',
+        '--ephemeral',
+        '--ignore-rules',
+        '--sandbox',
+        'workspace-write',
+        ...codexWritableArgs(session, harness),
+        ...(native ? ['-c', 'sandbox_workspace_write.network_access=true'] : []),
+        '-c',
+        `model_reasoning_effort=${JSON.stringify(HEADLESS_REASONING_EFFORT)}`,
+        '--model',
+        session.model,
+        '--json',
+        '-',
+      ],
+      input: plannerPrompt,
+      env,
+      parse: parseCodexWorkerResult,
+      hasIndependentActivity: codexIndependentActivity,
+    };
+  }
+
   const schemaPath = path.join(sessionDir, 'review-schema.json');
   fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
@@ -737,7 +764,9 @@ class HeadlessReviewAgent {
         ? HEADLESS_TRANSPORT === 'provider-native'
           ? IS_WORKER
             ? 'Codex Business implementation'
-            : 'Codex Business review'
+            : IS_PLANNER
+              ? 'Codex Business planning'
+              : 'Codex Business review'
           : 'Codex managed review'
         : 'Claude Code managed review';
     await cx.notify(acp.methods.client.session.update, {
@@ -754,7 +783,7 @@ class HeadlessReviewAgent {
 
     let heartbeat;
     try {
-      const evidence = IS_WORKER ? '' : collectEvidence(session.cwd);
+      const evidence = IS_WORKER || IS_PLANNER ? '' : collectEvidence(session.cwd);
       const spec = buildCommand(session, prompt, evidence);
       heartbeat = setInterval(() => {
         void cx
@@ -764,7 +793,7 @@ class HeadlessReviewAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: 'in_progress',
-              rawOutput: { state: IS_WORKER ? 'implementing' : 'reviewing' },
+              rawOutput: { state: IS_WORKER ? 'implementing' : IS_PLANNER ? 'planning' : 'reviewing' },
             },
           })
           .catch(() => {});
@@ -802,7 +831,7 @@ class HeadlessReviewAgent {
             sessionUpdate: 'agent_message_chunk',
             content: {
               type: 'text',
-              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}${detail ? `\n${detail}` : ''}`,
+              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : IS_PLANNER ? 'PLAN_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}${detail ? `\n${detail}` : ''}`,
             },
           },
         });
@@ -815,7 +844,9 @@ class HeadlessReviewAgent {
       ) {
         const reason = IS_WORKER
           ? 'worker completed without repository command or file-change activity'
-          : 'reviewer completed without independent repository command activity';
+          : IS_PLANNER
+            ? 'planner completed without independent repository command activity'
+            : 'reviewer completed without independent repository command activity';
         await cx.notify(acp.methods.client.session.update, {
           sessionId: session.id,
           update: {
@@ -831,14 +862,14 @@ class HeadlessReviewAgent {
             sessionUpdate: 'agent_message_chunk',
             content: {
               type: 'text',
-              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}`,
+              text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : IS_PLANNER ? 'PLAN_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${reason}`,
             },
           },
         });
         return { stopReason: 'end_turn' };
       }
 
-      const canonical = IS_WORKER
+      const canonical = IS_WORKER || IS_PLANNER
         ? String(spec.parse(result.stdout)).trim()
         : canonicalReview(spec.parse(result.stdout));
       await cx.notify(acp.methods.client.session.update, {
@@ -875,7 +906,7 @@ class HeadlessReviewAgent {
           sessionUpdate: 'agent_message_chunk',
           content: {
             type: 'text',
-            text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${detail}`,
+            text: `${IS_WORKER ? 'IMPLEMENT_TRANSPORT_ERROR' : IS_PLANNER ? 'PLAN_TRANSPORT_ERROR' : 'REVIEW_TRANSPORT_ERROR'}\n${detail}`,
           },
         },
       });
@@ -904,7 +935,7 @@ const output = Readable.toWeb(process.stdin);
 const stream = acp.ndJsonStream(input, output);
 const agent = new HeadlessReviewAgent();
 acp
-  .agent({ name: `ai-office-${DRIVER || 'headless'}-${IS_WORKER ? 'worker' : 'review'}` })
+  .agent({ name: `ai-office-${DRIVER || 'headless'}-${IS_WORKER ? 'worker' : IS_PLANNER ? 'planner' : 'review'}` })
   .onRequest('initialize', (ctx) => agent.initialize(ctx.params))
   .onRequest('session/new', (ctx) => agent.newSession(ctx.params))
   .onRequest('authenticate', () => ({}))
