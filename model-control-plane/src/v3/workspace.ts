@@ -120,10 +120,23 @@ async function prepareSharedObjectAccess(
   executionOwner: UnixIdentity,
 ): Promise<boolean> {
   const commonGitDirValue = await git(repoRoot, ['rev-parse', '--git-common-dir'], sourceOwner);
-  const commonGitDir = path.resolve(repoRoot, commonGitDirValue);
-  const objectDirectory = path.join(commonGitDir, 'objects');
-  if (!inside(objectDirectory, commonGitDir) || !fs.statSync(objectDirectory).isDirectory()) {
-    throw new Error('V3_REPOSITORY_OBJECT_DIRECTORY_INVALID');
+  const repoBoundary = fs.realpathSync(repoRoot);
+  const commonGitDirCandidate = path.resolve(repoRoot, commonGitDirValue);
+  const commonGitDir = fs.realpathSync(commonGitDirCandidate);
+
+  // A linked worktree or redirected .git file can place the common Git directory outside the
+  // validated repository root. Never normalize permissions on that external repository. Such
+  // sources still work, but use a physically private clone instead of hardlinked objects.
+  if (!inside(commonGitDir, repoBoundary)) return false;
+
+  const objectDirectoryCandidate = path.join(commonGitDir, 'objects');
+  const objectDirectory = fs.realpathSync(objectDirectoryCandidate);
+  if (
+    !inside(objectDirectory, commonGitDir) ||
+    !inside(objectDirectory, repoBoundary) ||
+    !fs.statSync(objectDirectory).isDirectory()
+  ) {
+    return false;
   }
 
   // Never hardlink a canonical object inode that the execution identity already owns: file

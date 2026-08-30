@@ -191,6 +191,67 @@ test('execution permission normalization never follows repository symlinks outsi
   }
 });
 
+test('execution provisioning does not normalize an external common Git directory', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-external-gitdir-'));
+  const canonical = path.join(root, 'canonical');
+  const linked = path.join(root, 'linked');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(canonical, { recursive: true });
+  git(canonical, 'init');
+  git(canonical, 'config', 'user.email', 'v3-test@example.invalid');
+  git(canonical, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(canonical, 'tracked.txt'), 'base\n');
+  git(canonical, 'add', '.');
+  git(canonical, 'commit', '-m', 'base');
+  git(canonical, 'gc', '--prune=now');
+  git(canonical, 'worktree', 'add', '-b', 'linked-test', linked, 'HEAD');
+  const base = git(linked, 'rev-parse', 'HEAD');
+  const canonicalConfig = path.join(canonical, '.git', 'config');
+  const beforeConfig = fs.readFileSync(canonicalConfig, 'utf8');
+  const sourcePack = fs
+    .readdirSync(path.join(canonical, '.git', 'objects', 'pack'))
+    .find((entry) => entry.endsWith('.pack'));
+  assert.ok(sourcePack);
+  const sourcePackPath = path.join(canonical, '.git', 'objects', 'pack', sourcePack);
+  const beforePack = fs.statSync(sourcePackPath);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+    executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'external-gitdir-1',
+      repositoryPath: linked,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const workspacePackPath = path.join(
+      implementation.hostPath,
+      '.git',
+      'objects',
+      'pack',
+      sourcePack,
+    );
+    const workspacePack = fs.statSync(workspacePackPath);
+    const afterPack = fs.statSync(sourcePackPath);
+
+    assert.notEqual(workspacePack.ino, beforePack.ino);
+    assert.equal(fs.readFileSync(canonicalConfig, 'utf8'), beforeConfig);
+    assert.equal(afterPack.uid, beforePack.uid);
+    assert.equal(afterPack.gid, beforePack.gid);
+    assert.equal(afterPack.mode & 0o777, beforePack.mode & 0o777);
+  } finally {
+    try {
+      git(canonical, 'worktree', 'remove', '--force', linked);
+    } catch {}
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('execution provisioning falls back to private objects when the execution identity owns the source', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-private-object-fallback-'));
   const source = path.join(root, 'source');

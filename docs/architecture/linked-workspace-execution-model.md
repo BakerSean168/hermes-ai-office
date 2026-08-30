@@ -44,8 +44,8 @@ A Git linked worktree stores its private administrative files under the canonica
 
 When an execution owner is configured:
 
-1. identify the source common Git object directory;
-2. refuse hardlink sharing when the source repository/object inode is already owned by the execution UID; such repositories fall back to a private `--no-hardlinks` clone;
+1. resolve the real source common Git directory and require it to remain inside the real repository root; linked-worktree/external-gitdir sources fall back to a private `--no-hardlinks` clone rather than granting permissions on another repository;
+2. refuse hardlink sharing when the source repository/object inode is already owned by the execution UID; such repositories also fall back to a private `--no-hardlinks` clone;
 3. configure `core.sharedRepository=0640`, which keeps future Git object files group-readable but group-not-writable even under production `UMask=0077`;
 4. before every linked clone, reassert the canonical object tree's group to the execution GID and group-readable/traversable modes; this is the authoritative step because newly-created Git objects may temporarily retain the source owner's primary group;
 5. enable setgid on object directories as an inheritance aid, but do not rely on it as the sole future-object guarantee;
