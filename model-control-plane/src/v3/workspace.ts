@@ -1049,29 +1049,35 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       privatizeExecutionOwnedObjectLinks(hostPath, effectiveClonePlan, this.#executionOwner);
     }
 
+    const writable =
+      input.workspaceMode === 'isolated_write' ||
+      input.workspaceMode === 'reuse_implementation_workspace';
+
     if (this.#executionOwner) {
-      // The execution directory and private repository metadata belong to OpenHands. Existing
-      // object files may be hardlinked to canonical storage and deliberately remain source-owned.
-      fs.chownSync(path.dirname(hostPath), this.#executionOwner.uid, this.#executionOwner.gid);
-      fs.chmodSync(path.dirname(hostPath), 0o750);
+      // The execution directory is intentionally still service-owned/inaccessible here. Complete
+      // every privileged recursive ownership/mode operation before exposing the path to the worker;
+      // otherwise the worker could swap a checked file for a symlink between find(1) and
+      // chown/chmod. Shared object files remain canonical-owned and are skipped by these helpers.
       await chownExecutionRepository(
         hostPath,
         this.#executionOwner,
         effectiveClonePlan.hardlinkObjects,
       );
     }
+    await chmodExecutionRepository(hostPath, writable);
 
-    if (
-      input.workspaceMode === 'isolated_write' ||
-      input.workspaceMode === 'reuse_implementation_workspace'
-    ) {
-      await chmodExecutionRepository(hostPath, true);
+    if (this.#executionOwner) {
+      // This is the publication point. After this ownership transition no privileged recursive
+      // pathname operation is allowed against the execution tree.
+      fs.chownSync(executionDirectory, this.#executionOwner.uid, this.#executionOwner.gid);
+      fs.chmodSync(executionDirectory, 0o750);
+    }
+
+    if (writable) {
       return { hostPath, executionPath, repositoryRoot, branch, sourceRevision: resolvedRevision };
     }
 
-    // Read/review phases get a physically read-only private clone. Shared source objects remain
-    // source-owned and read-only to the execution identity.
-    await chmodExecutionRepository(hostPath, false);
+    // Read/review phases are physically read-only at publication time.
     return { hostPath, executionPath, repositoryRoot, sourceRevision: resolvedRevision };
   }
 

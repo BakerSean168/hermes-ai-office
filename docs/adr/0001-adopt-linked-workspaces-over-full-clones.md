@@ -36,6 +36,9 @@ The source object's owner remains unchanged. Hardlink sharing is enabled only af
 
 Review snapshots remain execution-private linked clones and become physically read-only after snapshot overlay. Object files created by the implementation identity are privatized before review; safe canonical history may remain linked. Tracked symlinks that escape the execution root are rejected rather than merely protected from chown/chmod. This preserves independent review without copying immutable history or exposing host-visible sibling paths.
 
+
+Workspace publication follows the same privilege rule: the per-execution directory remains service-owned/inaccessible while root performs any recursive privatization, ownership, or mode normalization. Only after those operations finish is the directory itself chowned/chmodded to the execution identity. That ownership transition is the publication point; no privileged recursive pathname traversal may occur afterward.
+
 ### 2. Host-controlled batch integration
 
 Replace bundle/full-clone integration with a temporary detached `git worktree` owned by the control plane:
