@@ -539,8 +539,7 @@ export class WorkItemCoordinator {
     if (!options.allowUnreviewed && !approvedReview?.sourceRevision) {
       throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     }
-    const plan = this.#repository.get(item.planId);
-    const repositoryRoot = implementation.repositoryRoot ?? plan?.repositoryPath;
+    const repositoryRoot = implementation.repositoryRoot;
     if (!repositoryRoot) throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     return {
       workspaceRef: implementation.workspaceRef,

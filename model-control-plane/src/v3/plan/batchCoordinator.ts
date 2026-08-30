@@ -223,39 +223,60 @@ export class BatchCoordinator {
     const integrationItems = repairItem
       ? [repairItem]
       : originalItems.filter((item) => !externalBaseline.has(item.workItemId));
-    const implementations = integrationItems.map((item) => {
-      const evidence = this.#workItems.approvedImplementationEvidence(item, {
-        allowUnreviewed: this.#allowUnreviewed(plan),
+    let implementations: Array<{
+      workspaceRef: string;
+      repositoryRoot: string;
+      sourceRevision: string;
+      executionId: string;
+    }>;
+    let requiredAncestorRevisions: string[] | undefined;
+    try {
+      implementations = integrationItems.map((item) => {
+        const evidence = this.#workItems.approvedImplementationEvidence(item, {
+          allowUnreviewed: this.#allowUnreviewed(plan),
+        });
+        return {
+          workspaceRef: evidence.workspaceRef,
+          repositoryRoot: evidence.repositoryRoot,
+          sourceRevision: evidence.sourceRevision,
+          executionId: evidence.executionId,
+        };
       });
-      return {
-        workspaceRef: evidence.workspaceRef,
-        repositoryRoot: evidence.repositoryRoot,
-        sourceRevision: evidence.sourceRevision,
-        executionId: evidence.executionId,
-      };
-    });
-    const postMergeRepairItem = integrationItems.find(isPostMergeDeliveryRepairItem);
-    const postMergeFailedRevision =
-      (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) &&
-      plan.mergeRevision
-        ? plan.mergeRevision
-        : undefined;
-    const requiredAncestorRevisions = repairItem
-      ? [
-          ...new Set([
-            ...originalItems.map(
-              (item) =>
-                externalBaseline.get(item.workItemId)?.revision ??
-                this.#workItems.approvedImplementationEvidence(item, {
-                  allowUnreviewed: this.#allowUnreviewed(plan),
-                }).approvedRevision,
-            ),
-            ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
-          ]),
-        ]
-      : postMergeFailedRevision
-        ? [postMergeFailedRevision]
-        : undefined;
+      const postMergeRepairItem = integrationItems.find(isPostMergeDeliveryRepairItem);
+      const postMergeFailedRevision =
+        (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) &&
+        plan.mergeRevision
+          ? plan.mergeRevision
+          : undefined;
+      requiredAncestorRevisions = repairItem
+        ? [
+            ...new Set([
+              ...originalItems.map(
+                (item) =>
+                  externalBaseline.get(item.workItemId)?.revision ??
+                  this.#workItems.approvedImplementationEvidence(item, {
+                    allowUnreviewed: this.#allowUnreviewed(plan),
+                  }).approvedRevision,
+              ),
+              ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
+            ]),
+          ]
+        : postMergeFailedRevision
+          ? [postMergeFailedRevision]
+          : undefined;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'BATCH_INTEGRATION_EVIDENCE_MISSING';
+      const reason = message.split(':', 1)[0] ?? 'BATCH_INTEGRATION_EVIDENCE_MISSING';
+      this.#repository.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
+      this.#repository.setPlanStatus(plan.planId, 'BLOCKED', reason);
+      this.#repository.appendEvent(
+        plan.planId,
+        'BATCH_INTEGRATION_BLOCKED',
+        { reason, message: message.slice(0, PLAN_LIMITS.errorDetailCharacters) },
+        { batchId: batch.batchId },
+      );
+      return;
+    }
     try {
       const integrated = await this.#workspace.integrateBatch({
         planId: plan.planId,

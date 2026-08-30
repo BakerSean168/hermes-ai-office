@@ -401,6 +401,7 @@ const workspace: WorkspaceProvisioningPort = {
     return {
       hostPath: `/tmp/${input.executionId}`,
       executionPath: `/workspace/${input.executionId}`,
+      repositoryRoot: input.repositoryPath || '/tmp/repository',
       branch:
         input.workspaceMode === 'isolated_write' ? `ai-office/${input.executionId}` : undefined,
       sourceRevision: input.baseRevision ?? 'base-revision',
@@ -494,6 +495,103 @@ test('durable plans retry a writer instead of reviewing a no-commit success', as
     assert.equal(host.creates, 2);
   } finally {
     await runtime.app.close();
+  }
+});
+
+test('legacy implementation evidence without repository provenance blocks integration fail-closed', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-null-repository-root-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  integrationCount = 0;
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    env: {
+      ...process.env,
+      MODEL_CP_V3_PLAN_REVIEW_STRATEGY: 'BATCH_ONLY',
+    },
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'dsh-acp': true,
+      'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'codex-business-worker-headless': true,
+      'codex-business-review-headless': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'legacy-null-repository-root' },
+      payload: {
+        projectKey: 'legacy-project',
+        objective: 'Verify legacy workspace provenance fails closed.',
+        analysisSummary: 'One ticket is sufficient.',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch',
+            title: 'Legacy provenance batch',
+            workItems: [
+              {
+                key: 'item',
+                title: 'Implement change',
+                objective: 'Implement and commit a change.',
+                acceptanceCriteria: ['Implementation is committed.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const implementation = body.batches[0].workItems[0].executions[0];
+    assert.equal(implementation.phase, 'IMPLEMENT');
+
+    const db = new DatabaseSync(dbFile);
+    try {
+      db.prepare('UPDATE v3_execution_links SET repository_root=NULL WHERE execution_id=?').run(
+        implementation.executionId,
+      );
+    } finally {
+      db.close();
+    }
+
+    host.succeed(implementation.refs.openhandsConversationId, 'IMPLEMENTED, TESTED, AND COMMITTED');
+    await runtime.v3.reconcilePlans(planId);
+
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'BATCH_INTEGRATION_EVIDENCE_MISSING');
+    assert.equal(body.batches[0].status, 'BLOCKED');
+    assert.equal(body.batches[0].blockedReason, 'BATCH_INTEGRATION_EVIDENCE_MISSING');
+    assert.equal(body.batches[0].integratedRevision, undefined);
+    assert.equal(integrationCount, 0);
+    assert.ok(
+      body.events.some(
+        (event: { type: string; detail?: { reason?: string } }) =>
+          event.type === 'BATCH_INTEGRATION_BLOCKED' &&
+          event.detail?.reason === 'BATCH_INTEGRATION_EVIDENCE_MISSING',
+      ),
+    );
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
