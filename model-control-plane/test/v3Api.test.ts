@@ -2107,3 +2107,278 @@ test('V3 review snapshot freezes current implementation HEAD and preserves origi
     await runtime.app.close();
   }
 });
+
+test('V3 durable workspace claim fences a stale cross-process provision owner', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-provision-cross-process-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  let releaseFirst!: () => void;
+  let markFirstEntered!: () => void;
+  const firstEntered = new Promise<void>((resolve) => {
+    markFirstEntered = resolve;
+  });
+  const firstGate = new Promise<void>((resolve) => {
+    releaseFirst = resolve;
+  });
+  let firstProvisionCalls = 0;
+  let secondProvisionCalls = 0;
+
+  const firstWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async provision(input) {
+      firstProvisionCalls += 1;
+      markFirstEntered();
+      await firstGate;
+      if (input.publicationFence && !(await input.publicationFence())) {
+        throw new Error('WORKSPACE_PROVISION_CLAIM_LOST');
+      }
+      return workspace.provision(input);
+    },
+  };
+  const secondWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async provision(input) {
+      secondProvisionCalls += 1;
+      assert.equal(await input.publicationFence?.(), true);
+      return workspace.provision(input);
+    },
+  };
+  const firstHost = new FakeHost();
+  const secondHost = new FakeHost();
+  const firstRuntime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: firstHost,
+    v3ModelGateway: gateway,
+    v3Workspace: firstWorkspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': false },
+  });
+  const secondRuntime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: secondHost,
+    v3ModelGateway: gateway,
+    v3Workspace: secondWorkspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': false },
+  });
+  const request = (runtime: Awaited<ReturnType<typeof buildControlPlane>>) =>
+    runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'workspace-cross-process-fence' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Provision one workspace with durable cross-process ownership.',
+        projectKey: 'workspace-fence-project',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'source-base' },
+        await: false,
+      },
+    });
+
+  try {
+    const firstRequest = request(firstRuntime);
+    await firstEntered;
+
+    const contenderDb = openDb(dbFile);
+    try {
+      const record = new ExecutionLinkRepository(contenderDb).findByIdempotencyKey(
+        'workspace-cross-process-fence',
+      );
+      assert.ok(record?.workspaceProvisionToken);
+      contenderDb
+        .prepare('UPDATE v3_execution_links SET workspace_provision_claimed_at=? WHERE execution_id=?')
+        .run(Date.now() - 20 * 60_000, record.executionId);
+    } finally {
+      contenderDb.close();
+    }
+
+    const secondResponse = await request(secondRuntime);
+    assert.equal(secondResponse.statusCode, 201);
+    assert.equal(secondProvisionCalls, 1);
+    assert.equal(secondHost.creates, 1);
+
+    releaseFirst();
+    const firstResponse = await firstRequest;
+    assert.equal(firstResponse.statusCode, 201);
+    assert.equal(firstResponse.json().executionId, secondResponse.json().executionId);
+    assert.equal(firstProvisionCalls, 1);
+    assert.equal(firstHost.creates, 0);
+
+    const verifyDb = openDb(dbFile);
+    try {
+      const record = new ExecutionLinkRepository(verifyDb).findByIdempotencyKey(
+        'workspace-cross-process-fence',
+      );
+      assert.ok(record?.workspaceRef);
+      assert.equal(record?.workspaceProvisionToken, undefined);
+      assert.equal(record?.workspaceProvisionClaimedAt, undefined);
+      assert.notEqual(record?.statusCache, 'FAILED');
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    releaseFirst();
+    await Promise.all([firstRuntime.app.close(), secondRuntime.app.close()]);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('V3 tokenless host recovery cannot attach across a newer durable launch claim', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-recovery-token-fence-'));
+  const db = openDb(path.join(directory, 'control-plane.sqlite'));
+  try {
+    const links = new ExecutionLinkRepository(db);
+    const reserved = links.reserve({
+      idempotencyKey: 'host-recovery-token-fence',
+      projectKey: 'host-recovery-fence-project',
+      phase: 'INVESTIGATE_PLAN',
+      objectiveSummary: 'Fence stale recovery attachment.',
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'planning-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'read_oriented',
+        sessionPolicy: 'fresh',
+        reasons: ['test'],
+      },
+    });
+    const executionId = reserved.record.executionId;
+    links.attachWorkspace(executionId, {
+      workspaceRef: `/workspace/executions/${executionId}/repo`,
+      repositoryRoot: '/tmp/fake-repo',
+      sourceRevision: 'source-base',
+    });
+    const now = Date.now();
+    assert.equal(links.claimHostLaunch(executionId, 'old-token', now, now - 120_000).acquired, true);
+    db.prepare('UPDATE v3_execution_links SET host_launch_claimed_at=? WHERE execution_id=?').run(
+      now - 10 * 60_000,
+      executionId,
+    );
+    assert.equal(
+      links.claimHostLaunch(executionId, 'new-token', now + 1, now - 120_000).acquired,
+      true,
+    );
+
+    assert.throws(
+      () => links.attachOpenHands(executionId, 'stale-recovered-conversation', now),
+      /HOST_EXECUTION_ASSOCIATION_CONFLICT/,
+    );
+    const fenced = links.get(executionId);
+    assert.equal(fenced?.openhandsConversationId, undefined);
+    assert.equal(fenced?.hostLaunchToken, 'new-token');
+
+    const attached = links.attachOpenHands(
+      executionId,
+      'current-owner-conversation',
+      now,
+      'new-token',
+    );
+    assert.equal(attached.openhandsConversationId, 'current-owner-conversation');
+    assert.equal(attached.hostLaunchToken, undefined);
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+class StaleRecoveryAttachmentHost extends FakeHost {
+  recoveries = 0;
+  readonly secondRecoveryEntered: Promise<void>;
+  #markSecondRecoveryEntered!: () => void;
+  #releaseSecondRecovery!: () => void;
+  readonly #secondRecoveryGate: Promise<void>;
+
+  constructor() {
+    super();
+    this.secondRecoveryEntered = new Promise<void>((resolve) => {
+      this.#markSecondRecoveryEntered = resolve;
+    });
+    this.#secondRecoveryGate = new Promise<void>((resolve) => {
+      this.#releaseSecondRecovery = resolve;
+    });
+  }
+
+  releaseSecondRecovery() {
+    this.#releaseSecondRecovery();
+  }
+
+  override async recoverExecution() {
+    this.recoveries += 1;
+    if (this.recoveries === 2) {
+      this.#markSecondRecoveryEntered();
+      await this.#secondRecoveryGate;
+      return {
+        conversationId: 'conversation-visible-to-stale-owner',
+        status: 'RUNNING' as const,
+        startedAt: new Date().toISOString(),
+      };
+    }
+    return null;
+  }
+}
+
+test('V3 superseded recovery owner cannot attach a conversation after launch-token takeover', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-recovery-attach-fence-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new StaleRecoveryAttachmentHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: { 'openhands-builtin': true, 'opencode-acp': false },
+  });
+
+  try {
+    const request = runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'host-recovery-attach-fence' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Do not let stale recovery clear a newer launch claim.',
+        projectKey: 'host-recovery-attach-fence-project',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'source-base' },
+        await: false,
+      },
+    });
+
+    await host.secondRecoveryEntered;
+    const contenderDb = openDb(dbFile);
+    let executionId = '';
+    try {
+      const contenderLinks = new ExecutionLinkRepository(contenderDb);
+      const record = contenderLinks.findByIdempotencyKey('host-recovery-attach-fence');
+      assert.ok(record?.hostLaunchToken);
+      executionId = record.executionId;
+      contenderDb
+        .prepare('UPDATE v3_execution_links SET host_launch_claimed_at=? WHERE execution_id=?')
+        .run(Date.now() - 10 * 60_000, executionId);
+      const takeover = contenderLinks.claimHostLaunch(
+        executionId,
+        'new-recovery-owner-token',
+        Date.now(),
+        Date.now() - 120_000,
+      );
+      assert.equal(takeover.acquired, true);
+    } finally {
+      contenderDb.close();
+    }
+
+    host.releaseSecondRecovery();
+    const response = await request;
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.json().status, 'STARTING');
+    assert.equal(host.creates, 0);
+
+    const verifyDb = openDb(dbFile);
+    try {
+      const record = new ExecutionLinkRepository(verifyDb).get(executionId);
+      assert.equal(record?.openhandsConversationId, undefined);
+      assert.equal(record?.hostLaunchToken, 'new-recovery-owner-token');
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    host.releaseSecondRecovery();
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

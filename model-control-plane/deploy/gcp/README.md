@@ -106,6 +106,14 @@ To opt a repository into physical object sharing, perform preparation only at a 
 
 If any precondition or post-check is ambiguous, do not normalize the repository. Leave it unprepared and allow the runtime to use its safe private-clone fallback.
 
+The GCP service runs with `PrivateTmp=true`. Linked execution clone staging must not use `/tmp`; it lives in a service-private sibling of the workspace root. `--local` is enabled only when the inspected source object directory and staging path are device-compatible. Treat `EXDEV` from local clone creation as a staging/mount-boundary defect, not as a reason to weaken source trust checks.
+
+
+## Crash-safe workspace provisioning
+
+Execution workspace provisioning uses additive SQLite `workspace_provision_token` / `workspace_provision_claimed_at` claims. Only the current token owner may publish an execution path, attach `workspace_ref`, or mark provisioning failed. The workspace provisioner CAS-renews the token immediately before touching a pre-existing unattached workspace, immediately before filesystem publication, and immediately before worker exposure. A stale process must stop on failed renewal and must never recursively delete the shared execution directory.
+
+Do not clear workspace-provision claim columns manually. A fresh claim intentionally suppresses another provisioner; stale takeover is handled by normal replay/reconciliation.
 
 ## Crash-safe execution host launch
 

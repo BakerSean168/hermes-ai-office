@@ -39,11 +39,17 @@ Review snapshots remain execution-private linked clones and become physically re
 
 Workspace publication follows the same privilege rule: the per-execution directory remains service-owned/inaccessible while root performs any recursive privatization, ownership, or mode normalization. Only after those operations finish is the directory itself chowned/chmodded to the execution identity. That ownership transition is the publication point; no privileged recursive pathname traversal may occur afterward.
 
+Provisioning stages execution clones in a service-private sibling of the configured workspace root rather than `/tmp`. This preserves local hardlink semantics under the production `PrivateTmp=true` mount namespace. `--local` is permitted only when the inspected source object directory and staging directory are device-compatible; otherwise the private `--no-local` fallback is used. The root linked-clone staging root and disposable trust config remain root-owned; a source-owned staging child exists only for a clone that deliberately runs as the source identity.
+
 ### 1b. Crash-safe execution-host launch
 
 Persist execution-host launch ownership in the control-plane database. `host_launch_token` and `host_launch_claimed_at` are additive nullable columns on execution links. A launch token is a short-lived lease, not a host identifier. The control plane must recover the host by durable `executionId` before issuing a create, atomically claim the right to create, re-check after claiming, CAS-renew that same token immediately before the external POST, and attach the returned host conversation only while that token still owns the claim. The post-recovery renewal fences a slow/stale owner that lost its claim while scanning the host; the refreshed lease exceeds the bounded host-create timeout.
 
-OpenHands recovery uses the execution tag already written on every conversation. The search is ordered by creation time and bounded by the durable execution creation boundary; duplicate matches are an error rather than a best-effort choice. This closes both multi-process races and the post-success/pre-database-attach crash window without making the execution workspace itself the coordination authority.
+OpenHands recovery uses the execution tag already written on every conversation. The search is ordered by creation time and bounded by the durable execution creation boundary; duplicate matches are an error rather than a best-effort choice. This closes both multi-process races and the post-success/pre-database-attach crash window without making the execution workspace itself the coordination authority. A recovery that runs after a launch claim exists must attach with that exact token; tokenless attachment is permitted only while no launch claim exists, so a delayed superseded recovery cannot clear a newer owner's lease.
+
+### 1c. Crash-safe workspace provisioning
+
+Workspace creation is also a cross-process durable lease. `workspace_provision_token` and `workspace_provision_claimed_at` are additive nullable execution-link columns. Before cloning/reusing an execution workspace, the service atomically claims provisioning ownership. Filesystem publication calls back into the control plane to CAS-renew the same token immediately before the shared execution path is created/replaced and again before the finalized directory is exposed to the worker. Only the token owner may attach `workspace_ref` or durably fail provisioning. A stale loser therefore cannot delete a newer workspace, publish after takeover, or mark the winner failed. Generic provision failure paths never recursively delete the shared execution directory.
 
 ### 2. Host-controlled batch integration
 

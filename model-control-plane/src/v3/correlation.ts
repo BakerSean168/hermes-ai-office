@@ -34,6 +34,8 @@ interface ExecutionLinkRow {
   git_branch: string | null;
   source_revision: string | null;
   writer_start_revision: string | null;
+  workspace_provision_token: string | null;
+  workspace_provision_claimed_at: number | null;
   host_launch_token: string | null;
   host_launch_claimed_at: number | null;
   previous_execution_id: string | null;
@@ -80,6 +82,8 @@ export function ensureV3Schema(db: DatabaseSync): void {
       git_branch TEXT,
       source_revision TEXT,
       writer_start_revision TEXT,
+      workspace_provision_token TEXT,
+      workspace_provision_claimed_at INTEGER,
       host_launch_token TEXT,
       host_launch_claimed_at INTEGER,
       previous_execution_id TEXT,
@@ -120,6 +124,12 @@ export function ensureV3Schema(db: DatabaseSync): void {
   }
   if (!columns.has('writer_start_revision')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN writer_start_revision TEXT');
+  }
+  if (!columns.has('workspace_provision_token')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN workspace_provision_token TEXT');
+  }
+  if (!columns.has('workspace_provision_claimed_at')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN workspace_provision_claimed_at INTEGER');
   }
   if (!columns.has('host_launch_token')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN host_launch_token TEXT');
@@ -228,6 +238,8 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
     writerStartRevision: row.writer_start_revision ?? undefined,
+    workspaceProvisionToken: row.workspace_provision_token ?? undefined,
+    workspaceProvisionClaimedAt: row.workspace_provision_claimed_at ?? undefined,
     hostLaunchToken: row.host_launch_token ?? undefined,
     hostLaunchClaimedAt: row.host_launch_claimed_at ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
@@ -350,6 +362,65 @@ export class ExecutionLinkRepository {
     return { record: this.get(executionId)!, created: true };
   }
 
+  claimWorkspaceProvision(
+    executionId: string,
+    token: string,
+    claimedAt: number,
+    staleBefore: number,
+  ): { record: ExecutionLinkRecord; acquired: boolean } {
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET workspace_provision_token=?,workspace_provision_claimed_at=?,updated_at=?
+          WHERE execution_id=? AND status_cache='STARTING' AND workspace_ref IS NULL
+            AND (
+              workspace_provision_token IS NULL OR workspace_provision_claimed_at IS NULL
+              OR workspace_provision_claimed_at < ?
+            )`,
+      )
+      .run(token, claimedAt, claimedAt, executionId, staleBefore);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, acquired: Number(result.changes) === 1 };
+  }
+
+  renewWorkspaceProvisionClaim(
+    executionId: string,
+    token: string,
+    claimedAt: number,
+  ): { record: ExecutionLinkRecord; renewed: boolean } {
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET workspace_provision_claimed_at=?,updated_at=?
+          WHERE execution_id=? AND status_cache='STARTING' AND workspace_ref IS NULL
+            AND workspace_provision_token=?`,
+      )
+      .run(claimedAt, claimedAt, executionId, token);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, renewed: Number(result.changes) === 1 };
+  }
+
+  failWorkspaceProvisionClaim(
+    executionId: string,
+    token: string,
+  ): { record: ExecutionLinkRecord; failed: boolean } {
+    const now = Date.now();
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET status_cache='FAILED',ended_at=?,workspace_provision_token=NULL,
+                workspace_provision_claimed_at=NULL,updated_at=?
+          WHERE execution_id=? AND status_cache='STARTING' AND workspace_ref IS NULL
+            AND workspace_provision_token=?`,
+      )
+      .run(now, now, executionId, token);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, failed: Number(result.changes) === 1 };
+  }
+
   attachWorkspace(
     executionId: string,
     input: {
@@ -358,22 +429,50 @@ export class ExecutionLinkRepository {
       gitBranch?: string;
       sourceRevision?: string;
     },
+    provisionToken?: string,
   ): ExecutionLinkRecord {
-    this.#db
-      .prepare(
-        `UPDATE v3_execution_links
-           SET workspace_ref=?,repository_root=?,git_branch=?,source_revision=?,updated_at=? WHERE execution_id=?`,
-      )
-      .run(
+    const now = Date.now();
+    const statement = provisionToken
+      ? this.#db.prepare(
+          `UPDATE v3_execution_links
+             SET workspace_ref=?,repository_root=?,git_branch=?,source_revision=?,
+                 workspace_provision_token=NULL,workspace_provision_claimed_at=NULL,updated_at=?
+           WHERE execution_id=? AND status_cache='STARTING' AND workspace_ref IS NULL
+             AND workspace_provision_token=?`,
+        )
+      : this.#db.prepare(
+          `UPDATE v3_execution_links
+             SET workspace_ref=?,repository_root=?,git_branch=?,source_revision=?,updated_at=?
+           WHERE execution_id=? AND status_cache='STARTING'
+             AND workspace_provision_token IS NULL
+             AND (workspace_ref IS NULL OR workspace_ref=?)`,
+        );
+    if (provisionToken) {
+      statement.run(
         input.workspaceRef,
         input.repositoryRoot ?? null,
         input.gitBranch ?? null,
         input.sourceRevision ?? null,
-        Date.now(),
+        now,
         executionId,
+        provisionToken,
       );
+    } else {
+      statement.run(
+        input.workspaceRef,
+        input.repositoryRoot ?? null,
+        input.gitBranch ?? null,
+        input.sourceRevision ?? null,
+        now,
+        executionId,
+        input.workspaceRef,
+      );
+    }
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    if (record.workspaceRef !== input.workspaceRef) {
+      throw new Error('WORKSPACE_PROVISION_ASSOCIATION_CONFLICT');
+    }
     return record;
   }
 
@@ -476,6 +575,7 @@ export class ExecutionLinkRepository {
                  host_launch_token=NULL,host_launch_claimed_at=NULL,
                  started_at=COALESCE(?,started_at,created_at), updated_at=?
            WHERE execution_id=? AND status_cache='STARTING'
+             AND host_launch_token IS NULL
              AND (openhands_conversation_id IS NULL OR openhands_conversation_id=?)`,
         );
     if (launchToken) {

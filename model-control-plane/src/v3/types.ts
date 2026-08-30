@@ -196,6 +196,8 @@ export interface ExecutionLinkRecord {
   gitBranch?: string;
   sourceRevision?: string;
   writerStartRevision?: string;
+  workspaceProvisionToken?: string;
+  workspaceProvisionClaimedAt?: number;
   hostLaunchToken?: string;
   hostLaunchClaimedAt?: number;
   previousExecutionId?: string;

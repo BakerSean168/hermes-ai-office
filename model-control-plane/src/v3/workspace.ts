@@ -77,6 +77,7 @@ export interface WorkspaceProvisioningPort {
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
     reviewBaseRevision?: string;
+    publicationFence?: () => Promise<boolean>;
   }): Promise<ProvisionedWorkspace>;
   pruneExecutionArtifacts?(input: { executionId: string; workspaceRef: string }): Promise<boolean>;
   removeExecutionWorkspace?(executionId: string): Promise<boolean>;
@@ -869,6 +870,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     baseRevision?: string;
     workspaceMode: WorkspaceMode;
     reviewBaseRevision?: string;
+    publicationFence?: () => Promise<boolean>;
   }): Promise<ProvisionedWorkspace> {
     const requested = path.resolve(input.repositoryPath);
     if (!this.#allowedRepositoryRoots.some((root) => inside(requested, root))) {
@@ -908,11 +910,14 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const executionPath = path.posix.join(this.#executionRoot, 'executions', directory, 'repo');
     const existingWorkspace = fs.lstatSync(hostPath, { throwIfNoEntry: false });
     if (existingWorkspace) {
+      // A pre-existing path is removable only by the process that still owns the durable
+      // provisioning claim. A superseded process must never delete a newer publisher's artifact.
+      if (input.publicationFence && !(await input.publicationFence())) {
+        throw new Error('WORKSPACE_PROVISION_CLAIM_LOST');
+      }
       await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
-      // DevelopmentExecutionService calls provision() only while the durable execution has no
-      // attached workspaceRef. Therefore an existing directory here is unreachable crash residue,
-      // never an active/resumable writer lease. Recreate it from the requested repository/base/mode
-      // instead of silently accepting an artifact whose identity cannot be proven externally.
+      // No host execution can launch before workspaceRef is durably attached. Under the fenced
+      // claim this path can therefore only be crash residue from an interrupted provision.
       fs.rmSync(executionDirectory, { recursive: true, force: true });
     }
     fs.mkdirSync(executionDirectory, { recursive: true, mode: 0o750 });
@@ -932,15 +937,47 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           privatizeRelativeObjectPaths: [],
         };
 
-    const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-v3-'));
-    const stagingRepo = path.join(stagingRoot, 'repo');
-    fs.chownSync(stagingRoot, sourceOwner.uid, sourceOwner.gid);
-    const sameFilesystem = fs.statSync(stagingRoot).dev === fs.statSync(path.dirname(hostPath)).dev;
-    const effectiveClonePlan: ObjectClonePlan = sameFilesystem
-      ? objectClonePlan
-      : { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+    // systemd PrivateTmp gives the service a private /tmp mount namespace. Even when
+    // stat(2) reports the same backing device from the host, hardlinking canonical Git objects
+    // into that private mount can fail with EXDEV. Stage beside the workspace root instead: the
+    // sibling path is outside the OpenHands /workspace bind mount but shares the publication mount.
+    const stagingBase = path.join(path.dirname(this.#hostRoot), '.model-control-plane-staging');
+    fs.mkdirSync(stagingBase, { recursive: true, mode: 0o711 });
+    const stagingBaseStat = fs.lstatSync(stagingBase);
+    if (
+      !stagingBaseStat.isDirectory() ||
+      stagingBaseStat.isSymbolicLink() ||
+      fs.realpathSync(stagingBase) !== path.resolve(stagingBase) ||
+      (serviceUid !== undefined && stagingBaseStat.uid !== serviceUid)
+    ) {
+      throw new Error('V3_WORKSPACE_STAGING_ROOT_NOT_ALLOWED');
+    }
+    fs.chmodSync(stagingBase, 0o711);
+    const stagingRoot = fs.mkdtempSync(path.join(stagingBase, 'workspace-'));
+    // Keep the staging root service-owned. Source-owner write access is granted only to a
+    // dedicated child when the safe private-clone fallback actually runs as that identity.
+    // This prevents a repository owner from racing a root-performed linked clone or its
+    // disposable Git trust config while preserving source-owner cloning when required.
+    fs.chmodSync(stagingRoot, 0o711);
+    const stagingDevice = fs.statSync(stagingRoot).dev;
+    const publicationSameFilesystem = stagingDevice === fs.statSync(path.dirname(hostPath)).dev;
+    const sourceDevice = objectClonePlan.sourceObjectDirectory
+      ? fs.statSync(objectClonePlan.sourceObjectDirectory).dev
+      : fs.statSync(repoRoot).dev;
+    const hardlinkFilesystemCompatible = stagingDevice === sourceDevice;
+    const effectiveClonePlan: ObjectClonePlan =
+      publicationSameFilesystem && hardlinkFilesystemCompatible
+        ? objectClonePlan
+        : { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
     const cloneWithServiceIdentity = effectiveClonePlan.hardlinkObjects;
     const cloneIdentity = cloneWithServiceIdentity ? undefined : sourceOwner;
+    const cloneParent = cloneWithServiceIdentity ? stagingRoot : path.join(stagingRoot, 'source');
+    if (!cloneWithServiceIdentity) {
+      fs.mkdirSync(cloneParent, { mode: 0o700 });
+      fs.chownSync(cloneParent, sourceOwner.uid, sourceOwner.gid);
+      fs.chmodSync(cloneParent, 0o700);
+    }
+    const stagingRepo = path.join(cloneParent, 'repo');
     const trustedCloneConfig = path.join(stagingRoot, 'git-safe-config');
 
     let branch: string | undefined;
@@ -1029,7 +1066,13 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
 
       assertWorkspaceSymlinksContained(stagingRepo);
 
-      if (sameFilesystem) {
+      // This is the filesystem publication fence. A process whose durable claim was taken over
+      // while cloning must stop before it can create/replace the shared execution path.
+      if (input.publicationFence && !(await input.publicationFence())) {
+        throw new Error('WORKSPACE_PROVISION_CLAIM_LOST');
+      }
+
+      if (publicationSameFilesystem) {
         fs.renameSync(stagingRepo, hostPath);
       } else {
         fs.cpSync(stagingRepo, hostPath, {
@@ -1040,7 +1083,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         });
       }
     } catch (error) {
-      fs.rmSync(path.dirname(hostPath), { recursive: true, force: true });
+      // Never remove the shared execution directory from a generic failure path. A different
+      // process may have won the durable claim and published there. Staging cleanup is private.
       throw error;
     } finally {
       fs.rmSync(stagingRoot, { recursive: true, force: true });
@@ -1068,8 +1112,14 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     await chmodExecutionRepository(hostPath, writable);
 
     if (this.#executionOwner) {
-      // This is the publication point. After this ownership transition no privileged recursive
-      // pathname operation is allowed against the execution tree.
+      // Renew once more immediately before exposing the finalized tree to the worker. If the
+      // durable claim changed after filesystem placement, leave the tree service-owned so the
+      // current owner can safely recover/remove it; a stale owner may not publish it.
+      if (input.publicationFence && !(await input.publicationFence())) {
+        throw new Error('WORKSPACE_PROVISION_CLAIM_LOST');
+      }
+      // This is the worker publication point. After this ownership transition no privileged
+      // recursive pathname operation is allowed against the execution tree.
       fs.chownSync(executionDirectory, this.#executionOwner.uid, this.#executionOwner.gid);
       fs.chmodSync(executionDirectory, 0o750);
     }

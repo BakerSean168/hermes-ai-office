@@ -34,6 +34,7 @@ const ACTIVE_WRITER_STATUSES = new Set<ExecutionStatus>([
 ]);
 const WRITER_LEASE_STATUSES = new Set<ExecutionStatus>([...ACTIVE_WRITER_STATUSES, 'PAUSED']);
 const HOST_LAUNCH_CLAIM_STALE_MS = 120_000;
+const WORKSPACE_PROVISION_CLAIM_STALE_MS = 15 * 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -310,7 +311,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     }
   }
 
-  async #recoverHostExecution(record: ExecutionLinkRecord): Promise<ExecutionLinkRecord> {
+  async #recoverHostExecution(
+    record: ExecutionLinkRecord,
+    launchToken?: string,
+  ): Promise<ExecutionLinkRecord> {
     if (record.openhandsConversationId || TERMINAL.has(record.statusCache)) return record;
     const recovered = await this.#host.recoverExecution({
       executionId: record.executionId,
@@ -323,6 +327,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       record.executionId,
       recovered.conversationId,
       Number.isFinite(startedAt) ? startedAt : undefined,
+      launchToken,
     );
   }
 
@@ -336,7 +341,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     }
     let recovered: ExecutionLinkRecord;
     try {
-      recovered = await this.#recoverHostExecution(record);
+      recovered = await this.#recoverHostExecution(record, record.hostLaunchToken);
     } catch {
       // Fail closed while host recovery is unavailable or ambiguous. Never issue a second launch.
       return record;
@@ -359,7 +364,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     // launch became visible just as the recovery process took ownership of the durable claim.
     let afterTakeover: ExecutionLinkRecord;
     try {
-      afterTakeover = await this.#recoverHostExecution(takeover.record);
+      afterTakeover = await this.#recoverHostExecution(takeover.record, takeoverToken);
     } catch {
       return takeover.record;
     }
@@ -594,17 +599,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         } else {
           this.#enforceWriterAdmission(input.projectKey, candidates);
         }
-        const admitted = reserve();
-        if (effectiveInput.phase === 'IMPLEMENT_FIX' && fixLineage) {
-          const previous = fixLineage.implementation;
-          admitted.record = this.#links.attachWorkspace(admitted.record.executionId, {
-            workspaceRef: previous.workspaceRef!,
-            repositoryRoot: previous.repositoryRoot,
-            gitBranch: previous.gitBranch,
-            sourceRevision: previous.sourceRevision,
-          });
-        }
-        return admitted;
+        return reserve();
       });
     } else {
       reservation = reserve();
@@ -630,7 +625,33 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     record = await this.#withExecutionStartLock(record.executionId, async () => {
       let current = this.#links.get(record.executionId);
       if (!current) throw new Error('EXECUTION_NOT_FOUND');
-      if (current.workspaceRef) return current;
+      if (current.workspaceRef || TERMINAL.has(current.statusCache)) return current;
+
+      if (effectiveInput.phase === 'IMPLEMENT_FIX' && !fixLineage) {
+        fixLineage = await this.#resolveFixLineage(effectiveInput);
+      }
+
+      const now = Date.now();
+      const provisionToken = randomUUID();
+      const claim = this.#links.claimWorkspaceProvision(
+        current.executionId,
+        provisionToken,
+        now,
+        now - WORKSPACE_PROVISION_CLAIM_STALE_MS,
+      );
+      current = claim.record;
+      if (!claim.acquired) return current;
+
+      const publicationFence = async (): Promise<boolean> => {
+        const renewed = this.#links.renewWorkspaceProvisionClaim(
+          current!.executionId,
+          provisionToken,
+          Date.now(),
+        );
+        current = renewed.record;
+        return renewed.renewed;
+      };
+
       try {
         let repositoryPath = input.repository.path;
         let baseRevision = input.repository.baseRevision;
@@ -639,12 +660,16 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         if (effectiveInput.phase === 'IMPLEMENT_FIX') {
           if (!fixLineage) throw new Error('PREVIOUS_EXECUTION_NOT_FIXABLE');
           const previous = fixLineage.implementation;
-          current = this.#links.attachWorkspace(current.executionId, {
-            workspaceRef: previous.workspaceRef!,
-            repositoryRoot: previous.repositoryRoot,
-            gitBranch: previous.gitBranch,
-            sourceRevision: previous.sourceRevision,
-          });
+          current = this.#links.attachWorkspace(
+            current.executionId,
+            {
+              workspaceRef: previous.workspaceRef!,
+              repositoryRoot: previous.repositoryRoot,
+              gitBranch: previous.gitBranch,
+              sourceRevision: previous.sourceRevision,
+            },
+            provisionToken,
+          );
         } else {
           if (input.phase === 'VERIFY_REVIEW') {
             const previous = this.#requirePreviousImplementation(effectiveInput);
@@ -659,20 +684,32 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             baseRevision,
             workspaceMode: current.workspaceMode,
             reviewBaseRevision,
+            publicationFence,
           });
-          current = this.#links.attachWorkspace(current.executionId, {
-            workspaceRef: provisioned.executionPath,
-            repositoryRoot: provisioned.repositoryRoot,
-            gitBranch: provisioned.branch,
-            sourceRevision:
-              input.phase === 'ADOPT_CHANGE'
-                ? input.context?.reviewBaseRevision?.trim() || provisioned.sourceRevision
-                : provisioned.sourceRevision,
-          });
+          current = this.#links.attachWorkspace(
+            current.executionId,
+            {
+              workspaceRef: provisioned.executionPath,
+              repositoryRoot: provisioned.repositoryRoot,
+              gitBranch: provisioned.branch,
+              sourceRevision:
+                input.phase === 'ADOPT_CHANGE'
+                  ? input.context?.reviewBaseRevision?.trim() || provisioned.sourceRevision
+                  : provisioned.sourceRevision,
+            },
+            provisionToken,
+          );
         }
         return current;
       } catch (error) {
-        this.#links.updateStatus(current.executionId, 'FAILED');
+        const failed = this.#links.failWorkspaceProvisionClaim(current.executionId, provisionToken);
+        if (!failed.failed) return failed.record;
+        const detail = error instanceof Error ? error.message : String(error);
+        this.#links.attachFailure(failed.record.executionId, {
+          code: detail.split(':', 1)[0] || 'WORKSPACE_PROVISION_FAILED',
+          detail: detail.slice(0, 2_000),
+          retryable: false,
+        });
         throw error;
       }
     });
@@ -736,7 +773,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       // its host conversation just before this CAS. Re-scan after acquiring the claim and only
       // POST when the host still proves there is no execution for this durable executionId.
       try {
-        current = await this.#recoverHostExecution(current);
+        current = await this.#recoverHostExecution(current, token);
       } catch {
         return current;
       }
@@ -780,7 +817,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         // conclusive. A stale claim becomes retryable FAILED only after later observation proves
         // no matching host execution exists.
         try {
-          return await this.#recoverHostExecution(current);
+          return await this.#recoverHostExecution(current, token);
         } catch {
           return current;
         }

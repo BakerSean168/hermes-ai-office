@@ -48,6 +48,29 @@ test('control-plane deployment contains no V2, CPA, or Provider Hub runtime conf
   assert.equal(fs.existsSync(path.join(root, 'scripts/migrate-provider-hub-to-litellm.py')), false);
 });
 
+test('linked workspace staging stays outside systemd PrivateTmp', () => {
+  const workspace = fs.readFileSync(path.join(root, 'src/v3/workspace.ts'), 'utf8');
+  const gcpUnit = fs.readFileSync(
+    path.join(root, 'deploy/gcp/hermes-model-control-plane.service'),
+    'utf8',
+  );
+
+  assert.match(gcpUnit, /PrivateTmp=true/);
+  assert.match(
+    workspace,
+    /path\.join\(path\.dirname\(this\.#hostRoot\), '\.model-control-plane-staging'\)/,
+  );
+  assert.doesNotMatch(workspace, /path\.join\(os\.tmpdir\(\), 'hermes-ai-office-v3-'\)/);
+  assert.match(workspace, /hardlinkFilesystemCompatible = stagingDevice === sourceDevice/);
+  assert.match(workspace, /V3_WORKSPACE_STAGING_ROOT_NOT_ALLOWED/);
+  assert.match(workspace, /fs\.chmodSync\(stagingRoot, 0o711\)/);
+  assert.match(
+    workspace,
+    /const cloneParent = cloneWithServiceIdentity \? stagingRoot : path\.join\(stagingRoot, 'source'\)/,
+  );
+  assert.doesNotMatch(workspace, /fs\.chownSync\(stagingRoot, sourceOwner\.uid/);
+});
+
 test('OpenHands outer container permits Codex bubblewrap without granting Linux capabilities', () => {
   const raw = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
   const compose = parse(raw) as any;

@@ -1622,3 +1622,48 @@ test('workspace retention pruning removes only ignored artifacts and can release
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('superseded provisioning claim cannot remove an existing published workspace', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-provision-fence-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'winner\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const winner = await provisioner.provision({
+      executionId: 'provision-fence-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(winner.hostPath, 'winner-marker.txt'), 'keep me\n');
+
+    await assert.rejects(
+      provisioner.provision({
+        executionId: 'provision-fence-1',
+        repositoryPath: source,
+        baseRevision: base,
+        workspaceMode: 'isolated_write',
+        publicationFence: async () => false,
+      }),
+      /WORKSPACE_PROVISION_CLAIM_LOST/,
+    );
+
+    assert.equal(fs.readFileSync(path.join(winner.hostPath, 'winner-marker.txt'), 'utf8'), 'keep me\n');
+    assert.equal(git(winner.hostPath, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

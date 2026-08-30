@@ -66,6 +66,14 @@ This grants read access to history already in scope for the execution without gr
 8. leave safely shared hardlinked object files source-owned;
 9. apply writer/read-only permissions without chmod'ing shared object files; execution IDs must use the collision-free durable ID alphabet rather than lossy path sanitization.
 
+Execution clone staging is service-private and lives beside the configured workspace root, not under `os.tmpdir()`. The production systemd unit uses `PrivateTmp=true`; staging under `/tmp` crosses that private mount namespace and can make an otherwise valid local hardlink clone fail with `EXDEV`. The provisioner also verifies source-object/staging device compatibility before enabling `--local`; an incompatible source safely uses `--no-local`. For a root-performed linked clone the staging root and disposable Git trust config remain root-owned; source-owner write access is granted only to a dedicated child used by the private-clone fallback.
+
+### Durable workspace provisioning ownership
+
+Workspace publication is coordinated in SQLite as well as by the in-process execution mutex. Every unattached execution workspace has at most one current `workspace_provision_token`. A process must win that claim before provisioning, and the workspace layer receives a publication fence that CAS-renews the same token before deleting proven crash residue, before placing the shared execution path, and before exposing the finalized directory to the worker. `attachWorkspace()` clears the claim only when the same token still owns it; provisioning failure can transition to `FAILED` only under the same token. If ownership changed, the stale process returns the newer durable record and may not delete or fail the winner.
+
+The filesystem side mirrors the durable fence: a generic staging/publish error cleans only service-private staging. It never recursively removes the shared execution directory. Existing unattached workspace residue may be removed only after the current token successfully renews, which prevents a superseded service instance from deleting an artifact published by a newer owner.
+
 ### Durable host launch ownership
 
 Workspace isolation is insufficient if two host conversations can be launched for one durable execution. Host launch therefore uses a SQLite-backed claim, not only an in-process mutex:
