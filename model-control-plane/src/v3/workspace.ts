@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import fs from 'node:fs';
+import fs, { type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -114,65 +114,255 @@ function overlayWorkingTree(sourceRepo: string, snapshotRepo: string, entries: s
   }
 }
 
+function executionDirectoryName(executionId: string): string {
+  if (!executionId || !/^[A-Za-z0-9._-]+$/.test(executionId)) {
+    throw new Error('V3_EXECUTION_ID_INVALID');
+  }
+  return executionId;
+}
+
+function identityCanRead(stat: Stats, identity: UnixIdentity): boolean {
+  if (stat.uid === identity.uid) return (stat.mode & 0o400) !== 0;
+  if (stat.gid === identity.gid) return (stat.mode & 0o040) !== 0;
+  return (stat.mode & 0o004) !== 0;
+}
+
+function identityCanWrite(stat: Stats, identity: UnixIdentity): boolean {
+  if (stat.uid === identity.uid) return (stat.mode & 0o200) !== 0;
+  if (stat.gid === identity.gid) return (stat.mode & 0o020) !== 0;
+  return (stat.mode & 0o002) !== 0;
+}
+
+function assertManagedWorkspacePath(hostPath: string, hostRoot: string): void {
+  const lexicalRoot = path.resolve(hostRoot);
+  const lexicalPath = path.resolve(hostPath);
+  if (!inside(lexicalPath, lexicalRoot)) throw new Error('V3_EXECUTION_WORKSPACE_NOT_ALLOWED');
+
+  const relative = path.relative(lexicalRoot, lexicalPath);
+  let cursor = lexicalRoot;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    const stat = fs.lstatSync(cursor, { throwIfNoEntry: false });
+    if (!stat) throw new Error('V3_EXECUTION_WORKSPACE_MISSING');
+    if (stat.isSymbolicLink()) throw new Error('V3_EXECUTION_WORKSPACE_SYMLINK');
+  }
+
+  const realRoot = fs.realpathSync(lexicalRoot);
+  const realPath = fs.realpathSync(lexicalPath);
+  if (!inside(realPath, realRoot)) throw new Error('V3_EXECUTION_WORKSPACE_NOT_ALLOWED');
+  if (!fs.statSync(realPath).isDirectory()) throw new Error('V3_EXECUTION_WORKSPACE_INVALID');
+}
+
+async function assertManagedGitWorkspace(
+  hostPath: string,
+  hostRoot: string,
+  owner?: UnixIdentity,
+): Promise<void> {
+  assertManagedWorkspacePath(hostPath, hostRoot);
+  const topLevel = path.resolve(
+    await git(hostPath, [...safeDirectory(hostPath), 'rev-parse', '--show-toplevel'], owner),
+  );
+  if (fs.realpathSync(topLevel) !== fs.realpathSync(hostPath)) {
+    throw new Error('V3_EXECUTION_WORKSPACE_REPOSITORY_MISMATCH');
+  }
+}
+
+function assertWorkspaceSymlinksContained(workspaceRoot: string): void {
+  const lexicalRoot = path.resolve(workspaceRoot);
+  const realRoot = fs.realpathSync(lexicalRoot);
+
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      if (directory === lexicalRoot && entry.name === '.git') continue;
+      const entryPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) {
+        const target = fs.readlinkSync(entryPath);
+        if (path.isAbsolute(target)) throw new Error('V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT');
+        const lexicalTarget = path.resolve(path.dirname(entryPath), target);
+        if (!inside(lexicalTarget, lexicalRoot)) {
+          throw new Error('V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT');
+        }
+        try {
+          const realTarget = fs.realpathSync(entryPath);
+          if (!inside(realTarget, realRoot)) throw new Error('V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
+        continue;
+      }
+      if (stat.isDirectory()) visit(entryPath);
+    }
+  };
+
+  visit(lexicalRoot);
+}
+
+interface ObjectTreeInspection {
+  directories: Array<{ path: string; stat: Stats }>;
+  files: Array<{ path: string; relative: string; stat: Stats }>;
+}
+
+function inspectObjectTree(objectDirectory: string): ObjectTreeInspection | null {
+  const rootStat = fs.lstatSync(objectDirectory, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return null;
+  const device = rootStat.dev;
+  const directories: ObjectTreeInspection['directories'] = [];
+  const files: ObjectTreeInspection['files'] = [];
+
+  const visit = (directory: string): boolean => {
+    const directoryStat = fs.lstatSync(directory);
+    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || directoryStat.dev !== device) {
+      return false;
+    }
+    directories.push({ path: directory, stat: directoryStat });
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(entryPath);
+      if (stat.dev !== device || stat.isSymbolicLink()) return false;
+      if (stat.isDirectory()) {
+        if (!visit(entryPath)) return false;
+      } else if (stat.isFile()) {
+        files.push({ path: entryPath, relative: path.relative(objectDirectory, entryPath), stat });
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  return visit(objectDirectory) ? { directories, files } : null;
+}
+
+interface ObjectClonePlan {
+  hardlinkObjects: boolean;
+  sourceObjectDirectory?: string;
+  privatizeRelativeObjectPaths: string[];
+}
+
 async function prepareSharedObjectAccess(
   repoRoot: string,
   sourceOwner: UnixIdentity,
   executionOwner: UnixIdentity,
-): Promise<boolean> {
+): Promise<ObjectClonePlan> {
   const commonGitDirValue = await git(repoRoot, ['rev-parse', '--git-common-dir'], sourceOwner);
   const repoBoundary = fs.realpathSync(repoRoot);
   const commonGitDirCandidate = path.resolve(repoRoot, commonGitDirValue);
+  const commonGitDirStat = fs.lstatSync(commonGitDirCandidate, { throwIfNoEntry: false });
+  if (!commonGitDirStat?.isDirectory() || commonGitDirStat.isSymbolicLink()) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+  }
   const commonGitDir = fs.realpathSync(commonGitDirCandidate);
 
   // A linked worktree or redirected .git file can place the common Git directory outside the
-  // validated repository root. Never normalize permissions on that external repository. Such
-  // sources still work, but use a physically private clone instead of hardlinked objects.
-  if (!inside(commonGitDir, repoBoundary)) return false;
-
-  const objectDirectoryCandidate = path.join(commonGitDir, 'objects');
-  const objectDirectory = fs.realpathSync(objectDirectoryCandidate);
-  if (
-    !inside(objectDirectory, commonGitDir) ||
-    !inside(objectDirectory, repoBoundary) ||
-    !fs.statSync(objectDirectory).isDirectory()
-  ) {
-    return false;
+  // validated repository root. Never normalize permissions on that external repository.
+  if (!inside(commonGitDir, repoBoundary)) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
   }
 
-  // Never hardlink a canonical object inode that the execution identity already owns: file
-  // ownership would let the worker chmod the shared inode and then mutate canonical history.
-  if (sourceOwner.uid === executionOwner.uid) return false;
-  const executionOwnedObject = await execFileAsync(
-    'find',
-    [objectDirectory, '-type', 'f', '-uid', String(executionOwner.uid), '-print', '-quit'],
-    { encoding: 'utf8', timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
-  );
-  if (executionOwnedObject.stdout.trim()) return false;
+  const objectDirectoryCandidate = path.join(commonGitDir, 'objects');
+  const objectDirectoryStat = fs.lstatSync(objectDirectoryCandidate, { throwIfNoEntry: false });
+  if (!objectDirectoryStat?.isDirectory() || objectDirectoryStat.isSymbolicLink()) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+  }
+  const objectDirectory = fs.realpathSync(objectDirectoryCandidate);
+  if (!inside(objectDirectory, commonGitDir) || !inside(objectDirectory, repoBoundary)) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+  }
 
-  // Production runs with UMask=0077. Numeric sharedRepository=0640 makes Git create immutable
-  // object files as 0440: source-owner readable and execution-group readable, never group-writable.
-  // This applies to future loose objects and repacked objects, not only files present today.
-  await git(repoRoot, ['config', '--local', 'core.sharedRepository', '0640'], sourceOwner);
+  // Alternate object databases widen the object trust boundary beyond this repository.
+  if (fs.existsSync(path.join(objectDirectory, 'info', 'alternates'))) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+  }
+  const objectTree = inspectObjectTree(objectDirectory);
+  if (!objectTree) return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
 
-  // A local clone hardlinks pre-existing object files. Keep those files source-owned so a
-  // worker can never gain ownership of the canonical inode, but grant the execution GID
-  // read access. Re-running this normalization before every linked clone is authoritative;
-  // setgid directories are only an additional inheritance aid because Git may stage/rename
-  // future objects from paths that retain the source owner's primary group.
-  await execFileAsync('chgrp', ['-R', String(executionOwner.gid), objectDirectory], {
-    timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
-  });
-  await execFileAsync(
-    'find',
-    [objectDirectory, '-type', 'd', '-exec', 'chmod', 'u+rwx,g+rx,g-w,o-rwx,g+s', '{}', '+'],
-    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
-  );
-  await execFileAsync(
-    'find',
-    [objectDirectory, '-type', 'f', '-exec', 'chmod', 'u+r,g+r,g-w,o-rwx', '{}', '+'],
-    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
-  );
-  return true;
+  const executionOwnedRelativePaths = objectTree.files
+    .filter(({ stat }) => stat.uid === executionOwner.uid)
+    .map(({ relative }) => relative);
+
+  if (sourceOwner.uid === executionOwner.uid) {
+    // Review snapshots are commonly cloned from an implementation workspace owned by the same
+    // execution identity. Keep only already-readable, non-writable foreign-owned object inodes
+    // shared; privatize every owner-mutable or otherwise unsafe object in the child clone.
+    const privatizeRelativeObjectPaths = objectTree.files
+      .filter(
+        ({ stat }) =>
+          stat.uid === executionOwner.uid ||
+          !identityCanRead(stat, executionOwner) ||
+          identityCanWrite(stat, executionOwner),
+      )
+      .map(({ relative }) => relative);
+    return {
+      hardlinkObjects: true,
+      sourceObjectDirectory: objectDirectory,
+      privatizeRelativeObjectPaths,
+    };
+  }
+
+  // A canonical repository unexpectedly containing execution-owned object files has already
+  // crossed the ownership boundary. Use a physically private clone.
+  if (executionOwnedRelativePaths.length > 0) {
+    return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+  }
+
+  // Normalize only unique object-file inodes. If an unreadable file is already hardlinked,
+  // changing its metadata could affect an arbitrary external link, so fail closed to a private
+  // clone instead. Already-readable hardlinks are safe only when the execution identity cannot
+  // write them. Future restrictive-umask objects are normalized on the next provisioning pass.
+  for (const file of objectTree.files) {
+    if (identityCanWrite(file.stat, executionOwner)) {
+      return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+    }
+    if (identityCanRead(file.stat, executionOwner)) continue;
+    if (file.stat.nlink !== 1) return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+    fs.chownSync(file.path, file.stat.uid, executionOwner.gid);
+    fs.chmodSync(file.path, (file.stat.mode & 0o700) | 0o040);
+  }
+  for (const directory of objectTree.directories) {
+    fs.chownSync(directory.path, directory.stat.uid, executionOwner.gid);
+    fs.chmodSync(directory.path, 0o2750);
+  }
+
+  return {
+    hardlinkObjects: true,
+    sourceObjectDirectory: objectDirectory,
+    privatizeRelativeObjectPaths: [],
+  };
+}
+
+function privatizeExecutionOwnedObjectLinks(
+  hostPath: string,
+  plan: ObjectClonePlan,
+  executionOwner: UnixIdentity,
+): void {
+  if (!plan.hardlinkObjects || !plan.sourceObjectDirectory) return;
+  const cloneObjectDirectory = path.join(hostPath, '.git', 'objects');
+  for (const relative of plan.privatizeRelativeObjectPaths) {
+    const sourcePath = path.resolve(plan.sourceObjectDirectory, relative);
+    const clonePath = path.resolve(cloneObjectDirectory, relative);
+    if (
+      !inside(sourcePath, plan.sourceObjectDirectory) ||
+      !inside(clonePath, cloneObjectDirectory) ||
+      !fs.existsSync(sourcePath) ||
+      !fs.existsSync(clonePath)
+    ) {
+      continue;
+    }
+    const sourceStat = fs.lstatSync(sourcePath);
+    const cloneStat = fs.lstatSync(clonePath);
+    if (!sourceStat.isFile() || !cloneStat.isFile()) continue;
+
+    if (sourceStat.dev === cloneStat.dev && sourceStat.ino === cloneStat.ino) {
+      const temporary = `${clonePath}.pixel-private-${process.pid}-${Math.random().toString(16).slice(2)}`;
+      fs.copyFileSync(clonePath, temporary, fs.constants.COPYFILE_EXCL);
+      fs.chownSync(temporary, executionOwner.uid, executionOwner.gid);
+      fs.chmodSync(temporary, cloneStat.mode & 0o777);
+      fs.renameSync(temporary, clonePath);
+    } else {
+      fs.chownSync(clonePath, executionOwner.uid, executionOwner.gid);
+    }
+  }
 }
 
 async function chownExecutionRepository(
@@ -462,60 +652,91 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     // Local execution clones keep private refs/index/new objects but physically share
     // pre-existing canonical objects through hardlinks. This preserves the worker trust
     // boundary without multiplying immutable Git history per execution.
-    const sharedObjects = this.#executionOwner
+    const objectClonePlan: ObjectClonePlan = this.#executionOwner
       ? await prepareSharedObjectAccess(repoRoot, sourceOwner, this.#executionOwner)
-      : true;
+      : { hardlinkObjects: true, privatizeRelativeObjectPaths: [] };
+
+    const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-v3-'));
+    const stagingRepo = path.join(stagingRoot, 'repo');
+    fs.chownSync(stagingRoot, sourceOwner.uid, sourceOwner.gid);
+    const sameFilesystem = fs.statSync(stagingRoot).dev === fs.statSync(path.dirname(hostPath)).dev;
+    const effectiveClonePlan: ObjectClonePlan = sameFilesystem
+      ? objectClonePlan
+      : { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+    const cloneAsRoot = effectiveClonePlan.hardlinkObjects;
+    const cloneIdentity = cloneAsRoot ? undefined : sourceOwner;
+    const trustedCloneConfig = path.join(stagingRoot, 'git-safe-config');
 
     let branch: string | undefined;
     try {
+      let cloneEnv: NodeJS.ProcessEnv | undefined;
+      if (cloneAsRoot) {
+        // Linux protected_hardlinks prevents the OpenHands identity from linking canonical
+        // dev-owned packs. Root therefore performs only the local clone. Git's internal
+        // upload-pack subprocess must see the source as trusted, so use a disposable protected
+        // global config scoped to the already-validated repoRoot. Nothing is written to a user
+        // or system Git config and the file is removed with stagingRoot.
+        await execFileAsync(
+          'git',
+          ['config', '--file', trustedCloneConfig, '--add', 'safe.directory', repoRoot],
+          { encoding: 'utf8', timeout: WORKSPACE_GIT_TIMEOUT_MS },
+        );
+        await execFileAsync(
+          'git',
+          [
+            'config',
+            '--file',
+            trustedCloneConfig,
+            '--add',
+            'safe.directory',
+            path.join(repoRoot, '.git'),
+          ],
+          { encoding: 'utf8', timeout: WORKSPACE_GIT_TIMEOUT_MS },
+        );
+        cloneEnv = { ...process.env, GIT_CONFIG_GLOBAL: trustedCloneConfig };
+      }
+
       await execFileAsync(
         'git',
         [
-          '-c',
-          `safe.directory=${repoRoot}`,
           'clone',
           '--local',
-          ...(sharedObjects ? [] : ['--no-hardlinks']),
+          ...(effectiveClonePlan.hardlinkObjects ? [] : ['--no-hardlinks']),
           '--no-checkout',
           repoRoot,
-          hostPath,
+          stagingRepo,
         ],
         {
+          ...(cloneIdentity ? { uid: cloneIdentity.uid, gid: cloneIdentity.gid } : {}),
+          ...(cloneEnv ? { env: cloneEnv } : {}),
           encoding: 'utf8',
           timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
           maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
         },
       );
 
+      const stagingIdentity = cloneAsRoot ? undefined : sourceOwner;
       if (
         input.workspaceMode === 'isolated_write' ||
         input.workspaceMode === 'reuse_implementation_workspace'
       ) {
         branch = `ai-office/${directory}`;
-        await git(hostPath, [
-          ...safeDirectory(hostPath),
-          'checkout',
-          '-B',
-          branch,
-          resolvedRevision,
-        ]);
+        await git(stagingRepo, ['checkout', '-B', branch, resolvedRevision], stagingIdentity);
       } else {
-        await git(hostPath, [...safeDirectory(hostPath), 'checkout', '--detach', resolvedRevision]);
+        await git(stagingRepo, ['checkout', '--detach', resolvedRevision], stagingIdentity);
       }
 
       if (input.workspaceMode === 'review_snapshot' && input.reviewBaseRevision?.trim()) {
-        const resolvedReviewBase = await git(hostPath, [
-          ...safeDirectory(hostPath),
-          'rev-parse',
-          '--verify',
-          input.reviewBaseRevision.trim(),
-        ]);
-        await git(hostPath, [
-          ...safeDirectory(hostPath),
-          'update-ref',
-          'refs/ai-office/review-base',
-          resolvedReviewBase,
-        ]);
+        const resolvedReviewBase = await git(
+          stagingRepo,
+          ['rev-parse', '--verify', input.reviewBaseRevision.trim()],
+          stagingIdentity,
+        );
+        await git(
+          stagingRepo,
+          ['update-ref', 'refs/ai-office/review-base', resolvedReviewBase],
+          stagingIdentity,
+        );
       }
 
       if (input.workspaceMode === 'review_snapshot') {
@@ -528,11 +749,28 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
           sourceOwner,
         );
-        overlayWorkingTree(repoRoot, hostPath, workingTreeEntries);
+        overlayWorkingTree(repoRoot, stagingRepo, workingTreeEntries);
+      }
+
+      if (sameFilesystem) {
+        fs.renameSync(stagingRepo, hostPath);
+      } else {
+        fs.cpSync(stagingRepo, hostPath, {
+          recursive: true,
+          preserveTimestamps: true,
+          errorOnExist: true,
+          force: false,
+        });
       }
     } catch (error) {
       fs.rmSync(path.dirname(hostPath), { recursive: true, force: true });
       throw error;
+    } finally {
+      fs.rmSync(stagingRoot, { recursive: true, force: true });
+    }
+
+    if (this.#executionOwner) {
+      privatizeExecutionOwnedObjectLinks(hostPath, effectiveClonePlan, this.#executionOwner);
     }
 
     if (this.#executionOwner) {
@@ -540,7 +778,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       // object files may be hardlinked to canonical storage and deliberately remain source-owned.
       fs.chownSync(path.dirname(hostPath), this.#executionOwner.uid, this.#executionOwner.gid);
       fs.chmodSync(path.dirname(hostPath), 0o750);
-      await chownExecutionRepository(hostPath, this.#executionOwner, sharedObjects);
+      await chownExecutionRepository(
+        hostPath,
+        this.#executionOwner,
+        effectiveClonePlan.hardlinkObjects,
+      );
     }
 
     if (

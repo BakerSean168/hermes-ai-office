@@ -55,12 +55,14 @@ This grants read access to history already in scope for the execution without gr
 
 ### Execution clone
 
-1. clone directly into the execution workspace with `git clone --local --no-checkout`;
+1. clone directly into the execution workspace with `git clone --local --no-checkout` when the source common Git directory is in-bounds; otherwise use `--no-hardlinks`;
 2. checkout the required branch/detached revision;
-3. for review, set `refs/ai-office/review-base` and overlay Git-visible working-tree state;
-4. transfer execution-private files/directories to the execution identity;
-5. leave hardlinked shared object files source-owned;
-6. apply writer/read-only permissions without chmod'ing shared object files.
+3. for review cloned from an OpenHands-owned implementation workspace, have the root control plane create the local hardlinks from a service-private staging directory using a disposable protected Git config that trusts only the already-validated source path; retain hardlinks for pre-existing source-owned canonical objects but break hardlinks only for object files actually owned by the execution identity (normally the implementation's new loose objects/pack);
+4. atomically rename the staged clone into the execution workspace when staging/workspace share a filesystem; cross-filesystem roots fall back to a private clone/copy;
+5. for review, set `refs/ai-office/review-base` and overlay Git-visible working-tree state;
+6. transfer execution-private files/directories and privatized object copies to the execution identity;
+7. leave safely shared hardlinked object files source-owned;
+8. apply writer/read-only permissions without chmod'ing shared object files.
 
 ### Cleanup
 
