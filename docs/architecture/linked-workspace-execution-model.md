@@ -45,10 +45,11 @@ A Git linked worktree stores its private administrative files under the canonica
 When an execution owner is configured:
 
 1. identify the source common Git object directory;
-2. ensure the object directory tree is group-readable/traversable by the execution GID;
-3. enable setgid on object directories so future objects inherit the execution-sharing group;
-4. configure Git shared-repository behavior for future object permissions;
-5. never transfer source object-file ownership to the execution user.
+2. refuse hardlink sharing when the source repository/object inode is already owned by the execution UID; such repositories fall back to a private `--no-hardlinks` clone;
+3. configure `core.sharedRepository=0640`, which keeps future Git object files group-readable but group-not-writable even under production `UMask=0077`;
+4. ensure the object directory tree is group-readable/traversable by the execution GID;
+5. enable setgid on object directories so future objects inherit the execution-sharing group;
+6. never transfer shared source object-file ownership to the execution user.
 
 This grants read access to history already in scope for the execution without granting canonical ref/index ownership.
 

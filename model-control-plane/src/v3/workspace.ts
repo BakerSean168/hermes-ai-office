@@ -118,7 +118,7 @@ async function prepareSharedObjectAccess(
   repoRoot: string,
   sourceOwner: UnixIdentity,
   executionOwner: UnixIdentity,
-): Promise<void> {
+): Promise<boolean> {
   const commonGitDirValue = await git(repoRoot, ['rev-parse', '--git-common-dir'], sourceOwner);
   const commonGitDir = path.resolve(repoRoot, commonGitDirValue);
   const objectDirectory = path.join(commonGitDir, 'objects');
@@ -126,10 +126,24 @@ async function prepareSharedObjectAccess(
     throw new Error('V3_REPOSITORY_OBJECT_DIRECTORY_INVALID');
   }
 
+  // Never hardlink a canonical object inode that the execution identity already owns: file
+  // ownership would let the worker chmod the shared inode and then mutate canonical history.
+  if (sourceOwner.uid === executionOwner.uid) return false;
+  const executionOwnedObject = await execFileAsync(
+    'find',
+    [objectDirectory, '-type', 'f', '-uid', String(executionOwner.uid), '-print', '-quit'],
+    { encoding: 'utf8', timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+  if (executionOwnedObject.stdout.trim()) return false;
+
+  // Production runs with UMask=0077. Numeric sharedRepository=0640 makes Git create immutable
+  // object files as 0440: source-owner readable and execution-group readable, never group-writable.
+  // This applies to future loose objects and repacked objects, not only files present today.
+  await git(repoRoot, ['config', '--local', 'core.sharedRepository', '0640'], sourceOwner);
+
   // A local clone hardlinks pre-existing object files. Keep those files source-owned so a
   // worker can never gain ownership of the canonical inode, but grant the execution GID
-  // read access. Setgid directories make newly-created canonical objects inherit the same
-  // read-sharing group without making the object files group-writable.
+  // read access. Setgid directories make future canonical objects inherit the sharing group.
   await execFileAsync('chgrp', ['-R', String(executionOwner.gid), objectDirectory], {
     timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
   });
@@ -143,9 +157,14 @@ async function prepareSharedObjectAccess(
     [objectDirectory, '-type', 'f', '-exec', 'chmod', 'u+r,g+r,g-w,o-rwx', '{}', '+'],
     { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
   );
+  return true;
 }
 
-async function chownExecutionRepository(target: string, owner: UnixIdentity): Promise<void> {
+async function chownExecutionRepository(
+  target: string,
+  owner: UnixIdentity,
+  sharedObjects: boolean,
+): Promise<void> {
   const objectDirectory = path.join(target, '.git', 'objects');
   // The checked-out tree is untrusted input. Do not pass symlinks to chown: GNU chown
   // dereferences them by default and could re-own an arbitrary host target. Directory entry
@@ -181,6 +200,15 @@ async function chownExecutionRepository(target: string, owner: UnixIdentity): Pr
     [objectDirectory, '-type', 'd', '-exec', 'chown', `${owner.uid}:${owner.gid}`, '{}', '+'],
     { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
   );
+  if (!sharedObjects) {
+    // Fallback clones use physically private object files, so ownership can safely move to
+    // the execution identity. Shared hardlinked object files must remain source-owned.
+    await execFileAsync(
+      'find',
+      [objectDirectory, '-type', 'f', '-exec', 'chown', `${owner.uid}:${owner.gid}`, '{}', '+'],
+      { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+    );
+  }
 }
 
 async function chmodExecutionRepository(target: string, writable: boolean): Promise<void> {
@@ -419,9 +447,9 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     // Local execution clones keep private refs/index/new objects but physically share
     // pre-existing canonical objects through hardlinks. This preserves the worker trust
     // boundary without multiplying immutable Git history per execution.
-    if (this.#executionOwner) {
-      await prepareSharedObjectAccess(repoRoot, sourceOwner, this.#executionOwner);
-    }
+    const sharedObjects = this.#executionOwner
+      ? await prepareSharedObjectAccess(repoRoot, sourceOwner, this.#executionOwner)
+      : true;
 
     let branch: string | undefined;
     try {
@@ -432,6 +460,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           `safe.directory=${repoRoot}`,
           'clone',
           '--local',
+          ...(sharedObjects ? [] : ['--no-hardlinks']),
           '--no-checkout',
           repoRoot,
           hostPath,
@@ -496,7 +525,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       // object files may be hardlinked to canonical storage and deliberately remain source-owned.
       fs.chownSync(path.dirname(hostPath), this.#executionOwner.uid, this.#executionOwner.gid);
       fs.chmodSync(path.dirname(hostPath), 0o750);
-      await chownExecutionRepository(hostPath, this.#executionOwner);
+      await chownExecutionRepository(hostPath, this.#executionOwner, sharedObjects);
     }
 
     if (

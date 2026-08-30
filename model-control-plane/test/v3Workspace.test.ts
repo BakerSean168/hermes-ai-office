@@ -191,6 +191,61 @@ test('execution permission normalization never follows repository symlinks outsi
   }
 });
 
+test('execution provisioning falls back to private objects when the execution identity owns the source', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-private-object-fallback-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  for (let index = 0; index < 16; index += 1) {
+    fs.writeFileSync(path.join(source, `file-${index}.txt`), `base-${index}\n`);
+  }
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  git(source, 'gc', '--prune=now');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const sourcePack = fs
+    .readdirSync(path.join(source, '.git', 'objects', 'pack'))
+    .find((entry) => entry.endsWith('.pack'));
+  assert.ok(sourcePack);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+    executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'private-objects-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const sourcePackPath = path.join(source, '.git', 'objects', 'pack', sourcePack);
+    const workspacePackPath = path.join(
+      implementation.hostPath,
+      '.git',
+      'objects',
+      'pack',
+      sourcePack,
+    );
+    const sourceStat = fs.statSync(sourcePackPath);
+    const workspaceStat = fs.statSync(workspacePackPath);
+
+    assert.notEqual(workspaceStat.ino, sourceStat.ino);
+    assert.doesNotMatch(
+      fs.readFileSync(path.join(source, '.git', 'config'), 'utf8'),
+      /sharedRepository/i,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('execution provisioning shares packed source objects without sharing mutable Git state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-linked-objects-'));
   const source = path.join(root, 'source');
