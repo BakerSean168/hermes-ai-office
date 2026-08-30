@@ -143,7 +143,7 @@ test('review snapshot preserves committed implementation HEAD and records origin
   }
 });
 
-test('execution permission normalization never follows repository symlinks outside the workspace', async () => {
+test('execution provisioning rejects tracked symlinks that escape the workspace', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-symlink-boundary-'));
   const source = path.join(root, 'source');
   const workspaceRoot = path.join(root, 'workspaces');
@@ -167,26 +167,205 @@ test('execution permission normalization never follows repository symlinks outsi
     executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
   });
 
-  let reviewRoot: string | undefined;
   try {
-    const review = await provisioner.provision({
-      executionId: 'symlink-review-1',
-      repositoryPath: source,
-      baseRevision: base,
-      workspaceMode: 'read_oriented',
-    });
-    reviewRoot = review.hostPath;
+    await assert.rejects(
+      provisioner.provision({
+        executionId: 'symlink-review-1',
+        repositoryPath: source,
+        baseRevision: base,
+        workspaceMode: 'read_oriented',
+      }),
+      /V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT/,
+    );
     const after = fs.statSync(victim);
-
-    assert.equal(fs.lstatSync(path.join(review.hostPath, 'outside-link')).isSymbolicLink(), true);
     assert.equal(after.uid, before.uid);
     assert.equal(after.gid, before.gid);
     assert.equal(after.mode & 0o777, before.mode & 0o777);
     assert.equal(fs.readFileSync(victim, 'utf8'), 'host-owned\n');
+    assert.equal(fs.existsSync(provisioner.hostPathForExecution('symlink-review-1')), false);
   } finally {
-    if (reviewRoot && fs.existsSync(reviewRoot)) {
-      execFileSync('chmod', ['-R', 'u+w', reviewRoot]);
-    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('execution provisioning preserves relative symlinks contained inside the workspace', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-contained-symlink-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(path.join(source, 'content'), { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'content', 'target.txt'), 'inside\n');
+  fs.symlinkSync('content/target.txt', path.join(source, 'inside-link'));
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base with contained symlink');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const workspace = await provisioner.provision({
+      executionId: 'contained-symlink-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    assert.equal(fs.lstatSync(path.join(workspace.hostPath, 'inside-link')).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(path.join(workspace.hostPath, 'inside-link'), 'utf8'), 'inside\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('execution workspace names reject lossy identifiers instead of colliding', () => {
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: '/tmp/v3-workspace-id-test',
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: ['/tmp'],
+  });
+
+  assert.match(provisioner.hostPathForExecution('exec_safe-1.2'), /exec_safe-1\.2\/repo$/);
+  assert.throws(() => provisioner.hostPathForExecution('exec/a'), /V3_EXECUTION_ID_INVALID/);
+  assert.throws(() => provisioner.hostPathForExecution('exec:a'), /V3_EXECUTION_ID_INVALID/);
+});
+
+test('existing execution workspace symlinks are rejected before reuse', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-existing-symlink-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+  const hostPath = provisioner.hostPathForExecution('existing-symlink-1');
+  fs.mkdirSync(path.dirname(hostPath), { recursive: true });
+  fs.symlinkSync(source, hostPath);
+
+  try {
+    await assert.rejects(
+      provisioner.provision({
+        executionId: 'existing-symlink-1',
+        repositoryPath: source,
+        baseRevision: base,
+        workspaceMode: 'isolated_write',
+      }),
+      /V3_EXECUTION_WORKSPACE_SYMLINK/,
+    );
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('existing execution workspaces reject redirected Git metadata', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-existing-gitdir-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+  const hostPath = provisioner.hostPathForExecution('redirected-gitdir-1');
+  fs.mkdirSync(hostPath, { recursive: true });
+  fs.writeFileSync(path.join(hostPath, 'tracked.txt'), 'base\n');
+  fs.symlinkSync(path.join(source, '.git'), path.join(hostPath, '.git'));
+
+  try {
+    await assert.rejects(
+      provisioner.provision({
+        executionId: 'redirected-gitdir-1',
+        repositoryPath: source,
+        baseRevision: base,
+        workspaceMode: 'isolated_write',
+      }),
+      /V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID/,
+    );
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('execution provisioning treats a symlinked canonical object directory as private', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-object-symlink-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  const externalObjects = path.join(root, 'external-objects');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  for (let index = 0; index < 12; index += 1) {
+    fs.writeFileSync(path.join(source, `file-${index}.txt`), `base-${index}\n`);
+  }
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  git(source, 'gc', '--prune=now');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const sourceObjects = path.join(source, '.git', 'objects');
+  fs.renameSync(sourceObjects, externalObjects);
+  fs.symlinkSync(externalObjects, sourceObjects);
+  const pack = fs.readdirSync(path.join(externalObjects, 'pack')).find((entry) => entry.endsWith('.pack'));
+  assert.ok(pack);
+  const externalPackPath = path.join(externalObjects, 'pack', pack);
+  const before = fs.statSync(externalPackPath);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+    executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
+  });
+
+  try {
+    const workspace = await provisioner.provision({
+      executionId: 'object-symlink-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const workspacePack = fs
+      .readdirSync(path.join(workspace.hostPath, '.git', 'objects', 'pack'))
+      .find((entry) => entry.endsWith('.pack'));
+    assert.ok(workspacePack);
+    const workspacePackStat = fs.statSync(
+      path.join(workspace.hostPath, '.git', 'objects', 'pack', workspacePack),
+    );
+    const after = fs.statSync(externalPackPath);
+
+    assert.notEqual(workspacePackStat.ino, before.ino);
+    assert.doesNotThrow(() => git(workspace.hostPath, 'cat-file', '-e', `${base}^{commit}`));
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+    assert.equal(after.mode & 0o777, before.mode & 0o777);
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -229,17 +408,17 @@ test('execution provisioning does not normalize an external common Git directory
       baseRevision: base,
       workspaceMode: 'isolated_write',
     });
-    const workspacePackPath = path.join(
-      implementation.hostPath,
-      '.git',
-      'objects',
-      'pack',
-      sourcePack,
+    const workspacePack = fs
+      .readdirSync(path.join(implementation.hostPath, '.git', 'objects', 'pack'))
+      .find((entry) => entry.endsWith('.pack'));
+    assert.ok(workspacePack);
+    const workspacePackStat = fs.statSync(
+      path.join(implementation.hostPath, '.git', 'objects', 'pack', workspacePack),
     );
-    const workspacePack = fs.statSync(workspacePackPath);
     const afterPack = fs.statSync(sourcePackPath);
 
-    assert.notEqual(workspacePack.ino, beforePack.ino);
+    assert.notEqual(workspacePackStat.ino, beforePack.ino);
+    assert.doesNotThrow(() => git(implementation.hostPath, 'cat-file', '-e', `${base}^{commit}`));
     assert.equal(fs.readFileSync(canonicalConfig, 'utf8'), beforeConfig);
     assert.equal(afterPack.uid, beforePack.uid);
     assert.equal(afterPack.gid, beforePack.gid);
@@ -365,6 +544,97 @@ test('execution provisioning shares packed source objects without sharing mutabl
     assert.notEqual(implementationHead, base);
     assert.equal(git(source, 'rev-parse', 'HEAD'), base);
     assert.equal(fs.readFileSync(path.join(source, 'file-0.txt'), 'utf8'), 'base-0\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration rejects a worktree whose common Git directory is external', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-gitdir-'));
+  const allowedRoot = path.join(root, 'allowed');
+  const canonical = path.join(root, 'canonical');
+  const linked = path.join(allowedRoot, 'linked');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(allowedRoot, { recursive: true });
+  fs.mkdirSync(canonical, { recursive: true });
+  git(canonical, 'init');
+  git(canonical, 'config', 'user.email', 'v3-test@example.invalid');
+  git(canonical, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(canonical, 'tracked.txt'), 'base\n');
+  git(canonical, 'add', '.');
+  git(canonical, 'commit', '-m', 'base');
+  const base = git(canonical, 'rev-parse', 'HEAD');
+  git(canonical, 'worktree', 'add', '-b', 'integration-linked', linked, base);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [allowedRoot],
+  });
+
+  try {
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-external-gitdir',
+        batchKey: 'batch-1',
+        repositoryPath: linked,
+        baseRevision: base,
+        implementations: [],
+      }),
+      /V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED/,
+    );
+    assert.equal(git(canonical, 'rev-parse', 'HEAD'), base);
+    assert.throws(
+      () => git(canonical, 'rev-parse', 'refs/ai-office/plans/plan-external-gitdir/batches/batch-1'),
+      /Command failed/,
+    );
+  } finally {
+    try {
+      git(canonical, 'worktree', 'remove', '--force', linked);
+    } catch {}
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration rejects a repository that resolves outside the allowed root', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-root-'));
+  const allowedRoot = path.join(root, 'allowed');
+  const outside = path.join(root, 'outside');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(allowedRoot, { recursive: true });
+  fs.mkdirSync(outside, { recursive: true });
+  git(outside, 'init');
+  git(outside, 'config', 'user.email', 'v3-test@example.invalid');
+  git(outside, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(outside, 'tracked.txt'), 'base\n');
+  git(outside, 'add', '.');
+  git(outside, 'commit', '-m', 'outside base');
+  const base = git(outside, 'rev-parse', 'HEAD');
+  const redirect = path.join(allowedRoot, 'redirect');
+  fs.symlinkSync(outside, redirect);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [allowedRoot],
+  });
+
+  try {
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-outside',
+        batchKey: 'batch-outside',
+        repositoryPath: redirect,
+        baseRevision: base,
+        implementations: [],
+      }),
+      /V3_REPOSITORY_ROOT_NOT_ALLOWED/,
+    );
+    assert.equal(git(outside, 'rev-parse', 'HEAD'), base);
+    assert.throws(
+      () => git(outside, 'rev-parse', 'refs/ai-office/plans/plan-outside/batches/batch-outside'),
+      /Command failed/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -153,17 +153,78 @@ function assertManagedWorkspacePath(hostPath: string, hostRoot: string): void {
   if (!fs.statSync(realPath).isDirectory()) throw new Error('V3_EXECUTION_WORKSPACE_INVALID');
 }
 
+function realPathInsideAllowedRoots(candidate: string, allowedRoots: string[]): boolean {
+  let realCandidate: string;
+  try {
+    realCandidate = fs.realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  return allowedRoots.some((root) => {
+    try {
+      return inside(realCandidate, fs.realpathSync(root));
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function assertManagedGitWorkspace(
   hostPath: string,
   hostRoot: string,
   owner?: UnixIdentity,
 ): Promise<void> {
   assertManagedWorkspacePath(hostPath, hostRoot);
+  const realWorkspace = fs.realpathSync(hostPath);
+  const gitDirectory = path.join(hostPath, '.git');
+  const gitStat = fs.lstatSync(gitDirectory, { throwIfNoEntry: false });
+  if (!gitStat?.isDirectory() || gitStat.isSymbolicLink()) {
+    throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+  }
+  const realGitDirectory = fs.realpathSync(gitDirectory);
+  if (!inside(realGitDirectory, realWorkspace)) {
+    throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+  }
+
   const topLevel = path.resolve(
     await git(hostPath, [...safeDirectory(hostPath), 'rev-parse', '--show-toplevel'], owner),
   );
-  if (fs.realpathSync(topLevel) !== fs.realpathSync(hostPath)) {
+  if (fs.realpathSync(topLevel) !== realWorkspace) {
     throw new Error('V3_EXECUTION_WORKSPACE_REPOSITORY_MISMATCH');
+  }
+  const commonGitDirValue = await git(
+    hostPath,
+    [...safeDirectory(hostPath), 'rev-parse', '--git-common-dir'],
+    owner,
+  );
+  const commonGitDir = fs.realpathSync(path.resolve(hostPath, commonGitDirValue));
+  if (!inside(commonGitDir, realWorkspace)) {
+    throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+  }
+}
+
+async function assertCanonicalGitMetadataContained(
+  repoRoot: string,
+  owner: UnixIdentity,
+): Promise<void> {
+  const realRepository = fs.realpathSync(repoRoot);
+  const commonGitDirValue = await git(repoRoot, ['rev-parse', '--git-common-dir'], owner);
+  const commonCandidate = path.resolve(repoRoot, commonGitDirValue);
+  const commonStat = fs.lstatSync(commonCandidate, { throwIfNoEntry: false });
+  if (!commonStat?.isDirectory() || commonStat.isSymbolicLink()) {
+    throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
+  }
+  const realCommon = fs.realpathSync(commonCandidate);
+  if (!inside(realCommon, realRepository)) {
+    throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
+  }
+  const objectCandidate = path.join(realCommon, 'objects');
+  const objectStat = fs.lstatSync(objectCandidate, { throwIfNoEntry: false });
+  if (!objectStat?.isDirectory() || objectStat.isSymbolicLink()) {
+    throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
+  }
+  if (!inside(fs.realpathSync(objectCandidate), realCommon)) {
+    throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
   }
 }
 
@@ -212,7 +273,11 @@ function inspectObjectTree(objectDirectory: string): ObjectTreeInspection | null
 
   const visit = (directory: string): boolean => {
     const directoryStat = fs.lstatSync(directory);
-    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || directoryStat.dev !== device) {
+    if (
+      !directoryStat.isDirectory() ||
+      directoryStat.isSymbolicLink() ||
+      directoryStat.dev !== device
+    ) {
       return false;
     }
     directories.push({ path: directory, stat: directoryStat });
@@ -474,8 +539,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
   }
 
   hostPathForExecution(executionId: string): string {
-    const directory = executionId.replace(/[^a-zA-Z0-9._-]/g, '_');
-    return path.join(this.#hostRoot, 'executions', directory, 'repo');
+    return path.join(this.#hostRoot, 'executions', executionDirectoryName(executionId), 'repo');
   }
 
   hostPathForWorkspaceRef(workspaceRef: string): string {
@@ -514,7 +578,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const repoRoot = path.resolve(
       await git(requested, ['rev-parse', '--show-toplevel'], requestedOwner),
     );
-    if (!this.#allowedRepositoryRoots.some((root) => inside(repoRoot, root))) {
+    if (!realPathInsideAllowedRoots(repoRoot, this.#allowedRepositoryRoots)) {
       throw new Error('V3_REPOSITORY_ROOT_NOT_ALLOWED');
     }
     const repoStat = fs.statSync(repoRoot);
@@ -562,6 +626,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     workspaceRef: string;
   }): Promise<{ startRevision: string }> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
+    await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const trusted = safeDirectory(hostPath);
     const ref = writerBaselineRef(input.executionId);
     try {
@@ -583,6 +648,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     workspaceRef: string;
   }): Promise<WriterCompletionEvidence> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
+    await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const trusted = safeDirectory(hostPath);
     const ref = writerBaselineRef(input.executionId);
     let startRevision: string;
@@ -626,7 +692,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const repoRoot = path.resolve(
       await git(requested, ['rev-parse', '--show-toplevel'], requestedOwner),
     );
-    if (!this.#allowedRepositoryRoots.some((root) => inside(repoRoot, root))) {
+    if (!realPathInsideAllowedRoots(repoRoot, this.#allowedRepositoryRoots)) {
       throw new Error('V3_REPOSITORY_ROOT_NOT_ALLOWED');
     }
     const repoStat = fs.statSync(repoRoot);
@@ -634,7 +700,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const revision = input.baseRevision?.trim() || 'HEAD';
     const resolvedRevision = await git(repoRoot, ['rev-parse', '--verify', revision], sourceOwner);
 
-    const directory = input.executionId.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const directory = executionDirectoryName(input.executionId);
     const executionsRoot = path.join(this.#hostRoot, 'executions');
     fs.mkdirSync(executionsRoot, { recursive: true, mode: 0o750 });
     if (this.#executionOwner) {
@@ -644,17 +710,27 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
 
     const hostPath = this.hostPathForExecution(input.executionId);
     const executionPath = path.posix.join(this.#executionRoot, 'executions', directory, 'repo');
-    if (fs.existsSync(hostPath)) {
+    const existingWorkspace = fs.lstatSync(hostPath, { throwIfNoEntry: false });
+    if (existingWorkspace) {
+      await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
       return { hostPath, executionPath, sourceRevision: resolvedRevision };
     }
     fs.mkdirSync(path.dirname(hostPath), { recursive: true, mode: 0o750 });
+    assertManagedWorkspacePath(path.dirname(hostPath), this.#hostRoot);
 
     // Local execution clones keep private refs/index/new objects but physically share
     // pre-existing canonical objects through hardlinks. This preserves the worker trust
     // boundary without multiplying immutable Git history per execution.
+    const serviceUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
     const objectClonePlan: ObjectClonePlan = this.#executionOwner
       ? await prepareSharedObjectAccess(repoRoot, sourceOwner, this.#executionOwner)
-      : { hardlinkObjects: true, privatizeRelativeObjectPaths: [] };
+      : {
+          // Preserve the legacy optional-owner contract. When the service and repository have
+          // different owners, clone privately as sourceOwner instead of relying on a trust
+          // exception or permissions the service identity may not have.
+          hardlinkObjects: serviceUid !== undefined && serviceUid === sourceOwner.uid,
+          privatizeRelativeObjectPaths: [],
+        };
 
     const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-v3-'));
     const stagingRepo = path.join(stagingRoot, 'repo');
@@ -663,19 +739,19 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const effectiveClonePlan: ObjectClonePlan = sameFilesystem
       ? objectClonePlan
       : { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
-    const cloneAsRoot = effectiveClonePlan.hardlinkObjects;
-    const cloneIdentity = cloneAsRoot ? undefined : sourceOwner;
+    const cloneWithServiceIdentity = effectiveClonePlan.hardlinkObjects;
+    const cloneIdentity = cloneWithServiceIdentity ? undefined : sourceOwner;
     const trustedCloneConfig = path.join(stagingRoot, 'git-safe-config');
 
     let branch: string | undefined;
     try {
       let cloneEnv: NodeJS.ProcessEnv | undefined;
-      if (cloneAsRoot) {
+      if (cloneWithServiceIdentity && serviceUid !== sourceOwner.uid) {
         // Linux protected_hardlinks prevents the OpenHands identity from linking canonical
-        // dev-owned packs. Root therefore performs only the local clone. Git's internal
-        // upload-pack subprocess must see the source as trusted, so use a disposable protected
-        // global config scoped to the already-validated repoRoot. Nothing is written to a user
-        // or system Git config and the file is removed with stagingRoot.
+        // dev-owned packs. The service identity therefore performs the linked clone. When that
+        // identity differs from sourceOwner (root in production), Git's internal upload-pack
+        // subprocess must see the source as trusted, so use a disposable protected global config
+        // scoped to the already-validated repoRoot. Nothing is persisted globally.
         await execFileAsync(
           'git',
           ['config', '--file', trustedCloneConfig, '--add', 'safe.directory', repoRoot],
@@ -700,8 +776,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         'git',
         [
           'clone',
-          '--local',
-          ...(effectiveClonePlan.hardlinkObjects ? [] : ['--no-hardlinks']),
+          ...(effectiveClonePlan.hardlinkObjects ? ['--local'] : ['--no-local']),
           '--no-checkout',
           repoRoot,
           stagingRepo,
@@ -715,7 +790,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         },
       );
 
-      const stagingIdentity = cloneAsRoot ? undefined : sourceOwner;
+      const stagingIdentity = cloneWithServiceIdentity ? undefined : sourceOwner;
       if (
         input.workspaceMode === 'isolated_write' ||
         input.workspaceMode === 'reuse_implementation_workspace'
@@ -751,6 +826,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         );
         overlayWorkingTree(repoRoot, stagingRepo, workingTreeEntries);
       }
+
+      assertWorkspaceSymlinksContained(stagingRepo);
 
       if (sameFilesystem) {
         fs.renameSync(stagingRepo, hostPath);
@@ -805,6 +882,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
   }): Promise<boolean> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
     if (!fs.existsSync(hostPath)) return false;
+    await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const gitDirectory = path.join(hostPath, '.git');
     if (!fs.existsSync(gitDirectory)) return false;
     await execFileAsync(
@@ -831,7 +909,10 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     if (!inside(executionDirectory, executionsRoot)) {
       throw new Error('V3_EXECUTION_WORKSPACE_NOT_ALLOWED');
     }
-    if (!fs.existsSync(executionDirectory)) return false;
+    const executionStat = fs.lstatSync(executionDirectory, { throwIfNoEntry: false });
+    if (!executionStat) return false;
+    if (executionStat.isSymbolicLink()) throw new Error('V3_EXECUTION_WORKSPACE_SYMLINK');
+    assertManagedWorkspacePath(executionDirectory, this.#hostRoot);
     fs.rmSync(executionDirectory, { recursive: true, force: true });
     return true;
   }
@@ -854,8 +935,12 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const repoRoot = path.resolve(
       await git(requested, ['rev-parse', '--show-toplevel'], requestedOwner),
     );
+    if (!realPathInsideAllowedRoots(repoRoot, this.#allowedRepositoryRoots)) {
+      throw new Error('V3_REPOSITORY_ROOT_NOT_ALLOWED');
+    }
     const repoStat = fs.statSync(repoRoot);
     const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    await assertCanonicalGitMetadataContained(repoRoot, sourceOwner);
     const integrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-integrate-'));
     fs.chownSync(integrationRoot, sourceOwner.uid, sourceOwner.gid);
     const integrationRepo = path.join(integrationRoot, 'repo');
@@ -876,6 +961,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
 
       for (const [index, implementation] of input.implementations.entries()) {
         const implementationPath = this.hostPathForWorkspaceRef(implementation.workspaceRef);
+        await assertManagedGitWorkspace(implementationPath, this.#hostRoot, this.#executionOwner);
         const trustedImplementation = safeDirectory(implementationPath);
         const dirty = await git(implementationPath, [
           ...trustedImplementation,

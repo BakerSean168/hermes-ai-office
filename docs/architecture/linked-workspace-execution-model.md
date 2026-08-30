@@ -44,25 +44,27 @@ A Git linked worktree stores its private administrative files under the canonica
 
 When an execution owner is configured:
 
-1. resolve the real source common Git directory and require it to remain inside the real repository root; linked-worktree/external-gitdir sources fall back to a private `--no-hardlinks` clone rather than granting permissions on another repository;
-2. refuse hardlink sharing when the source repository/object inode is already owned by the execution UID; such repositories also fall back to a private `--no-hardlinks` clone;
-3. configure `core.sharedRepository=0640`, which keeps future Git object files group-readable but group-not-writable even under production `UMask=0077`;
-4. before every linked clone, reassert the canonical object tree's group to the execution GID and group-readable/traversable modes; this is the authoritative step because newly-created Git objects may temporarily retain the source owner's primary group;
-5. enable setgid on object directories as an inheritance aid, but do not rely on it as the sole future-object guarantee;
-6. never transfer shared source object-file ownership to the execution user.
+1. resolve the real source common Git directory and object directory and require both to remain inside the real repository root; terminal symlinks, alternates, special files, cross-device object trees, and out-of-bound common Git directories disable hardlink sharing;
+2. inspect object-file ownership, mode, link count, and device before changing metadata; never recursively `chgrp/chmod` an unverified object tree;
+3. if the execution identity can write any canonical object, or an unreadable object already has another hardlink, fail closed to a private `--no-local` clone;
+4. an unreadable object may receive execution-group read permission only when its inode is unique to the canonical object tree; object directories may receive group traversal after the no-symlink/no-cross-device inspection because directories cannot be hardlinked;
+5. future objects created under a restrictive umask are re-inspected and normalized on the next provisioning pass instead of persisting a repository-wide `core.sharedRepository` mutation;
+6. for implementation-to-review cloning where source and execution UID match, retain only already-readable/non-writable foreign-owned history as hardlinks and break links for owner-mutable or otherwise unsafe execution-created objects;
+7. never transfer safely shared source object-file ownership or write permission to the execution user.
 
-This grants read access to history already in scope for the execution without granting canonical ref/index ownership.
+This grants read access to history already in scope for the execution without granting canonical ref/index ownership or mutating metadata on an inode that may be linked outside the repository.
 
 ### Execution clone
 
-1. clone directly into the execution workspace with `git clone --local --no-checkout` when the source common Git directory is in-bounds; otherwise use `--no-hardlinks`;
+1. stage a `git clone --local --no-checkout` only when the inspected object tree is safe to share; otherwise use a physically private `git clone --no-local --no-checkout`;
 2. checkout the required branch/detached revision;
 3. for review cloned from an OpenHands-owned implementation workspace, have the root control plane create the local hardlinks from a service-private staging directory using a disposable protected Git config that trusts only the already-validated source path; retain hardlinks for pre-existing source-owned canonical objects but break hardlinks only for object files actually owned by the execution identity (normally the implementation's new loose objects/pack);
 4. atomically rename the staged clone into the execution workspace when staging/workspace share a filesystem; cross-filesystem roots fall back to a private clone/copy;
-5. for review, set `refs/ai-office/review-base` and overlay Git-visible working-tree state;
-6. transfer execution-private files/directories and privatized object copies to the execution identity;
-7. leave safely shared hardlinked object files source-owned;
-8. apply writer/read-only permissions without chmod'ing shared object files.
+5. for review, set `refs/ai-office/review-base` and overlay Git-visible working-tree state; reject absolute or relative symlinks whose lexical or resolved targets escape the staged workspace while preserving contained relative links;
+6. atomically publish only a real managed directory; existing execution paths are revalidated with `lstat`, `realpath`, and Git top-level identity before reuse, retry, pruning, or integration;
+7. transfer execution-private files/directories and privatized object copies to the execution identity;
+8. leave safely shared hardlinked object files source-owned;
+9. apply writer/read-only permissions without chmod'ing shared object files; execution IDs must use the collision-free durable ID alphabet rather than lossy path sanitization.
 
 ### Cleanup
 
@@ -70,7 +72,7 @@ Removing an execution directory unlinks its hardlinks only. Canonical object fil
 
 ## Batch integration invariants
 
-1. The integration worktree is host-controlled and never mounted as a model workspace.
+1. The integration worktree is host-controlled and never mounted as a model workspace; the resolved canonical Git top-level must remain inside the configured real repository roots before any worktree/ref mutation.
 2. It starts detached from the exact batch base revision.
 3. Each implementation workspace must be clean and its HEAD must advance beyond its source revision.
 4. Required ancestor revisions are verified in the implementation workspace before import.

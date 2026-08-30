@@ -116,12 +116,12 @@ canonical repo
 
 **Implementation:**
 1. Resolve canonical common object directory.
-2. For configured execution identity, prepare source object group-read access without changing source object ownership.
-3. Clone directly with `git clone --local --no-checkout`; remove `--no-hardlinks` and the staging-copy path.
-4. Checkout exact writer/review revision.
-5. Preserve review overlay semantics.
-6. Transfer only execution-private ownership/permissions; shared hardlinked object files remain source-owned.
-7. Keep old workspace refs/path contract unchanged.
+2. For configured execution identity, inspect the real canonical object tree, link count, ownership, mode, and filesystem boundary before enabling sharing; unsafe sources use a private fallback without metadata mutation.
+3. Stage a `git clone --local --no-checkout` for safe sharing, or `git clone --no-local --no-checkout` for private fallback; atomically rename into the production workspace on the normal single filesystem.
+4. Checkout the exact writer/review revision and reject tracked symlinks that escape the staged workspace.
+5. Preserve review overlay semantics and privatize execution-owned objects before handing the review snapshot to the same execution identity.
+6. Transfer only execution-private ownership/permissions; safely shared hardlinked object files remain source-owned and never worker-writable.
+7. Revalidate existing workspace path components, real Git metadata, and top-level identity before reuse/retry/prune/integration; keep the public workspace-ref contract unchanged.
 
 **Acceptance:**
 - physical source object sharing proven by test;
@@ -235,7 +235,7 @@ Completed in branch `refactor/workspace-storage-v4-20260830`:
 
 - **WS-1001 COMPLETE** — forensic report, ADR, architecture document, and Active Plan created from measured GCP Dev evidence.
 - **WS-1002 COMPLETE** — packed-object sharing regression test proves execution/source pack inode sharing while execution commits leave canonical HEAD/working tree unchanged.
-- **WS-1101 COMPLETE** — execution/review provisioning now uses local linked clones with private mutable Git metadata and hardlinked pre-existing objects; `--no-hardlinks` staging/copy path removed.
+- **WS-1101 COMPLETE** — execution/review provisioning now uses linked local clones with private mutable Git metadata and hardlinked safe pre-existing objects. Service-private staging remains only as an atomic publication/security boundary; the legacy full-history staging-copy path is gone, and unsafe sources use `--no-local` private fallback.
 - **WS-1102 COMPLETE** — batch integration now uses a host-only detached Git worktree; `bundle --all`, full integration clone, and integrated full-history bundle fetch were removed. Implementation transfer bundles contain only `HEAD ^sourceRevision`.
 - **Retention hardening COMPLETE (pulled forward from Phase 3)** — completed/cancelled batches no longer pin the latest successful implementation workspace for every historical/synthetic work item while the overall Plan remains active. Terminal execution pruning also removes execution-scoped `.agent-harness` state even when the repository itself remains protected for recovery.
 
@@ -251,18 +251,24 @@ Verification:
 - `git diff --check`: PASS.
 - production-shaped UID/GID prototype against the real `hermes-openhands-v3` mount: source/execution pack same inode, OpenHands commit succeeds, canonical HEAD/working tree unchanged.
 - First re-review of `8f4172c` returned **FAIL** with a second P1: future canonical Git objects could inherit service `UMask=0077` and become unreadable by linked workers.
-- Second repair configures `core.sharedRepository=0640` before canonical sharing, preserving group-read/no-group-write for future loose/packed objects; a real Git prototype under `umask 077` produced mode `0440` for both loose and packed objects. Later review-specific work refined same-owner handling so only execution-owned new objects are privatized while source-owned canonical history remains shared.
+- Second repair initially used `core.sharedRepository=0640` to keep future canonical objects group-readable under `UMask=0077`. Later trust-boundary hardening supersedes that persistent repository mutation: provisioning now inspects the real object tree each time, normalizes only unique unreadable inodes, and falls back to a private clone when link count/ownership/mode cannot be changed safely.
 - Second repair focused verification: `v3Workspace.test.ts` **12/12 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **154/154 PASS**, `git diff --check` PASS.
-- Production-shaped smoke using a `dev`-owned source repository, root control-plane code, the real OpenHands UID/GID `10001:10001`, and the real `/workspace` bind mount passed: after initial provisioning set `core.sharedRepository=0640`, a later canonical commit created under `umask 077` produced an object at mode `0440`; the next provisioning reasserted gid `10001`, source/clone object paths had the same inode/link count, OpenHands could `git cat-file` the future commit and create a private commit, and canonical HEAD/working tree remained unchanged.
+- Production-shaped smoke using a `dev`-owned source repository, root control-plane code, the real OpenHands execution identity, and the real `/workspace` bind mount passed for the earlier shared-permission model. The final hardening keeps the same readability property but obtains it via per-provision inspection/normalization instead of a persistent `core.sharedRepository` setting; this exact final model requires a fresh smoke before deployment.
 - Third independent review of `de0e00c` returned **FAIL** with one P1: a linked-worktree or redirected `.git` could resolve its common Git directory outside `repoRoot`, so permission normalization might touch another repository.
-- Third repair resolves real paths and only enables sharing when the real common Git directory and object directory remain inside the real source repository root. Linked-worktree/external-gitdir sources fall back to `--no-hardlinks` and are explicitly regression-tested to leave the external canonical repository config/object ownership/modes unchanged.
+- Third repair resolves real paths and only enables sharing when the real common Git directory and object directory remain inside the real source repository root. Linked-worktree/external-gitdir sources fall back to a physically private `--no-local` clone and are explicitly regression-tested to leave the external canonical repository config/object ownership/modes unchanged.
 - Third repair focused verification: `v3Workspace.test.ts` **13/13 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **155/155 PASS**, `git diff --check` PASS.
 - Fourth independent review of `4e770d5` returned **FAIL** with one P1: review snapshots sourced from OpenHands-owned implementation workspaces would fall back to full-history clones and reintroduce disk amplification.
 - Fourth repair introduces mixed object sharing for same-owner implementation→review cloning: source-owned canonical hardlinks remain shared, while only object files actually owned by the execution identity are broken into private clone inodes before review. Out-of-bound common gitdirs still use full private clones.
 - The mixed-review clone is staged under `/tmp` and atomically renamed into the production workspace on the normal single filesystem. Hardlink creation is performed by the root control plane using a disposable `GIT_CONFIG_GLOBAL` that trusts only the already-validated source repo for that clone; this avoids both Git dubious-ownership failure and Linux `protected_hardlinks` failure without persisting a global trust exception. Cross-filesystem roots fall back to a private clone/copy.
 - Production-shaped mixed-object smoke PASSED: dev-owned canonical pack, OpenHands-owned implementation, and read-only review all shared the same canonical pack inode with link count 3; the implementation's new OpenHands-owned commit object and the review copy had different inodes; review resolved the exact implementation commit and was clean; canonical HEAD/working tree were unchanged. The smoke workspaces were ~408 KiB and ~384 KiB for the small fixture rather than full-history copies.
 - Final local verification after the mixed-review repair: `v3Workspace.test.ts` **13/13 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **155/155 PASS**, `git diff --check` PASS.
-- Independent re-review is required on the fourth repaired exact branch before production deployment.
+- A delayed exact-`7d5805b` Business audit surfaced four additional P1 trust-boundary patterns plus one P2 path-collision issue: symlinked canonical object directories, post-resolution integration roots outside the allowlist, pre-existing execution-path symlink/reuse, escaping tracked symlinks, and lossy execution-ID sanitization. Although later commits had already addressed part of the common-Git-dir surface, these findings are treated as a generalized security review rather than dismissed as stale.
+- Current hardening validates common/object directories with `lstat/realpath`, rejects alternates/special/cross-device object trees, never changes metadata on an unreadable multiply-linked object inode, switches unsafe sources to `--no-local`, validates all existing/reused execution workspaces, rejects escaping tracked symlinks while preserving contained relative links, validates resolved integration roots and implementation workspace identities, and rejects lossy execution IDs.
+- New focused regression coverage includes escaping/contained tracked symlinks, existing workspace symlink reuse, execution-ID collision prevention, symlinked canonical object-directory private fallback, and integration redirected outside the real allowlist.
+- The next deployment candidate must pass focused/full verification and an independent Business re-review on the exact new commit; no previous PASS/FAIL result is transferable to that candidate.
+- Current hardened candidate verification: `v3Workspace.test.ts` **20/20 PASS**, retention **1/1 PASS**, TypeScript typecheck PASS, production build PASS, full model-control-plane **162/162 PASS**, and `git diff --check` PASS.
+- Production-shaped final-model smoke PASSED using the real workspace mount and execution identity: implementation and review shared the canonical history pack inode; the writer-created commit object and its review copy had different inodes; review was clean at the exact implementation HEAD; canonical HEAD/working tree were unchanged. The small fixture consumed ~340 KiB for implementation and ~316 KiB for review.
+- Independent Business re-review is required on the exact new commit produced from this hardening before production deployment.
 
 Deployment gate:
 

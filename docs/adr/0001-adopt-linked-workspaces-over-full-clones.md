@@ -32,9 +32,9 @@ Existing source Git objects are physically shared through hardlinks. The executi
 - new objects created by the worker;
 - writer baseline refs.
 
-The source object's owner remains unchanged. The execution GID receives read access to source object files; execution-private directories and metadata are owned by the execution identity. Recursive ownership/permission operations must never chown/chmod shared object files.
+The source object's owner remains unchanged. Hardlink sharing is enabled only after the common Git/object directories, inode ownership, permissions, link counts, and filesystem boundary pass a fail-closed inspection. Unreadable unique source objects may receive execution-group read permission; unsafe or externally-linked objects force a private `--no-local` clone. Execution-private directories and metadata are owned by the execution identity. Recursive ownership/permission operations must never blindly mutate shared object inodes.
 
-Review snapshots remain execution-private linked clones and become physically read-only after snapshot overlay. This preserves independent review without copying immutable history.
+Review snapshots remain execution-private linked clones and become physically read-only after snapshot overlay. Object files created by the implementation identity are privatized before review; safe canonical history may remain linked. Tracked symlinks that escape the execution root are rejected rather than merely protected from chown/chmod. This preserves independent review without copying immutable history or exposing host-visible sibling paths.
 
 ### 2. Host-controlled batch integration
 
@@ -95,7 +95,7 @@ Positive:
 
 Costs:
 
-- canonical Git object permissions must support read access for the execution GID;
+- canonical object sharing requires a per-provision inode/permission/link-count inspection; repositories that cannot satisfy it pay the cost of a private clone;
 - cleanup code must distinguish shared hardlinked object files from execution-private files;
 - old full-clone workspaces remain valid until retention removes them;
 - Git GC/repack of canonical repositories must be coordinated with active linked clones because hardlinked old pack inodes remain alive until the clone disappears.
