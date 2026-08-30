@@ -346,6 +346,9 @@ Verification:
 - A dedicated regression blocks the first provisioner at its publication fence while holding the flock, starts a second provisioner for the same execution, and proves the second cannot even enter its fence until the first releases the OS lock; after release the stale contender is rejected by the durable fence and the winner workspace/HEAD remain intact.
 - Verification after OS-level serialization: workspace **34/34 PASS**, API **30/30 PASS**, Plan **34/34 PASS**, deployment-boundary **10/10 PASS** before the explicit flock assertion update, TypeScript typecheck PASS, production build PASS, full model-control-plane **186/186 PASS**, and `git diff --check` PASS. A fresh exact-commit Business re-review is mandatory before deployment/reconcile.
 
+- **Independent Business deployment gate PASS** on exact code candidate `511ef0897e5ceb829c958cb917997ce829dc8a9d`: no P0/P1 blockers remain after the per-execution kernel flock repair. The reviewed boundary includes durable workspace/host launch claims, stale-owner fencing, service-owned torn-publication recovery, PrivateTmp-safe staging, object sharing, repository provenance, review immutability, integration, and retention. Exact-lineage verification is typecheck/build PASS, deployment-boundary **10/10**, API **30/30**, workspace **34/34**, Plan **34/34**, full model-control-plane **186/186**, and `git diff --check` PASS.
+- `511ef08` is the deployable code SHA. Any later commit before cutover must be documentation-only; any code change requires another exact Business review.
+
 
 Deployment gate:
 
