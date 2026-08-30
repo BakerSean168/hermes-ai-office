@@ -83,11 +83,12 @@ Every newly provisioned execution records the real canonical `repositoryRoot` al
 4. Each implementation workspace must be clean, its source revision must resolve to a commit, and that source revision must be an ancestor of the exact implementation HEAD.
 5. Required ancestor revisions are verified in the implementation workspace before import.
 6. The implementation bundle excludes the validated source ancestry; after fetch, `FETCH_HEAD` must equal the intended implementation HEAD exactly before merge.
-7. Merge order matches the existing batch implementation order.
-8. Conflicts remain `BATCH_INTEGRATION_CONFLICT:*` with actionable Git evidence.
-9. On success, the exact integrated HEAD is stored under a collision-free durable integration ref: existing safe plan/batch identifiers keep their historical ref spelling, while unsafe components are injectively UTF-8 hex encoded.
-10. The canonical source working tree HEAD/index/files never change.
-11. The temporary integration worktree is removed in `finally`, including conflict cases.
+7. Every Git command that inspects or exports the worker-mutable implementation repository (`status`, `rev-parse`, `merge-base`, `bundle`) executes as the execution workspace owner, never as the privileged control-plane/source owner. Command-line overrides disable `core.fsmonitor`, hooks, and pagers for those reads; bundle export is written into an execution-owned temporary directory and only then handed to the canonical source owner for fetch.
+8. Merge order matches the existing batch implementation order.
+9. Conflicts remain `BATCH_INTEGRATION_CONFLICT:*` with actionable Git evidence.
+10. On success, the exact integrated HEAD is stored under a collision-free durable integration ref: existing safe plan/batch identifiers keep their historical ref spelling, while unsafe components are injectively UTF-8 hex encoded.
+11. The canonical source working tree HEAD/index/files never change.
+12. The temporary integration worktree is removed in `finally`, including conflict cases.
 
 ## Retention interaction
 

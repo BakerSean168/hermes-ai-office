@@ -124,6 +124,19 @@ function executionDirectoryName(executionId: string): string {
   return executionRefComponent(executionId);
 }
 
+function untrustedWorkspaceGitArgs(workspace: string, args: string[]): string[] {
+  return [
+    ...safeDirectory(workspace),
+    '-c',
+    'core.fsmonitor=false',
+    '-c',
+    'core.hooksPath=/dev/null',
+    '-c',
+    'core.pager=cat',
+    ...args,
+  ];
+}
+
 function integrationRefComponent(value: string): string {
   const ordinary = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(value);
   if (ordinary && !value.endsWith('.lock')) return value;
@@ -1025,15 +1038,24 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           throw new Error('BATCH_INTEGRATION_REPOSITORY_MISMATCH');
         }
         const implementationPath = this.hostPathForWorkspaceRef(implementation.workspaceRef);
-        await assertManagedGitWorkspace(implementationPath, this.#hostRoot, this.#executionOwner);
-        const trustedImplementation = safeDirectory(implementationPath);
-        const dirty = await git(implementationPath, [
-          ...trustedImplementation,
-          'status',
-          '--porcelain',
-        ]);
+        assertManagedWorkspacePath(implementationPath, this.#hostRoot);
+        const implementationStat = fs.statSync(implementationPath);
+        const implementationOwner = this.#executionOwner ?? {
+          uid: implementationStat.uid,
+          gid: implementationStat.gid,
+        };
+        await assertManagedGitWorkspace(implementationPath, this.#hostRoot, implementationOwner);
+        const dirty = await git(
+          implementationPath,
+          untrustedWorkspaceGitArgs(implementationPath, ['status', '--porcelain']),
+          implementationOwner,
+        );
         if (dirty) throw new Error('BATCH_INTEGRATION_UNCOMMITTED_CHANGES');
-        const head = await git(implementationPath, [...trustedImplementation, 'rev-parse', 'HEAD']);
+        const head = await git(
+          implementationPath,
+          untrustedWorkspaceGitArgs(implementationPath, ['rev-parse', 'HEAD']),
+          implementationOwner,
+        );
         let targetSourceRevision: string;
         try {
           targetSourceRevision = await git(
@@ -1046,12 +1068,15 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         }
         let sourceRevision: string;
         try {
-          sourceRevision = await git(implementationPath, [
-            ...trustedImplementation,
-            'rev-parse',
-            '--verify',
-            `${implementation.sourceRevision}^{commit}`,
-          ]);
+          sourceRevision = await git(
+            implementationPath,
+            untrustedWorkspaceGitArgs(implementationPath, [
+              'rev-parse',
+              '--verify',
+              `${implementation.sourceRevision}^{commit}`,
+            ]),
+            implementationOwner,
+          );
         } catch {
           throw new Error('BATCH_INTEGRATION_SOURCE_REVISION_INVALID');
         }
@@ -1062,25 +1087,31 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
         }
         try {
-          await git(implementationPath, [
-            ...trustedImplementation,
-            'merge-base',
-            '--is-ancestor',
-            sourceRevision,
-            head,
-          ]);
+          await git(
+            implementationPath,
+            untrustedWorkspaceGitArgs(implementationPath, [
+              'merge-base',
+              '--is-ancestor',
+              sourceRevision,
+              head,
+            ]),
+            implementationOwner,
+          );
         } catch {
           throw new Error('BATCH_INTEGRATION_SOURCE_NOT_ANCESTOR');
         }
         for (const requiredRevision of input.requiredAncestorRevisions ?? []) {
           try {
-            await git(implementationPath, [
-              ...trustedImplementation,
-              'merge-base',
-              '--is-ancestor',
-              requiredRevision,
-              head,
-            ]);
+            await git(
+              implementationPath,
+              untrustedWorkspaceGitArgs(implementationPath, [
+                'merge-base',
+                '--is-ancestor',
+                requiredRevision,
+                head,
+              ]),
+              implementationOwner,
+            );
           } catch {
             throw new Error(`BATCH_INTEGRATION_REPAIR_INCOMPLETE:${requiredRevision}`);
           }
@@ -1089,27 +1120,43 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         // The implementation workspace is private to the execution identity, so the source
         // owner cannot traverse it directly. Export only objects newer than the recorded source
         // revision, then let the source owner fetch that small exact bundle into the host worktree.
-        const implementationBundle = path.join(integrationRoot, `implementation-${index}.bundle`);
-        await git(implementationPath, [
-          ...trustedImplementation,
-          'bundle',
-          'create',
-          implementationBundle,
-          'HEAD',
-          `^${sourceRevision}`,
-        ]);
-        fs.chownSync(implementationBundle, sourceOwner.uid, sourceOwner.gid);
-        await git(
-          integrationRepo,
-          ['fetch', '--no-tags', implementationBundle, 'HEAD'],
-          sourceOwner,
-        );
-        const fetchedHead = await git(
-          integrationRepo,
-          ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
-          sourceOwner,
-        );
-        if (fetchedHead !== head) throw new Error('BATCH_INTEGRATION_HEAD_MISMATCH');
+        const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-ai-office-export-${index}-`));
+        const implementationBundle = path.join(exportRoot, 'implementation.bundle');
+        const currentUid = typeof process.getuid === 'function' ? process.getuid() : implementationOwner.uid;
+        const currentGid = typeof process.getgid === 'function' ? process.getgid() : implementationOwner.gid;
+        if (implementationOwner.uid !== currentUid || implementationOwner.gid !== currentGid) {
+          fs.chownSync(exportRoot, implementationOwner.uid, implementationOwner.gid);
+        }
+        fs.chmodSync(exportRoot, 0o700);
+        try {
+          await git(
+            implementationPath,
+            untrustedWorkspaceGitArgs(implementationPath, [
+              'bundle',
+              'create',
+              implementationBundle,
+              'HEAD',
+              `^${sourceRevision}`,
+            ]),
+            implementationOwner,
+          );
+          fs.chownSync(implementationBundle, sourceOwner.uid, sourceOwner.gid);
+          fs.chownSync(exportRoot, sourceOwner.uid, sourceOwner.gid);
+          fs.chmodSync(exportRoot, 0o700);
+          await git(
+            integrationRepo,
+            ['fetch', '--no-tags', implementationBundle, 'HEAD'],
+            sourceOwner,
+          );
+          const fetchedHead = await git(
+            integrationRepo,
+            ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
+            sourceOwner,
+          );
+          if (fetchedHead !== head) throw new Error('BATCH_INTEGRATION_HEAD_MISMATCH');
+        } finally {
+          fs.rmSync(exportRoot, { recursive: true, force: true });
+        }
         try {
           await git(
             integrationRepo,

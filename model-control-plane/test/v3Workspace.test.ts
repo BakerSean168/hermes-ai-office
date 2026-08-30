@@ -1003,6 +1003,69 @@ test('batch integration requires implementation sourceRevision to be an ancestor
   }
 });
 
+test('batch integration disables worker-controlled fsmonitor configuration', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-fsmonitor-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  const marker = path.join(root, 'fsmonitor-executed.txt');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'fsmonitor-implementation',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(implementation.hostPath, 'implemented.txt'), 'implementation\n');
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    git(implementation.hostPath, 'add', '.');
+    git(implementation.hostPath, 'commit', '-m', 'implementation');
+
+    const monitor = path.join(implementation.hostPath, '.git', 'malicious-fsmonitor.sh');
+    fs.writeFileSync(
+      monitor,
+      `#!/bin/sh\nprintf 'executed\\n' > '${marker}'\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    git(implementation.hostPath, 'config', 'core.fsmonitor', monitor);
+
+    const integrated = await provisioner.integrateBatch({
+      planId: 'plan-fsmonitor',
+      batchKey: 'batch-1',
+      repositoryPath: source,
+      baseRevision: base,
+      implementations: [
+        {
+          workspaceRef: implementation.executionPath,
+          repositoryRoot: implementation.repositoryRoot,
+          sourceRevision: base,
+        },
+      ],
+    });
+
+    assert.equal(fs.existsSync(marker), false);
+    assert.equal(git(source, 'show', `${integrated.revision}:implemented.txt`), 'implementation');
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('batch integration rejects implementation provenance bound to another repository', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-repository-binding-'));
   const target = path.join(root, 'target');
