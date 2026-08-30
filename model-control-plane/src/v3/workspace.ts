@@ -169,6 +169,30 @@ function realPathInsideAllowedRoots(candidate: string, allowedRoots: string[]): 
   });
 }
 
+function assertPrivateGitMetadataTree(gitDirectory: string): void {
+  const realGitDirectory = fs.realpathSync(gitDirectory);
+  const visit = (directory: string): void => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      const stat = fs.lstatSync(entryPath);
+      if (stat.isSymbolicLink()) {
+        throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+      }
+      if (stat.isDirectory()) {
+        const realDirectory = fs.realpathSync(entryPath);
+        if (!inside(realDirectory, realGitDirectory)) {
+          throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+        }
+        visit(entryPath);
+      }
+    }
+  };
+  visit(gitDirectory);
+  if (fs.existsSync(path.join(gitDirectory, 'objects', 'info', 'alternates'))) {
+    throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+  }
+}
+
 async function assertManagedGitWorkspace(
   hostPath: string,
   hostRoot: string,
@@ -198,9 +222,11 @@ async function assertManagedGitWorkspace(
     owner,
   );
   const commonGitDir = fs.realpathSync(path.resolve(hostPath, commonGitDirValue));
-  if (!inside(commonGitDir, realWorkspace)) {
+  if (!inside(commonGitDir, realWorkspace) || commonGitDir !== realGitDirectory) {
     throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
   }
+  assertPrivateGitMetadataTree(gitDirectory);
+  assertWorkspaceSymlinksContained(hostPath);
 }
 
 async function assertCanonicalGitMetadataContained(

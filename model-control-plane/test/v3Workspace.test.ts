@@ -272,6 +272,92 @@ test('existing execution workspace symlinks are rejected before reuse', async ()
   }
 });
 
+test('writer reuse rejects Git object-directory redirection introduced after provisioning', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-reuse-object-redirect-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const workspace = await provisioner.provision({
+      executionId: 'reuse-object-redirect-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const objects = path.join(workspace.hostPath, '.git', 'objects');
+    fs.rmSync(objects, { recursive: true, force: true });
+    fs.symlinkSync(path.join(source, '.git', 'objects'), objects);
+
+    await assert.rejects(
+      provisioner.prepareWriterExecution({
+        executionId: 'reuse-object-redirect-attempt',
+        workspaceRef: workspace.executionPath,
+      }),
+      /V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID/,
+    );
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('writer reuse rejects escaping working-tree symlinks introduced after provisioning', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-reuse-tree-symlink-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  const victim = path.join(root, 'victim.txt');
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(victim, 'victim\n');
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const workspace = await provisioner.provision({
+      executionId: 'reuse-tree-symlink-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.symlinkSync(victim, path.join(workspace.hostPath, 'late-outside-link'));
+
+    await assert.rejects(
+      provisioner.prepareWriterExecution({
+        executionId: 'reuse-tree-symlink-attempt',
+        workspaceRef: workspace.executionPath,
+      }),
+      /V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT/,
+    );
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'victim\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('existing execution workspaces reject redirected Git metadata', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-existing-gitdir-'));
   const source = path.join(root, 'source');
