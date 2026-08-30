@@ -36,7 +36,7 @@ test('control-plane deployment contains no V2, CPA, or Provider Hub runtime conf
   assert.match(dropin, /MODEL_CP_V3_LITELLM_URL=http:\/\/127\.0\.0\.1:4000/);
   assert.match(
     dropin,
-    /MODEL_CP_V3_ENABLED_BACKENDS=opencode-acp,dsh-acp,codex-business-review-headless,codex-review-headless,claude-code-review-headless,openhands-builtin/,
+    /MODEL_CP_V3_ENABLED_BACKENDS=opencode-acp,dsh-acp,codex-acp,codex-business-planner-headless,codex-business-worker-headless,codex-business-review-headless,codex-review-headless,claude-code-review-headless,openhands-builtin/,
   );
   assert.match(
     dropin,

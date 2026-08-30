@@ -330,7 +330,7 @@ class DashboardTest(unittest.TestCase):
                                             "phase": "BATCH_VERIFY",
                                             "status": "RUNNING",
                                             "selection": {"backend": "codex-review-headless", "modelClass": "gpt-5.6-sol"},
-                                            "timing": {"startedAt": "2026-08-27T01:00:00Z"},
+                                            "timing": {"startedAt": "2026-08-27T01:00:00Z", "lastObservedAt": "2026-08-27T01:02:03Z"},
                                         }
                                     ],
                                 },
@@ -357,8 +357,61 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(plan["currentActivity"]["backend"], "codex-review-headless")
         self.assertEqual(plan["currentActivity"]["model"], "gpt-5.6-sol")
         self.assertEqual(plan["currentActivity"]["revision"], "candidate-2")
+        self.assertEqual(plan["currentActivity"]["lastObservedAt"], "2026-08-27T01:02:03Z")
         self.assertEqual(set(plan), set(CONTRACT["$defs"]["Plan"]["properties"]))
         self.assertEqual(set(plan["currentActivity"]), set(CONTRACT["$defs"]["PlanActivity"]["properties"]))
+
+    def test_plan_activity_common_non_execution_states_keep_schema_complete(self) -> None:
+        complete, _ = api._plans([{
+            "planId": "plan-complete", "projectKey": "demo", "objective": "Done",
+            "status": "SUCCEEDED", "currentRevision": "abc", "batches": [],
+        }])
+        self.assertEqual(complete[0]["currentActivity"]["kind"], "COMPLETE")
+        self.assertIsNone(complete[0]["currentActivity"]["lastObservedAt"])
+        self.assertEqual(
+            set(complete[0]["currentActivity"]),
+            set(CONTRACT["$defs"]["PlanActivity"]["properties"]),
+        )
+
+        integrating, _ = api._plans([{
+            "planId": "plan-integrating", "projectKey": "demo", "objective": "Integrate",
+            "status": "RUNNING", "currentRevision": "abc",
+            "batches": [{
+                "batchId": "b1", "key": "batch-1", "title": "Integrate",
+                "status": "RUNNING", "integratedRevision": "candidate", "workItems": [],
+            }],
+        }])
+        self.assertEqual(integrating[0]["currentActivity"]["kind"], "INTEGRATION_CANDIDATE")
+        self.assertIsNone(integrating[0]["currentActivity"]["lastObservedAt"])
+        self.assertEqual(
+            set(integrating[0]["currentActivity"]),
+            set(CONTRACT["$defs"]["PlanActivity"]["properties"]),
+        )
+
+    def test_plan_projection_exposes_durable_github_governance_identity(self) -> None:
+        plans, _summary = api._plans([
+            {
+                "planId": "plan-pr", "projectKey": "digital-biome", "objective": "Review PR",
+                "status": "SUCCEEDED", "currentRevision": "base", "batches": [],
+                "source": {
+                    "kind": "EXTERNAL_CHANGE", "revision": "1111111111111111111111111111111111111111",
+                    "origin": {
+                        "kind": "GITHUB_PULL_REQUEST", "repository": "example/project",
+                        "pullRequestNumber": 42, "producer": "JULES", "headRef": "jules/fix", "baseRef": "main"
+                    }
+                },
+                "externalHeadRevision": "2222222222222222222222222222222222222222",
+                "governanceStatusRevision": "2222222222222222222222222222222222222222",
+                "governanceStatusPlanStatus": "SUCCEEDED",
+            }
+        ])
+        governance = plans[0]["governance"]
+        self.assertEqual(governance["kind"], "GITHUB_PULL_REQUEST")
+        self.assertEqual(governance["pullRequestNumber"], 42)
+        self.assertEqual(governance["producer"], "JULES")
+        self.assertEqual(governance["governedRevision"], "2222222222222222222222222222222222222222")
+        self.assertEqual(governance["publishedPlanStatus"], "SUCCEEDED")
+        self.assertEqual(set(plans[0]), set(CONTRACT["$defs"]["Plan"]["properties"]))
 
     def test_plan_projection_identifies_post_merge_repair_and_failed_merge_revision(self) -> None:
         plans, _summary = api._plans(

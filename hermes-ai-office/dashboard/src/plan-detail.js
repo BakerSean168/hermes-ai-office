@@ -179,7 +179,10 @@ function TimelineExecution(props) {
       h("span", { className: "hao-phase" }, item.phase || "EXECUTION"),
       h(Badge, { value: item.status }),
       item.verdict ? h("span", { className: "hao-timeline-verdict" }, item.verdict) : null,
-      h("span", { className: "hao-timeline-time" }, dateTime(item.startedAt, props.locale))
+      h("span", { className: "hao-timeline-time" },
+        dateTime(item.startedAt, props.locale) +
+        (item.lastObservedAt ? " · " + props.t.lastObserved + " " + dateTime(item.lastObservedAt, props.locale) : "")
+      )
     ),
     h("div", { className: "hao-plan-meta" }, chips.map(function (value, index) {
       return h("span", { className: "hao-plan-chip", key: value + index }, value);
@@ -246,7 +249,13 @@ export function PlanDetail(props) {
         h("div", null,
           h("div", { className: "hao-running-top" }, plan ? h(Badge, { value: plan.status }) : null, h("span", { className: "hao-phase" }, t.planDetail)),
           h("h2", null, plan ? plan.objective : t.planDetail),
-          plan ? h("div", { className: "hao-running-project" }, plan.projectKey + " · " + shortRevision(plan.currentRevision)) : null
+          plan ? h("div", { className: "hao-running-project" }, plan.projectKey + " · " + shortRevision(plan.currentRevision)) : null,
+          plan && plan.governance ? h("div", { className: "hao-plan-meta" },
+            h("span", { className: "hao-plan-chip" }, props.t.governance + " · PR #" + (plan.governance.pullRequestNumber || "—")),
+            plan.governance.producer ? h("span", { className: "hao-plan-chip" }, plan.governance.producer) : null,
+            plan.governance.governedRevision ? h("span", { className: "hao-plan-chip" }, shortRevision(plan.governance.governedRevision)) : null,
+            plan.governance.publishedPlanStatus ? h(Badge, { value: plan.governance.publishedPlanStatus }) : null
+          ) : null
         ),
         h("button", { type: "button", className: "hao-button hao-button-secondary", onClick: props.onClose }, t.close)
       ),

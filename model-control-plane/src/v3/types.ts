@@ -129,6 +129,7 @@ export interface RouteUsageSummary {
 
 export interface ExecutionTiming {
   startedAt?: string;
+  lastObservedAt?: string;
   endedAt?: string;
   durationMs?: number;
 }
@@ -209,6 +210,7 @@ export interface ExecutionLinkRecord {
   statusCache: ExecutionStatus;
   createdAt: number;
   updatedAt: number;
+  hostUpdatedAt?: number;
   startedAt?: number;
   endedAt?: number;
 }

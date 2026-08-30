@@ -664,6 +664,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     let hostSnapshot = record.openhandsConversationId
       ? await this.#host.getExecution(record.openhandsConversationId)
       : null;
+    if (hostSnapshot?.updatedAt) {
+      const hostUpdatedAt = Date.parse(hostSnapshot.updatedAt);
+      if (Number.isFinite(hostUpdatedAt) && hostUpdatedAt > (record.hostUpdatedAt ?? 0)) {
+        record = this.#links.observeHostUpdatedAt(record.executionId, hostUpdatedAt);
+      }
+    }
     // Durable terminal product state is monotonic. In particular, a writer may be
     // rejected after the host reports SUCCEEDED because deterministic Git completion
     // verification failed. A later stale host snapshot must never resurrect that
@@ -752,7 +758,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
               (record.endedAt ?? record.updatedAt) - (record.startedAt ?? record.createdAt),
             )
           : undefined;
-        return { startedAt, endedAt, durationMs };
+        const lastObservedAt = record.hostUpdatedAt
+          ? new Date(record.hostUpdatedAt).toISOString()
+          : undefined;
+        return { startedAt, lastObservedAt, endedAt, durationMs };
       })(),
       usage: durableUsage,
       refs: {

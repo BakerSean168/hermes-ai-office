@@ -106,6 +106,7 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
                 "revision": raw.get("mergeRevision") or raw.get("currentRevision"),
                 "executionId": None,
                 "startedAt": None,
+                "lastObservedAt": None,
             }
         return {
             "kind": "COMPLETE" if str(raw.get("status") or "").upper() == "SUCCEEDED" else "IDLE",
@@ -122,6 +123,7 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
             "revision": raw.get("currentRevision"),
             "executionId": None,
             "startedAt": None,
+            "lastObservedAt": None,
         }
 
     items = [item for item in current.get("workItems", []) if isinstance(item, Mapping)]
@@ -149,6 +151,7 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
                 "revision": current.get("integratedRevision") or raw.get("currentRevision"),
                 "executionId": None,
                 "startedAt": None,
+                "lastObservedAt": None,
             }
         candidate = current.get("integratedRevision")
         return {
@@ -166,6 +169,7 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
             "revision": candidate or raw.get("currentRevision"),
             "executionId": None,
             "startedAt": None,
+            "lastObservedAt": None,
         }
 
     latest = _latest_execution(item)
@@ -210,6 +214,7 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
         "revision": revision,
         "executionId": execution_id,
         "startedAt": timing.get("startedAt") or (latest or {}).get("createdAt"),
+        "lastObservedAt": timing.get("lastObservedAt"),
     }
 
 
@@ -328,6 +333,27 @@ def _summary_plan_health(status: str, activity: Mapping[str, Any]) -> Dict[str, 
     return _health_from_attention([])
 
 
+def _governance(raw: Mapping[str, Any]) -> Dict[str, Any] | None:
+    source = raw.get("source") if isinstance(raw.get("source"), Mapping) else {}
+    if str(source.get("kind") or "").upper() != "EXTERNAL_CHANGE":
+        return None
+    origin = source.get("origin") if isinstance(source.get("origin"), Mapping) else {}
+    if str(origin.get("kind") or "").upper() != "GITHUB_PULL_REQUEST":
+        return None
+    number = origin.get("pullRequestNumber")
+    return {
+        "kind": "GITHUB_PULL_REQUEST",
+        "repository": str(origin.get("repository") or "") or None,
+        "pullRequestNumber": int(number) if isinstance(number, int) else None,
+        "producer": str(origin.get("producer") or "") or None,
+        "headRef": str(origin.get("headRef") or "") or None,
+        "baseRef": str(origin.get("baseRef") or "") or None,
+        "governedRevision": str(raw.get("externalHeadRevision") or source.get("revision") or "") or None,
+        "publishedRevision": str(raw.get("governanceStatusRevision") or "") or None,
+        "publishedPlanStatus": str(raw.get("governanceStatusPlanStatus") or "").upper() or None,
+    }
+
+
 def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
     plans = []
     summary = {"total": 0, "active": 0, "blocked": 0, "succeeded": 0}
@@ -363,6 +389,7 @@ def _plans(raw_plans: Any) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
                 "deliveryStage": raw.get("deliveryStage"),
                 "pullRequestUrl": raw.get("pullRequestUrl"),
                 "mergeRevision": raw.get("mergeRevision"),
+                "governance": _governance(raw),
                 "createdAt": raw.get("createdAt"),
                 "updatedAt": raw.get("updatedAt"),
                 "batches": {"total": len(business_batches), "succeeded": sum(batch.get("status") == "SUCCEEDED" for batch in business_batches)},

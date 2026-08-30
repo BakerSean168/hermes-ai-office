@@ -48,6 +48,7 @@ interface ExecutionLinkRow {
   status_cache: string;
   created_at: number;
   updated_at: number;
+  host_updated_at: number | null;
   started_at: number | null;
   ended_at: number | null;
 }
@@ -89,6 +90,7 @@ export function ensureV3Schema(db: DatabaseSync): void {
       status_cache TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
+      host_updated_at INTEGER,
       started_at INTEGER,
       ended_at INTEGER
     );
@@ -128,6 +130,9 @@ export function ensureV3Schema(db: DatabaseSync): void {
   }
   if (!columns.has('observed_routes_json')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN observed_routes_json TEXT');
+  }
+  if (!columns.has('host_updated_at')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN host_updated_at INTEGER');
   }
   if (!columns.has('started_at')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN started_at INTEGER');
@@ -217,6 +222,7 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     statusCache: row.status_cache as ExecutionStatus,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    hostUpdatedAt: row.host_updated_at ?? undefined,
     startedAt: row.started_at ?? row.created_at,
     endedAt: row.ended_at ?? undefined,
   };
@@ -355,6 +361,27 @@ export class ExecutionLinkRepository {
          WHERE execution_id=?`,
       )
       .run(conversationId, startedAt ?? null, now, executionId);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
+  observeHostUpdatedAt(executionId: string, observedAt: number): ExecutionLinkRecord {
+    if (!Number.isFinite(observedAt)) {
+      const record = this.get(executionId);
+      if (!record) throw new Error('EXECUTION_NOT_FOUND');
+      return record;
+    }
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET host_updated_at=CASE
+              WHEN host_updated_at IS NULL OR host_updated_at < ? THEN ?
+              ELSE host_updated_at
+            END
+          WHERE execution_id=?`,
+      )
+      .run(observedAt, observedAt, executionId);
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;

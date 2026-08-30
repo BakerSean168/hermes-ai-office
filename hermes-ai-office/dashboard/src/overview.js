@@ -1,5 +1,5 @@
 import { React, h } from "./runtime.js";
-import { activityLabel, compact, duration, integer, money, percentage, routeLabel, shortRevision } from "./format.js";
+import { activityLabel, compact, dateTime, duration, integer, money, percentage, routeLabel, shortRevision } from "./format.js";
 import { Badge, ExecutionTable, Metric, Panel, RunningCards } from "./components.js";
 import { HealthSummary } from "./plan-detail.js";
 
@@ -38,6 +38,9 @@ function PlanCards(props) {
     if (activity.model) meta.push(activity.model);
     const revision = shortRevision(activity.revision);
     if (revision) meta.push(revision);
+    if (activity.lastObservedAt) meta.push(t.lastObserved + " " + dateTime(activity.lastObservedAt, props.locale));
+    if (plan.governance && plan.governance.pullRequestNumber) meta.push("PR #" + plan.governance.pullRequestNumber);
+    if (plan.governance && plan.governance.publishedPlanStatus) meta.push(t.governance + " " + plan.governance.publishedPlanStatus);
     const progress = [
       plan.workItems.succeeded + "/" + plan.workItems.total + " " + t.items,
       plan.batches.succeeded + "/" + plan.batches.total + " " + t.batches,

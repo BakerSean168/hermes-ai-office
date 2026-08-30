@@ -35,7 +35,11 @@ export class GovernanceCoordinator {
         planStatus: plan.status,
         blockedReason: plan.blockedReason,
       });
-      if (publication.published !== false) {
+      const exactHeadPublished =
+        publication.published !== false &&
+        !publication.stale &&
+        publication.observedHeadRevision === revision;
+      if (exactHeadPublished) {
         this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
       }
     } catch {

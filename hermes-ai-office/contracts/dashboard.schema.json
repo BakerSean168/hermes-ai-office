@@ -605,7 +605,7 @@
     "Plan": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "createdAt", "updatedAt", "batches", "systemBatches", "workItems", "systemWorkItems", "currentBatch", "currentActivity", "health"],
+      "required": ["planId", "projectKey", "objective", "status", "currentRevision", "blockedReason", "deliveryStage", "pullRequestUrl", "mergeRevision", "governance", "createdAt", "updatedAt", "batches", "systemBatches", "workItems", "systemWorkItems", "currentBatch", "currentActivity", "health"],
       "properties": {
         "planId": {"type": "string", "minLength": 1},
         "projectKey": {"type": "string", "minLength": 1},
@@ -616,6 +616,12 @@
         "deliveryStage": {"type": ["string", "null"]},
         "pullRequestUrl": {"type": ["string", "null"]},
         "mergeRevision": {"type": ["string", "null"]},
+        "governance": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/PlanGovernance"}
+          ]
+        },
         "createdAt": {"type": ["integer", "number", "null"]},
         "updatedAt": {"type": ["integer", "number", "null"]},
         "batches": {"$ref": "#/$defs/ProgressCount"},
@@ -641,6 +647,22 @@
         },
         "currentActivity": {"$ref": "#/$defs/PlanActivity"},
         "health": {"$ref": "#/$defs/PlanHealth"}
+      }
+    },
+    "PlanGovernance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "repository", "pullRequestNumber", "producer", "headRef", "baseRef", "governedRevision", "publishedRevision", "publishedPlanStatus"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["GITHUB_PULL_REQUEST"]},
+        "repository": {"type": ["string", "null"]},
+        "pullRequestNumber": {"type": ["integer", "null"], "minimum": 1},
+        "producer": {"type": ["string", "null"]},
+        "headRef": {"type": ["string", "null"]},
+        "baseRef": {"type": ["string", "null"]},
+        "governedRevision": {"type": ["string", "null"]},
+        "publishedRevision": {"type": ["string", "null"]},
+        "publishedPlanStatus": {"type": ["string", "null"]}
       }
     },
     "PlanHealthIssue": {
@@ -677,7 +699,7 @@
     "PlanActivity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "status", "phase", "batchKey", "batchTitle", "workItemKey", "workItemTitle", "attempt", "backend", "model", "reason", "revision", "executionId", "startedAt"],
+      "required": ["kind", "status", "phase", "batchKey", "batchTitle", "workItemKey", "workItemTitle", "attempt", "backend", "model", "reason", "revision", "executionId", "startedAt", "lastObservedAt"],
       "properties": {
         "kind": {
           "type": "string",
@@ -695,13 +717,14 @@
         "reason": {"type": ["string", "null"]},
         "revision": {"type": ["string", "null"]},
         "executionId": {"type": ["string", "null"]},
-        "startedAt": {"type": ["string", "null"]}
+        "startedAt": {"type": ["string", "null"]},
+        "lastObservedAt": {"type": ["string", "null"]}
       }
     },
     "PlanTimelineExecution": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["executionId", "phase", "status", "attempt", "backend", "model", "policyReasons", "strongModel", "decisionReason", "startedAt", "endedAt", "durationMs", "totalTokens", "costUsd", "errorCode", "errorDetail", "verdict"],
+      "required": ["executionId", "phase", "status", "attempt", "backend", "model", "policyReasons", "strongModel", "decisionReason", "startedAt", "lastObservedAt", "endedAt", "durationMs", "totalTokens", "costUsd", "errorCode", "errorDetail", "verdict"],
       "properties": {
         "executionId": {"type": "string", "minLength": 1},
         "phase": {"type": "string", "minLength": 1},
@@ -716,6 +739,7 @@
           "enum": ["BATCH_AGGREGATE_REVIEW", "INTEGRATION_REPAIR", "POST_MERGE_RECOVERY", "DELIVERY_REPAIR", "INDEPENDENT_REVIEW", "FAILED_VERIFICATION_REPAIR", "STRONG_MODEL_POLICY", null]
         },
         "startedAt": {"type": ["string", "null"]},
+        "lastObservedAt": {"type": ["string", "null"]},
         "endedAt": {"type": ["string", "null"]},
         "durationMs": {"type": ["integer", "null"], "minimum": 0},
         "totalTokens": {"type": "integer", "minimum": 0},

@@ -68,6 +68,7 @@ function durableSnapshot(record: ExecutionLinkRecord): DevelopmentExecutionSnaps
       : null,
     timing: {
       startedAt: new Date(record.startedAt ?? record.createdAt).toISOString(),
+      lastObservedAt: record.hostUpdatedAt ? new Date(record.hostUpdatedAt).toISOString() : undefined,
       endedAt: ended ? new Date(record.endedAt ?? record.updatedAt).toISOString() : undefined,
       durationMs: ended
         ? Math.max(0, (record.endedAt ?? record.updatedAt) - (record.startedAt ?? record.createdAt))

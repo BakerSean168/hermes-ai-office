@@ -1472,6 +1472,7 @@ test('V3 execution list reconciles non-terminal cached state from the execution 
     assert.equal(listed.statusCode, 200);
     assert.equal(listed.json().items[0].status, 'SUCCEEDED');
     assert.equal(listed.json().items[0].usage.input, 100);
+    assert.equal(listed.json().items[0].timing.lastObservedAt, '2026-08-21T15:00:05.000Z');
   } finally {
     await runtime.app.close();
   }

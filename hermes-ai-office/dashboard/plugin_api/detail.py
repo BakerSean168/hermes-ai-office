@@ -79,6 +79,7 @@ def _timeline_execution(raw: Mapping[str, Any], plan: Mapping[str, Any], work_it
         "strongModel": strong_model,
         "decisionReason": _decision_reason(work_item_key, phase, strong_model),
         "startedAt": str(timing.get("startedAt") or "") or None,
+        "lastObservedAt": str(timing.get("lastObservedAt") or "") or None,
         "endedAt": str(timing.get("endedAt") or "") or None,
         "durationMs": int(_number(timing.get("durationMs"))) if timing.get("durationMs") is not None else None,
         "totalTokens": usage["input"] + usage["output"],

@@ -3633,6 +3633,130 @@ test('repair publication keeps the force-with-lease anchored to the intake head 
   }
 });
 
+test('stale GitHub governance publication never advances the durable fingerprint', async () => {
+  const host = new PlanHost();
+  const HEAD = '1111111111111111111111111111111111111111';
+  const NEW_HEAD = '3333333333333333333333333333333333333333';
+  const BASE = '2222222222222222222222222222222222222222';
+  let successCalls = 0;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      if (input.planStatus === 'SUCCEEDED') {
+        successCalls += 1;
+        if (successCalls === 1) {
+          return {
+            revision: input.expectedHeadRevision,
+            state: 'error',
+            stale: true,
+            observedHeadRevision: NEW_HEAD,
+            published: true,
+          };
+        }
+        if (successCalls === 2) {
+          return {
+            revision: input.expectedHeadRevision,
+            state: 'success',
+            stale: false,
+            published: true,
+          };
+        }
+      }
+      return {
+        revision: input.expectedHeadRevision,
+        state: input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale: false,
+        observedHeadRevision: input.expectedHeadRevision,
+        published: true,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3GovernanceStatus: governanceStatus,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Keep stale GitHub status publications retryable.',
+        analysisSummary: 'Review-only GitHub PR path.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: HEAD,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Approve only after independent verification.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-governance-stale-fingerprint',
+    );
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'PASS\nThe external change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(successCalls, 1);
+    assert.notEqual(
+      body.governanceStatusPlanStatus,
+      'SUCCEEDED',
+      'a stale publication is not the durable status for the reviewed SHA',
+    );
+
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(successCalls, 2, 'periodic reconciliation retries stale status publication');
+    assert.notEqual(
+      body.governanceStatusPlanStatus,
+      'SUCCEEDED',
+      'published=true without an exact observed head is still not durable proof',
+    );
+
+    await runtime.v3.reconcilePlans();
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(successCalls, 3, 'periodic reconciliation continues until the exact head is observed');
+    assert.equal(body.governanceStatusRevision, HEAD);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('terminal GitHub governance status is retried durably after a transient reporting failure', async () => {
   const host = new PlanHost();
   const HEAD = '1111111111111111111111111111111111111111';
@@ -3650,6 +3774,8 @@ test('terminal GitHub governance status is retried durably after a transient rep
         revision: input.expectedHeadRevision,
         state: input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
         stale: false,
+        observedHeadRevision: input.expectedHeadRevision,
+        published: true,
       };
     },
   };
