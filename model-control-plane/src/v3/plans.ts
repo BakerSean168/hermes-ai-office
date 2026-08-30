@@ -508,6 +508,16 @@ export class PlanRepository {
       .run(revision, planStatus, Date.now(), planId);
   }
 
+  invalidateGovernanceStatusPublished(planId: string): void {
+    this.#db
+      .prepare(
+        `UPDATE v3_plans
+            SET governance_status_revision=NULL,governance_status_plan_status=NULL,updated_at=?
+          WHERE plan_id=?`,
+      )
+      .run(Date.now(), planId);
+  }
+
   setPlanStatus(planId: string, status: PlanStatus, blockedReason?: string): void {
     this.#db
       .prepare('UPDATE v3_plans SET status=?,blocked_reason=?,updated_at=? WHERE plan_id=?')

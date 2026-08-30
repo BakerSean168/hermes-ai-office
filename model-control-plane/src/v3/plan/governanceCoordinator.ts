@@ -47,6 +47,18 @@ export class GovernanceCoordinator {
       if (exactHeadPublished || supersededHeadHandled) {
         this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
       }
+      if (supersededHeadHandled && publication.observedHeadRevision) {
+        const currentHeadPlan = this.#repository.findByCommandKey(
+          `github-pr:${plan.source.origin.repository}:${plan.source.origin.pullRequestNumber}:${publication.observedHeadRevision}`,
+        );
+        if (currentHeadPlan && currentHeadPlan.planId !== plan.planId) {
+          // The superseded plan may have raced an already-published status on the
+          // current head (or this service may be upgrading from the old behavior
+          // that wrote fail-closed ERROR there). Make the exact-head plan publish
+          // its own durable truth once more; it remains the only owner of that SHA.
+          this.#repository.invalidateGovernanceStatusPublished(currentHeadPlan.planId);
+        }
+      }
     } catch {
       // Governance status is a retryable side effect, not plan truth. Leave the
       // publication fingerprint stale so periodic reconciliation retries it.
