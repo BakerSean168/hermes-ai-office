@@ -302,7 +302,10 @@ Verification:
 - Production-shaped publication-race smoke PASSED with 3,500 tracked files and a real host process running as UID 10001. The attacker waited until it observed the execution directory owner become 10001, then successfully replaced a tracked file with a symlink to a root-owned victim. The swap therefore definitely occurred after publication, but the victim owner/group/mode/device/inode/size remained exactly unchanged after an additional delay, proving no privileged recursive traversal remained after exposure.
 - Post-repair verification remains workspace focused **31/31 PASS**, API focused **23/23 PASS**, legacy-evidence/batch focused **2/2 PASS**, retention **1/1 PASS**, TypeScript typecheck PASS, production build PASS, full model-control-plane **175/175 PASS**, and `git diff --check` PASS.
 - A fresh exact-commit Business re-review is mandatory; the `6ea72b5` FAIL verdict is not transferable to the repaired candidate.
-- Independent Business re-review is required on the exact new commit produced from this hardening before production deployment.
+- **Independent Business deployment gate PASS** on exact code candidate `6d41a75db82d67f97fcebc7944ce3c57f8d492fd`: no P0/P1 findings remain across publication ordering, FD/pipe handoff, worker Git config/environment, object sharing, repository provenance, legacy fail-closed behavior, integration lifecycle, retention/recovery, and deployment compatibility.
+- Reviewer P2 note: the deliberately minimal read-only review snapshot did not contain `node_modules`, so the reviewer could not independently launch the TypeScript test commands inside that snapshot. The authoritative host-side verification for the exact code lineage remains workspace **31/31**, API **23/23**, legacy-evidence/batch **2/2**, retention **1/1**, full model-control-plane **175/175**, typecheck/build PASS, plus production-shaped FD/TOCTOU and publication-race smokes.
+- Code SHA `6d41a75db82d67f97fcebc7944ce3c57f8d492fd` is the reviewed deployment candidate. Subsequent documentation-only commits do not invalidate that code review; any code change requires a new exact review.
+
 
 Deployment gate:
 
