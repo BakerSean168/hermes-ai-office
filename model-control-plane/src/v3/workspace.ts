@@ -114,10 +114,91 @@ function overlayWorkingTree(sourceRepo: string, snapshotRepo: string, entries: s
   }
 }
 
-async function chownTree(target: string, owner: UnixIdentity): Promise<void> {
-  await execFileAsync('chown', ['-R', `${owner.uid}:${owner.gid}`, target], {
-    timeout: WORKSPACE_GIT_TIMEOUT_MS,
+async function prepareSharedObjectAccess(
+  repoRoot: string,
+  sourceOwner: UnixIdentity,
+  executionOwner: UnixIdentity,
+): Promise<void> {
+  const commonGitDirValue = await git(repoRoot, ['rev-parse', '--git-common-dir'], sourceOwner);
+  const commonGitDir = path.resolve(repoRoot, commonGitDirValue);
+  const objectDirectory = path.join(commonGitDir, 'objects');
+  if (!inside(objectDirectory, commonGitDir) || !fs.statSync(objectDirectory).isDirectory()) {
+    throw new Error('V3_REPOSITORY_OBJECT_DIRECTORY_INVALID');
+  }
+
+  // A local clone hardlinks pre-existing object files. Keep those files source-owned so a
+  // worker can never gain ownership of the canonical inode, but grant the execution GID
+  // read access. Setgid directories make newly-created canonical objects inherit the same
+  // read-sharing group without making the object files group-writable.
+  await execFileAsync('chgrp', ['-R', String(executionOwner.gid), objectDirectory], {
+    timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
   });
+  await execFileAsync(
+    'find',
+    [objectDirectory, '-type', 'd', '-exec', 'chmod', 'u+rwx,g+rx,g-w,o-rwx,g+s', '{}', '+'],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+  await execFileAsync(
+    'find',
+    [objectDirectory, '-type', 'f', '-exec', 'chmod', 'u+r,g+r,g-w,o-rwx', '{}', '+'],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+}
+
+async function chownExecutionRepository(target: string, owner: UnixIdentity): Promise<void> {
+  const objectDirectory = path.join(target, '.git', 'objects');
+  await execFileAsync(
+    'find',
+    [
+      target,
+      '-path',
+      objectDirectory,
+      '-prune',
+      '-o',
+      '-exec',
+      'chown',
+      `${owner.uid}:${owner.gid}`,
+      '{}',
+      '+',
+    ],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+  if (!fs.existsSync(objectDirectory)) return;
+  // Object directories in the clone are private directory entries and may be re-owned.
+  // Object files may be hardlinks to canonical files and therefore must never be chowned.
+  await execFileAsync(
+    'find',
+    [objectDirectory, '-type', 'd', '-exec', 'chown', `${owner.uid}:${owner.gid}`, '{}', '+'],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+}
+
+async function chmodExecutionRepository(target: string, writable: boolean): Promise<void> {
+  const objectDirectory = path.join(target, '.git', 'objects');
+  await execFileAsync(
+    'find',
+    [
+      target,
+      '-path',
+      objectDirectory,
+      '-prune',
+      '-o',
+      '-exec',
+      'chmod',
+      writable ? 'u+rwX,go-rwx' : 'a-w',
+      '{}',
+      '+',
+    ],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
+  if (!fs.existsSync(objectDirectory)) return;
+  // Shared object files keep their source-side mode. Only clone-local object directories
+  // need to become writable for writers or traversal-only for review snapshots.
+  await execFileAsync(
+    'find',
+    [objectDirectory, '-type', 'd', '-exec', 'chmod', writable ? '0700' : '0500', '{}', '+'],
+    { timeout: WORKSPACE_PERMISSION_TIMEOUT_MS },
+  );
 }
 
 export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
@@ -210,7 +291,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     let ref: string | undefined;
     if (input.ref?.trim()) {
       ref = input.ref.trim();
-      const refRevision = await git(repoRoot, ['rev-parse', '--verify', `${ref}^{commit}`], sourceOwner);
+      const refRevision = await git(
+        repoRoot,
+        ['rev-parse', '--verify', `${ref}^{commit}`],
+        sourceOwner,
+      );
       if (refRevision !== headRevision) throw new Error('HANDOFF_REF_REVISION_MISMATCH');
     }
     const aheadBy = Number(
@@ -312,88 +397,100 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     }
     fs.mkdirSync(path.dirname(hostPath), { recursive: true, mode: 0o750 });
 
-    // Clone into the service-private staging area as the repository owner. This keeps the
-    // source-side Git trust boundary intact even when the control-plane service itself is root.
-    const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-v3-'));
-    const stagingRepo = path.join(stagingRoot, 'repo');
-    fs.chownSync(stagingRoot, sourceOwner.uid, sourceOwner.gid);
+    // Local execution clones keep private refs/index/new objects but physically share
+    // pre-existing canonical objects through hardlinks. This preserves the worker trust
+    // boundary without multiplying immutable Git history per execution.
+    if (this.#executionOwner) {
+      await prepareSharedObjectAccess(repoRoot, sourceOwner, this.#executionOwner);
+    }
+
     let branch: string | undefined;
     try {
-      await execFileAsync('git', ['clone', '--local', '--no-hardlinks', repoRoot, stagingRepo], {
-        uid: sourceOwner.uid,
-        gid: sourceOwner.gid,
-        encoding: 'utf8',
-        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
-        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
-      });
+      await execFileAsync(
+        'git',
+        [
+          '-c',
+          `safe.directory=${repoRoot}`,
+          'clone',
+          '--local',
+          '--no-checkout',
+          repoRoot,
+          hostPath,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
+          maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+        },
+      );
 
       if (
         input.workspaceMode === 'isolated_write' ||
         input.workspaceMode === 'reuse_implementation_workspace'
       ) {
         branch = `ai-office/${directory}`;
-        await git(stagingRepo, ['checkout', '-B', branch, resolvedRevision], sourceOwner);
+        await git(hostPath, [
+          ...safeDirectory(hostPath),
+          'checkout',
+          '-B',
+          branch,
+          resolvedRevision,
+        ]);
       } else {
-        await git(stagingRepo, ['checkout', '--detach', resolvedRevision], sourceOwner);
+        await git(hostPath, [...safeDirectory(hostPath), 'checkout', '--detach', resolvedRevision]);
       }
 
       if (input.workspaceMode === 'review_snapshot' && input.reviewBaseRevision?.trim()) {
-        const resolvedReviewBase = await git(
-          stagingRepo,
-          ['rev-parse', '--verify', input.reviewBaseRevision.trim()],
-          sourceOwner,
-        );
-        await git(
-          stagingRepo,
-          ['update-ref', 'refs/ai-office/review-base', resolvedReviewBase],
-          sourceOwner,
-        );
+        const resolvedReviewBase = await git(hostPath, [
+          ...safeDirectory(hostPath),
+          'rev-parse',
+          '--verify',
+          input.reviewBaseRevision.trim(),
+        ]);
+        await git(hostPath, [
+          ...safeDirectory(hostPath),
+          'update-ref',
+          'refs/ai-office/review-base',
+          resolvedReviewBase,
+        ]);
       }
 
       if (input.workspaceMode === 'review_snapshot') {
         // Review must inspect the implementation artifact, not merely its last committed HEAD.
         // Freeze exactly the Git-visible working tree: tracked files plus non-ignored untracked
         // files, including tracked deletions. Ignored build/cache material (node_modules, dist,
-        // etc.) is intentionally excluded. This preserves an uncommitted implementation while
-        // keeping the reviewer on an independent, physically read-only clone.
+        // etc.) is intentionally excluded.
         const workingTreeEntries = await gitNullList(
           repoRoot,
           ['ls-files', '-z', '--cached', '--others', '--exclude-standard'],
           sourceOwner,
         );
-        overlayWorkingTree(repoRoot, stagingRepo, workingTreeEntries);
+        overlayWorkingTree(repoRoot, hostPath, workingTreeEntries);
       }
-
-      fs.cpSync(stagingRepo, hostPath, {
-        recursive: true,
-        preserveTimestamps: true,
-        errorOnExist: true,
-        force: false,
-      });
-    } finally {
-      fs.rmSync(stagingRoot, { recursive: true, force: true });
+    } catch (error) {
+      fs.rmSync(path.dirname(hostPath), { recursive: true, force: true });
+      throw error;
     }
 
     if (this.#executionOwner) {
-      // OpenHands must be able to traverse the per-execution directory as well as the repo itself.
-      await chownTree(path.dirname(hostPath), this.#executionOwner);
+      // The execution directory and private repository metadata belong to OpenHands. Existing
+      // object files may be hardlinked to canonical storage and deliberately remain source-owned.
+      fs.chownSync(path.dirname(hostPath), this.#executionOwner.uid, this.#executionOwner.gid);
+      fs.chmodSync(path.dirname(hostPath), 0o750);
+      await chownExecutionRepository(hostPath, this.#executionOwner);
     }
 
     if (
       input.workspaceMode === 'isolated_write' ||
       input.workspaceMode === 'reuse_implementation_workspace'
     ) {
-      await execFileAsync('chmod', ['-R', 'u+rwX,go-rwx', hostPath], {
-        timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
-      });
+      await chmodExecutionRepository(hostPath, true);
       return { hostPath, executionPath, branch, sourceRevision: resolvedRevision };
     }
 
-    // Read/review phases get a physically read-only clone. OpenHands owns the files but
-    // cannot mutate them, so a prompt mistake cannot silently turn investigation into implementation.
-    await execFileAsync('chmod', ['-R', 'a-w', hostPath], {
-      timeout: WORKSPACE_PERMISSION_TIMEOUT_MS,
-    });
+    // Read/review phases get a physically read-only private clone. Shared source objects remain
+    // source-owned and read-only to the execution identity.
+    await chmodExecutionRepository(hostPath, false);
     return { hostPath, executionPath, sourceRevision: resolvedRevision };
   }
 
@@ -414,6 +511,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
       },
     );
+    // Agent Harness state is execution-scoped, not repository recovery state. A terminal
+    // execution may keep its repo for repair/review continuity without pinning tool caches,
+    // model homes, and MCP materializations beside it.
+    const harnessPath = path.join(path.dirname(hostPath), '.agent-harness');
+    if (fs.existsSync(harnessPath)) fs.rmSync(harnessPath, { recursive: true, force: true });
     return true;
   }
 
@@ -455,15 +557,18 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const safePlan = input.planId.replace(/[^a-zA-Z0-9._-]/g, '_');
     const safeBatch = input.batchKey.replace(/[^a-zA-Z0-9._-]/g, '_');
     const integrationRef = `refs/ai-office/plans/${safePlan}/batches/${safeBatch}`;
+    let worktreeAdded = false;
     try {
-      const sourceBundle = path.join(integrationRoot, 'source.bundle');
-      await git(repoRoot, ['bundle', 'create', sourceBundle, '--all'], sourceOwner);
-      await execFileAsync('git', ['clone', '--no-hardlinks', sourceBundle, integrationRepo], {
-        encoding: 'utf8',
-        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
-        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
-      });
-      await git(integrationRepo, ['checkout', '--detach', input.baseRevision]);
+      // Integration is control-plane-owned, so a real detached worktree is the smallest and
+      // safest representation: it shares canonical objects/refs without exposing that common
+      // Git directory to a model process.
+      await git(
+        repoRoot,
+        ['worktree', 'add', '--detach', integrationRepo, input.baseRevision],
+        sourceOwner,
+      );
+      worktreeAdded = true;
+
       for (const [index, implementation] of input.implementations.entries()) {
         const implementationPath = this.hostPathForWorkspaceRef(implementation.workspaceRef);
         const trustedImplementation = safeDirectory(implementationPath);
@@ -490,7 +595,10 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
             throw new Error(`BATCH_INTEGRATION_REPAIR_INCOMPLETE:${requiredRevision}`);
           }
         }
-        const fetchedRef = `refs/ai-office/incoming/${index}`;
+
+        // The implementation workspace is private to the execution identity, so the source
+        // owner cannot traverse it directly. Export only objects newer than the recorded source
+        // revision, then let the source owner fetch that small exact bundle into the host worktree.
         const implementationBundle = path.join(integrationRoot, `implementation-${index}.bundle`);
         await git(implementationPath, [
           ...trustedImplementation,
@@ -498,19 +606,29 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           'create',
           implementationBundle,
           'HEAD',
+          `^${implementation.sourceRevision}`,
         ]);
-        await git(integrationRepo, ['fetch', implementationBundle, `HEAD:${fetchedRef}`]);
+        fs.chownSync(implementationBundle, sourceOwner.uid, sourceOwner.gid);
+        await git(
+          integrationRepo,
+          ['fetch', '--no-tags', implementationBundle, 'HEAD'],
+          sourceOwner,
+        );
         try {
-          await git(integrationRepo, [
-            '-c',
-            'user.name=Hermes AI Office',
-            '-c',
-            'user.email=ai-office@localhost',
-            'merge',
-            '--no-ff',
-            '--no-edit',
-            fetchedRef,
-          ]);
+          await git(
+            integrationRepo,
+            [
+              '-c',
+              'user.name=Hermes AI Office',
+              '-c',
+              'user.email=ai-office@localhost',
+              'merge',
+              '--no-ff',
+              '--no-edit',
+              'FETCH_HEAD',
+            ],
+            sourceOwner,
+          );
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (/CONFLICT|Automatic merge failed/i.test(message)) {
@@ -519,17 +637,26 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           throw error;
         }
       }
-      const revision = await git(integrationRepo, ['rev-parse', 'HEAD']);
-      const integrationBundle = path.join(integrationRoot, 'integrated.bundle');
-      await git(integrationRepo, ['bundle', 'create', integrationBundle, 'HEAD']);
-      fs.chownSync(integrationBundle, sourceOwner.uid, sourceOwner.gid);
-      await git(repoRoot, ['fetch', integrationBundle, `+HEAD:${integrationRef}`], sourceOwner);
+      const revision = await git(integrationRepo, ['rev-parse', 'HEAD'], sourceOwner);
+      await git(repoRoot, ['update-ref', integrationRef, revision], sourceOwner);
       return { revision, ref: integrationRef };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.startsWith('BATCH_INTEGRATION_')) throw error;
       throw new Error(`BATCH_INTEGRATION_FAILED:${message}`);
     } finally {
+      if (worktreeAdded) {
+        try {
+          await git(repoRoot, ['worktree', 'remove', '--force', integrationRepo], sourceOwner);
+        } catch {
+          // Best-effort physical cleanup continues below; worktree prune repairs stale metadata.
+        }
+        try {
+          await git(repoRoot, ['worktree', 'prune'], sourceOwner);
+        } catch {
+          // Cleanup failure must not hide the original integration result/error.
+        }
+      }
       fs.rmSync(integrationRoot, { recursive: true, force: true });
     }
   }

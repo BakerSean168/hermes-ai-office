@@ -42,16 +42,25 @@ test('workspace retention deletes expired terminal artifacts but preserves block
     record('blocked-review', {
       phase: 'VERIFY_REVIEW',
       planId: 'blocked-plan',
+      batchId: 'running-batch',
       workItemId: 'blocked-item',
       endedAt: NOW - 2 * hour,
     }),
     record('blocked-worker', {
       planId: 'blocked-plan',
+      batchId: 'running-batch',
       workItemId: 'blocked-item',
       endedAt: NOW - 3 * hour,
       createdAt: NOW - 4 * hour,
     }),
     record('done-plan-worker', { planId: 'done-plan', endedAt: NOW - 2 * hour }),
+    record('completed-batch-worker', {
+      planId: 'blocked-plan',
+      batchId: 'completed-batch',
+      workItemId: 'completed-item',
+      endedAt: NOW - 3 * hour,
+      createdAt: NOW - 4 * hour,
+    }),
     record('causal-parent', { endedAt: NOW - 20 * hour }),
     record('active-fix', {
       phase: 'IMPLEMENT_FIX',
@@ -82,6 +91,13 @@ test('workspace retention deletes expired terminal artifacts but preserves block
         if (planId === 'done-plan') return { status: 'SUCCEEDED' };
         return null;
       },
+      batches(planId: string) {
+        if (planId !== 'blocked-plan') return [];
+        return [
+          { batchId: 'running-batch', status: 'BLOCKED' as const },
+          { batchId: 'completed-batch', status: 'SUCCEEDED' as const },
+        ];
+      },
     },
     workspace,
   });
@@ -90,6 +106,7 @@ test('workspace retention deletes expired terminal artifacts but preserves block
 
   assert.deepEqual(deleted.sort(), [
     'blocked-review',
+    'completed-batch-worker',
     'done-plan-worker',
     'old-failure',
     'old-success',
@@ -97,5 +114,5 @@ test('workspace retention deletes expired terminal artifacts but preserves block
   assert.deepEqual(pruned.sort(), ['blocked-worker', 'recent-success']);
   assert.equal(pruned.includes('causal-parent'), false);
   assert.equal(deleted.includes('causal-parent'), false);
-  assert.deepEqual(summary, { scanned: 8, pruned: 2, deleted: 4, protected: 2 });
+  assert.deepEqual(summary, { scanned: 9, pruned: 2, deleted: 5, protected: 2 });
 });

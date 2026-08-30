@@ -1,5 +1,5 @@
 import type { ExecutionLinkRecord, ExecutionStatus } from './types.js';
-import type { PlanStatus } from './plan/model.js';
+import type { PlanNodeStatus, PlanStatus } from './plan/model.js';
 import type { WorkspaceProvisioningPort } from './workspace.js';
 
 const TERMINAL = new Set<ExecutionStatus>(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
@@ -11,6 +11,7 @@ export interface WorkspaceRetentionLinkStore {
 
 export interface WorkspaceRetentionPlanStore {
   get(planId: string): { status: PlanStatus } | null;
+  batches?(planId: string): Array<{ batchId: string; status: PlanNodeStatus }>;
 }
 
 export interface WorkspaceRetentionOptions {
@@ -56,12 +57,25 @@ export class ExecutionWorkspaceRetention {
     const activeWorkspaceRefs = new Set<string>();
     const recoverableWorkspaceRefs = new Set<string>();
     const planStatus = new Map<string, PlanStatus | null>();
+    const batchStatus = new Map<string, Map<string, PlanNodeStatus>>();
 
     const statusForPlan = (planId: string): PlanStatus | null => {
       if (planStatus.has(planId)) return planStatus.get(planId) ?? null;
       const status = this.#plans.get(planId)?.status ?? null;
       planStatus.set(planId, status);
       return status;
+    };
+
+    const statusForBatch = (planId: string, batchId: string): PlanNodeStatus | null => {
+      if (!this.#plans.batches) return null;
+      let statuses = batchStatus.get(planId);
+      if (!statuses) {
+        statuses = new Map(
+          this.#plans.batches(planId).map((batch) => [batch.batchId, batch.status] as const),
+        );
+        batchStatus.set(planId, statuses);
+      }
+      return statuses.get(batchId) ?? null;
     };
 
     for (const record of records) {
@@ -91,6 +105,13 @@ export class ExecutionWorkspaceRetention {
       }
       const status = statusForPlan(record.planId);
       if (!status || TERMINAL_PLANS.has(status)) continue;
+      // Once a batch is accepted/cancelled, its durable integrated revision/ref is the
+      // recovery boundary. Keeping the latest implementation clone for every historical
+      // synthetic repair work item otherwise pins gigabytes for the lifetime of the plan.
+      if (record.batchId) {
+        const batch = statusForBatch(record.planId, record.batchId);
+        if (batch === 'SUCCEEDED' || batch === 'CANCELLED') continue;
+      }
       const current = latestImplementationByWorkItem.get(record.workItemId);
       if (!current || record.createdAt > current.createdAt) {
         latestImplementationByWorkItem.set(record.workItemId, record);

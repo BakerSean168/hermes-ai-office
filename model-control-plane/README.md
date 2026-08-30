@@ -8,7 +8,7 @@ The model control plane is a focused execution-state service for Hermes AI Offic
 - causal execution lineage;
 - durable plans, validated dependency batches, and stable work-item identities;
 - configurable trusted-plan review cadence: strict per-ticket review by default, or batch-only independent review for high-throughput overnight work;
-- isolated implementation workspaces and read-only review snapshots;
+- isolated implementation workspaces and read-only review snapshots backed by storage-linked local Git clones;
 - strict PASS/FAIL review governance;
 - single-writer leases;
 - deterministic batch integration candidates plus premium `BATCH_VERIFY` aggregate semantic review before promotion into durable Git refs;

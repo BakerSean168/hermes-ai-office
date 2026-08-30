@@ -143,6 +143,69 @@ test('review snapshot preserves committed implementation HEAD and records origin
   }
 });
 
+test('execution provisioning shares packed source objects without sharing mutable Git state', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-linked-objects-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  for (let index = 0; index < 24; index += 1) {
+    fs.writeFileSync(path.join(source, `file-${index}.txt`), `base-${index}\n`);
+  }
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  git(source, 'gc', '--prune=now');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const sourcePack = fs
+    .readdirSync(path.join(source, '.git', 'objects', 'pack'))
+    .find((entry) => entry.endsWith('.pack'));
+  assert.ok(sourcePack);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'linked-objects-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const sourcePackPath = path.join(source, '.git', 'objects', 'pack', sourcePack);
+    const workspacePackPath = path.join(
+      implementation.hostPath,
+      '.git',
+      'objects',
+      'pack',
+      sourcePack,
+    );
+    const sourceStat = fs.statSync(sourcePackPath);
+    const workspaceStat = fs.statSync(workspacePackPath);
+
+    assert.equal(workspaceStat.dev, sourceStat.dev);
+    assert.equal(workspaceStat.ino, sourceStat.ino);
+    assert.ok(sourceStat.nlink >= 2);
+
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    fs.writeFileSync(path.join(implementation.hostPath, 'file-0.txt'), 'execution-only\n');
+    git(implementation.hostPath, 'add', 'file-0.txt');
+    git(implementation.hostPath, 'commit', '-m', 'execution change');
+    const implementationHead = git(implementation.hostPath, 'rev-parse', 'HEAD');
+
+    assert.notEqual(implementationHead, base);
+    assert.equal(git(source, 'rev-parse', 'HEAD'), base);
+    assert.equal(fs.readFileSync(path.join(source, 'file-0.txt'), 'utf8'), 'base-0\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('batch integration creates a durable repository ref without changing the source worktree', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integrate-'));
   const source = path.join(root, 'source');
@@ -193,6 +256,10 @@ test('batch integration creates a durable repository ref without changing the so
     assert.equal(git(source, 'rev-parse', 'HEAD'), base);
     assert.equal(fs.readFileSync(path.join(source, 'tracked.txt'), 'utf8'), 'base\n');
     assert.equal(git(source, 'show', `${integrated.revision}:tracked.txt`), 'implemented');
+    assert.doesNotMatch(
+      git(source, 'worktree', 'list', '--porcelain'),
+      /hermes-ai-office-integrate-/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -543,10 +610,16 @@ test('workspace retention pruning removes only ignored artifacts and can release
       workspaceMode: 'isolated_write',
     });
     fs.mkdirSync(path.join(implementation.hostPath, 'node_modules', 'pkg'), { recursive: true });
-    fs.writeFileSync(path.join(implementation.hostPath, 'node_modules', 'pkg', 'index.js'), 'cache\n');
+    fs.writeFileSync(
+      path.join(implementation.hostPath, 'node_modules', 'pkg', 'index.js'),
+      'cache\n',
+    );
     fs.mkdirSync(path.join(implementation.hostPath, '.cache'), { recursive: true });
     fs.writeFileSync(path.join(implementation.hostPath, '.cache', 'state'), 'cache\n');
     fs.writeFileSync(path.join(implementation.hostPath, 'untracked.txt'), 'preserve me\n');
+    const harnessPath = path.join(path.dirname(implementation.hostPath), '.agent-harness');
+    fs.mkdirSync(path.join(harnessPath, 'home'), { recursive: true });
+    fs.writeFileSync(path.join(harnessPath, 'home', 'cache'), 'execution cache\n');
 
     assert.equal(
       await provisioner.pruneExecutionArtifacts({
@@ -557,8 +630,15 @@ test('workspace retention pruning removes only ignored artifacts and can release
     );
     assert.equal(fs.existsSync(path.join(implementation.hostPath, 'node_modules')), false);
     assert.equal(fs.existsSync(path.join(implementation.hostPath, '.cache')), false);
-    assert.equal(fs.readFileSync(path.join(implementation.hostPath, 'untracked.txt'), 'utf8'), 'preserve me\n');
-    assert.equal(fs.readFileSync(path.join(implementation.hostPath, 'tracked.txt'), 'utf8'), 'base\n');
+    assert.equal(
+      fs.readFileSync(path.join(implementation.hostPath, 'untracked.txt'), 'utf8'),
+      'preserve me\n',
+    );
+    assert.equal(
+      fs.readFileSync(path.join(implementation.hostPath, 'tracked.txt'), 'utf8'),
+      'base\n',
+    );
+    assert.equal(fs.existsSync(harnessPath), false);
 
     assert.equal(await provisioner.removeExecutionWorkspace('retention-1'), true);
     assert.equal(fs.existsSync(path.dirname(implementation.hostPath)), false);
