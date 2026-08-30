@@ -272,6 +272,59 @@ test('existing execution workspace symlinks are rejected before reuse', async ()
   }
 });
 
+test('unattached execution crash residue is recreated from the requested repository and base', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-crash-residue-'));
+  const sourceA = path.join(root, 'source-a');
+  const sourceB = path.join(root, 'source-b');
+  const workspaceRoot = path.join(root, 'workspaces');
+  for (const [source, content, message] of [
+    [sourceA, 'from-a\n', 'base a'],
+    [sourceB, 'from-b\n', 'base b'],
+  ] as const) {
+    fs.mkdirSync(source, { recursive: true });
+    git(source, 'init');
+    git(source, 'config', 'user.email', 'v3-test@example.invalid');
+    git(source, 'config', 'user.name', 'V3 Test');
+    fs.writeFileSync(path.join(source, 'tracked.txt'), content);
+    git(source, 'add', '.');
+    git(source, 'commit', '-m', message);
+  }
+  const baseA = git(sourceA, 'rev-parse', 'HEAD');
+  const baseB = git(sourceB, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const first = await provisioner.provision({
+      executionId: 'crash-residue-1',
+      repositoryPath: sourceA,
+      baseRevision: baseA,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(first.hostPath, 'residue.txt'), 'stale execution residue\n');
+    fs.writeFileSync(path.join(first.hostPath, 'tracked.txt'), 'dirty residue\n');
+
+    const second = await provisioner.provision({
+      executionId: 'crash-residue-1',
+      repositoryPath: sourceB,
+      baseRevision: baseB,
+      workspaceMode: 'isolated_write',
+    });
+
+    assert.equal(second.hostPath, first.hostPath);
+    assert.equal(second.sourceRevision, baseB);
+    assert.equal(git(second.hostPath, 'rev-parse', 'HEAD'), baseB);
+    assert.equal(fs.readFileSync(path.join(second.hostPath, 'tracked.txt'), 'utf8'), 'from-b\n');
+    assert.equal(fs.existsSync(path.join(second.hostPath, 'residue.txt')), false);
+    assert.equal(git(second.hostPath, 'status', '--porcelain'), '');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('writer reuse rejects Git object-directory redirection introduced after provisioning', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-reuse-object-redirect-'));
   const source = path.join(root, 'source');
@@ -353,6 +406,47 @@ test('writer reuse rejects escaping working-tree symlinks introduced after provi
       /V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT/,
     );
     assert.equal(fs.readFileSync(victim, 'utf8'), 'victim\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('writer reuse rejects special files inside private Git metadata', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-git-special-file-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const workspace = await provisioner.provision({
+      executionId: 'git-special-file-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    const fifo = path.join(workspace.hostPath, '.git', 'hostile-fifo');
+    execFileSync('mkfifo', [fifo]);
+
+    await assert.rejects(
+      provisioner.prepareWriterExecution({
+        executionId: 'git-special-file-attempt',
+        workspaceRef: workspace.executionPath,
+      }),
+      /V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID/,
+    );
+    assert.equal(fs.lstatSync(fifo).isFIFO(), true);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
@@ -635,6 +729,88 @@ test('execution provisioning shares packed source objects without sharing mutabl
   }
 });
 
+test('batch integration rejects canonical object alternates outside the repository trust boundary', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-alternates-'));
+  const source = path.join(root, 'source');
+  const externalObjects = path.join(root, 'external-objects');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(externalObjects, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  fs.mkdirSync(path.join(source, '.git', 'objects', 'info'), { recursive: true });
+  fs.writeFileSync(
+    path.join(source, '.git', 'objects', 'info', 'alternates'),
+    `${externalObjects}\n`,
+  );
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-alternates',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [],
+      }),
+      /V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED/,
+    );
+    assert.throws(
+      () => git(source, 'rev-parse', 'refs/ai-office/plans/plan-alternates/batches/batch-1'),
+      /Command failed/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration rejects descendant symlinks in the canonical object tree', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-object-symlink-'));
+  const source = path.join(root, 'source');
+  const external = path.join(root, 'external');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  fs.mkdirSync(external, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  fs.symlinkSync(external, path.join(source, '.git', 'objects', 'hostile-link'));
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-object-symlink',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [],
+      }),
+      /V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('batch integration rejects a worktree whose common Git directory is external', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-gitdir-'));
   const allowedRoot = path.join(root, 'allowed');
@@ -720,6 +896,106 @@ test('batch integration rejects a repository that resolves outside the allowed r
     assert.throws(
       () => git(outside, 'rev-parse', 'refs/ai-office/plans/plan-outside/batches/batch-outside'),
       /Command failed/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration durable refs encode unsafe identifiers without collisions', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-ref-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const unsafe = await provisioner.integrateBatch({
+      planId: 'plan/ref',
+      batchKey: 'batch/a',
+      repositoryPath: source,
+      baseRevision: base,
+      implementations: [],
+    });
+    const safe = await provisioner.integrateBatch({
+      planId: 'plan_ref',
+      batchKey: 'batch_a',
+      repositoryPath: source,
+      baseRevision: base,
+      implementations: [],
+    });
+
+    assert.notEqual(unsafe.ref, safe.ref);
+    assert.equal(safe.ref, 'refs/ai-office/plans/plan_ref/batches/batch_a');
+    assert.match(unsafe.ref, /^refs\/ai-office\/plans\/%x[0-9a-f]+\/batches\/%x[0-9a-f]+$/);
+    assert.equal(git(source, 'rev-parse', unsafe.ref), base);
+    assert.equal(git(source, 'rev-parse', safe.ref), base);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration requires implementation sourceRevision to be an ancestor of HEAD', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-source-ancestor-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+
+  git(source, 'checkout', '-b', 'sibling-source');
+  fs.writeFileSync(path.join(source, 'sibling.txt'), 'sibling\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'sibling source');
+  const sibling = git(source, 'rev-parse', 'HEAD');
+  git(source, 'checkout', '-B', 'main-test', base);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'source-ancestor-implementation',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(implementation.hostPath, 'implemented.txt'), 'implementation\n');
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    git(implementation.hostPath, 'add', '.');
+    git(implementation.hostPath, 'commit', '-m', 'implementation');
+
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-source-ancestor',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [
+          { workspaceRef: implementation.executionPath, sourceRevision: sibling },
+        ],
+      }),
+      /BATCH_INTEGRATION_SOURCE_NOT_ANCESTOR/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

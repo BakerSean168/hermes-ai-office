@@ -121,6 +121,12 @@ function executionDirectoryName(executionId: string): string {
   return executionId;
 }
 
+function integrationRefComponent(value: string): string {
+  const ordinary = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(value);
+  if (ordinary && !value.endsWith('.lock')) return value;
+  return `%x${Buffer.from(value, 'utf8').toString('hex')}`;
+}
+
 function identityCanRead(stat: Stats, identity: UnixIdentity): boolean {
   if (stat.uid === identity.uid) return (stat.mode & 0o400) !== 0;
   if (stat.gid === identity.gid) return (stat.mode & 0o040) !== 0;
@@ -184,6 +190,8 @@ function assertPrivateGitMetadataTree(gitDirectory: string): void {
           throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
         }
         visit(entryPath);
+      } else if (!stat.isFile()) {
+        throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
       }
     }
   };
@@ -249,7 +257,11 @@ async function assertCanonicalGitMetadataContained(
   if (!objectStat?.isDirectory() || objectStat.isSymbolicLink()) {
     throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
   }
-  if (!inside(fs.realpathSync(objectCandidate), realCommon)) {
+  const realObjects = fs.realpathSync(objectCandidate);
+  if (!inside(realObjects, realCommon)) {
+    throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
+  }
+  if (fs.existsSync(path.join(realObjects, 'info', 'alternates')) || !inspectObjectTree(realObjects)) {
     throw new Error('V3_REPOSITORY_GIT_DIRECTORY_NOT_ALLOWED');
   }
 }
@@ -739,7 +751,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const existingWorkspace = fs.lstatSync(hostPath, { throwIfNoEntry: false });
     if (existingWorkspace) {
       await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
-      return { hostPath, executionPath, sourceRevision: resolvedRevision };
+      // DevelopmentExecutionService calls provision() only while the durable execution has no
+      // attached workspaceRef. Therefore an existing directory here is unreachable crash residue,
+      // never an active/resumable writer lease. Recreate it from the requested repository/base/mode
+      // instead of silently accepting an artifact whose identity cannot be proven externally.
+      fs.rmSync(path.dirname(hostPath), { recursive: true, force: true });
     }
     fs.mkdirSync(path.dirname(hostPath), { recursive: true, mode: 0o750 });
     assertManagedWorkspacePath(path.dirname(hostPath), this.#hostRoot);
@@ -970,8 +986,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const integrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-integrate-'));
     fs.chownSync(integrationRoot, sourceOwner.uid, sourceOwner.gid);
     const integrationRepo = path.join(integrationRoot, 'repo');
-    const safePlan = input.planId.replace(/[^a-zA-Z0-9._-]/g, '_');
-    const safeBatch = input.batchKey.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const safePlan = integrationRefComponent(input.planId);
+    const safeBatch = integrationRefComponent(input.batchKey);
     const integrationRef = `refs/ai-office/plans/${safePlan}/batches/${safeBatch}`;
     let worktreeAdded = false;
     try {
@@ -996,8 +1012,30 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         ]);
         if (dirty) throw new Error('BATCH_INTEGRATION_UNCOMMITTED_CHANGES');
         const head = await git(implementationPath, [...trustedImplementation, 'rev-parse', 'HEAD']);
-        if (head === implementation.sourceRevision) {
+        let sourceRevision: string;
+        try {
+          sourceRevision = await git(implementationPath, [
+            ...trustedImplementation,
+            'rev-parse',
+            '--verify',
+            `${implementation.sourceRevision}^{commit}`,
+          ]);
+        } catch {
+          throw new Error('BATCH_INTEGRATION_SOURCE_REVISION_INVALID');
+        }
+        if (head === sourceRevision) {
           throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
+        }
+        try {
+          await git(implementationPath, [
+            ...trustedImplementation,
+            'merge-base',
+            '--is-ancestor',
+            sourceRevision,
+            head,
+          ]);
+        } catch {
+          throw new Error('BATCH_INTEGRATION_SOURCE_NOT_ANCESTOR');
         }
         for (const requiredRevision of input.requiredAncestorRevisions ?? []) {
           try {
@@ -1023,7 +1061,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           'create',
           implementationBundle,
           'HEAD',
-          `^${implementation.sourceRevision}`,
+          `^${sourceRevision}`,
         ]);
         fs.chownSync(implementationBundle, sourceOwner.uid, sourceOwner.gid);
         await git(
@@ -1031,6 +1069,12 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           ['fetch', '--no-tags', implementationBundle, 'HEAD'],
           sourceOwner,
         );
+        const fetchedHead = await git(
+          integrationRepo,
+          ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
+          sourceOwner,
+        );
+        if (fetchedHead !== head) throw new Error('BATCH_INTEGRATION_HEAD_MISMATCH');
         try {
           await git(
             integrationRepo,

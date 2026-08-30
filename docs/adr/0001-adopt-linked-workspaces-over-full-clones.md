@@ -51,6 +51,8 @@ canonical repository
 
 The model never receives this integration worktree, so sharing the canonical common Git directory does not widen the model trust boundary.
 
+
+Before creating the host worktree or updating a durable integration ref, the canonical repository must pass the full Git-object trust check: the resolved top-level/common Git/object directories stay in the configured repository boundary, object alternates and descendant symlinks/special/cross-device entries are rejected, and implementation source revisions are resolved and proven ancestors of the exact imported HEAD. Unsafe plan/batch ref components are injectively UTF-8 hex encoded while the existing spelling for normal durable identifiers is preserved.
 ### 3. Work-item reuse
 
 Keep existing `IMPLEMENT_FIX` workspace reuse. A later ticket will extend reuse to transport/backend retry attempts of the same work item after characterizing dirty/partial writer states. This is intentionally not coupled to the storage fix.

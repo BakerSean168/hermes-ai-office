@@ -61,7 +61,7 @@ This grants read access to history already in scope for the execution without gr
 3. for review cloned from an OpenHands-owned implementation workspace, have the root control plane create the local hardlinks from a service-private staging directory using a disposable protected Git config that trusts only the already-validated source path; retain hardlinks for pre-existing source-owned canonical objects but break hardlinks only for object files actually owned by the execution identity (normally the implementation's new loose objects/pack);
 4. atomically rename the staged clone into the execution workspace when staging/workspace share a filesystem; cross-filesystem roots fall back to a private clone/copy;
 5. for review, set `refs/ai-office/review-base` and overlay Git-visible working-tree state; reject absolute or relative symlinks whose lexical or resolved targets escape the staged workspace while preserving contained relative links;
-6. atomically publish only a real managed directory; existing execution paths are revalidated with `lstat`, `realpath`, Git top-level/common-dir identity, a no-symlink/no-alternates private `.git` tree, and contained working-tree symlinks before reuse, retry, pruning, or integration;
+6. atomically publish only a real managed directory; retry/resume paths with a durable `workspaceRef` revalidate `lstat`, `realpath`, Git top-level/common-dir identity, a regular-file/directory-only no-symlink/no-alternates private `.git` tree, and contained working-tree symlinks; if `provision()` finds a directory for an execution whose durable record still has no `workspaceRef`, that directory is treated as crash residue and is validated then recreated from the requested repository/base/mode rather than silently reused;
 7. transfer execution-private files/directories and privatized object copies to the execution identity;
 8. leave safely shared hardlinked object files source-owned;
 9. apply writer/read-only permissions without chmod'ing shared object files; execution IDs must use the collision-free durable ID alphabet rather than lossy path sanitization.
@@ -73,15 +73,16 @@ Removing an execution directory unlinks its hardlinks only. Canonical object fil
 ## Batch integration invariants
 
 1. The integration worktree is host-controlled and never mounted as a model workspace; the resolved canonical Git top-level must remain inside the configured real repository roots before any worktree/ref mutation.
-2. It starts detached from the exact batch base revision.
-3. Each implementation workspace must be clean and its HEAD must advance beyond its source revision.
-4. Required ancestor revisions are verified in the implementation workspace before import.
-5. Fetch uses the exact implementation HEAD and imports only objects missing from canonical.
-6. Merge order matches the existing batch implementation order.
-7. Conflicts remain `BATCH_INTEGRATION_CONFLICT:*` with actionable Git evidence.
-8. On success, the exact integrated HEAD is stored under the existing durable integration ref.
-9. The canonical source working tree HEAD/index/files never change.
-10. The temporary integration worktree is removed in `finally`, including conflict cases.
+2. Canonical common-Git/object metadata must pass the full object trust-boundary check before integration: no external common dir, object alternates, descendant symlinks, special files, or cross-device object entries.
+3. It starts detached from the exact batch base revision.
+4. Each implementation workspace must be clean, its source revision must resolve to a commit, and that source revision must be an ancestor of the exact implementation HEAD.
+5. Required ancestor revisions are verified in the implementation workspace before import.
+6. The implementation bundle excludes the validated source ancestry; after fetch, `FETCH_HEAD` must equal the intended implementation HEAD exactly before merge.
+7. Merge order matches the existing batch implementation order.
+8. Conflicts remain `BATCH_INTEGRATION_CONFLICT:*` with actionable Git evidence.
+9. On success, the exact integrated HEAD is stored under a collision-free durable integration ref: existing safe plan/batch identifiers keep their historical ref spelling, while unsafe components are injectively UTF-8 hex encoded.
+10. The canonical source working tree HEAD/index/files never change.
+11. The temporary integration worktree is removed in `finally`, including conflict cases.
 
 ## Retention interaction
 
