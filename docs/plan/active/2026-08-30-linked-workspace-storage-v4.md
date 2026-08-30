@@ -241,13 +241,16 @@ Completed in branch `refactor/workspace-storage-v4-20260830`:
 
 Verification:
 
-- `v3Workspace.test.ts`: 10/10 PASS.
+- Initial independent Business Codex review of `018f35f` returned **FAIL** with one P1: root ownership/permission normalization could dereference a repository symlink and mutate an arbitrary host target.
+- Repair restricts ownership/permission normalization to regular files/directories only; repository symlinks are never passed to `chown`/`chmod`. A hostile external-target symlink regression test now locks this trust boundary.
+- `v3Workspace.test.ts`: 11/11 PASS.
 - `v3WorkspaceRetention.test.ts`: 1/1 PASS.
 - TypeScript `check-types`: PASS.
 - production build: PASS.
-- full model-control-plane suite: **152/152 PASS**.
+- full model-control-plane suite: **153/153 PASS**.
 - `git diff --check`: PASS.
 - production-shaped UID/GID prototype against the real `hermes-openhands-v3` mount: source/execution pack same inode, OpenHands commit succeeds, canonical HEAD/working tree unchanged.
+- Independent re-review is required on the repaired exact commit before production deployment.
 
 Deployment gate:
 

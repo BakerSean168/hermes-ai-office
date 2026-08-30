@@ -147,6 +147,9 @@ async function prepareSharedObjectAccess(
 
 async function chownExecutionRepository(target: string, owner: UnixIdentity): Promise<void> {
   const objectDirectory = path.join(target, '.git', 'objects');
+  // The checked-out tree is untrusted input. Do not pass symlinks to chown: GNU chown
+  // dereferences them by default and could re-own an arbitrary host target. Directory entry
+  // ownership is sufficient for the worker to replace/remove a symlink.
   await execFileAsync(
     'find',
     [
@@ -155,6 +158,13 @@ async function chownExecutionRepository(target: string, owner: UnixIdentity): Pr
       objectDirectory,
       '-prune',
       '-o',
+      '(',
+      '-type',
+      'd',
+      '-o',
+      '-type',
+      'f',
+      ')',
       '-exec',
       'chown',
       `${owner.uid}:${owner.gid}`,
@@ -175,6 +185,8 @@ async function chownExecutionRepository(target: string, owner: UnixIdentity): Pr
 
 async function chmodExecutionRepository(target: string, writable: boolean): Promise<void> {
   const objectDirectory = path.join(target, '.git', 'objects');
+  // Never chmod a repository symlink: following it would mutate permissions outside the
+  // execution workspace. Only regular files/directories receive phase permissions.
   await execFileAsync(
     'find',
     [
@@ -183,6 +195,13 @@ async function chmodExecutionRepository(target: string, writable: boolean): Prom
       objectDirectory,
       '-prune',
       '-o',
+      '(',
+      '-type',
+      'd',
+      '-o',
+      '-type',
+      'f',
+      ')',
       '-exec',
       'chmod',
       writable ? 'u+rwX,go-rwx' : 'a-w',

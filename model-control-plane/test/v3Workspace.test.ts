@@ -143,6 +143,54 @@ test('review snapshot preserves committed implementation HEAD and records origin
   }
 });
 
+test('execution permission normalization never follows repository symlinks outside the workspace', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-symlink-boundary-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  const victim = path.join(root, 'host-owned.txt');
+  fs.mkdirSync(source, { recursive: true });
+  fs.writeFileSync(victim, 'host-owned\n', { mode: 0o600 });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  fs.symlinkSync(victim, path.join(source, 'outside-link'));
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base with external symlink');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const before = fs.statSync(victim);
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+    executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
+  });
+
+  let reviewRoot: string | undefined;
+  try {
+    const review = await provisioner.provision({
+      executionId: 'symlink-review-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'read_oriented',
+    });
+    reviewRoot = review.hostPath;
+    const after = fs.statSync(victim);
+
+    assert.equal(fs.lstatSync(path.join(review.hostPath, 'outside-link')).isSymbolicLink(), true);
+    assert.equal(after.uid, before.uid);
+    assert.equal(after.gid, before.gid);
+    assert.equal(after.mode & 0o777, before.mode & 0o777);
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'host-owned\n');
+  } finally {
+    if (reviewRoot && fs.existsSync(reviewRoot)) {
+      execFileSync('chmod', ['-R', 'u+w', reviewRoot]);
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('execution provisioning shares packed source objects without sharing mutable Git state', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-linked-objects-'));
   const source = path.join(root, 'source');
