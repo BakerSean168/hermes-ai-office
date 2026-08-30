@@ -353,6 +353,8 @@ Verification:
 - Deployment-only repair removes the workspace root from `ReadWritePaths` in the GCP unit, generic unit, and production drop-in while retaining the database directory. `ProtectSystem=full` leaves `/opt` writable, so the workspace whitelist was redundant. `PrivateTmp=true`, `NoNewPrivileges=true`, and the rest of the service sandbox remain unchanged. Deployment-boundary regression now forbids reintroducing a workspace `ReadWritePaths` bind.
 - Before persistent deployment, a transient `systemd-run` smoke with `PrivateTmp=yes` + `ProtectSystem=full` and no workspace `ReadWritePaths` must prove both hardlink inode sharing from MemoFlow and atomic rename from the service-private staging sibling into the workspace mount. This configuration change requires independent Business review before the unit is installed/restarted.
 
+- **Independent Business deployment review PASS** on exact deployment candidate `ad2ed125a96ad1b3a8420ec1a7eaf6b1fbcb7f2e`: removing the redundant workspace `ReadWritePaths` bind does not weaken the configured `ProtectSystem=full` sandbox and is required to preserve one VFS mount identity for linked-object hardlinks and atomic staging publication. `PrivateTmp`, `NoNewPrivileges`, UMask, database write-path confinement, and all reviewed storage code remain unchanged.
+
 
 Deployment gate:
 
