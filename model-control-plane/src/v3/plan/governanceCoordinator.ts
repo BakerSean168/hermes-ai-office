@@ -39,7 +39,12 @@ export class GovernanceCoordinator {
         publication.published !== false &&
         !publication.stale &&
         publication.observedHeadRevision === revision;
-      if (exactHeadPublished) {
+      const supersededHeadHandled =
+        publication.published !== false &&
+        publication.stale &&
+        publication.superseded === true &&
+        publication.observedHeadRevision !== revision;
+      if (exactHeadPublished || supersededHeadHandled) {
         this.#repository.setGovernanceStatusPublished(plan.planId, revision, plan.status);
       }
     } catch {

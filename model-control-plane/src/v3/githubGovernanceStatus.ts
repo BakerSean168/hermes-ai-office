@@ -34,6 +34,8 @@ export interface GitHubGovernanceStatusResult {
   stale: boolean;
   observedHeadRevision?: string;
   published?: boolean;
+  /** The governed SHA is no longer the stable open PR head, so this old plan must stop publishing. */
+  superseded?: boolean;
 }
 
 export interface GitHubGovernanceStatusPort {
@@ -238,29 +240,25 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
 
     const staleDescription = 'Hermes review is stale because the pull request head changed.';
     if (desired.state !== 'error') {
+      // Revoke only the SHA this plan actually reviewed. A newer PR head has no
+      // governance status until its own exact-head plan publishes one; that missing
+      // required context is already fail-closed and must not be overwritten by this
+      // superseded plan.
       await postStatus(input.expectedHeadRevision, 'error', staleDescription);
     }
 
-    if (
-      afterPost.number === input.pullRequestNumber &&
-      afterPost.state === 'open' &&
-      afterHead
-    ) {
-      validateSha(afterHead);
-      await postStatus(
-        afterHead,
-        'error',
-        'Hermes governance has not verified this pull request head.',
-      );
-      const confirmed = await readPullRequest();
-      const confirmedHead = confirmed.head?.sha?.trim() ?? '';
-      if (
-        confirmed.number !== input.pullRequestNumber ||
-        confirmed.state !== 'open' ||
-        confirmedHead !== afterHead
-      ) {
-        throw new Error('GITHUB_GOVERNANCE_HEAD_UNSTABLE');
-      }
+    // Confirm the PR did not move again while we revoked the reviewed SHA. Once a
+    // different head (or a closed PR) is stable across reads, this plan is
+    // superseded and periodic reconciliation must stop retrying its side effect.
+    const confirmed = await readPullRequest();
+    const confirmedHead = confirmed.head?.sha?.trim() ?? '';
+    const stableSupersession =
+      confirmed.number === input.pullRequestNumber &&
+      confirmed.state === afterPost.state &&
+      confirmedHead === afterHead &&
+      (confirmed.state !== 'open' || confirmedHead !== input.expectedHeadRevision);
+    if (!stableSupersession) {
+      throw new Error('GITHUB_GOVERNANCE_HEAD_UNSTABLE');
     }
 
     return {
@@ -269,6 +267,7 @@ export class GitHubGovernanceStatus implements GitHubGovernanceStatusPort {
       stale: true,
       observedHeadRevision: afterHead || undefined,
       published: true,
+      superseded: true,
     };
   }
 }

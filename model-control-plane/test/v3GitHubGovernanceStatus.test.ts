@@ -105,11 +105,16 @@ test('GitHub governance status rechecks the PR head after posting and fails clos
     stale: true,
     observedHeadRevision: NEW_HEAD,
     published: true,
+    superseded: true,
   });
   assert.ok(commands.some((command) => command.includes(`statuses/${HEAD}`) && command.includes('state=success')));
   assert.ok(commands.some((command) => command.includes(`statuses/${HEAD}`) && command.includes('state=error')));
-  assert.ok(commands.some((command) => command.includes(`statuses/${NEW_HEAD}`) && command.includes('state=error')));
-  assert.ok(reads >= 3, 'the fail-closed status write must itself be verified against the current PR head');
+  assert.equal(
+    commands.some((command) => command.includes(`statuses/${NEW_HEAD}`)),
+    false,
+    'a superseded plan must never write governance state onto the new PR head',
+  );
+  assert.equal(reads, 3, 'the moved head must be confirmed stable before retiring the old plan');
 });
 
 test('GitHub governance status leaves reconciliation retryable when the PR head keeps moving during fail-closed publication', async () => {
@@ -147,11 +152,19 @@ test('GitHub governance status never marks a stale reviewed SHA green after PR s
     stale: true,
     observedHeadRevision: NEW_HEAD,
     published: true,
+    superseded: true,
   });
-  const post = state.commands.find((command) => command.includes('gh api -X POST')) ?? '';
-  assert.match(post, /state=error/);
-  assert.match(post, /review is stale because the pull request head changed/);
-  assert.doesNotMatch(post, /state=success/);
+  const posts = state.commands.filter((command) => command.includes('gh api -X POST'));
+  assert.equal(posts.length, 1);
+  assert.match(posts[0]!, new RegExp(`statuses/${HEAD}`));
+  assert.match(posts[0]!, /state=error/);
+  assert.match(posts[0]!, /review is stale because the pull request head changed/);
+  assert.doesNotMatch(posts[0]!, /state=success/);
+  assert.equal(
+    posts.some((command) => command.includes(`statuses/${NEW_HEAD}`)),
+    false,
+    'the new head stays fail-closed by absence until its own plan publishes',
+  );
 });
 
 test('GitHub governance status defers publication while the control-plane repair head is propagating', async () => {
@@ -199,6 +212,7 @@ test('GitHub governance status stops treating the previous head as propagation l
     stale: true,
     observedHeadRevision: HEAD,
     published: true,
+    superseded: true,
   });
   assert.ok(state.commands.some((command) => command.includes('state=error')));
 });

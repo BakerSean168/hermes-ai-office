@@ -3757,6 +3757,106 @@ test('stale GitHub governance publication never advances the durable fingerprint
   }
 });
 
+test('superseded GitHub governance head is durably retired and stops periodic status writes', async () => {
+  const host = new PlanHost();
+  const HEAD = '1111111111111111111111111111111111111111';
+  const NEW_HEAD = '3333333333333333333333333333333333333333';
+  const BASE = '2222222222222222222222222222222222222222';
+  let successCalls = 0;
+  const governanceStatus: GitHubGovernanceStatusPort = {
+    async publish(input) {
+      if (input.planStatus === 'SUCCEEDED') {
+        successCalls += 1;
+        return {
+          revision: input.expectedHeadRevision,
+          state: 'error',
+          stale: true,
+          observedHeadRevision: NEW_HEAD,
+          published: true,
+          superseded: true,
+        };
+      }
+      return {
+        revision: input.expectedHeadRevision,
+        state: 'pending',
+        stale: false,
+        observedHeadRevision: input.expectedHeadRevision,
+        published: true,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    logger: false,
+    v3ExecutionHost: host,
+    v3Workspace: workspace,
+    v3GovernanceStatus: governanceStatus,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const plan = await runtime.v3.createPlan(
+      {
+        projectKey: 'digital-biome',
+        objective: 'Retire governance for a PR head that has been superseded.',
+        analysisSummary: 'Old exact-head plan must not overwrite the new head.',
+        repository: { path: '/tmp/repository', baseRevision: BASE },
+        source: {
+          kind: 'EXTERNAL_CHANGE',
+          revision: HEAD,
+          origin: {
+            kind: 'GITHUB_PULL_REQUEST',
+            repository: 'example/project',
+            pullRequestNumber: 42,
+            pullRequestUrl: 'https://github.com/example/project/pull/42',
+            title: 'External proposal',
+            author: 'jules',
+            headRef: 'jules/fix-42',
+            baseRef: 'main',
+            headRepository: 'example/project',
+          },
+        },
+        batches: [
+          {
+            key: 'external-pr',
+            title: 'Review external PR',
+            workItems: [
+              {
+                key: 'external-pr-change',
+                title: 'Validate external PR',
+                objective: 'Approve only after independent verification.',
+              },
+            ],
+          },
+        ],
+      },
+      'github-governance-superseded-head',
+    );
+
+    await runtime.v3.reconcilePlans(plan.planId);
+    let body = (await runtime.v3.getPlan(plan.planId, true))!;
+    const review = body.batches[0]!.workItems[0]!.executions[1]!;
+    host.succeed(review.refs.openhandsConversationId!, 'PASS\nThe external change is valid.');
+    await runtime.v3.reconcilePlans(plan.planId);
+    await runtime.v3.reconcilePlans(plan.planId);
+
+    body = (await runtime.v3.getPlan(plan.planId, true))!;
+    assert.equal(body.status, 'SUCCEEDED');
+    assert.equal(successCalls, 1);
+    assert.equal(body.governanceStatusRevision, HEAD);
+    assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
+
+    await runtime.v3.reconcilePlans();
+    assert.equal(successCalls, 1, 'a confirmed superseded head must leave the periodic active set');
+  } finally {
+    await runtime.app.close();
+  }
+});
+
 test('terminal GitHub governance status is retried durably after a transient reporting failure', async () => {
   const host = new PlanHost();
   const HEAD = '1111111111111111111111111111111111111111';
