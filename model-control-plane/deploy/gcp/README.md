@@ -114,6 +114,7 @@ The GCP service runs with `PrivateTmp=true`. Linked execution clone staging must
 Execution workspace provisioning uses additive SQLite `workspace_provision_token` / `workspace_provision_claimed_at` claims. Only the current token owner may publish an execution path, attach `workspace_ref`, or mark provisioning failed. The workspace provisioner CAS-renews the token immediately before touching a pre-existing unattached workspace, immediately before filesystem publication, and immediately before worker exposure. A stale process must stop on failed renewal and must never recursively delete the shared execution directory.
 
 Do not clear workspace-provision claim columns manually. A fresh claim intentionally suppresses another provisioner; stale takeover is handled by normal replay/reconciliation.
+If a service crash leaves an incomplete repository before durable `workspace_ref` attachment, replay may clear it only when the current claim still owns the lifecycle and the execution parent remains service-owned. Redirected `.git`, special Git metadata, escaping symlinks, or worker/foreign-owned parents remain fail-closed; do not manually delete around those checks.
 
 ## Crash-safe execution host launch
 

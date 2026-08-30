@@ -50,6 +50,7 @@ OpenHands recovery uses the execution tag already written on every conversation.
 ### 1c. Crash-safe workspace provisioning
 
 Workspace creation is also a cross-process durable lease. `workspace_provision_token` and `workspace_provision_claimed_at` are additive nullable execution-link columns. Before cloning/reusing an execution workspace, the service atomically claims provisioning ownership. Filesystem publication calls back into the control plane to CAS-renew the same token immediately before the shared execution path is created/replaced and again before the finalized directory is exposed to the worker. Only the token owner may attach `workspace_ref` or durably fail provisioning. A stale loser therefore cannot delete a newer workspace, publish after takeover, or mark the winner failed. Generic provision failure paths never recursively delete the shared execution directory.
+A crash may leave a partially placed repository before `workspace_ref` is attached. Replay may remove that residue without a fully valid Git repository only when the deterministic execution parent is still service-owned, the same durable token renews, the path stays inside the managed root, and no Git-metadata redirection/special-node/escaping-symlink signal is present. Once the parent is worker/foreign-owned, full managed-workspace validation is mandatory.
 
 ### 2. Host-controlled batch integration
 

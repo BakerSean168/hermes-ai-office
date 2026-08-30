@@ -1667,3 +1667,49 @@ test('superseded provisioning claim cannot remove an existing published workspac
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('service-owned incomplete crash residue is safely recreated under the durable publication fence', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-partial-crash-residue-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+  const executionId = 'partial-crash-residue-1';
+  const hostPath = provisioner.hostPathForExecution(executionId);
+  const executionDirectory = path.dirname(hostPath);
+  fs.mkdirSync(hostPath, { recursive: true, mode: 0o750 });
+  fs.writeFileSync(path.join(hostPath, 'partial-copy.bin'), 'incomplete\n');
+  let fenceCalls = 0;
+
+  try {
+    const recovered = await provisioner.provision({
+      executionId,
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+      publicationFence: async () => {
+        fenceCalls += 1;
+        return true;
+      },
+    });
+
+    assert.equal(recovered.hostPath, hostPath);
+    assert.equal(git(hostPath, 'rev-parse', 'HEAD'), base);
+    assert.equal(fs.existsSync(path.join(hostPath, 'partial-copy.bin')), false);
+    assert.ok(fenceCalls >= 2);
+    assert.equal(fs.lstatSync(executionDirectory).isDirectory(), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

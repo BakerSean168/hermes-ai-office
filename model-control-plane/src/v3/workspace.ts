@@ -915,10 +915,60 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       if (input.publicationFence && !(await input.publicationFence())) {
         throw new Error('WORKSPACE_PROVISION_CLAIM_LOST');
       }
-      await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
-      // No host execution can launch before workspaceRef is durably attached. Under the fenced
-      // claim this path can therefore only be crash residue from an interrupted provision.
-      fs.rmSync(executionDirectory, { recursive: true, force: true });
+      if (existingWorkspace.isSymbolicLink()) {
+        throw new Error('V3_EXECUTION_WORKSPACE_SYMLINK');
+      }
+      const executionDirectoryStat = fs.lstatSync(executionDirectory, { throwIfNoEntry: false });
+      if (!executionDirectoryStat?.isDirectory() || executionDirectoryStat.isSymbolicLink()) {
+        throw new Error('V3_EXECUTION_WORKSPACE_INVALID');
+      }
+      assertManagedWorkspacePath(executionDirectory, this.#hostRoot);
+      const serviceUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+      if (serviceUid !== undefined && executionDirectoryStat.uid === serviceUid) {
+        // The parent directory has not crossed the worker-publication ownership boundary yet. A
+        // crash during rename/cross-device copy can therefore leave an incomplete repo here.
+        // Before treating it as removable residue, preserve the same structural trust checks that
+        // protect a completed workspace: .git may not be redirected/special, private Git metadata
+        // may not contain symlinks/alternates/special nodes, and working-tree symlinks may not
+        // escape. Only ordinary incompleteness (for example missing Git files after a torn copy) is
+        // recoverable without a fully valid repository.
+        const gitDirectory = path.join(hostPath, '.git');
+        const gitStat = fs.lstatSync(gitDirectory, { throwIfNoEntry: false });
+        if (gitStat) {
+          if (!gitStat.isDirectory() || gitStat.isSymbolicLink()) {
+            throw new Error('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID');
+          }
+          assertPrivateGitMetadataTree(gitDirectory);
+        }
+        assertWorkspaceSymlinksContained(hostPath);
+        if (gitStat) {
+          try {
+            await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            if (
+              detail.startsWith('V3_EXECUTION_WORKSPACE_GIT_DIRECTORY_INVALID') ||
+              detail.startsWith('V3_EXECUTION_WORKSPACE_REPOSITORY_MISMATCH') ||
+              detail.startsWith('V3_WORKSPACE_SYMLINK_OUTSIDE_ROOT') ||
+              detail.startsWith('V3_EXECUTION_WORKSPACE_SYMLINK') ||
+              detail.startsWith('V3_EXECUTION_WORKSPACE_NOT_ALLOWED')
+            ) {
+              throw error;
+            }
+            // Other failures are consistent with a service-owned torn clone/copy. The current
+            // durable publication token still fences this cleanup from a newer publisher.
+          }
+        }
+        // A missing .git directory is itself ordinary torn-copy evidence. Because the parent is
+        // still service-owned and the current durable token fences deletion, it is safe to clear.
+        fs.rmSync(executionDirectory, { recursive: true, force: true });
+      } else {
+        // Once the execution directory is worker-owned, its contents are untrusted. Preserve the
+        // existing symlink/special-file/Git-boundary validation before deleting proven crash
+        // residue so an attacker cannot turn recovery into arbitrary host deletion.
+        await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
+        fs.rmSync(executionDirectory, { recursive: true, force: true });
+      }
     }
     fs.mkdirSync(executionDirectory, { recursive: true, mode: 0o750 });
     assertManagedWorkspacePath(executionDirectory, this.#hostRoot);
