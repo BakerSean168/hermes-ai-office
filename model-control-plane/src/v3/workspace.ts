@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs, { type Stats } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -137,6 +137,145 @@ function untrustedWorkspaceGitArgs(workspace: string, args: string[]): string[] 
   ];
 }
 
+function untrustedGitEnvironment(): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+    HOME: '/nonexistent',
+    LANG: 'C',
+    LC_ALL: 'C',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_TERMINAL_PROMPT: '0',
+  };
+}
+
+async function untrustedWorkspaceGit(
+  workspace: string,
+  args: string[],
+  identity: UnixIdentity,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(
+      'git',
+      ['-C', workspace, ...untrustedWorkspaceGitArgs(workspace, args)],
+      {
+        uid: identity.uid,
+        gid: identity.gid,
+        env: untrustedGitEnvironment(),
+        encoding: 'utf8',
+        timeout: WORKSPACE_GIT_TIMEOUT_MS,
+        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
+      },
+    );
+    return result.stdout.trim();
+  } catch (error) {
+    const failure = error as Error & { stderr?: string; stdout?: string };
+    const detail =
+      [failure.stdout?.trim(), failure.stderr?.trim()].filter(Boolean).join('\n') || failure.message;
+    throw new Error(`GIT_COMMAND_FAILED:${detail.slice(0, 4_000)}`);
+  }
+}
+
+function executionWorkspaceIdentity(workspace: string, configured?: UnixIdentity): UnixIdentity {
+  if (configured) return configured;
+  const stat = fs.statSync(workspace);
+  return { uid: stat.uid, gid: stat.gid };
+}
+
+async function exportUntrustedWorkspaceBundle(input: {
+  workspace: string;
+  sourceRevision: string;
+  executionOwner: UnixIdentity;
+  destination: string;
+  destinationOwner: UnixIdentity;
+}): Promise<void> {
+  const flags =
+    fs.constants.O_WRONLY |
+    fs.constants.O_CREAT |
+    fs.constants.O_EXCL |
+    (fs.constants.O_NOFOLLOW ?? 0);
+  const destinationFd = fs.openSync(input.destination, flags, 0o600);
+  try {
+    fs.fchownSync(destinationFd, input.destinationOwner.uid, input.destinationOwner.gid);
+    fs.fchmodSync(destinationFd, 0o600);
+
+    await new Promise<void>((resolve, reject) => {
+      let stderr = '';
+      let writeFailure: Error | undefined;
+      let timedOut = false;
+      const child = spawn(
+        'git',
+        [
+          '-C',
+          input.workspace,
+          ...untrustedWorkspaceGitArgs(input.workspace, [
+            'bundle',
+            'create',
+            '-',
+            'HEAD',
+            `^${input.sourceRevision}`,
+          ]),
+        ],
+        {
+          uid: input.executionOwner.uid,
+          gid: input.executionOwner.gid,
+          env: untrustedGitEnvironment(),
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      const timer = setTimeout(() => {
+        timedOut = true;
+        if (child.pid) {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            child.kill('SIGKILL');
+          }
+        }
+      }, WORKSPACE_LONG_COMMAND_TIMEOUT_MS);
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        if (writeFailure) return;
+        try {
+          fs.writeSync(destinationFd, chunk);
+        } catch (error) {
+          writeFailure = error instanceof Error ? error : new Error(String(error));
+          if (child.pid) {
+            try {
+              process.kill(-child.pid, 'SIGKILL');
+            } catch {
+              child.kill('SIGKILL');
+            }
+          }
+        }
+      });
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', (chunk: string) => {
+        if (stderr.length < 4_000) stderr += chunk.slice(0, 4_000 - stderr.length);
+      });
+      child.once('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once('close', (code) => {
+        clearTimeout(timer);
+        if (writeFailure) return reject(writeFailure);
+        if (timedOut) return reject(new Error('GIT_COMMAND_FAILED:bundle export timed out'));
+        if (code !== 0) {
+          return reject(
+            new Error(`GIT_COMMAND_FAILED:${stderr.trim().slice(0, 4_000) || `exit ${code}`}`),
+          );
+        }
+        resolve();
+      });
+    });
+    fs.fsyncSync(destinationFd);
+  } finally {
+    fs.closeSync(destinationFd);
+  }
+}
+
 function integrationRefComponent(value: string): string {
   const ordinary = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(value);
   if (ordinary && !value.endsWith('.lock')) return value;
@@ -223,6 +362,7 @@ async function assertManagedGitWorkspace(
   owner?: UnixIdentity,
 ): Promise<void> {
   assertManagedWorkspacePath(hostPath, hostRoot);
+  const workspaceOwner = executionWorkspaceIdentity(hostPath, owner);
   const realWorkspace = fs.realpathSync(hostPath);
   const gitDirectory = path.join(hostPath, '.git');
   const gitStat = fs.lstatSync(gitDirectory, { throwIfNoEntry: false });
@@ -235,15 +375,15 @@ async function assertManagedGitWorkspace(
   }
 
   const topLevel = path.resolve(
-    await git(hostPath, [...safeDirectory(hostPath), 'rev-parse', '--show-toplevel'], owner),
+    await untrustedWorkspaceGit(hostPath, ['rev-parse', '--show-toplevel'], workspaceOwner),
   );
   if (fs.realpathSync(topLevel) !== realWorkspace) {
     throw new Error('V3_EXECUTION_WORKSPACE_REPOSITORY_MISMATCH');
   }
-  const commonGitDirValue = await git(
+  const commonGitDirValue = await untrustedWorkspaceGit(
     hostPath,
-    [...safeDirectory(hostPath), 'rev-parse', '--git-common-dir'],
-    owner,
+    ['rev-parse', '--git-common-dir'],
+    workspaceOwner,
   );
   const commonGitDir = fs.realpathSync(path.resolve(hostPath, commonGitDirValue));
   if (!inside(commonGitDir, realWorkspace) || commonGitDir !== realGitDirectory) {
@@ -681,18 +821,18 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
   }): Promise<{ startRevision: string }> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
     await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
-    const trusted = safeDirectory(hostPath);
+    const workspaceOwner = executionWorkspaceIdentity(hostPath, this.#executionOwner);
     const ref = writerBaselineRef(input.executionId);
     try {
-      const existing = await git(
+      const existing = await untrustedWorkspaceGit(
         hostPath,
-        [...trusted, 'rev-parse', '--verify', ref],
-        this.#executionOwner,
+        ['rev-parse', '--verify', ref],
+        workspaceOwner,
       );
       return { startRevision: existing };
     } catch {
-      const head = await git(hostPath, [...trusted, 'rev-parse', 'HEAD'], this.#executionOwner);
-      await git(hostPath, [...trusted, 'update-ref', ref, head], this.#executionOwner);
+      const head = await untrustedWorkspaceGit(hostPath, ['rev-parse', 'HEAD'], workspaceOwner);
+      await untrustedWorkspaceGit(hostPath, ['update-ref', ref, head], workspaceOwner);
       return { startRevision: head };
     }
   }
@@ -703,24 +843,20 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
   }): Promise<WriterCompletionEvidence> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
     await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
-    const trusted = safeDirectory(hostPath);
+    const workspaceOwner = executionWorkspaceIdentity(hostPath, this.#executionOwner);
     const ref = writerBaselineRef(input.executionId);
     let startRevision: string;
     try {
-      startRevision = await git(
+      startRevision = await untrustedWorkspaceGit(
         hostPath,
-        [...trusted, 'rev-parse', '--verify', ref],
-        this.#executionOwner,
+        ['rev-parse', '--verify', ref],
+        workspaceOwner,
       );
     } catch {
       throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
     }
-    const headRevision = await git(
-      hostPath,
-      [...trusted, 'rev-parse', 'HEAD'],
-      this.#executionOwner,
-    );
-    const dirty = await git(hostPath, [...trusted, 'status', '--porcelain'], this.#executionOwner);
+    const headRevision = await untrustedWorkspaceGit(hostPath, ['rev-parse', 'HEAD'], workspaceOwner);
+    const dirty = await untrustedWorkspaceGit(hostPath, ['status', '--porcelain'], workspaceOwner);
     if (dirty) throw new Error('WRITER_COMPLETION_DIRTY');
     if (headRevision === startRevision) throw new Error('WRITER_COMPLETION_NO_COMMIT');
     return { startRevision, headRevision };
@@ -948,15 +1084,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const gitDirectory = path.join(hostPath, '.git');
     if (!fs.existsSync(gitDirectory)) return false;
-    await execFileAsync(
-      'git',
-      ['-c', `safe.directory=${hostPath}`, '-C', hostPath, 'clean', '-ffdX'],
-      {
-        encoding: 'utf8',
-        timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
-        maxBuffer: WORKSPACE_GIT_LARGE_BUFFER_BYTES,
-      },
-    );
+    const workspaceOwner = executionWorkspaceIdentity(hostPath, this.#executionOwner);
+    await untrustedWorkspaceGit(hostPath, ['clean', '-ffdX'], workspaceOwner);
     // Agent Harness state is execution-scoped, not repository recovery state. A terminal
     // execution may keep its repo for repair/review continuity without pinning tool caches,
     // model homes, and MCP materializations beside it.
@@ -1007,6 +1136,9 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     }
     const repoStat = fs.statSync(repoRoot);
     const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    if (this.#executionOwner && sourceOwner.uid === this.#executionOwner.uid) {
+      throw new Error('BATCH_INTEGRATION_SOURCE_OWNER_CONFLICT');
+    }
     const targetRepositoryRoot = fs.realpathSync(repoRoot);
     await assertCanonicalGitMetadataContained(repoRoot, sourceOwner);
     const integrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-integrate-'));
@@ -1045,15 +1177,15 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           gid: implementationStat.gid,
         };
         await assertManagedGitWorkspace(implementationPath, this.#hostRoot, implementationOwner);
-        const dirty = await git(
+        const dirty = await untrustedWorkspaceGit(
           implementationPath,
-          untrustedWorkspaceGitArgs(implementationPath, ['status', '--porcelain']),
+          ['status', '--porcelain'],
           implementationOwner,
         );
         if (dirty) throw new Error('BATCH_INTEGRATION_UNCOMMITTED_CHANGES');
-        const head = await git(
+        const head = await untrustedWorkspaceGit(
           implementationPath,
-          untrustedWorkspaceGitArgs(implementationPath, ['rev-parse', 'HEAD']),
+          ['rev-parse', 'HEAD'],
           implementationOwner,
         );
         let targetSourceRevision: string;
@@ -1068,13 +1200,13 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         }
         let sourceRevision: string;
         try {
-          sourceRevision = await git(
+          sourceRevision = await untrustedWorkspaceGit(
             implementationPath,
-            untrustedWorkspaceGitArgs(implementationPath, [
+            [
               'rev-parse',
               '--verify',
               `${implementation.sourceRevision}^{commit}`,
-            ]),
+            ],
             implementationOwner,
           );
         } catch {
@@ -1087,14 +1219,14 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
         }
         try {
-          await git(
+          await untrustedWorkspaceGit(
             implementationPath,
-            untrustedWorkspaceGitArgs(implementationPath, [
+            [
               'merge-base',
               '--is-ancestor',
               sourceRevision,
               head,
-            ]),
+            ],
             implementationOwner,
           );
         } catch {
@@ -1102,14 +1234,14 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         }
         for (const requiredRevision of input.requiredAncestorRevisions ?? []) {
           try {
-            await git(
+            await untrustedWorkspaceGit(
               implementationPath,
-              untrustedWorkspaceGitArgs(implementationPath, [
+              [
                 'merge-base',
                 '--is-ancestor',
                 requiredRevision,
                 head,
-              ]),
+              ],
               implementationOwner,
             );
           } catch {
@@ -1117,46 +1249,29 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           }
         }
 
-        // The implementation workspace is private to the execution identity, so the source
-        // owner cannot traverse it directly. Export only objects newer than the recorded source
-        // revision, then let the source owner fetch that small exact bundle into the host worktree.
-        const exportRoot = fs.mkdtempSync(path.join(os.tmpdir(), `hermes-ai-office-export-${index}-`));
-        const implementationBundle = path.join(exportRoot, 'implementation.bundle');
-        const currentUid = typeof process.getuid === 'function' ? process.getuid() : implementationOwner.uid;
-        const currentGid = typeof process.getgid === 'function' ? process.getgid() : implementationOwner.gid;
-        if (implementationOwner.uid !== currentUid || implementationOwner.gid !== currentGid) {
-          fs.chownSync(exportRoot, implementationOwner.uid, implementationOwner.gid);
-        }
-        fs.chmodSync(exportRoot, 0o700);
-        try {
-          await git(
-            implementationPath,
-            untrustedWorkspaceGitArgs(implementationPath, [
-              'bundle',
-              'create',
-              implementationBundle,
-              'HEAD',
-              `^${sourceRevision}`,
-            ]),
-            implementationOwner,
-          );
-          fs.chownSync(implementationBundle, sourceOwner.uid, sourceOwner.gid);
-          fs.chownSync(exportRoot, sourceOwner.uid, sourceOwner.gid);
-          fs.chmodSync(exportRoot, 0o700);
-          await git(
-            integrationRepo,
-            ['fetch', '--no-tags', implementationBundle, 'HEAD'],
-            sourceOwner,
-          );
-          const fetchedHead = await git(
-            integrationRepo,
-            ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
-            sourceOwner,
-          );
-          if (fetchedHead !== head) throw new Error('BATCH_INTEGRATION_HEAD_MISMATCH');
-        } finally {
-          fs.rmSync(exportRoot, { recursive: true, force: true });
-        }
+        // The worker never owns or receives a pathname/FD for the canonical-side bundle file.
+        // Git writes bundle bytes to stdout through a pipe; the root control plane streams those
+        // bytes into an O_EXCL/O_NOFOLLOW file already owned by the canonical source identity.
+        // This removes the worker-path -> privileged-chown TOCTOU boundary entirely.
+        const implementationBundle = path.join(integrationRoot, `implementation-${index}.bundle`);
+        await exportUntrustedWorkspaceBundle({
+          workspace: implementationPath,
+          sourceRevision,
+          executionOwner: implementationOwner,
+          destination: implementationBundle,
+          destinationOwner: sourceOwner,
+        });
+        await git(
+          integrationRepo,
+          ['fetch', '--no-tags', implementationBundle, 'HEAD'],
+          sourceOwner,
+        );
+        const fetchedHead = await git(
+          integrationRepo,
+          ['rev-parse', '--verify', 'FETCH_HEAD^{commit}'],
+          sourceOwner,
+        );
+        if (fetchedHead !== head) throw new Error('BATCH_INTEGRATION_HEAD_MISMATCH');
         try {
           await git(
             integrationRepo,

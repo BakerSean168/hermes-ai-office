@@ -730,6 +730,41 @@ test('execution provisioning shares packed source objects without sharing mutabl
   }
 });
 
+test('batch integration fails closed when canonical and execution owners are identical', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-owner-conflict-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+    executionOwner: { uid: process.getuid!(), gid: process.getgid!() },
+  });
+
+  try {
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-owner-conflict',
+        batchKey: 'batch-1',
+        repositoryPath: source,
+        baseRevision: base,
+        implementations: [],
+      }),
+      /BATCH_INTEGRATION_SOURCE_OWNER_CONFLICT/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('batch integration rejects canonical object alternates outside the repository trust boundary', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-alternates-'));
   const source = path.join(root, 'source');
