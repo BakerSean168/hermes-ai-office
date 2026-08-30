@@ -54,8 +54,20 @@ test('linked workspace staging stays outside systemd PrivateTmp', () => {
     path.join(root, 'deploy/gcp/hermes-model-control-plane.service'),
     'utf8',
   );
+  const genericUnit = fs.readFileSync(
+    path.join(root, 'deploy/hermes-model-control-plane.service'),
+    'utf8',
+  );
+  const productionDropin = fs.readFileSync(
+    path.join(root, 'deploy/hermes-model-control-plane.service.d/v3-production.conf'),
+    'utf8',
+  );
 
   assert.match(gcpUnit, /PrivateTmp=true/);
+  assert.match(gcpUnit, /^ReadWritePaths=\/srv\/hermes-personal\/data\/model-control-plane$/m);
+  assert.doesNotMatch(gcpUnit, /ReadWritePaths=.*hermes-ai-office-v3\/workspaces/);
+  assert.doesNotMatch(genericUnit, /ReadWritePaths=.*hermes-ai-office-v3\/workspaces/);
+  assert.doesNotMatch(productionDropin, /^ReadWritePaths=.*hermes-ai-office-v3\/workspaces/m);
   assert.match(
     workspace,
     /path\.join\(path\.dirname\(this\.#hostRoot\), '\.model-control-plane-staging'\)/,

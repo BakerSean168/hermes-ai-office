@@ -107,6 +107,7 @@ To opt a repository into physical object sharing, perform preparation only at a 
 If any precondition or post-check is ambiguous, do not normalize the repository. Leave it unprepared and allow the runtime to use its safe private-clone fallback.
 
 The GCP service runs with `PrivateTmp=true`. Linked execution clone staging must not use `/tmp`; it lives in a service-private sibling of the workspace root. `--local` is enabled only when the inspected source object directory and staging path are device-compatible. Treat `EXDEV` from local clone creation as a staging/mount-boundary defect, not as a reason to weaken source trust checks.
+Do **not** add the workspace root to systemd `ReadWritePaths` while `ProtectSystem=full` is used. `ProtectSystem=full` does not make `/opt` read-only, so that whitelist is unnecessary; systemd implements `ReadWritePaths` as a bind mount, and a separate mount ID makes otherwise same-ext4 `link(2)` / `rename(2)` operations return `EXDEV`. The database path remains in `ReadWritePaths`; workspace/source/staging must remain on the ordinary root mount for linked-object sharing and atomic publication.
 
 
 ## Crash-safe workspace provisioning
