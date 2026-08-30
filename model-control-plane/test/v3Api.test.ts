@@ -76,6 +76,7 @@ const workspace: WorkspaceProvisioningPort = {
     return {
       hostPath: `/tmp/${input.executionId}`,
       executionPath: `/workspace/${input.executionId}`,
+      repositoryRoot: input.repositoryPath || '/tmp/repository',
       sourceRevision: 'abc123',
     };
   },
@@ -95,6 +96,39 @@ const gateway: ModelGatewayPort = {
     };
   },
 };
+
+test('execution link workspace provenance persists repository root', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'execution-link-repository-root-'));
+  const db = openDb(path.join(directory, 'control-plane.sqlite'));
+  try {
+    const links = new ExecutionLinkRepository(db);
+    const reserved = links.reserve({
+      idempotencyKey: 'repository-root-roundtrip',
+      projectKey: 'memoflow',
+      phase: 'IMPLEMENT',
+      objectiveSummary: 'Persist repository provenance.',
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'implementation-efficient',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'isolated_write',
+        sessionPolicy: 'fresh',
+        reasons: ['test'],
+      },
+    });
+    const attached = links.attachWorkspace(reserved.record.executionId, {
+      workspaceRef: '/workspace/executions/example/repo',
+      repositoryRoot: '/home/dev/projects/memoflow',
+      gitBranch: 'ai-office/example',
+      sourceRevision: 'abc123',
+    });
+    assert.equal(attached.repositoryRoot, '/home/dev/projects/memoflow');
+    assert.equal(links.get(reserved.record.executionId)?.repositoryRoot, '/home/dev/projects/memoflow');
+  } finally {
+    db.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test('external replay revalidates the persisted backend selection from pre-gate crash residue', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'external-backend-residue-'));
@@ -540,6 +574,7 @@ test('V3 IMPLEMENT_FIX reuses the reviewed implementation workspace and receives
       return {
         hostPath: `/host/workspaces/executions/${input.executionId}/repo`,
         executionPath: `/workspace/executions/${input.executionId}/repo`,
+        repositoryRoot: input.repositoryPath || '/tmp/repository',
         branch:
           input.workspaceMode === 'isolated_write' ? `ai-office/${input.executionId}` : undefined,
         sourceRevision: 'abc123',

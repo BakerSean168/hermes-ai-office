@@ -32,6 +32,7 @@ export interface WorkerLaunchOverride {
 
 export interface ApprovedImplementationEvidence {
   workspaceRef: string;
+  repositoryRoot: string;
   sourceRevision: string;
   executionId: string;
   approvedRevision: string;
@@ -538,8 +539,12 @@ export class WorkItemCoordinator {
     if (!options.allowUnreviewed && !approvedReview?.sourceRevision) {
       throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     }
+    const plan = this.#repository.get(item.planId);
+    const repositoryRoot = implementation.repositoryRoot ?? plan?.repositoryPath;
+    if (!repositoryRoot) throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     return {
       workspaceRef: implementation.workspaceRef,
+      repositoryRoot,
       sourceRevision: implementation.sourceRevision,
       executionId: implementation.executionId,
       approvedRevision: approvedReview?.sourceRevision ?? implementation.sourceRevision,

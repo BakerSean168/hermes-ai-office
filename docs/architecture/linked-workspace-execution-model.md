@@ -70,6 +70,11 @@ This grants read access to history already in scope for the execution without gr
 
 Removing an execution directory unlinks its hardlinks only. Canonical object files survive because they retain the canonical directory link. Old pack blocks can be reclaimed after all linked clones referencing them are removed.
 
+
+### Durable repository identity
+
+Every newly provisioned execution records the real canonical `repositoryRoot` alongside its durable `workspaceRef`, source revision, and Git branch. Continuation/fix reuse carries that provenance forward. Batch integration accepts an implementation only when its durable repository root realpath equals the target canonical root and its recorded source revision resolves to the same commit in the target object database. This identity is control-plane-owned; worker-editable remotes or `.git/config` are not repository authority. Existing SQLite databases add the nullable `repository_root` column in place; legacy plan-owned evidence may fall back to the durable Plan repository path until it is naturally replaced by a newly provisioned execution.
+
 ## Batch integration invariants
 
 1. The integration worktree is host-controlled and never mounted as a model workspace; the resolved canonical Git top-level must remain inside the configured real repository roots before any worktree/ref mutation.

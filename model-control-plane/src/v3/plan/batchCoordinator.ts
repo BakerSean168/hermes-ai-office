@@ -229,6 +229,7 @@ export class BatchCoordinator {
       });
       return {
         workspaceRef: evidence.workspaceRef,
+        repositoryRoot: evidence.repositoryRoot,
         sourceRevision: evidence.sourceRevision,
         executionId: evidence.executionId,
       };

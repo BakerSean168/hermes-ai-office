@@ -192,6 +192,7 @@ export interface ExecutionLinkRecord {
   openhandsConversationId?: string;
   langfuseTraceId?: string;
   workspaceRef?: string;
+  repositoryRoot?: string;
   gitBranch?: string;
   sourceRevision?: string;
   previousExecutionId?: string;

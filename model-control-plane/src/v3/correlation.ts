@@ -30,6 +30,7 @@ interface ExecutionLinkRow {
   openhands_conversation_id: string | null;
   langfuse_trace_id: string | null;
   workspace_ref: string | null;
+  repository_root: string | null;
   git_branch: string | null;
   source_revision: string | null;
   previous_execution_id: string | null;
@@ -72,6 +73,7 @@ export function ensureV3Schema(db: DatabaseSync): void {
       openhands_conversation_id TEXT,
       langfuse_trace_id TEXT,
       workspace_ref TEXT,
+      repository_root TEXT,
       git_branch TEXT,
       source_revision TEXT,
       previous_execution_id TEXT,
@@ -107,7 +109,10 @@ export function ensureV3Schema(db: DatabaseSync): void {
       }>
     ).map((row) => row.name),
   );
-  if (!columns.has('previous_execution_id')) {
+  if (!columns.has('repository_root')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN repository_root TEXT');
+  }
+    if (!columns.has('previous_execution_id')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN previous_execution_id TEXT');
   }
   if (!columns.has('result_text')) {
@@ -204,6 +209,7 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     openhandsConversationId: row.openhands_conversation_id ?? undefined,
     langfuseTraceId: row.langfuse_trace_id ?? undefined,
     workspaceRef: row.workspace_ref ?? undefined,
+    repositoryRoot: row.repository_root ?? undefined,
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
@@ -328,15 +334,21 @@ export class ExecutionLinkRepository {
 
   attachWorkspace(
     executionId: string,
-    input: { workspaceRef: string; gitBranch?: string; sourceRevision?: string },
+    input: {
+      workspaceRef: string;
+      repositoryRoot?: string;
+      gitBranch?: string;
+      sourceRevision?: string;
+    },
   ): ExecutionLinkRecord {
     this.#db
       .prepare(
         `UPDATE v3_execution_links
-           SET workspace_ref=?,git_branch=?,source_revision=?,updated_at=? WHERE execution_id=?`,
+           SET workspace_ref=?,repository_root=?,git_branch=?,source_revision=?,updated_at=? WHERE execution_id=?`,
       )
       .run(
         input.workspaceRef,
+        input.repositoryRoot ?? null,
         input.gitBranch ?? null,
         input.sourceRevision ?? null,
         Date.now(),

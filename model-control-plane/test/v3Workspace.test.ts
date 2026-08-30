@@ -230,8 +230,9 @@ test('execution workspace names reject lossy identifiers instead of colliding', 
   });
 
   assert.match(provisioner.hostPathForExecution('exec_safe-1.2'), /exec_safe-1\.2\/repo$/);
-  assert.throws(() => provisioner.hostPathForExecution('exec/a'), /V3_EXECUTION_ID_INVALID/);
-  assert.throws(() => provisioner.hostPathForExecution('exec:a'), /V3_EXECUTION_ID_INVALID/);
+  for (const invalid of ['exec/a', 'exec:a', '.', '..', 'foo..bar', 'foo.', 'foo.lock', '.hidden']) {
+    assert.throws(() => provisioner.hostPathForExecution(invalid), /V3_EXECUTION_ID_INVALID/);
+  }
 });
 
 test('existing execution workspace symlinks are rejected before reuse', async () => {
@@ -992,10 +993,71 @@ test('batch integration requires implementation sourceRevision to be an ancestor
         repositoryPath: source,
         baseRevision: base,
         implementations: [
-          { workspaceRef: implementation.executionPath, sourceRevision: sibling },
+          { workspaceRef: implementation.executionPath, repositoryRoot: implementation.repositoryRoot, sourceRevision: sibling },
         ],
       }),
       /BATCH_INTEGRATION_SOURCE_NOT_ANCESTOR/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('batch integration rejects implementation provenance bound to another repository', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-integration-repository-binding-'));
+  const target = path.join(root, 'target');
+  const other = path.join(root, 'other');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(target, { recursive: true });
+  git(target, 'init');
+  git(target, 'config', 'user.email', 'v3-test@example.invalid');
+  git(target, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(target, 'tracked.txt'), 'base\n');
+  git(target, 'add', '.');
+  git(target, 'commit', '-m', 'shared base');
+  const base = git(target, 'rev-parse', 'HEAD');
+  git(target, 'clone', '--no-local', '.', other);
+  git(other, 'config', 'user.email', 'worker@example.invalid');
+  git(other, 'config', 'user.name', 'Worker');
+
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  try {
+    const implementation = await provisioner.provision({
+      executionId: 'other-repository-implementation',
+      repositoryPath: other,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+    });
+    fs.writeFileSync(path.join(implementation.hostPath, 'other.txt'), 'other repository change\n');
+    git(implementation.hostPath, 'config', 'user.email', 'worker@example.invalid');
+    git(implementation.hostPath, 'config', 'user.name', 'Worker');
+    git(implementation.hostPath, 'add', '.');
+    git(implementation.hostPath, 'commit', '-m', 'other repository implementation');
+
+    await assert.rejects(
+      provisioner.integrateBatch({
+        planId: 'plan-repository-binding',
+        batchKey: 'batch-1',
+        repositoryPath: target,
+        baseRevision: base,
+        implementations: [
+          {
+            workspaceRef: implementation.executionPath,
+            repositoryRoot: implementation.repositoryRoot,
+            sourceRevision: base,
+          },
+        ],
+      }),
+      /BATCH_INTEGRATION_REPOSITORY_MISMATCH/,
+    );
+    assert.throws(
+      () => git(target, 'rev-parse', 'refs/ai-office/plans/plan-repository-binding/batches/batch-1'),
+      /Command failed/,
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
@@ -1042,6 +1104,7 @@ test('batch integration creates a durable repository ref without changing the so
       implementations: [
         {
           workspaceRef: implementation.executionPath,
+          repositoryRoot: implementation.repositoryRoot,
           sourceRevision: implementation.sourceRevision,
         },
       ],
@@ -1185,8 +1248,8 @@ test('batch integration classifies Git conflicts with conflict evidence for LLM 
         repositoryPath: source,
         baseRevision: base,
         implementations: [
-          { workspaceRef: left.executionPath, sourceRevision: base },
-          { workspaceRef: right.executionPath, sourceRevision: base },
+          { workspaceRef: left.executionPath, repositoryRoot: left.repositoryRoot, sourceRevision: base },
+          { workspaceRef: right.executionPath, repositoryRoot: right.repositoryRoot, sourceRevision: base },
         ],
       }),
       (error: unknown) => {
@@ -1254,7 +1317,7 @@ test('repaired batch integration rejects a repair head that drops an approved so
         batchKey: 'batch-1',
         repositoryPath: source,
         baseRevision: base,
-        implementations: [{ workspaceRef: incompleteRepair.executionPath, sourceRevision: base }],
+        implementations: [{ workspaceRef: incompleteRepair.executionPath, repositoryRoot: incompleteRepair.repositoryRoot, sourceRevision: base }],
         requiredAncestorRevisions: [approvedHead],
       }),
       /BATCH_INTEGRATION_REPAIR_INCOMPLETE/,

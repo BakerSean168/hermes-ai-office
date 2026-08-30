@@ -511,6 +511,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           const previous = fixLineage.implementation;
           admitted.record = this.#links.attachWorkspace(admitted.record.executionId, {
             workspaceRef: previous.workspaceRef!,
+            repositoryRoot: previous.repositoryRoot,
             gitBranch: previous.gitBranch,
             sourceRevision: previous.sourceRevision,
           });
@@ -549,6 +550,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           const previous = fixLineage.implementation;
           record = this.#links.attachWorkspace(record.executionId, {
             workspaceRef: previous.workspaceRef!,
+            repositoryRoot: previous.repositoryRoot,
             gitBranch: previous.gitBranch,
             sourceRevision: previous.sourceRevision,
           });
@@ -572,6 +574,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           });
           record = this.#links.attachWorkspace(record.executionId, {
             workspaceRef: provisioned.executionPath,
+            repositoryRoot: provisioned.repositoryRoot,
             gitBranch: provisioned.branch,
             sourceRevision:
               input.phase === 'ADOPT_CHANGE'

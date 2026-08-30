@@ -21,9 +21,14 @@ export function inside(child: string, parent: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+export function executionRefComponent(executionId: string): string {
+  const safe = /^[A-Za-z0-9][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*$/.test(executionId);
+  if (!safe || executionId.endsWith('.lock')) throw new Error('V3_EXECUTION_ID_INVALID');
+  return executionId;
+}
+
 export function writerBaselineRef(executionId: string): string {
-  const safe = executionId.replace(/[^a-zA-Z0-9._-]/g, '_');
-  return `refs/ai-office/writers/${safe}/start`;
+  return `refs/ai-office/writers/${executionRefComponent(executionId)}/start`;
 }
 
 export function safeDirectory(directory: string): string[] {

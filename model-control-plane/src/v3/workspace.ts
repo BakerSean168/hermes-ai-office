@@ -11,6 +11,7 @@ import {
   WORKSPACE_PERMISSION_TIMEOUT_MS,
 } from './planConstants.js';
 import {
+  executionRefComponent,
   git,
   gitNullList,
   inside,
@@ -29,6 +30,7 @@ const execFileAsync = promisify(execFile);
 export interface ProvisionedWorkspace {
   hostPath: string;
   executionPath: string;
+  repositoryRoot: string;
   branch?: string;
   sourceRevision: string;
 }
@@ -83,7 +85,11 @@ export interface WorkspaceProvisioningPort {
     batchKey: string;
     repositoryPath: string;
     baseRevision: string;
-    implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+    implementations: Array<{
+      workspaceRef: string;
+      repositoryRoot: string;
+      sourceRevision: string;
+    }>;
     requiredAncestorRevisions?: string[];
   }): Promise<{ revision: string; ref: string }>;
 }
@@ -115,10 +121,7 @@ function overlayWorkingTree(sourceRepo: string, snapshotRepo: string, entries: s
 }
 
 function executionDirectoryName(executionId: string): string {
-  if (!executionId || !/^[A-Za-z0-9._-]+$/.test(executionId)) {
-    throw new Error('V3_EXECUTION_ID_INVALID');
-  }
-  return executionId;
+  return executionRefComponent(executionId);
 }
 
 function integrationRefComponent(value: string): string {
@@ -735,6 +738,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     }
     const repoStat = fs.statSync(repoRoot);
     const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    const repositoryRoot = fs.realpathSync(repoRoot);
     const revision = input.baseRevision?.trim() || 'HEAD';
     const resolvedRevision = await git(repoRoot, ['rev-parse', '--verify', revision], sourceOwner);
 
@@ -746,7 +750,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       fs.chmodSync(executionsRoot, 0o750);
     }
 
+    const executionDirectory = path.join(executionsRoot, directory);
     const hostPath = this.hostPathForExecution(input.executionId);
+    if (path.resolve(path.dirname(hostPath)) !== path.resolve(executionDirectory)) {
+      throw new Error('V3_EXECUTION_WORKSPACE_NOT_ALLOWED');
+    }
     const executionPath = path.posix.join(this.#executionRoot, 'executions', directory, 'repo');
     const existingWorkspace = fs.lstatSync(hostPath, { throwIfNoEntry: false });
     if (existingWorkspace) {
@@ -755,10 +763,10 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       // attached workspaceRef. Therefore an existing directory here is unreachable crash residue,
       // never an active/resumable writer lease. Recreate it from the requested repository/base/mode
       // instead of silently accepting an artifact whose identity cannot be proven externally.
-      fs.rmSync(path.dirname(hostPath), { recursive: true, force: true });
+      fs.rmSync(executionDirectory, { recursive: true, force: true });
     }
-    fs.mkdirSync(path.dirname(hostPath), { recursive: true, mode: 0o750 });
-    assertManagedWorkspacePath(path.dirname(hostPath), this.#hostRoot);
+    fs.mkdirSync(executionDirectory, { recursive: true, mode: 0o750 });
+    assertManagedWorkspacePath(executionDirectory, this.#hostRoot);
 
     // Local execution clones keep private refs/index/new objects but physically share
     // pre-existing canonical objects through hardlinks. This preserves the worker trust
@@ -909,13 +917,13 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       input.workspaceMode === 'reuse_implementation_workspace'
     ) {
       await chmodExecutionRepository(hostPath, true);
-      return { hostPath, executionPath, branch, sourceRevision: resolvedRevision };
+      return { hostPath, executionPath, repositoryRoot, branch, sourceRevision: resolvedRevision };
     }
 
     // Read/review phases get a physically read-only private clone. Shared source objects remain
     // source-owned and read-only to the execution identity.
     await chmodExecutionRepository(hostPath, false);
-    return { hostPath, executionPath, sourceRevision: resolvedRevision };
+    return { hostPath, executionPath, repositoryRoot, sourceRevision: resolvedRevision };
   }
 
   async pruneExecutionArtifacts(input: {
@@ -964,7 +972,11 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     batchKey: string;
     repositoryPath: string;
     baseRevision: string;
-    implementations: Array<{ workspaceRef: string; sourceRevision: string }>;
+    implementations: Array<{
+      workspaceRef: string;
+      repositoryRoot: string;
+      sourceRevision: string;
+    }>;
     requiredAncestorRevisions?: string[];
   }): Promise<{ revision: string; ref: string }> {
     const requested = path.resolve(input.repositoryPath);
@@ -982,6 +994,7 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     }
     const repoStat = fs.statSync(repoRoot);
     const sourceOwner = { uid: repoStat.uid, gid: repoStat.gid };
+    const targetRepositoryRoot = fs.realpathSync(repoRoot);
     await assertCanonicalGitMetadataContained(repoRoot, sourceOwner);
     const integrationRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ai-office-integrate-'));
     fs.chownSync(integrationRoot, sourceOwner.uid, sourceOwner.gid);
@@ -1002,6 +1015,15 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
       worktreeAdded = true;
 
       for (const [index, implementation] of input.implementations.entries()) {
+        let implementationRepositoryRoot: string;
+        try {
+          implementationRepositoryRoot = fs.realpathSync(implementation.repositoryRoot);
+        } catch {
+          throw new Error('BATCH_INTEGRATION_REPOSITORY_MISMATCH');
+        }
+        if (implementationRepositoryRoot !== targetRepositoryRoot) {
+          throw new Error('BATCH_INTEGRATION_REPOSITORY_MISMATCH');
+        }
         const implementationPath = this.hostPathForWorkspaceRef(implementation.workspaceRef);
         await assertManagedGitWorkspace(implementationPath, this.#hostRoot, this.#executionOwner);
         const trustedImplementation = safeDirectory(implementationPath);
@@ -1012,6 +1034,16 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
         ]);
         if (dirty) throw new Error('BATCH_INTEGRATION_UNCOMMITTED_CHANGES');
         const head = await git(implementationPath, [...trustedImplementation, 'rev-parse', 'HEAD']);
+        let targetSourceRevision: string;
+        try {
+          targetSourceRevision = await git(
+            repoRoot,
+            ['rev-parse', '--verify', `${implementation.sourceRevision}^{commit}`],
+            sourceOwner,
+          );
+        } catch {
+          throw new Error('BATCH_INTEGRATION_SOURCE_REVISION_NOT_IN_TARGET');
+        }
         let sourceRevision: string;
         try {
           sourceRevision = await git(implementationPath, [
@@ -1022,6 +1054,9 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
           ]);
         } catch {
           throw new Error('BATCH_INTEGRATION_SOURCE_REVISION_INVALID');
+        }
+        if (sourceRevision !== targetSourceRevision) {
+          throw new Error('BATCH_INTEGRATION_SOURCE_REVISION_NOT_IN_TARGET');
         }
         if (head === sourceRevision) {
           throw new Error('BATCH_INTEGRATION_EMPTY_IMPLEMENTATION');
