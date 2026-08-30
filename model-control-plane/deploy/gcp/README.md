@@ -90,3 +90,18 @@ The GitHub repository webhook then targets
 `https://<gcp-dev-tailnet-host>:8443/github/webhook` with content type `application/json`, the same
 `GITHUB_WEBHOOK_SECRET`, and Pull request events enabled. Branch protection/required governance status
 is a later rollout gate; the first pilot remains review/report-only and does not enable auto-merge.
+
+
+## Linked workspace repository preparation
+
+Runtime linked-workspace provisioning never changes canonical Git object ownership, group, mode, ACLs, or repository configuration. A repository whose object tree is not already readable/traversable and non-writable to the configured OpenHands execution identity uses the private `--no-local` fallback.
+
+To opt a repository into physical object sharing, perform preparation only at a quiescent deployment boundary:
+
+1. verify through the control plane that no RUNNING or PAUSED writer owns that repository and the relevant durable Plan is at an integrated/terminal checkpoint;
+2. record source `HEAD`, refs, `git status`, `git fsck`, and object-tree ownership/modes;
+3. configure the repository so future Git objects are group-readable but never group-writable, and normalize the existing `.git/objects` tree once for the execution group while no source writer is active;
+4. re-run `git fsck`, source cleanliness, and a read-only access audit as the execution identity;
+5. start one production-shaped execution and prove source/execution history objects share inodes while canonical HEAD and working tree remain unchanged.
+
+If any precondition or post-check is ambiguous, do not normalize the repository. Leave it unprepared and allow the runtime to use its safe private-clone fallback.

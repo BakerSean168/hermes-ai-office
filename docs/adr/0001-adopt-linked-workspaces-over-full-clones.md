@@ -30,9 +30,9 @@ Existing source Git objects are physically shared through hardlinks. The executi
 - HEAD/index/refs/config;
 - working tree;
 - new objects created by the worker;
-- writer baseline refs.
+- a control-plane-durable writer start revision; workers do not own the authoritative completion baseline.
 
-The source object's owner remains unchanged. Hardlink sharing is enabled only after the common Git/object directories, inode ownership, permissions, link counts, and filesystem boundary pass a fail-closed inspection. Unreadable unique source objects may receive execution-group read permission; unsafe or externally-linked objects force a private `--no-local` clone. Execution-private directories and metadata are owned by the execution identity. Recursive ownership/permission operations must never blindly mutate shared object inodes.
+The source object's owner remains unchanged. Runtime provisioning is read-only with respect to canonical Git object metadata: hardlink sharing is enabled only when the common Git/object directories, inode ownership, permissions, link counts, and filesystem boundary already pass a fail-closed inspection. If any canonical object is unreadable by the execution identity, writable by it, externally linked, redirected, special, or otherwise unsafe, provisioning uses a private `--no-local` clone. A repository may be prepared for sharing only during an explicit quiescent maintenance boundary with no active source writer; runtime provisioning never repairs canonical permissions in place. Execution-private directories and metadata are owned by the execution identity.
 
 Review snapshots remain execution-private linked clones and become physically read-only after snapshot overlay. Object files created by the implementation identity are privatized before review; safe canonical history may remain linked. Tracked symlinks that escape the execution root are rejected rather than merely protected from chown/chmod. This preserves independent review without copying immutable history or exposing host-visible sibling paths.
 
@@ -103,7 +103,7 @@ Positive:
 
 Costs:
 
-- canonical object sharing requires a per-provision inode/permission/link-count inspection; repositories that cannot satisfy it pay the cost of a private clone;
+- canonical object sharing requires a per-provision read-only inode/permission/link-count inspection; repositories that are not pre-prepared at a quiescent maintenance boundary pay the cost of a private clone;
 - cleanup code must distinguish shared hardlinked object files from execution-private files;
 - old full-clone workspaces remain valid until retention removes them;
 - Git GC/repack of canonical repositories must be coordinated with active linked clones because hardlinked old pack inodes remain alive until the clone disappears.

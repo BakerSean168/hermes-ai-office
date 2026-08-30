@@ -16,7 +16,6 @@ import {
   gitNullList,
   inside,
   safeDirectory,
-  writerBaselineRef,
   type UnixIdentity,
 } from './gitSupport.js';
 import {
@@ -59,6 +58,7 @@ export interface WorkspaceProvisioningPort {
   verifyWriterCompletion(input: {
     executionId: string;
     workspaceRef: string;
+    startRevision: string;
   }): Promise<WriterCompletionEvidence>;
   discoverExternalProgress?(input: {
     repositoryPath: string;
@@ -565,22 +565,27 @@ async function prepareSharedObjectAccess(
     return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
   }
 
-  // Normalize only unique object-file inodes. If an unreadable file is already hardlinked,
-  // changing its metadata could affect an arbitrary external link, so fail closed to a private
-  // clone instead. Already-readable hardlinks are safe only when the execution identity cannot
-  // write them. Future restrictive-umask objects are normalized on the next provisioning pass.
+  // Runtime provisioning never mutates canonical object metadata. Sharing is enabled only
+  // when the repository was prepared out-of-band at a quiescent maintenance boundary and every
+  // existing object/directory is already readable (and never writable) by the execution identity.
+  // Otherwise fall back to a physically private clone. This removes a TOCTOU with concurrent
+  // source Git writers while keeping the storage optimization fail-safe.
   for (const file of objectTree.files) {
-    if (identityCanWrite(file.stat, executionOwner)) {
+    if (!identityCanRead(file.stat, executionOwner) || identityCanWrite(file.stat, executionOwner)) {
       return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
     }
-    if (identityCanRead(file.stat, executionOwner)) continue;
-    if (file.stat.nlink !== 1) return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
-    fs.chownSync(file.path, file.stat.uid, executionOwner.gid);
-    fs.chmodSync(file.path, (file.stat.mode & 0o700) | 0o040);
   }
   for (const directory of objectTree.directories) {
-    fs.chownSync(directory.path, directory.stat.uid, executionOwner.gid);
-    fs.chmodSync(directory.path, 0o2750);
+    if (!identityCanRead(directory.stat, executionOwner) || identityCanWrite(directory.stat, executionOwner)) {
+      return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
+    }
+    const canTraverse =
+      directory.stat.uid === executionOwner.uid
+        ? (directory.stat.mode & 0o100) !== 0
+        : directory.stat.gid === executionOwner.gid
+          ? (directory.stat.mode & 0o010) !== 0
+          : (directory.stat.mode & 0o001) !== 0;
+    if (!canTraverse) return { hardlinkObjects: false, privatizeRelativeObjectPaths: [] };
   }
 
   return {
@@ -822,43 +827,39 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
     await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const workspaceOwner = executionWorkspaceIdentity(hostPath, this.#executionOwner);
-    const ref = writerBaselineRef(input.executionId);
-    try {
-      const existing = await untrustedWorkspaceGit(
-        hostPath,
-        ['rev-parse', '--verify', ref],
-        workspaceOwner,
-      );
-      return { startRevision: existing };
-    } catch {
-      const head = await untrustedWorkspaceGit(hostPath, ['rev-parse', 'HEAD'], workspaceOwner);
-      await untrustedWorkspaceGit(hostPath, ['update-ref', ref, head], workspaceOwner);
-      return { startRevision: head };
-    }
+    const startRevision = await untrustedWorkspaceGit(hostPath, ['rev-parse', 'HEAD'], workspaceOwner);
+    return { startRevision };
   }
 
   async verifyWriterCompletion(input: {
     executionId: string;
     workspaceRef: string;
+    startRevision: string;
   }): Promise<WriterCompletionEvidence> {
     const hostPath = this.hostPathForWorkspaceRef(input.workspaceRef);
     await assertManagedGitWorkspace(hostPath, this.#hostRoot, this.#executionOwner);
     const workspaceOwner = executionWorkspaceIdentity(hostPath, this.#executionOwner);
-    const ref = writerBaselineRef(input.executionId);
-    let startRevision: string;
-    try {
-      startRevision = await untrustedWorkspaceGit(
-        hostPath,
-        ['rev-parse', '--verify', ref],
-        workspaceOwner,
-      );
-    } catch {
-      throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
+    const startRevision = await untrustedWorkspaceGit(
+      hostPath,
+      ['rev-parse', '--verify', `${input.startRevision}^{commit}`],
+      workspaceOwner,
+    );
+    if (startRevision.toLowerCase() !== input.startRevision.toLowerCase()) {
+      throw new Error('WRITER_COMPLETION_BASELINE_MISMATCH');
     }
     const headRevision = await untrustedWorkspaceGit(hostPath, ['rev-parse', 'HEAD'], workspaceOwner);
     const dirty = await untrustedWorkspaceGit(hostPath, ['status', '--porcelain'], workspaceOwner);
     if (dirty) throw new Error('WRITER_COMPLETION_DIRTY');
     if (headRevision === startRevision) throw new Error('WRITER_COMPLETION_NO_COMMIT');
+    try {
+      await untrustedWorkspaceGit(
+        hostPath,
+        ['merge-base', '--is-ancestor', startRevision, headRevision],
+        workspaceOwner,
+      );
+    } catch {
+      throw new Error('WRITER_COMPLETION_NOT_DESCENDANT');
+    }
     return { startRevision, headRevision };
   }
 

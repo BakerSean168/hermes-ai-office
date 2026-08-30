@@ -162,6 +162,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   readonly #planOrchestrator: DurablePlanOrchestrator;
   readonly #backendAvailability: Readonly<Record<string, boolean>>;
   #writerAdmissionTail: Promise<void> = Promise.resolve();
+  readonly #executionStartTails = new Map<string, Promise<void>>();
 
   constructor(options: {
     policy: DevelopmentPolicy;
@@ -284,6 +285,25 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       return await operation();
     } finally {
       release();
+    }
+  }
+
+  async #withExecutionStartLock<T>(executionId: string, operation: () => Promise<T>): Promise<T> {
+    const predecessor = this.#executionStartTails.get(executionId) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = predecessor.then(() => gate);
+    this.#executionStartTails.set(executionId, tail);
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.#executionStartTails.get(executionId) === tail) {
+        this.#executionStartTails.delete(executionId);
+      }
     }
   }
 
@@ -539,7 +559,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       return (await this.get(record.executionId))!;
     }
 
-    if (!record.workspaceRef) {
+    record = await this.#withExecutionStartLock(record.executionId, async () => {
+      let current = this.#links.get(record.executionId);
+      if (!current) throw new Error('EXECUTION_NOT_FOUND');
+      if (current.workspaceRef) return current;
       try {
         let repositoryPath = input.repository.path;
         let baseRevision = input.repository.baseRevision;
@@ -548,7 +571,7 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         if (effectiveInput.phase === 'IMPLEMENT_FIX') {
           if (!fixLineage) throw new Error('PREVIOUS_EXECUTION_NOT_FIXABLE');
           const previous = fixLineage.implementation;
-          record = this.#links.attachWorkspace(record.executionId, {
+          current = this.#links.attachWorkspace(current.executionId, {
             workspaceRef: previous.workspaceRef!,
             repositoryRoot: previous.repositoryRoot,
             gitBranch: previous.gitBranch,
@@ -559,20 +582,17 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
             const previous = this.#requirePreviousImplementation(effectiveInput);
             if (!previous.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
             repositoryPath = this.#workspace.hostPathForWorkspaceRef(previous.workspaceRef);
-            // Freeze the implementation workspace at its current HEAD. Committed worker changes stay
-            // committed in the review snapshot; only genuinely uncommitted changes appear dirty.
-            // Preserve the original implementation source as a dedicated comparison ref.
             baseRevision = 'HEAD';
             reviewBaseRevision = previous.sourceRevision;
           }
           const provisioned = await this.#workspace.provision({
-            executionId: record.executionId,
+            executionId: current.executionId,
             repositoryPath,
             baseRevision,
-            workspaceMode: record.workspaceMode,
+            workspaceMode: current.workspaceMode,
             reviewBaseRevision,
           });
-          record = this.#links.attachWorkspace(record.executionId, {
+          current = this.#links.attachWorkspace(current.executionId, {
             workspaceRef: provisioned.executionPath,
             repositoryRoot: provisioned.repositoryRoot,
             gitBranch: provisioned.branch,
@@ -582,11 +602,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
                 : provisioned.sourceRevision,
           });
         }
+        return current;
       } catch (error) {
-        this.#links.updateStatus(record.executionId, 'FAILED');
+        this.#links.updateStatus(current.executionId, 'FAILED');
         throw error;
       }
-    }
+    });
 
     if (input.phase === 'ADOPT_CHANGE') {
       if (record.statusCache !== 'SUCCEEDED' || !record.resultText) {
@@ -600,42 +621,51 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       return (await this.get(record.executionId))!;
     }
 
-    if (!record.openhandsConversationId) {
+    record = await this.#withExecutionStartLock(record.executionId, async () => {
+      let current = this.#links.get(record.executionId);
+      if (!current) throw new Error('EXECUTION_NOT_FOUND');
+      if (current.openhandsConversationId) return current;
       try {
-        if (WRITER_PHASES.has(record.phase)) {
-          if (!record.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
-          await this.#workspace.prepareWriterExecution({
-            executionId: record.executionId,
-            workspaceRef: record.workspaceRef,
-          });
+        if (WRITER_PHASES.has(current.phase)) {
+          if (!current.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
+          if (!current.writerStartRevision) {
+            const prepared = await this.#workspace.prepareWriterExecution({
+              executionId: current.executionId,
+              workspaceRef: current.workspaceRef,
+            });
+            current = this.#links.attachWriterStartRevision(
+              current.executionId,
+              prepared.startRevision,
+            );
+          }
         }
         const created = await this.#host.createExecution({
-          executionId: record.executionId,
-          projectKey: record.projectKey,
-          phase: record.phase,
+          executionId: current.executionId,
+          projectKey: current.projectKey,
+          phase: current.phase,
           objective: phasePrompt(effectiveInput),
-          repositoryPath: record.workspaceRef!,
+          repositoryPath: current.workspaceRef!,
           selection: persistedSelection,
           correlationMetadata: {
-            execution_id: record.executionId,
-            project_key: record.projectKey,
-            phase: record.phase,
-            ...(record.hermesProfile ? { hermes_profile: record.hermesProfile } : {}),
-            ...(record.hermesSessionId ? { hermes_session_id: record.hermesSessionId } : {}),
-            ...(record.hermesTurnId ? { hermes_turn_id: record.hermesTurnId } : {}),
+            execution_id: current.executionId,
+            project_key: current.projectKey,
+            phase: current.phase,
+            ...(current.hermesProfile ? { hermes_profile: current.hermesProfile } : {}),
+            ...(current.hermesSessionId ? { hermes_session_id: current.hermesSessionId } : {}),
+            ...(current.hermesTurnId ? { hermes_turn_id: current.hermesTurnId } : {}),
           },
         });
         const hostStartedAt = created.startedAt ? Date.parse(created.startedAt) : Number.NaN;
-        record = this.#links.attachOpenHands(
-          record.executionId,
+        return this.#links.attachOpenHands(
+          current.executionId,
           created.conversationId,
           Number.isFinite(hostStartedAt) ? hostStartedAt : undefined,
         );
       } catch (error) {
-        this.#links.updateStatus(record.executionId, 'FAILED');
+        this.#links.updateStatus(current.executionId, 'FAILED');
         throw error;
       }
-    }
+    });
 
     if (input.await !== false) {
       const timeoutMs = Math.max(1_000, input.timeoutMs ?? 10 * 60_000);
@@ -688,9 +718,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       ) {
         try {
           if (!record.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
+          if (!record.writerStartRevision) {
+            throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
+          }
           await this.#workspace.verifyWriterCompletion({
             executionId: record.executionId,
             workspaceRef: record.workspaceRef,
+            startRevision: record.writerStartRevision,
           });
           record = this.#links.updateStatus(record.executionId, 'SUCCEEDED', observedAtMs);
         } catch (error) {

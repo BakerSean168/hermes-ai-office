@@ -45,14 +45,14 @@ A Git linked worktree stores its private administrative files under the canonica
 When an execution owner is configured:
 
 1. resolve the real source common Git directory and object directory and require both to remain inside the real repository root; terminal symlinks, alternates, special files, cross-device object trees, and out-of-bound common Git directories disable hardlink sharing;
-2. inspect object-file ownership, mode, link count, and device before changing metadata; never recursively `chgrp/chmod` an unverified object tree;
-3. if the execution identity can write any canonical object, or an unreadable object already has another hardlink, fail closed to a private `--no-local` clone;
-4. an unreadable object may receive execution-group read permission only when its inode is unique to the canonical object tree; object directories may receive group traversal after the no-symlink/no-cross-device inspection because directories cannot be hardlinked;
-5. future objects created under a restrictive umask are re-inspected and normalized on the next provisioning pass instead of persisting a repository-wide `core.sharedRepository` mutation;
+2. inspect object-file ownership, mode, link count, device, readability, writability, and directory traversal without changing canonical metadata;
+3. if the execution identity can write any canonical object, cannot read/traverse any required object entry, or the object tree is otherwise unsafe, fail closed to a private `--no-local` clone;
+4. runtime provisioning never `chown`, `chgrp`, `chmod`, set ACLs, or rewrite repository config under the canonical object store;
+5. repository sharing permissions are prepared only during an explicit quiescent maintenance boundary with no active source writer, then verified before workers resume; future objects must inherit the prepared group/mode policy rather than being repaired by request-time provisioning;
 6. for implementation-to-review cloning where source and execution UID match, retain only already-readable/non-writable foreign-owned history as hardlinks and break links for owner-mutable or otherwise unsafe execution-created objects;
 7. never transfer safely shared source object-file ownership or write permission to the execution user.
 
-This grants read access to history already in scope for the execution without granting canonical ref/index ownership or mutating metadata on an inode that may be linked outside the repository.
+This grants read access to history already in scope for the execution without granting canonical ref/index ownership, and removes canonical object metadata mutation from the runtime request path.
 
 ### Execution clone
 

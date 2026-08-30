@@ -33,6 +33,7 @@ interface ExecutionLinkRow {
   repository_root: string | null;
   git_branch: string | null;
   source_revision: string | null;
+  writer_start_revision: string | null;
   previous_execution_id: string | null;
   plan_id: string | null;
   batch_id: string | null;
@@ -76,6 +77,7 @@ export function ensureV3Schema(db: DatabaseSync): void {
       repository_root TEXT,
       git_branch TEXT,
       source_revision TEXT,
+      writer_start_revision TEXT,
       previous_execution_id TEXT,
       plan_id TEXT,
       batch_id TEXT,
@@ -111,6 +113,9 @@ export function ensureV3Schema(db: DatabaseSync): void {
   );
   if (!columns.has('repository_root')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN repository_root TEXT');
+  }
+  if (!columns.has('writer_start_revision')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN writer_start_revision TEXT');
   }
     if (!columns.has('previous_execution_id')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN previous_execution_id TEXT');
@@ -212,6 +217,7 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     repositoryRoot: row.repository_root ?? undefined,
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
+    writerStartRevision: row.writer_start_revision ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
     planId: row.plan_id ?? undefined,
     batchId: row.batch_id ?? undefined,
@@ -356,6 +362,22 @@ export class ExecutionLinkRepository {
       );
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
+  attachWriterStartRevision(executionId: string, startRevision: string): ExecutionLinkRecord {
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET writer_start_revision=COALESCE(writer_start_revision,?),updated_at=?
+          WHERE execution_id=?`,
+      )
+      .run(startRevision, Date.now(), executionId);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    if (record.writerStartRevision !== startRevision) {
+      throw new Error('WRITER_COMPLETION_BASELINE_MISMATCH');
+    }
     return record;
   }
 

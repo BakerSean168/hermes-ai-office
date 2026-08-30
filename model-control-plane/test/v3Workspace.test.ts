@@ -1258,6 +1258,7 @@ test('writer completion requires a clean commit that advances the durable execut
       provisioner.verifyWriterCompletion({
         executionId: 'writer-execution-1',
         workspaceRef: implementation.executionPath,
+        startRevision: prepared.startRevision,
       }),
       /WRITER_COMPLETION_NO_COMMIT/,
     );
@@ -1267,6 +1268,7 @@ test('writer completion requires a clean commit that advances the durable execut
       provisioner.verifyWriterCompletion({
         executionId: 'writer-execution-1',
         workspaceRef: implementation.executionPath,
+        startRevision: prepared.startRevision,
       }),
       /WRITER_COMPLETION_DIRTY/,
     );
@@ -1278,18 +1280,34 @@ test('writer completion requires a clean commit that advances the durable execut
     const head = git(implementation.hostPath, 'rev-parse', 'HEAD');
     assert.notEqual(head, base);
 
+    // A worker-owned compatibility ref cannot change the control-plane baseline.
+    git(
+      implementation.hostPath,
+      'update-ref',
+      'refs/ai-office/writers/writer-execution-1/start',
+      head,
+    );
     const verified = await provisioner.verifyWriterCompletion({
       executionId: 'writer-execution-1',
       workspaceRef: implementation.executionPath,
+      startRevision: prepared.startRevision,
     });
     assert.deepEqual(verified, { startRevision: base, headRevision: head });
 
-    // Re-preparing the same durable execution must never move the baseline forward.
-    const preparedAgain = await provisioner.prepareWriterExecution({
-      executionId: 'writer-execution-1',
-      workspaceRef: implementation.executionPath,
-    });
-    assert.equal(preparedAgain.startRevision, base);
+    // A clean unrelated HEAD must not satisfy completion merely because it differs from baseline.
+    git(implementation.hostPath, 'checkout', '--orphan', 'unrelated-writer-history');
+    git(implementation.hostPath, 'rm', '-rf', '.');
+    fs.writeFileSync(path.join(implementation.hostPath, 'unrelated.txt'), 'unrelated\n');
+    git(implementation.hostPath, 'add', 'unrelated.txt');
+    git(implementation.hostPath, 'commit', '-m', 'unrelated writer history');
+    await assert.rejects(
+      provisioner.verifyWriterCompletion({
+        executionId: 'writer-execution-1',
+        workspaceRef: implementation.executionPath,
+        startRevision: prepared.startRevision,
+      }),
+      /WRITER_COMPLETION_NOT_DESCENDANT/,
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

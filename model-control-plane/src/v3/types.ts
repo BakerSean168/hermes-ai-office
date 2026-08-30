@@ -195,6 +195,7 @@ export interface ExecutionLinkRecord {
   repositoryRoot?: string;
   gitBranch?: string;
   sourceRevision?: string;
+  writerStartRevision?: string;
   previousExecutionId?: string;
   planId?: string;
   batchId?: string;

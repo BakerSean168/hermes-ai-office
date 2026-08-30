@@ -124,6 +124,17 @@ test('execution link workspace provenance persists repository root', () => {
     });
     assert.equal(attached.repositoryRoot, '/home/dev/projects/memoflow');
     assert.equal(links.get(reserved.record.executionId)?.repositoryRoot, '/home/dev/projects/memoflow');
+    const withBaseline = links.attachWriterStartRevision(reserved.record.executionId, 'baseline-abc');
+    assert.equal(withBaseline.writerStartRevision, 'baseline-abc');
+    assert.equal(links.get(reserved.record.executionId)?.writerStartRevision, 'baseline-abc');
+    assert.equal(
+      links.attachWriterStartRevision(reserved.record.executionId, 'baseline-abc').writerStartRevision,
+      'baseline-abc',
+    );
+    assert.throws(
+      () => links.attachWriterStartRevision(reserved.record.executionId, 'forged-baseline'),
+      /WRITER_COMPLETION_BASELINE_MISMATCH/,
+    );
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -251,6 +262,68 @@ test('V3 API provides an idempotent production execution facade', async () => {
 
     const legacyHealth = await runtime.app.inject({ method: 'GET', url: '/api/v2/health' });
     assert.equal(legacyHealth.statusCode, 404);
+  } finally {
+    await runtime.app.close();
+  }
+});
+
+test('V3 concurrent idempotent starts provision and launch an execution only once', async () => {
+  const host = new FakeHost();
+  let provisionCalls = 0;
+  let releaseProvision!: () => void;
+  let markEntered!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    markEntered = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    releaseProvision = resolve;
+  });
+  const concurrentWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async provision(input) {
+      provisionCalls += 1;
+      if (provisionCalls === 1) {
+        markEntered();
+        await gate;
+      }
+      return workspace.provision(input);
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: concurrentWorkspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': false,
+    },
+  });
+  const request = () =>
+    runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'concurrent-provision-once' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Inspect one durable execution exactly once.',
+        projectKey: 'concurrent-start-project',
+        repository: { path: '/tmp/fake-repo' },
+        await: false,
+      },
+    });
+
+  try {
+    const first = request();
+    await entered;
+    const second = request();
+    releaseProvision();
+    const [firstResponse, secondResponse] = await Promise.all([first, second]);
+    assert.equal(firstResponse.statusCode, 201);
+    assert.equal(secondResponse.statusCode, 201);
+    assert.equal(firstResponse.json().executionId, secondResponse.json().executionId);
+    assert.equal(provisionCalls, 1);
+    assert.equal(host.creates, 1);
   } finally {
     await runtime.app.close();
   }
