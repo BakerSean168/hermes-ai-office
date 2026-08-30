@@ -143,7 +143,9 @@ async function prepareSharedObjectAccess(
 
   // A local clone hardlinks pre-existing object files. Keep those files source-owned so a
   // worker can never gain ownership of the canonical inode, but grant the execution GID
-  // read access. Setgid directories make future canonical objects inherit the sharing group.
+  // read access. Re-running this normalization before every linked clone is authoritative;
+  // setgid directories are only an additional inheritance aid because Git may stage/rename
+  // future objects from paths that retain the source owner's primary group.
   await execFileAsync('chgrp', ['-R', String(executionOwner.gid), objectDirectory], {
     timeout: WORKSPACE_LONG_COMMAND_TIMEOUT_MS,
   });

@@ -47,8 +47,8 @@ When an execution owner is configured:
 1. identify the source common Git object directory;
 2. refuse hardlink sharing when the source repository/object inode is already owned by the execution UID; such repositories fall back to a private `--no-hardlinks` clone;
 3. configure `core.sharedRepository=0640`, which keeps future Git object files group-readable but group-not-writable even under production `UMask=0077`;
-4. ensure the object directory tree is group-readable/traversable by the execution GID;
-5. enable setgid on object directories so future objects inherit the execution-sharing group;
+4. before every linked clone, reassert the canonical object tree's group to the execution GID and group-readable/traversable modes; this is the authoritative step because newly-created Git objects may temporarily retain the source owner's primary group;
+5. enable setgid on object directories as an inheritance aid, but do not rely on it as the sole future-object guarantee;
 6. never transfer shared source object-file ownership to the execution user.
 
 This grants read access to history already in scope for the execution without granting canonical ref/index ownership.

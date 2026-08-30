@@ -253,7 +253,8 @@ Verification:
 - First re-review of `8f4172c` returned **FAIL** with a second P1: future canonical Git objects could inherit service `UMask=0077` and become unreadable by linked workers.
 - Second repair configures `core.sharedRepository=0640` before sharing, preserving group-read/no-group-write for future loose/packed objects; a real Git prototype under `umask 077` produced mode `0440` for both loose and packed objects. Repositories whose source/object inodes are already owned by the execution UID fall back to `--no-hardlinks` instead of exposing owner-mutable canonical inodes.
 - Second repair focused verification: `v3Workspace.test.ts` **12/12 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **154/154 PASS**, `git diff --check` PASS.
-- Independent re-review is required on the second repaired exact commit before production deployment.
+- Production-shaped smoke using a `dev`-owned source repository, root control-plane code, the real OpenHands UID/GID `10001:10001`, and the real `/workspace` bind mount passed: after initial provisioning set `core.sharedRepository=0640`, a later canonical commit created under `umask 077` produced an object at mode `0440`; the next provisioning reasserted gid `10001`, source/clone object paths had the same inode/link count, OpenHands could `git cat-file` the future commit and create a private commit, and canonical HEAD/working tree remained unchanged.
+- Independent re-review is required on the second repaired exact branch before production deployment.
 
 Deployment gate:
 
