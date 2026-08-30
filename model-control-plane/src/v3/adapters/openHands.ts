@@ -258,6 +258,9 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
       // execution in an interactive TUI (for example Nx's terminal UI).
       CI: { kind: 'StaticSecret', value: '1' },
       NX_TUI: { kind: 'StaticSecret', value: 'false' },
+      // Workspace identity is distinct from execution identity for IMPLEMENT_FIX:
+      // a fresh repair attempt intentionally reuses the previous mutable workspace.
+      HERMES_V3_WORKSPACE_REF: { kind: 'StaticSecret', value: input.repositoryPath },
     };
     if (input.selection.transportMode === 'LITELLM_MANAGED') {
       for (const [name, source] of Object.entries(backend.managed_env ?? {})) {

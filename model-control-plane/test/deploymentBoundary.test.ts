@@ -124,7 +124,9 @@ test('OpenHands coding workers launch through Agent Harness capability materiali
   assert.match(launcher, /unset OPENCODE_CONFIG/);
   assert.match(launcher, /AGENT_HARNESS_STATE/);
   assert.match(launcher, /HERMES_V3_EXECUTION_ID/);
-  assert.match(launcher, /workspace_repo="\/workspace\/executions\/\$execution_id\/repo"/);
+  assert.match(launcher, /HERMES_V3_WORKSPACE_REF/);
+  assert.match(launcher, /workspace_repo="\$\{HERMES_V3_WORKSPACE_REF:-\}"/);
+  assert.match(launcher, /execution_root="\/workspace\/executions\/\$execution_id"/);
   assert.match(launcher, /cd -- "\$workspace_repo"/);
   assert.doesNotMatch(launcher, /case "\$PWD" in/);
   assert.match(tooling, /@colbymchenry\/codegraph@\$CODEGRAPH_VERSION/);

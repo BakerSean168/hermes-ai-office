@@ -16,13 +16,22 @@ case "$execution_id" in
     ;;
 esac
 
-workspace_repo="/workspace/executions/$execution_id/repo"
+workspace_repo="${HERMES_V3_WORKSPACE_REF:-}"
+case "$workspace_repo" in
+  /workspace/executions/*/repo) ;;
+  *)
+    echo "agent-harness launch requires a bounded HERMES_V3_WORKSPACE_REF" >&2
+    exit 2
+    ;;
+esac
 if [[ ! -d "$workspace_repo" ]]; then
   echo "agent-harness execution workspace is missing: $workspace_repo" >&2
   exit 2
 fi
 cd -- "$workspace_repo"
-execution_root="$(dirname -- "$workspace_repo")"
+# Execution-scoped harness state must stay isolated even when IMPLEMENT_FIX reuses
+# an earlier implementation/adoption workspace.
+execution_root="/workspace/executions/$execution_id"
 harness_home="$execution_root/.agent-harness/home"
 harness_state="$execution_root/.agent-harness/state"
 harness_share="$execution_root/.agent-harness/share"

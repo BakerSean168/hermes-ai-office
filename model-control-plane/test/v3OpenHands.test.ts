@@ -240,6 +240,10 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       kind: 'StaticSecret',
       value: 'exec_acp_1',
     });
+    assert.deepEqual(acpBody.secrets.HERMES_V3_WORKSPACE_REF, {
+      kind: 'StaticSecret',
+      value: '/workspace/executions/exec_acp_1/repo',
+    });
     assert.deepEqual(acpBody.secrets.LITELLM_V3_KEY, {
       kind: 'StaticSecret',
       value: 'virtual-secret',
@@ -248,6 +252,30 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       kind: 'StaticSecret',
       value: 'http://127.0.0.1:4000/v1',
     });
+
+    await host.createExecution({
+      executionId: 'exec_acp_fix_1',
+      projectKey: 'pixel-agents',
+      phase: 'IMPLEMENT_FIX',
+      objective: 'Repair the existing implementation workspace.',
+      repositoryPath: '/workspace/executions/exec_impl_1/repo',
+      selection: {
+        backend: 'dsh-acp',
+        modelClass: 'implementation-efficient',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'reuse_implementation_workspace',
+        sessionPolicy: 'resume_preferred',
+        reasons: [],
+      },
+      correlationMetadata: { execution_id: 'exec_acp_fix_1', phase: 'IMPLEMENT_FIX' },
+    });
+    const reusedWorkspaceBody = createBody as any;
+    assert.equal(reusedWorkspaceBody.workspace.working_dir, '/workspace/executions/exec_impl_1/repo');
+    assert.equal(reusedWorkspaceBody.secrets.HERMES_V3_EXECUTION_ID.value, 'exec_acp_fix_1');
+    assert.equal(
+      reusedWorkspaceBody.secrets.HERMES_V3_WORKSPACE_REF.value,
+      '/workspace/executions/exec_impl_1/repo',
+    );
 
     await host.createExecution({
       executionId: 'exec_codex_business_planner_1',
