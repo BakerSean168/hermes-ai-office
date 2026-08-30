@@ -335,9 +335,17 @@ test('authenticated GitHub event bridge coalesces PR events into the same immuta
       };
     },
   };
+  let governancePublishes = 0;
   const governanceStatus: GitHubGovernanceStatusPort = {
     async publish(input) {
-      return { revision: input.expectedHeadRevision, state: 'pending', stale: false };
+      governancePublishes += 1;
+      return {
+        revision: input.expectedHeadRevision,
+        state: input.planStatus === 'SUCCEEDED' ? 'success' : 'pending',
+        stale: false,
+        observedHeadRevision: input.expectedHeadRevision,
+        published: true,
+      };
     },
   };
   const runtime = await buildControlPlane({
@@ -404,6 +412,13 @@ test('authenticated GitHub event bridge coalesces PR events into the same immuta
       assert.equal(plan.source.origin?.author, 'google-labs-jules[bot]');
     }
 
+    const beforeDuplicate = await runtime.v3.getPlan(acceptedBody.planId, true);
+    const executionIdsBeforeDuplicate =
+      beforeDuplicate?.batches.flatMap((batch) =>
+        batch.workItems.flatMap((item) => item.executions.map((execution) => execution.executionId)),
+      ) ?? [];
+    const publicationsBeforeDuplicate = governancePublishes;
+
     const duplicate = await runtime.app.inject({
       method: 'POST',
       url: '/api/v3/development/external-changes/github/events',
@@ -414,6 +429,15 @@ test('authenticated GitHub event bridge coalesces PR events into the same immuta
     assert.equal(duplicate.json().planId, acceptedBody.planId);
     assert.equal(duplicate.json().coalescedToCurrentHead, false);
     assert.equal(resolves, 2);
+    assert.equal(governancePublishes, publicationsBeforeDuplicate + 1);
+    const afterDuplicate = await runtime.v3.getPlan(acceptedBody.planId, true);
+    assert.deepEqual(
+      afterDuplicate?.batches.flatMap((batch) =>
+        batch.workItems.flatMap((item) => item.executions.map((execution) => execution.executionId)),
+      ),
+      executionIdsBeforeDuplicate,
+      'same-head redelivery republishes governance without rebuilding or re-reviewing the plan',
+    );
   } finally {
     await runtime.app.close();
   }

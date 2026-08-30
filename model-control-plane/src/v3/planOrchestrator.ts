@@ -162,7 +162,16 @@ export class DurablePlanOrchestrator {
   async createPlan(input: CreatePlanInput, commandKey: string) {
     if (!commandKey.trim()) throw new Error('IDEMPOTENCY_KEY_REQUIRED');
     const { plan, created } = this.#repository.create(input, commandKey);
-    if (created) await this.reconcilePlans(plan.planId);
+    if (created) {
+      await this.reconcilePlans(plan.planId);
+    } else if (plan.governanceStatusRequired) {
+      // A duplicate exact-head GitHub event is an idempotent side-effect reconcile,
+      // not a request to rebuild/re-review the durable plan. Requeue only the
+      // governance publication so redelivery can restore the plan's persisted truth
+      // if an older superseded plan or external actor overwrote the commit context.
+      this.#repository.invalidateGovernanceStatusPublished(plan.planId);
+      await this.#governance.reconcile(plan.planId);
+    }
     return (await this.getPlan(plan.planId))!;
   }
 
