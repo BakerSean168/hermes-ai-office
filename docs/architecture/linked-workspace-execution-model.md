@@ -73,9 +73,10 @@ Workspace isolation is insufficient if two host conversations can be launched fo
 1. before any external launch, recover the execution host by durable `executionId`; OpenHands recovery scans conversations by the existing execution tag and fails closed if more than one match exists;
 2. if no host execution exists, atomically acquire `host_launch_token` / `host_launch_claimed_at` while `status_cache=STARTING`; only the token owner may issue `createExecution`;
 3. re-scan the host after winning the claim so a stale previous launch that became visible during the CAS window is adopted instead of duplicated;
-4. after a successful create, attach the conversation only when the same launch token still owns the durable claim; attach clears the claim atomically;
-5. if the service crashes after host creation but before attach, restart/reconcile searches by `executionId`, adopts the single existing conversation, and clears the claim without another POST;
-6. a fresh claim owned by another process returns durable `STARTING` and suppresses launch; only after the claim exceeds the bounded host-request recovery interval may another process CAS-take it, re-scan, and fail it retryably when the host still proves no execution exists.
+4. after that potentially slow recovery scan, CAS-renew the same token immediately before POST. This is the launch fence: if another process took over while the scan was in flight, renewal fails and the superseded owner cannot create; the refreshed lease exceeds the bounded host-create timeout;
+5. after a successful create, attach the conversation only when the same launch token still owns the durable claim; attach clears the claim atomically;
+6. if the service crashes after host creation but before attach, restart/reconcile searches by `executionId`, adopts the single existing conversation, and clears the claim without another POST;
+7. a fresh claim owned by another process returns durable `STARTING` and suppresses launch; only after the claim exceeds the bounded host-request recovery interval may another process CAS-take it, re-scan, and fail it retryably when the host still proves no execution exists.
 
 Antigravity already has deterministic execution-local state and implements the same recovery contract. Routed execution hosts recover through the persisted backend selection, so recovery cannot silently switch execution host families.
 

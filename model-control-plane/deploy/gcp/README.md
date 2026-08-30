@@ -109,6 +109,6 @@ If any precondition or post-check is ambiguous, do not normalize the repository.
 
 ## Crash-safe execution host launch
 
-Execution-host creation is guarded by durable SQLite launch claims. A service instance must recover by durable execution ID before creating, win the launch claim atomically, recover once more after the claim, and attach the returned conversation with the same token. OpenHands recovery uses authenticated conversation search and the immutable execution tag; duplicate matches fail closed. A fresh claim held by another process suppresses a second POST. Expired claims are taken over only after host recovery proves the previous execution is absent.
+Execution-host creation is guarded by durable SQLite launch claims. A service instance must recover by durable execution ID before creating, win the launch claim atomically, recover once more after the claim, and attach the returned conversation with the same token. OpenHands recovery uses authenticated conversation search and the immutable execution tag; duplicate matches fail closed. A fresh claim held by another process suppresses a second POST. Expired claims are taken over only after host recovery proves the previous execution is absent. After any post-claim recovery scan, the owner must CAS-renew its own token immediately before POST; a failed renewal means ownership was superseded and launch is forbidden.
 
 Do not clear launch-claim columns manually during recovery. Use normal execution/plan reconciliation so an already-created host conversation can be adopted.

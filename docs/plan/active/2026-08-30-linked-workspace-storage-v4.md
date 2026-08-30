@@ -317,6 +317,10 @@ Verification:
 - New regressions cover SQLite fresh/stale claim ownership, stale-token attach rejection, fresh-claim duplicate suppression, post-success/pre-attach restart recovery with `createExecution=0`, OpenHands duplicate-tag rejection, routed-host recovery, and existing same-process idempotent start. Verification: workspace **31/31 PASS**, API **26/26 PASS**, OpenHands adapter **1/1 PASS**, Plan **34/34 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **178/178 PASS**, `git diff --check` PASS.
 - The previous MemoFlow legacy integration-repair writer has now terminated `FAILED` because its upstream GLM deployment was unavailable; it was not a code failure. Global RUNNING/PAUSED executions are currently zero and MemoFlow is durably `BLOCKED / IMPLEMENT_FAILED`, so the old provisioner will not automatically create another writer before cutover.
 - A fresh exact-commit Business re-review is mandatory on this crash-safe launch repair before merge/deployment.
+- Exact-candidate Business review of `31cdf63` returned **FAIL** with one P1 lease-fencing race: an owner could begin a slow post-claim recovery scan, lose the stale claim to another process while the scan was in flight, then observe absence and still POST because ownership was not revalidated after the scan.
+- Current repair adds atomic `renewHostLaunchClaim()` and requires the same launch token to CAS-renew immediately after the post-claim recovery scan and immediately before `createExecution()`. A superseded owner therefore cannot cross the POST boundary; a successful renewal refreshes the lease for longer than the supported host-create timeout.
+- Dedicated regression reproduces that exact race: process A owns token1 and blocks in its second recovery, process B ages and CAS-takes the claim as token2, then process A resumes. The fenced owner returns `STARTING` and `createExecution` remains **0**. API focused is **27/27 PASS** and full model-control-plane is **179/179 PASS**; typecheck/build remain PASS.
+- Another exact-commit Business re-review is mandatory before cutover.
 
 
 Deployment gate:

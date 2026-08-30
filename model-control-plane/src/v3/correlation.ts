@@ -416,6 +416,24 @@ export class ExecutionLinkRepository {
     return { record, acquired: Number(result.changes) === 1 };
   }
 
+  renewHostLaunchClaim(
+    executionId: string,
+    token: string,
+    claimedAt: number,
+  ): { record: ExecutionLinkRecord; renewed: boolean } {
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET host_launch_claimed_at=?,updated_at=?
+          WHERE execution_id=? AND status_cache='STARTING'
+            AND openhands_conversation_id IS NULL AND host_launch_token=?`,
+      )
+      .run(claimedAt, claimedAt, executionId, token);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, renewed: Number(result.changes) === 1 };
+  }
+
   expireHostLaunchClaim(
     executionId: string,
     token: string,

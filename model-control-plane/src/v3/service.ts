@@ -742,6 +742,14 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
       }
       if (current.openhandsConversationId) return current;
 
+      // The recovery scan may take long enough for this claim to become stale and be taken over
+      // by another process. Renew with the same token immediately before the external POST. This
+      // is the launch fence: a superseded owner cannot renew and therefore cannot create. The
+      // renewed lease is intentionally longer than the bounded host create request timeout.
+      const launchFence = this.#links.renewHostLaunchClaim(current.executionId, token, Date.now());
+      current = launchFence.record;
+      if (!launchFence.renewed) return current;
+
       try {
         const created = await this.#host.createExecution({
           executionId: current.executionId,

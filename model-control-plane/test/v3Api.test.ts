@@ -394,6 +394,100 @@ test('V3 concurrent idempotent starts provision and launch an execution only onc
   }
 });
 
+class FencedRecoveryHost extends FakeHost {
+  recoveries = 0;
+  readonly secondRecoveryEntered: Promise<void>;
+  #markSecondRecoveryEntered!: () => void;
+  #releaseSecondRecovery!: () => void;
+  readonly #secondRecoveryGate: Promise<void>;
+
+  constructor() {
+    super();
+    this.secondRecoveryEntered = new Promise<void>((resolve) => {
+      this.#markSecondRecoveryEntered = resolve;
+    });
+    this.#secondRecoveryGate = new Promise<void>((resolve) => {
+      this.#releaseSecondRecovery = resolve;
+    });
+  }
+
+  releaseSecondRecovery() {
+    this.#releaseSecondRecovery();
+  }
+
+  override async recoverExecution() {
+    this.recoveries += 1;
+    if (this.recoveries === 2) {
+      this.#markSecondRecoveryEntered();
+      await this.#secondRecoveryGate;
+    }
+    return null;
+  }
+}
+
+test('V3 superseded launch owner is fenced before POST after a slow recovery scan', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-launch-fence-race-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new FencedRecoveryHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': false,
+    },
+  });
+
+  try {
+    const request = runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'host-launch-fence-race' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Fence a superseded launch owner before POST.',
+        projectKey: 'launch-fence-project',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'source-base' },
+        await: false,
+      },
+    });
+
+    await host.secondRecoveryEntered;
+    const contenderDb = openDb(dbFile);
+    try {
+      const contenderLinks = new ExecutionLinkRepository(contenderDb);
+      const record = contenderLinks.findByIdempotencyKey('host-launch-fence-race');
+      assert.ok(record?.hostLaunchToken);
+      contenderDb
+        .prepare('UPDATE v3_execution_links SET host_launch_claimed_at=? WHERE execution_id=?')
+        .run(Date.now() - 10 * 60_000, record.executionId);
+      const takeover = contenderLinks.claimHostLaunch(
+        record.executionId,
+        'new-owner-token',
+        Date.now(),
+        Date.now() - 120_000,
+      );
+      assert.equal(takeover.acquired, true);
+      assert.equal(takeover.record.hostLaunchToken, 'new-owner-token');
+    } finally {
+      contenderDb.close();
+    }
+
+    host.releaseSecondRecovery();
+    const response = await request;
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.json().status, 'STARTING');
+    assert.equal(host.creates, 0);
+    assert.ok(host.recoveries >= 2);
+  } finally {
+    host.releaseSecondRecovery();
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('V3 fresh durable host launch claim suppresses duplicate launch across service recovery', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-launch-fresh-claim-'));
   const dbFile = path.join(directory, 'control-plane.sqlite');
