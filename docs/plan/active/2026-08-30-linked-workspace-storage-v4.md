@@ -355,6 +355,11 @@ Verification:
 
 - **Independent Business deployment review PASS** on exact deployment candidate `ad2ed125a96ad1b3a8420ec1a7eaf6b1fbcb7f2e`: removing the redundant workspace `ReadWritePaths` bind does not weaken the configured `ProtectSystem=full` sandbox and is required to preserve one VFS mount identity for linked-object hardlinks and atomic staging publication. `PrivateTmp`, `NoNewPrivileges`, UMask, database write-path confinement, and all reviewed storage code remain unchanged.
 
+- **Production cutover validated on canonical main `455af97`**. The reviewed storage code (`511ef08`) plus reviewed deployment repair (`ad2ed12`) are live; the service is healthy and the V3 SQLite schema contains durable workspace/host-launch claim columns. The installed unit keeps `PrivateTmp=true` / `ProtectSystem=full` and no longer bind-mounts the workspace root via `ReadWritePaths`.
+- Real service-namespace mount smoke passed after the unit repair: a MemoFlow canonical pack and a workspace hardlink resolve to the same `device:inode`, proving the `ReadWritePaths` mount split is gone. The same durable MemoFlow plan was then resumed with `reconcile(auto)`; no replacement plan was created.
+- First successful post-cutover execution `exec_3b4c4937-e694-4a71-83e4-5d0d4920547f` is RUNNING with a durable OpenHands conversation and no storage error. At initial measurement the execution repository contained 4,536 Git object files, and **all 4,536 shared canonical inodes; unique execution Git-object files/blocks were zero**. The logical repository accounted ~3.23 GB of blocks if hardlinks are naively counted per pathname, but ~3.106 GB of that was shared canonical Git history; the execution working tree accounted ~124.3 MB of blocks. A representative ~123.7 MB pack had identical canonical/execution `device:inode` and link count 2.
+- Root filesystem after recovery was ~64% used with ~53 GB free, versus the prior 97–99% incidents. No `EXDEV`, ENOSPC, or workspace-provision error was observed on the successful execution. This is the production acceptance evidence for the core linked-workspace storage cutover.
+
 
 Deployment gate:
 
