@@ -51,6 +51,25 @@ export class PlanRecoveryCoordinator {
       return;
     }
     if (!batch) return;
+    const integrationRepairLimitExceeded =
+      blocked.blockedReason === 'BATCH_INTEGRATION_REPAIR_LIMIT_EXCEEDED';
+    if (integrationRepairLimitExceeded && recoveryMode !== 'RETRY_INTEGRATION_REPAIR') return;
+    if (!integrationRepairLimitExceeded && recoveryMode === 'RETRY_INTEGRATION_REPAIR') return;
+    if (integrationRepairLimitExceeded) {
+      const repairPrefix = `integration-repair-b${batch.ordinal + 1}-`;
+      const repairAttempts = this.#repository
+        .workItems(batch.batchId)
+        .filter((item) => item.key.startsWith(repairPrefix)).length;
+      this.#repository.appendEvent(
+        planId,
+        'BATCH_INTEGRATION_REPAIR_RETRY_AUTHORIZED',
+        {
+          previousReason: blocked.blockedReason,
+          authorizedAttempt: repairAttempts + 1,
+        },
+        { batchId: batch.batchId },
+      );
+    }
     if (recoveryMode === 'SYNC_EXTERNAL') {
       const handled = await this.#externalProgress.reconcile(blocked, batch);
       if (handled) return;

@@ -82,7 +82,9 @@ export class PlanRepository {
           baseRevision,
           JSON.stringify(source),
           source.kind === 'EXTERNAL_CHANGE' ? source.revision : null,
-          source.kind === 'EXTERNAL_CHANGE' && source.origin?.kind === 'GITHUB_PULL_REQUEST' ? 1 : 0,
+          source.kind === 'EXTERNAL_CHANGE' && source.origin?.kind === 'GITHUB_PULL_REQUEST'
+            ? 1
+            : 0,
           null,
           null,
           delivery ? JSON.stringify(delivery) : null,
@@ -376,11 +378,7 @@ export class PlanRepository {
     const verified = input.verifiedWorkItems.filter((item) => itemByKey.has(item.key));
     const verifiedKeys = new Set(verified.map((item) => item.key));
     const blockedItems = this.workItems(blockedBatch.batchId);
-    if (
-      !blockedItems.every(
-        (item) => item.status === 'SUCCEEDED' || verifiedKeys.has(item.key),
-      )
-    ) {
+    if (!blockedItems.every((item) => item.status === 'SUCCEEDED' || verifiedKeys.has(item.key))) {
       throw new Error('EXTERNAL_PROGRESS_BLOCKED_BATCH_UNVERIFIED');
     }
 
@@ -424,7 +422,8 @@ export class PlanRepository {
         for (const batch of batches) {
           if (batch.status === 'SUCCEEDED' || batch.status === 'CANCELLED') continue;
           const items = this.workItems(batch.batchId);
-          const itemsComplete = items.length > 0 && items.every((item) => item.status === 'SUCCEEDED');
+          const itemsComplete =
+            items.length > 0 && items.every((item) => item.status === 'SUCCEEDED');
           const dependenciesComplete = batch.dependsOn.every(
             (dependency) => statusByKey.get(dependency) === 'SUCCEEDED',
           );
@@ -706,7 +705,12 @@ export class PlanRepository {
     const keyPrefix = `integration-repair-b${batch.ordinal + 1}-`;
     const items = this.workItems(batchId);
     const repairAttempt = items.filter((item) => item.key.startsWith(keyPrefix)).length + 1;
-    if (repairAttempt > PLAN_LIMITS.batchIntegrationRepairAttempts) return null;
+    const authorizedRetries = this.events(planId).filter(
+      (event) =>
+        event.type === 'BATCH_INTEGRATION_REPAIR_RETRY_AUTHORIZED' && event.batchId === batchId,
+    ).length;
+    const allowedAttempts = PLAN_LIMITS.batchIntegrationRepairAttempts + authorizedRetries;
+    if (repairAttempt > allowedAttempts) return null;
     const itemKey = `${keyPrefix}${repairAttempt}`;
     const existing = items.find((item) => item.key === itemKey);
     if (existing) return existing;

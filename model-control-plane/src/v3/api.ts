@@ -250,8 +250,7 @@ export function registerV3Routes(
     const expectedBytes = Buffer.from(expected);
     const suppliedBytes = Buffer.from(supplied);
     return (
-      expectedBytes.length === suppliedBytes.length &&
-      timingSafeEqual(expectedBytes, suppliedBytes)
+      expectedBytes.length === suppliedBytes.length && timingSafeEqual(expectedBytes, suppliedBytes)
     );
   };
 
@@ -265,8 +264,12 @@ export function registerV3Routes(
       return { error: { code: 'GITHUB_EVENT_BRIDGE_UNAUTHORIZED' } };
     }
     const body = (request.body ?? {}) as Record<string, unknown>;
-    const event = String(body.event ?? '').trim().toLowerCase();
-    const action = String(body.action ?? '').trim().toLowerCase();
+    const event = String(body.event ?? '')
+      .trim()
+      .toLowerCase();
+    const action = String(body.action ?? '')
+      .trim()
+      .toLowerCase();
     if (event !== 'pull_request') {
       reply.code(202);
       return { accepted: false, ignored: true, reason: 'EVENT_NOT_GOVERNED' };
@@ -284,7 +287,9 @@ export function registerV3Routes(
         ? (body.pullRequest as Record<string, unknown>)
         : {};
     try {
-      const eventHeadRevision = pullRequest.headSha ? String(pullRequest.headSha).trim() : undefined;
+      const eventHeadRevision = pullRequest.headSha
+        ? String(pullRequest.headSha).trim()
+        : undefined;
       const plan = await createGitHubGovernancePlan({
         projectKey: String(body.projectKey ?? '').trim(),
         repositoryPath: String(repository.path ?? '').trim(),
@@ -316,7 +321,6 @@ export function registerV3Routes(
       return { error: { code } };
     }
   });
-
 
   app.post('/api/v3/development/delegations', async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
@@ -469,7 +473,9 @@ export function registerV3Routes(
 
   app.get('/api/v3/development/plans', async (request, reply) => {
     const query = (request.query ?? {}) as Record<string, unknown>;
-    const view = String(query.view ?? 'full').trim().toLowerCase();
+    const view = String(query.view ?? 'full')
+      .trim()
+      .toLowerCase();
     if (!['full', 'summary'].includes(view)) {
       reply.code(400);
       return { error: { code: 'PLAN_LIST_VIEW_INVALID' } };
@@ -517,7 +523,15 @@ export function registerV3Routes(
       const requestedMode = String(request.body?.mode ?? 'auto')
         .trim()
         .toLowerCase();
-      if (!['auto', 'retry_review', 'retry_delivery', 'sync_external'].includes(requestedMode)) {
+      if (
+        ![
+          'auto',
+          'retry_review',
+          'retry_delivery',
+          'retry_integration_repair',
+          'sync_external',
+        ].includes(requestedMode)
+      ) {
         reply.code(400);
         return { error: { code: 'PLAN_RECOVERY_MODE_INVALID' } };
       }
@@ -526,9 +540,11 @@ export function registerV3Routes(
           ? 'RETRY_REVIEW'
           : requestedMode === 'retry_delivery'
             ? 'RETRY_DELIVERY'
-            : requestedMode === 'sync_external'
-              ? 'SYNC_EXTERNAL'
-              : 'AUTO';
+            : requestedMode === 'retry_integration_repair'
+              ? 'RETRY_INTEGRATION_REPAIR'
+              : requestedMode === 'sync_external'
+                ? 'SYNC_EXTERNAL'
+                : 'AUTO';
       void service
         .reconcilePlans(request.params.planId, true, recoveryMode)
         .catch((error) => request.log.error(error, 'V3 requested plan reconciliation failed'));
