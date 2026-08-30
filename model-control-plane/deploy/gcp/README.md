@@ -57,3 +57,36 @@ sudo bash model-control-plane/deploy/gcp/install-gcp-execution-plane.sh
 ```
 
 The installer intentionally does not copy provider credentials. GCP needs only the scoped LiteLLM execution key and the minimal admin key used for registry/usage projection.
+
+## Signed GitHub webhook ingress
+
+The GitHub PR governance bridge remains loopback/private. Public GitHub delivery must terminate in the
+separate `hermes-github-webhook-ingress.service`, which runs from a dependency-free compiled copy under `/usr/local/lib/hermes-github-webhook-ingress` with `ProtectHome=true`, verifies the raw `X-Hub-Signature-256` HMAC
+before parsing JSON, allows only the configured repository, normalizes only governed `pull_request`
+actions (`opened`, `reopened`, `synchronize`), and forwards them to the authenticated loopback V3 event
+bridge. The public verifier never executes PR code and never exposes the control-plane listener.
+
+Runtime files:
+
+- `/srv/hermes-personal/secrets/model-control-plane-v3.env` owns `MODEL_CP_V3_GITHUB_EVENT_TOKEN`.
+- `/srv/hermes-personal/secrets/github-webhook-ingress.env` owns `GITHUB_WEBHOOK_SECRET` plus the exact
+  repository/project/path mapping. Start from `deploy/github-webhook-ingress.env.example` and keep it
+  mode `0600`.
+
+Install after the model-control-plane build is present:
+
+```bash
+sudo model-control-plane/deploy/gcp/install-github-webhook-ingress.sh
+```
+
+On GCP Dev, expose only the verifier on a dedicated Funnel port; keep the existing `:443 -> :8320`
+Serve route tailnet-only:
+
+```bash
+tailscale funnel --bg --https=8443 http://127.0.0.1:8322
+```
+
+The GitHub repository webhook then targets
+`https://<gcp-dev-tailnet-host>:8443/github/webhook` with content type `application/json`, the same
+`GITHUB_WEBHOOK_SECRET`, and Pull request events enabled. Branch protection/required governance status
+is a later rollout gate; the first pilot remains review/report-only and does not enable auto-merge.

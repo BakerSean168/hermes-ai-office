@@ -292,3 +292,19 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.match(repairPublisher, /fs\.chownSync\(tempRoot, owner\.uid, owner\.gid\)/);
   assert.match(repairPublisher, /fs\.chmodSync\(tempRoot, 0o700\)/);
 });
+
+
+test('GitHub webhook ingress installs dependency-free ESM artifacts outside protected home', () => {
+  const unit = fs.readFileSync(
+    path.join(root, 'deploy/gcp/hermes-github-webhook-ingress.service'),
+    'utf8',
+  );
+  const installer = fs.readFileSync(
+    path.join(root, 'deploy/gcp/install-github-webhook-ingress.sh'),
+    'utf8',
+  );
+  assert.match(unit, /ExecStart=\/usr\/bin\/node \/usr\/local\/lib\/hermes-github-webhook-ingress\/githubWebhookIngressMain\.js/);
+  assert.match(unit, /ProtectHome=true/);
+  assert.match(installer, /\{"type":"module","private":true\}/);
+  assert.match(installer, /\/usr\/local\/lib\/hermes-github-webhook-ingress/);
+});

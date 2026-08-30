@@ -1,0 +1,39 @@
+[Unit]
+Description=Hermes signed GitHub webhook ingress
+After=network-online.target tailscaled.service hermes-model-control-plane.service
+Wants=network-online.target
+Requires=hermes-model-control-plane.service
+
+[Service]
+Type=simple
+User=dev
+Group=dev
+WorkingDirectory=/
+ExecStart=/usr/bin/node /usr/local/lib/hermes-github-webhook-ingress/githubWebhookIngressMain.js
+ExecStartPre=/usr/bin/test -f /usr/local/lib/hermes-github-webhook-ingress/githubWebhookIngressMain.js
+EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
+EnvironmentFile=/srv/hermes-personal/secrets/github-webhook-ingress.env
+Environment=NODE_ENV=production
+Environment=GITHUB_WEBHOOK_INGRESS_HOST=127.0.0.1
+Environment=GITHUB_WEBHOOK_INGRESS_PORT=8322
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
