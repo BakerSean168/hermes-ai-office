@@ -62,6 +62,8 @@ test('linked workspace staging stays outside systemd PrivateTmp', () => {
   );
   assert.doesNotMatch(workspace, /path\.join\(os\.tmpdir\(\), 'hermes-ai-office-v3-'\)/);
   assert.match(workspace, /hardlinkFilesystemCompatible = stagingDevice === sourceDevice/);
+  assert.match(workspace, /'\/usr\/bin\/flock'/);
+  assert.match(workspace, /'\.model-control-plane-locks'/);
   assert.match(workspace, /V3_WORKSPACE_STAGING_ROOT_NOT_ALLOWED/);
   assert.match(workspace, /fs\.chmodSync\(stagingRoot, 0o711\)/);
   assert.match(

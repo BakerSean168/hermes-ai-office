@@ -74,6 +74,7 @@ Workspace publication is coordinated in SQLite as well as by the in-process exec
 
 The filesystem side mirrors the durable fence: a generic staging/publish error cleans only service-private staging. It never recursively removes the shared execution directory. Existing unattached workspace residue may be removed only after the current token successfully renews, which prevents a superseded service instance from deleting an artifact published by a newer owner.
 Crash recovery distinguishes unpublished service-owned torn placement from a published/untrusted artifact. A service-owned parent with a missing or ordinarily incomplete private `.git` may be cleared only after the publication token renews and only after structural symlink/special-node/alternate checks; explicit Git-directory redirection, repository mismatch, or escaping working-tree symlinks remain blocking. Worker/foreign-owned residue always requires full managed-workspace validation before removal.
+The SQLite lease is paired with a per-execution OS `flock` held for the whole `provision()` filesystem critical section. The lock lives outside the OpenHands workspace mount in a service-owned `0700` directory. A stale process may keep running after its durable lease ages out, but a successor cannot begin residue cleanup or publication on that execution path until the kernel releases the old flock; once it enters, normal token renewal decides whether it may publish. Service death releases the lock automatically through the lock-holder pipe lifecycle.
 
 ### Durable host launch ownership
 

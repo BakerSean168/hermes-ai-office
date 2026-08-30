@@ -115,6 +115,7 @@ Execution workspace provisioning uses additive SQLite `workspace_provision_token
 
 Do not clear workspace-provision claim columns manually. A fresh claim intentionally suppresses another provisioner; stale takeover is handled by normal replay/reconciliation.
 If a service crash leaves an incomplete repository before durable `workspace_ref` attachment, replay may clear it only when the current claim still owns the lifecycle and the execution parent remains service-owned. Redirected `.git`, special Git metadata, escaping symlinks, or worker/foreign-owned parents remain fail-closed; do not manually delete around those checks.
+Production also requires util-linux `/usr/bin/flock`. The provisioner holds a per-execution kernel flock from before crash-residue handling through final worker exposure; the lock directory is a service-owned `0700` sibling of the workspace root and is not mounted into OpenHands. Do not replace this with a timer-only lease: SQLite ownership and the OS filesystem mutex are complementary.
 
 ## Crash-safe execution host launch
 

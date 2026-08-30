@@ -1713,3 +1713,78 @@ test('service-owned incomplete crash residue is safely recreated under the durab
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test('per-execution filesystem flock serializes stale and current workspace publishers', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'v3-workspace-filesystem-flock-'));
+  const source = path.join(root, 'source');
+  const workspaceRoot = path.join(root, 'workspaces');
+  fs.mkdirSync(source, { recursive: true });
+  git(source, 'init');
+  git(source, 'config', 'user.email', 'v3-test@example.invalid');
+  git(source, 'config', 'user.name', 'V3 Test');
+  fs.writeFileSync(path.join(source, 'tracked.txt'), 'base\n');
+  git(source, 'add', '.');
+  git(source, 'commit', '-m', 'base');
+  const base = git(source, 'rev-parse', 'HEAD');
+  const provisioner = new WorkspaceProvisioner({
+    hostRoot: workspaceRoot,
+    executionRoot: '/workspace',
+    allowedRepositoryRoots: [root],
+  });
+
+  let markFirstFence!: () => void;
+  let releaseFirstFence!: () => void;
+  const firstFenceEntered = new Promise<void>((resolve) => {
+    markFirstFence = resolve;
+  });
+  const firstFenceGate = new Promise<void>((resolve) => {
+    releaseFirstFence = resolve;
+  });
+  let firstFenceCalls = 0;
+  let secondFenceCalls = 0;
+
+  try {
+    const firstPromise = provisioner.provision({
+      executionId: 'filesystem-flock-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+      publicationFence: async () => {
+        firstFenceCalls += 1;
+        if (firstFenceCalls === 1) {
+          markFirstFence();
+          await firstFenceGate;
+        }
+        return true;
+      },
+    });
+
+    await firstFenceEntered;
+    const secondPromise = provisioner.provision({
+      executionId: 'filesystem-flock-1',
+      repositoryPath: source,
+      baseRevision: base,
+      workspaceMode: 'isolated_write',
+      publicationFence: async () => {
+        secondFenceCalls += 1;
+        return false;
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(secondFenceCalls, 0, 'second provisioner must block on flock before filesystem fencing');
+
+    releaseFirstFence();
+    const winner = await firstPromise;
+    fs.writeFileSync(path.join(winner.hostPath, 'winner-marker.txt'), 'winner\n');
+
+    await assert.rejects(secondPromise, /WORKSPACE_PROVISION_CLAIM_LOST/);
+    assert.ok(firstFenceCalls >= 1);
+    assert.ok(secondFenceCalls >= 1);
+    assert.equal(fs.readFileSync(path.join(winner.hostPath, 'winner-marker.txt'), 'utf8'), 'winner\n');
+    assert.equal(git(winner.hostPath, 'rev-parse', 'HEAD'), base);
+  } finally {
+    releaseFirstFence();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

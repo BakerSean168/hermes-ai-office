@@ -26,6 +26,90 @@ import type { WorkspaceMode } from './types.js';
 
 const execFileAsync = promisify(execFile);
 
+const WORKSPACE_FILESYSTEM_LOCK_WAIT_SECONDS = 30 * 60;
+
+async function acquireExecutionFilesystemLock(
+  hostRoot: string,
+  executionDirectory: string,
+): Promise<() => Promise<void>> {
+  const serviceUid = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  const lockRoot = path.join(path.dirname(hostRoot), '.model-control-plane-locks');
+  fs.mkdirSync(lockRoot, { recursive: true, mode: 0o700 });
+  const lockRootStat = fs.lstatSync(lockRoot);
+  if (
+    !lockRootStat.isDirectory() ||
+    lockRootStat.isSymbolicLink() ||
+    fs.realpathSync(lockRoot) !== path.resolve(lockRoot) ||
+    (serviceUid !== undefined && lockRootStat.uid !== serviceUid)
+  ) {
+    throw new Error('V3_WORKSPACE_LOCK_ROOT_NOT_ALLOWED');
+  }
+  fs.chmodSync(lockRoot, 0o700);
+  const lockPath = path.join(lockRoot, `${executionDirectory}.lock`);
+
+  const child = spawn(
+    '/usr/bin/flock',
+    [
+      '--exclusive',
+      '--timeout',
+      String(WORKSPACE_FILESYSTEM_LOCK_WAIT_SECONDS),
+      lockPath,
+      '/bin/sh',
+      '-c',
+      "printf 'PIXEL_WORKSPACE_LOCKED\\n'; cat >/dev/null",
+    ],
+    {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' },
+    },
+  );
+
+  let stdout = '';
+  let stderr = '';
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGKILL');
+      reject(error);
+    };
+    child.once('error', (error) => fail(error));
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk);
+      if (!settled && stdout.includes('PIXEL_WORKSPACE_LOCKED\n')) {
+        settled = true;
+        resolve();
+      }
+    });
+    child.once('close', (code) => {
+      if (!settled) {
+        fail(
+          new Error(
+            `V3_WORKSPACE_FILESYSTEM_LOCK_FAILED:${stderr.trim().slice(0, 500) || `exit ${code}`}`,
+          ),
+        );
+      }
+    });
+  });
+
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      child.once('close', done);
+      child.once('error', done);
+      if (child.stdin && !child.stdin.destroyed) child.stdin.end();
+      else if (child.exitCode != null) resolve();
+    });
+  };
+}
+
 export interface ProvisionedWorkspace {
   hostPath: string;
   executionPath: string;
@@ -895,6 +979,8 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
     const resolvedRevision = await git(repoRoot, ['rev-parse', '--verify', revision], sourceOwner);
 
     const directory = executionDirectoryName(input.executionId);
+    const releaseFilesystemLock = await acquireExecutionFilesystemLock(this.#hostRoot, directory);
+    try {
     const executionsRoot = path.join(this.#hostRoot, 'executions');
     fs.mkdirSync(executionsRoot, { recursive: true, mode: 0o750 });
     if (this.#executionOwner) {
@@ -1180,6 +1266,9 @@ export class WorkspaceProvisioner implements WorkspaceProvisioningPort {
 
     // Read/review phases are physically read-only at publication time.
     return { hostPath, executionPath, repositoryRoot, sourceRevision: resolvedRevision };
+    } finally {
+      await releaseFilesystemLock();
+    }
   }
 
   async pruneExecutionArtifacts(input: {
