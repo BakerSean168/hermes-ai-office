@@ -66,6 +66,19 @@ This grants read access to history already in scope for the execution without gr
 8. leave safely shared hardlinked object files source-owned;
 9. apply writer/read-only permissions without chmod'ing shared object files; execution IDs must use the collision-free durable ID alphabet rather than lossy path sanitization.
 
+### Durable host launch ownership
+
+Workspace isolation is insufficient if two host conversations can be launched for one durable execution. Host launch therefore uses a SQLite-backed claim, not only an in-process mutex:
+
+1. before any external launch, recover the execution host by durable `executionId`; OpenHands recovery scans conversations by the existing execution tag and fails closed if more than one match exists;
+2. if no host execution exists, atomically acquire `host_launch_token` / `host_launch_claimed_at` while `status_cache=STARTING`; only the token owner may issue `createExecution`;
+3. re-scan the host after winning the claim so a stale previous launch that became visible during the CAS window is adopted instead of duplicated;
+4. after a successful create, attach the conversation only when the same launch token still owns the durable claim; attach clears the claim atomically;
+5. if the service crashes after host creation but before attach, restart/reconcile searches by `executionId`, adopts the single existing conversation, and clears the claim without another POST;
+6. a fresh claim owned by another process returns durable `STARTING` and suppresses launch; only after the claim exceeds the bounded host-request recovery interval may another process CAS-take it, re-scan, and fail it retryably when the host still proves no execution exists.
+
+Antigravity already has deterministic execution-local state and implements the same recovery contract. Routed execution hosts recover through the persisted backend selection, so recovery cannot silently switch execution host families.
+
 ### Cleanup
 
 Removing an execution directory unlinks its hardlinks only. Canonical object files survive because they retain the canonical directory link. Old pack blocks can be reclaimed after all linked clones referencing them are removed.

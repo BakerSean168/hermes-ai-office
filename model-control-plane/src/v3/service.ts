@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import type { DevelopmentPolicy } from './policy.js';
 import type {
   DevelopmentExecutionServicePort,
@@ -31,6 +33,7 @@ const ACTIVE_WRITER_STATUSES = new Set<ExecutionStatus>([
   'WAITING_FOR_CONFIRMATION',
 ]);
 const WRITER_LEASE_STATUSES = new Set<ExecutionStatus>([...ACTIVE_WRITER_STATUSES, 'PAUSED']);
+const HOST_LAUNCH_CLAIM_STALE_MS = 120_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -305,6 +308,71 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
         this.#executionStartTails.delete(executionId);
       }
     }
+  }
+
+  async #recoverHostExecution(record: ExecutionLinkRecord): Promise<ExecutionLinkRecord> {
+    if (record.openhandsConversationId || TERMINAL.has(record.statusCache)) return record;
+    const recovered = await this.#host.recoverExecution({
+      executionId: record.executionId,
+      createdAt: record.createdAt,
+      selection: selectionFromRecord(record),
+    });
+    if (!recovered) return record;
+    const startedAt = recovered.startedAt ? Date.parse(recovered.startedAt) : Number.NaN;
+    return this.#links.attachOpenHands(
+      record.executionId,
+      recovered.conversationId,
+      Number.isFinite(startedAt) ? startedAt : undefined,
+    );
+  }
+
+  async #reconcileClaimedHostLaunch(record: ExecutionLinkRecord): Promise<ExecutionLinkRecord> {
+    if (
+      !record.hostLaunchToken ||
+      record.openhandsConversationId ||
+      TERMINAL.has(record.statusCache)
+    ) {
+      return record;
+    }
+    let recovered: ExecutionLinkRecord;
+    try {
+      recovered = await this.#recoverHostExecution(record);
+    } catch {
+      // Fail closed while host recovery is unavailable or ambiguous. Never issue a second launch.
+      return record;
+    }
+    if (recovered.openhandsConversationId) return recovered;
+    const claimedAt = recovered.hostLaunchClaimedAt ?? recovered.updatedAt;
+    if (Date.now() - claimedAt < HOST_LAUNCH_CLAIM_STALE_MS) return recovered;
+
+    const now = Date.now();
+    const takeoverToken = randomUUID();
+    const takeover = this.#links.claimHostLaunch(
+      recovered.executionId,
+      takeoverToken,
+      now,
+      now - HOST_LAUNCH_CLAIM_STALE_MS,
+    );
+    if (!takeover.acquired) return takeover.record;
+
+    // Re-check after winning the stale-claim CAS. This closes the window where the original
+    // launch became visible just as the recovery process took ownership of the durable claim.
+    let afterTakeover: ExecutionLinkRecord;
+    try {
+      afterTakeover = await this.#recoverHostExecution(takeover.record);
+    } catch {
+      return takeover.record;
+    }
+    if (afterTakeover.openhandsConversationId) return afterTakeover;
+
+    const expired = this.#links.expireHostLaunchClaim(recovered.executionId, takeoverToken);
+    if (!expired.expired) return expired.record;
+    return this.#links.attachFailure(expired.record.executionId, {
+      code: 'HOST_LAUNCH_RECOVERY_MISSING',
+      detail:
+        'A durable host launch claim expired and two host recovery scans found no matching execution.',
+      retryable: true,
+    });
   }
 
   async #reconcileWriterCandidates(): Promise<ExecutionLinkRecord[]> {
@@ -624,21 +692,57 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
     record = await this.#withExecutionStartLock(record.executionId, async () => {
       let current = this.#links.get(record.executionId);
       if (!current) throw new Error('EXECUTION_NOT_FOUND');
-      if (current.openhandsConversationId) return current;
+      if (current.openhandsConversationId || TERMINAL.has(current.statusCache)) return current;
+
       try {
-        if (WRITER_PHASES.has(current.phase)) {
-          if (!current.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
-          if (!current.writerStartRevision) {
-            const prepared = await this.#workspace.prepareWriterExecution({
-              executionId: current.executionId,
-              workspaceRef: current.workspaceRef,
-            });
-            current = this.#links.attachWriterStartRevision(
-              current.executionId,
-              prepared.startRevision,
-            );
-          }
+        current = await this.#recoverHostExecution(current);
+      } catch {
+        // Recovery must be available before a new launch. If the host cannot prove absence,
+        // fail closed instead of risking a duplicate mutable worker.
+        return current;
+      }
+      if (current.openhandsConversationId) return current;
+
+      if (WRITER_PHASES.has(current.phase)) {
+        if (!current.workspaceRef) throw new Error('PREVIOUS_EXECUTION_WORKSPACE_MISSING');
+        if (!current.writerStartRevision) {
+          const prepared = await this.#workspace.prepareWriterExecution({
+            executionId: current.executionId,
+            workspaceRef: current.workspaceRef,
+          });
+          current = this.#links.attachWriterStartRevision(
+            current.executionId,
+            prepared.startRevision,
+          );
         }
+      }
+
+      const now = Date.now();
+      const token = randomUUID();
+      const claim = this.#links.claimHostLaunch(
+        current.executionId,
+        token,
+        now,
+        now - HOST_LAUNCH_CLAIM_STALE_MS,
+      );
+      current = claim.record;
+      if (!claim.acquired) {
+        // Another process owns a fresh claim. It is the only process allowed to POST.
+        // This request returns the durable STARTING state and later observations recover/attach.
+        return current;
+      }
+
+      // Claim ownership is durable across processes, but a stale previous owner may have created
+      // its host conversation just before this CAS. Re-scan after acquiring the claim and only
+      // POST when the host still proves there is no execution for this durable executionId.
+      try {
+        current = await this.#recoverHostExecution(current);
+      } catch {
+        return current;
+      }
+      if (current.openhandsConversationId) return current;
+
+      try {
         const created = await this.#host.createExecution({
           executionId: current.executionId,
           projectKey: current.projectKey,
@@ -660,10 +764,18 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           current.executionId,
           created.conversationId,
           Number.isFinite(hostStartedAt) ? hostStartedAt : undefined,
+          token,
         );
-      } catch (error) {
-        this.#links.updateStatus(current.executionId, 'FAILED');
-        throw error;
+      } catch {
+        // The POST may have succeeded before the transport/process failed. Search by the durable
+        // execution tag before doing anything else, and keep the claim if recovery is not yet
+        // conclusive. A stale claim becomes retryable FAILED only after later observation proves
+        // no matching host execution exists.
+        try {
+          return await this.#recoverHostExecution(current);
+        } catch {
+          return current;
+        }
       }
     });
 
@@ -684,6 +796,13 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
   async get(executionId: string): Promise<DevelopmentExecutionSnapshot | null> {
     let record = this.#links.get(executionId);
     if (!record) return null;
+    if (
+      !record.openhandsConversationId &&
+      record.hostLaunchToken &&
+      !TERMINAL.has(record.statusCache)
+    ) {
+      record = await this.#reconcileClaimedHostLaunch(record);
+    }
     const [openHandsHealth, gatewaySummary, observabilityHealth] = await Promise.all([
       this.#host.health(),
       this.#gateway?.summary() ??

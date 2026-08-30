@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
+  ExecutionHostRecoveryInput,
   ExecutionHostSnapshot,
 } from '../ports.js';
 import type { ExecutionFailure, UsageSummary } from '../types.js';
@@ -146,7 +147,9 @@ function finalText(result: JsonRecord): string {
       .join('\n')
       .slice(0, 50_000);
   }
-  return String(result.response ?? '').trim().slice(0, 50_000);
+  return String(result.response ?? '')
+    .trim()
+    .slice(0, 50_000);
 }
 
 function failureFromResult(result: JsonRecord): ExecutionFailure {
@@ -197,14 +200,18 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     this.#binary = path.resolve(options.binary);
     this.#stateRoot = path.resolve(options.stateRoot);
     this.#workspaceHostRoot = path.resolve(options.workspaceHostRoot);
-    this.#workspaceExecutionRoot = path.posix.resolve(options.workspaceExecutionRoot ?? '/workspace');
+    this.#workspaceExecutionRoot = path.posix.resolve(
+      options.workspaceExecutionRoot ?? '/workspace',
+    );
     this.#home = path.resolve(options.home);
     this.#uid = options.uid;
     this.#gid = options.gid;
     this.#workspaceGid = options.workspaceGid ?? options.gid;
     this.#user = options.user ?? path.basename(this.#home);
     this.#printTimeout = options.printTimeout ?? '20m';
-    this.#sandboxWrapper = options.sandboxWrapper ? path.resolve(options.sandboxWrapper) : undefined;
+    this.#sandboxWrapper = options.sandboxWrapper
+      ? path.resolve(options.sandboxWrapper)
+      : undefined;
     if (this.#sandboxWrapper) {
       if (
         !Number.isInteger(this.#uid) ||
@@ -415,8 +422,18 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
     };
   }
 
+  async recoverExecution(input: ExecutionHostRecoveryInput): Promise<ExecutionHostSnapshot | null> {
+    const executionId = safeId(input.executionId);
+    const meta = fs.statSync(path.join(this.#executionDir(executionId), 'meta.json'), {
+      throwIfNoEntry: false,
+    });
+    if (!meta?.isFile()) return null;
+    return this.getExecution(`antigravity:${executionId}`);
+  }
+
   async getExecution(conversationId: string): Promise<ExecutionHostSnapshot> {
-    if (!conversationId.startsWith('antigravity:')) throw new Error('ANTIGRAVITY_CONVERSATION_ID_INVALID');
+    if (!conversationId.startsWith('antigravity:'))
+      throw new Error('ANTIGRAVITY_CONVERSATION_ID_INVALID');
     const executionId = safeId(conversationId.slice('antigravity:'.length));
     const directory = this.#executionDir(executionId);
     const meta = this.#meta(executionId);
@@ -520,7 +537,8 @@ export class AntigravityExecutionHost implements ExecutionHostPort {
   }
 
   async cancelExecution(conversationId: string): Promise<ExecutionHostSnapshot> {
-    if (!conversationId.startsWith('antigravity:')) throw new Error('ANTIGRAVITY_CONVERSATION_ID_INVALID');
+    if (!conversationId.startsWith('antigravity:'))
+      throw new Error('ANTIGRAVITY_CONVERSATION_ID_INVALID');
     const executionId = safeId(conversationId.slice('antigravity:'.length));
     const directory = this.#executionDir(executionId);
     const meta = this.#meta(executionId);

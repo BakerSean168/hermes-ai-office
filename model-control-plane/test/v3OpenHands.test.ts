@@ -32,6 +32,7 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
   );
   let status = 'running';
   let createBody: Record<string, unknown> | undefined;
+  let duplicateRecovery = false;
   const server = createServer((request, response) => {
     if (request.headers['x-session-api-key'] !== 'session-secret') {
       response.writeHead(401).end('{}');
@@ -40,6 +41,39 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
     response.setHeader('content-type', 'application/json');
     if (request.url === '/health') {
       response.end('{"status":"ok"}');
+      return;
+    }
+    if (request.url?.startsWith('/api/conversations/search') && request.method === 'GET') {
+      const tags = createBody ? (createBody as any).tags : {};
+      response.end(
+        JSON.stringify({
+          items: createBody
+            ? [
+                {
+                  id: '11111111-1111-4111-8111-111111111111',
+                  execution_status: status,
+                  created_at: '2026-08-21T15:00:00Z',
+                  updated_at: '2026-08-21T15:00:01Z',
+                  tags,
+                  stats: {},
+                },
+                ...(duplicateRecovery
+                  ? [
+                      {
+                        id: '22222222-2222-4222-8222-222222222222',
+                        execution_status: status,
+                        created_at: '2026-08-21T15:00:00Z',
+                        updated_at: '2026-08-21T15:00:02Z',
+                        tags,
+                        stats: {},
+                      },
+                    ]
+                  : []),
+              ]
+            : [],
+          next_page_id: null,
+        }),
+      );
       return;
     }
     if (request.url === '/api/conversations' && request.method === 'POST') {
@@ -138,6 +172,36 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       correlationMetadata: { execution_id: 'exec_1', phase: 'INVESTIGATE_PLAN' },
     });
     assert.equal(created.status, 'RUNNING');
+    const recovered = await host.recoverExecution({
+      executionId: 'exec_1',
+      createdAt: Date.parse('2026-08-21T14:59:59Z'),
+      selection: {
+        backend: 'openhands-builtin',
+        modelClass: 'planning-premium',
+        transportMode: 'LITELLM_MANAGED',
+        workspaceMode: 'read_oriented',
+        sessionPolicy: 'fresh',
+        reasons: [],
+      },
+    });
+    assert.equal(recovered?.conversationId, created.conversationId);
+    duplicateRecovery = true;
+    await assert.rejects(
+      host.recoverExecution({
+        executionId: 'exec_1',
+        createdAt: Date.parse('2026-08-21T14:59:59Z'),
+        selection: {
+          backend: 'openhands-builtin',
+          modelClass: 'planning-premium',
+          transportMode: 'LITELLM_MANAGED',
+          workspaceMode: 'read_oriented',
+          sessionPolicy: 'fresh',
+          reasons: [],
+        },
+      }),
+      /OPENHANDS_EXECUTION_DUPLICATE/,
+    );
+    duplicateRecovery = false;
     const body = createBody as any;
     assert.equal(body.agent.kind, 'Agent');
     assert.equal(body.agent.llm.model, 'litellm_proxy/planning-premium');
@@ -270,7 +334,10 @@ test('OpenHands V3 adapter creates a correlated managed execution and normalizes
       correlationMetadata: { execution_id: 'exec_acp_fix_1', phase: 'IMPLEMENT_FIX' },
     });
     const reusedWorkspaceBody = createBody as any;
-    assert.equal(reusedWorkspaceBody.workspace.working_dir, '/workspace/executions/exec_impl_1/repo');
+    assert.equal(
+      reusedWorkspaceBody.workspace.working_dir,
+      '/workspace/executions/exec_impl_1/repo',
+    );
     assert.equal(reusedWorkspaceBody.secrets.HERMES_V3_EXECUTION_ID.value, 'exec_acp_fix_1');
     assert.equal(
       reusedWorkspaceBody.secrets.HERMES_V3_WORKSPACE_REF.value,

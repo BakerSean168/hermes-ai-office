@@ -311,12 +311,19 @@ Verification:
 - Regression coverage proves a forged worker ref cannot move the baseline, a clean unrelated history is rejected, and two concurrent idempotent starts provision and launch only once. Verification after repair: workspace **31/31 PASS**, API **24/24 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **176/176 PASS**, `git diff --check` PASS.
 - Live MemoFlow read-only audit while the legacy writer is active found 4,536 regular canonical object files; 63 are currently unreadable by the OpenHands execution identity and none are writable by it. No metadata was changed. Therefore the first linked-storage cutover requires a quiescent repository-preparation step after the legacy writer reaches a durable safe boundary.
 - A fresh exact-commit Business re-review is mandatory on the new repair commit; no earlier review verdict transfers.
+- Exact-candidate Business review of `faca49b` returned **FAIL** with one P1 crash-window finding: the per-execution mutex was process-local, while OpenHands conversation creation and SQLite `openhands_conversation_id` attachment were not one durable/idempotent operation. A crash after successful POST but before attach could therefore launch a second writer on restart.
+- Current repair adds additive durable `host_launch_token` / `host_launch_claimed_at` state and atomic CAS claim/takeover/expiry operations. Every real `ExecutionHostPort` now supports recovery by durable execution identity. OpenHands searches the authenticated `/api/conversations/search` surface by the existing execution tag, detects duplicates fail-closed, and bounds an absence scan by the durable execution creation timestamp; Antigravity recovers from its deterministic execution state; routed recovery stays on the persisted backend.
+- Launch flow now performs recover → CAS claim → recover again → create → token-owned attach. Fresh claims suppress another POST across service instances. Post-success/pre-attach crash residue is recovered and attached without re-launch. Stale claims can be taken over only after the host is re-queried; claim expiry is token-CAS protected so a superseded owner cannot resurrect terminal state.
+- New regressions cover SQLite fresh/stale claim ownership, stale-token attach rejection, fresh-claim duplicate suppression, post-success/pre-attach restart recovery with `createExecution=0`, OpenHands duplicate-tag rejection, routed-host recovery, and existing same-process idempotent start. Verification: workspace **31/31 PASS**, API **26/26 PASS**, OpenHands adapter **1/1 PASS**, Plan **34/34 PASS**, retention **1/1 PASS**, typecheck PASS, build PASS, full model-control-plane **178/178 PASS**, `git diff --check` PASS.
+- The previous MemoFlow legacy integration-repair writer has now terminated `FAILED` because its upstream GLM deployment was unavailable; it was not a code failure. Global RUNNING/PAUSED executions are currently zero and MemoFlow is durably `BLOCKED / IMPLEMENT_FAILED`, so the old provisioner will not automatically create another writer before cutover.
+- A fresh exact-commit Business re-review is mandatory on this crash-safe launch repair before merge/deployment.
 
 
 Deployment gate:
 
-- Existing MemoFlow executions created by the legacy full-clone provisioner remain live. The control plane must not be restarted merely to activate this storage change while those writers are still running.
-- New provisioning semantics activate only after the existing live writers become terminal/safely resumable and the production service is rebuilt/restarted from the reviewed revision.
+- The legacy MemoFlow writer is terminal and the Plan is durably blocked; cutover may proceed only after the latest exact candidate passes independent Business review and a final zero-active-writer check.
+- MemoFlow canonical object sharing additionally requires the documented quiescent permission-preparation audit; otherwise the new runtime will safely fall back to private clones.
+- After deployment, resume the same MemoFlow Plan with plan-scoped `reconcile(auto)`; do not create a replacement Plan.
 
 Remaining planned follow-up:
 

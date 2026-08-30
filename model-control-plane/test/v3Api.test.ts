@@ -24,6 +24,9 @@ class FakeHost implements ExecutionHostPort {
   async health() {
     return 'OK' as const;
   }
+  async recoverExecution() {
+    return null;
+  }
   async createExecution(input: Parameters<ExecutionHostPort['createExecution']>[0]) {
     this.creates += 1;
     this.createdRepositories.push(input.repositoryPath);
@@ -56,6 +59,16 @@ class FakeHost implements ExecutionHostPort {
   async continueExecution() {
     this.status = 'RUNNING';
     return this.getExecution('ignored');
+  }
+}
+
+class RecoverableFakeHost extends FakeHost {
+  readonly recoverableByExecution = new Map<string, ExecutionHostSnapshot>();
+  recoveries = 0;
+
+  override async recoverExecution(input: { executionId: string }) {
+    this.recoveries += 1;
+    return this.recoverableByExecution.get(input.executionId) ?? null;
   }
 }
 
@@ -123,18 +136,70 @@ test('execution link workspace provenance persists repository root', () => {
       sourceRevision: 'abc123',
     });
     assert.equal(attached.repositoryRoot, '/home/dev/projects/memoflow');
-    assert.equal(links.get(reserved.record.executionId)?.repositoryRoot, '/home/dev/projects/memoflow');
-    const withBaseline = links.attachWriterStartRevision(reserved.record.executionId, 'baseline-abc');
+    assert.equal(
+      links.get(reserved.record.executionId)?.repositoryRoot,
+      '/home/dev/projects/memoflow',
+    );
+    const withBaseline = links.attachWriterStartRevision(
+      reserved.record.executionId,
+      'baseline-abc',
+    );
     assert.equal(withBaseline.writerStartRevision, 'baseline-abc');
     assert.equal(links.get(reserved.record.executionId)?.writerStartRevision, 'baseline-abc');
     assert.equal(
-      links.attachWriterStartRevision(reserved.record.executionId, 'baseline-abc').writerStartRevision,
+      links.attachWriterStartRevision(reserved.record.executionId, 'baseline-abc')
+        .writerStartRevision,
       'baseline-abc',
     );
     assert.throws(
       () => links.attachWriterStartRevision(reserved.record.executionId, 'forged-baseline'),
       /WRITER_COMPLETION_BASELINE_MISMATCH/,
     );
+    const claimedAt = Date.now();
+    const firstClaim = links.claimHostLaunch(
+      reserved.record.executionId,
+      'launch-token-a',
+      claimedAt,
+      claimedAt - 120_000,
+    );
+    assert.equal(firstClaim.acquired, true);
+    assert.equal(firstClaim.record.hostLaunchToken, 'launch-token-a');
+    assert.equal(firstClaim.record.hostLaunchClaimedAt, claimedAt);
+    const freshContender = links.claimHostLaunch(
+      reserved.record.executionId,
+      'launch-token-b',
+      claimedAt + 1,
+      claimedAt - 1,
+    );
+    assert.equal(freshContender.acquired, false);
+    assert.equal(freshContender.record.hostLaunchToken, 'launch-token-a');
+    const staleTakeover = links.claimHostLaunch(
+      reserved.record.executionId,
+      'launch-token-c',
+      claimedAt + 120_001,
+      claimedAt + 1,
+    );
+    assert.equal(staleTakeover.acquired, true);
+    assert.equal(staleTakeover.record.hostLaunchToken, 'launch-token-c');
+    assert.throws(
+      () =>
+        links.attachOpenHands(
+          reserved.record.executionId,
+          'conversation-stale-owner',
+          undefined,
+          'launch-token-a',
+        ),
+      /HOST_EXECUTION_ASSOCIATION_CONFLICT/,
+    );
+    const attachedHost = links.attachOpenHands(
+      reserved.record.executionId,
+      'conversation-claim-roundtrip',
+      undefined,
+      'launch-token-c',
+    );
+    assert.equal(attachedHost.openhandsConversationId, 'conversation-claim-roundtrip');
+    assert.equal(attachedHost.hostLaunchToken, undefined);
+    assert.equal(attachedHost.hostLaunchClaimedAt, undefined);
   } finally {
     db.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -329,6 +394,163 @@ test('V3 concurrent idempotent starts provision and launch an execution only onc
   }
 });
 
+test('V3 fresh durable host launch claim suppresses duplicate launch across service recovery', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-launch-fresh-claim-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const db = openDb(dbFile);
+  const links = new ExecutionLinkRepository(db);
+  const reserved = links.reserve({
+    idempotencyKey: 'host-launch-fresh-claim',
+    projectKey: 'fresh-claim-project',
+    phase: 'INVESTIGATE_PLAN',
+    objectiveSummary: 'Do not duplicate a claimed host launch.',
+    selection: {
+      backend: 'openhands-builtin',
+      modelClass: 'planning-premium',
+      transportMode: 'LITELLM_MANAGED',
+      workspaceMode: 'read_oriented',
+      sessionPolicy: 'fresh',
+      reasons: ['test'],
+    },
+  });
+  const executionId = reserved.record.executionId;
+  links.attachWorkspace(executionId, {
+    workspaceRef: `/workspace/executions/${executionId}/repo`,
+    repositoryRoot: '/tmp/fake-repo',
+    sourceRevision: 'source-base',
+  });
+  const claimedAt = Date.now();
+  assert.equal(
+    links.claimHostLaunch(executionId, 'other-process-token', claimedAt, claimedAt - 120_000)
+      .acquired,
+    true,
+  );
+  db.close();
+
+  const host = new RecoverableFakeHost();
+  const runtime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': false,
+    },
+  });
+  try {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'host-launch-fresh-claim' },
+      payload: {
+        phase: 'INVESTIGATE_PLAN',
+        objective: 'Do not duplicate a claimed host launch.',
+        projectKey: 'fresh-claim-project',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'source-base' },
+        await: false,
+      },
+    });
+    assert.equal(response.statusCode, 201);
+    assert.equal(response.json().executionId, executionId);
+    assert.equal(response.json().status, 'STARTING');
+    assert.equal(host.creates, 0);
+    assert.ok(host.recoveries >= 1);
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('V3 recovers a host execution created before the durable conversation attach without relaunching', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'host-launch-crash-recovery-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const db = openDb(dbFile);
+  const links = new ExecutionLinkRepository(db);
+  const reserved = links.reserve({
+    idempotencyKey: 'host-launch-crash-residue',
+    projectKey: 'crash-recovery-project',
+    phase: 'IMPLEMENT',
+    objectiveSummary: 'Recover one already-created host writer.',
+    selection: {
+      backend: 'openhands-builtin',
+      modelClass: 'implementation-efficient',
+      transportMode: 'LITELLM_MANAGED',
+      workspaceMode: 'isolated_write',
+      sessionPolicy: 'fresh',
+      reasons: ['test'],
+    },
+  });
+  const executionId = reserved.record.executionId;
+  links.attachWorkspace(executionId, {
+    workspaceRef: `/workspace/executions/${executionId}/repo`,
+    repositoryRoot: '/tmp/fake-repo',
+    gitBranch: `ai-office/${executionId}`,
+    sourceRevision: 'writer-start',
+  });
+  links.attachWriterStartRevision(executionId, 'writer-start');
+  const claimedAt = Date.now();
+  assert.equal(
+    links.claimHostLaunch(executionId, 'crashed-launch-token', claimedAt, claimedAt - 120_000)
+      .acquired,
+    true,
+  );
+  db.close();
+
+  const host = new RecoverableFakeHost();
+  host.recoverableByExecution.set(executionId, {
+    conversationId: 'conversation-created-before-crash',
+    status: 'RUNNING',
+    startedAt: new Date(claimedAt + 10).toISOString(),
+  });
+  const runtime = await buildControlPlane({
+    dbFile,
+    v3ExecutionHost: host,
+    v3ModelGateway: gateway,
+    v3Workspace: workspace,
+    v3BackendAvailability: {
+      'openhands-builtin': true,
+      'opencode-acp': false,
+    },
+  });
+
+  try {
+    const recovered = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/executions',
+      headers: { 'idempotency-key': 'host-launch-crash-residue' },
+      payload: {
+        phase: 'IMPLEMENT',
+        objective: 'Recover one already-created host writer.',
+        projectKey: 'crash-recovery-project',
+        repository: { path: '/tmp/fake-repo', baseRevision: 'writer-start' },
+        await: false,
+      },
+    });
+    assert.equal(recovered.statusCode, 201);
+    assert.equal(recovered.json().executionId, executionId);
+    assert.equal(
+      recovered.json().refs.openhandsConversationId,
+      'conversation-created-before-crash',
+    );
+    assert.equal(host.creates, 0);
+    assert.ok(host.recoveries >= 1);
+  } finally {
+    await runtime.app.close();
+  }
+
+  const verifiedDb = openDb(dbFile);
+  try {
+    const verified = new ExecutionLinkRepository(verifiedDb).get(executionId);
+    assert.equal(verified?.openhandsConversationId, 'conversation-created-before-crash');
+    assert.equal(verified?.hostLaunchToken, undefined);
+    assert.equal(verified?.hostLaunchClaimedAt, undefined);
+  } finally {
+    verifiedDb.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('V3 writer completion fails closed when the agent returns success without a new commit', async () => {
   const host = new FakeHost();
   const noCommitWorkspace: WorkspaceProvisioningPort = {
@@ -376,7 +598,6 @@ test('V3 writer completion fails closed when the agent returns success without a
     assert.equal(body.error.code, 'WRITER_COMPLETION_NO_COMMIT');
     assert.equal(body.error.retryable, false);
     assert.match(body.result.finalText, /did not edit or commit/);
-
 
     // The host keeps reporting its own SUCCEEDED terminal state. A deterministic
     // writer-completion rejection is product truth and must never be resurrected.

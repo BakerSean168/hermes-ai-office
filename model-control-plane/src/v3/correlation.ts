@@ -34,6 +34,8 @@ interface ExecutionLinkRow {
   git_branch: string | null;
   source_revision: string | null;
   writer_start_revision: string | null;
+  host_launch_token: string | null;
+  host_launch_claimed_at: number | null;
   previous_execution_id: string | null;
   plan_id: string | null;
   batch_id: string | null;
@@ -78,6 +80,8 @@ export function ensureV3Schema(db: DatabaseSync): void {
       git_branch TEXT,
       source_revision TEXT,
       writer_start_revision TEXT,
+      host_launch_token TEXT,
+      host_launch_claimed_at INTEGER,
       previous_execution_id TEXT,
       plan_id TEXT,
       batch_id TEXT,
@@ -117,7 +121,13 @@ export function ensureV3Schema(db: DatabaseSync): void {
   if (!columns.has('writer_start_revision')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN writer_start_revision TEXT');
   }
-    if (!columns.has('previous_execution_id')) {
+  if (!columns.has('host_launch_token')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN host_launch_token TEXT');
+  }
+  if (!columns.has('host_launch_claimed_at')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN host_launch_claimed_at INTEGER');
+  }
+  if (!columns.has('previous_execution_id')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN previous_execution_id TEXT');
   }
   if (!columns.has('result_text')) {
@@ -218,6 +228,8 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
     writerStartRevision: row.writer_start_revision ?? undefined,
+    hostLaunchToken: row.host_launch_token ?? undefined,
+    hostLaunchClaimedAt: row.host_launch_claimed_at ?? undefined,
     previousExecutionId: row.previous_execution_id ?? undefined,
     planId: row.plan_id ?? undefined,
     batchId: row.batch_id ?? undefined,
@@ -381,22 +393,90 @@ export class ExecutionLinkRepository {
     return record;
   }
 
+  claimHostLaunch(
+    executionId: string,
+    token: string,
+    claimedAt: number,
+    staleBefore: number,
+  ): { record: ExecutionLinkRecord; acquired: boolean } {
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET host_launch_token=?,host_launch_claimed_at=?,updated_at=?
+          WHERE execution_id=?
+            AND openhands_conversation_id IS NULL
+            AND status_cache='STARTING'
+            AND (
+              host_launch_token IS NULL OR host_launch_claimed_at IS NULL OR host_launch_claimed_at < ?
+            )`,
+      )
+      .run(token, claimedAt, claimedAt, executionId, staleBefore);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, acquired: Number(result.changes) === 1 };
+  }
+
+  expireHostLaunchClaim(
+    executionId: string,
+    token: string,
+  ): { record: ExecutionLinkRecord; expired: boolean } {
+    const now = Date.now();
+    const result = this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET status_cache='FAILED',ended_at=?,host_launch_token=NULL,
+                host_launch_claimed_at=NULL,updated_at=?
+          WHERE execution_id=? AND status_cache='STARTING'
+            AND openhands_conversation_id IS NULL AND host_launch_token=?`,
+      )
+      .run(now, now, executionId, token);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return { record, expired: Number(result.changes) === 1 };
+  }
+
   attachOpenHands(
     executionId: string,
     conversationId: string,
     startedAt?: number,
+    launchToken?: string,
   ): ExecutionLinkRecord {
     const now = Date.now();
-    this.#db
-      .prepare(
-        `UPDATE v3_execution_links
-           SET openhands_conversation_id=?, status_cache='RUNNING',
-               started_at=COALESCE(?,started_at,created_at), updated_at=?
-         WHERE execution_id=?`,
-      )
-      .run(conversationId, startedAt ?? null, now, executionId);
+    const statement = launchToken
+      ? this.#db.prepare(
+          `UPDATE v3_execution_links
+             SET openhands_conversation_id=?, status_cache='RUNNING',
+                 host_launch_token=NULL,host_launch_claimed_at=NULL,
+                 started_at=COALESCE(?,started_at,created_at), updated_at=?
+           WHERE execution_id=? AND status_cache='STARTING'
+             AND (openhands_conversation_id IS NULL OR openhands_conversation_id=?)
+             AND host_launch_token=?`,
+        )
+      : this.#db.prepare(
+          `UPDATE v3_execution_links
+             SET openhands_conversation_id=?, status_cache='RUNNING',
+                 host_launch_token=NULL,host_launch_claimed_at=NULL,
+                 started_at=COALESCE(?,started_at,created_at), updated_at=?
+           WHERE execution_id=? AND status_cache='STARTING'
+             AND (openhands_conversation_id IS NULL OR openhands_conversation_id=?)`,
+        );
+    if (launchToken) {
+      statement.run(
+        conversationId,
+        startedAt ?? null,
+        now,
+        executionId,
+        conversationId,
+        launchToken,
+      );
+    } else {
+      statement.run(conversationId, startedAt ?? null, now, executionId, conversationId);
+    }
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    if (record.openhandsConversationId !== conversationId) {
+      throw new Error('HOST_EXECUTION_ASSOCIATION_CONFLICT');
+    }
     return record;
   }
 

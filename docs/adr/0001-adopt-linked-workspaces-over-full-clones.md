@@ -39,6 +39,12 @@ Review snapshots remain execution-private linked clones and become physically re
 
 Workspace publication follows the same privilege rule: the per-execution directory remains service-owned/inaccessible while root performs any recursive privatization, ownership, or mode normalization. Only after those operations finish is the directory itself chowned/chmodded to the execution identity. That ownership transition is the publication point; no privileged recursive pathname traversal may occur afterward.
 
+### 1b. Crash-safe execution-host launch
+
+Persist execution-host launch ownership in the control-plane database. `host_launch_token` and `host_launch_claimed_at` are additive nullable columns on execution links. A launch token is a short-lived lease, not a host identifier. The control plane must recover the host by durable `executionId` before issuing a create, atomically claim the right to create, re-check after claiming, and attach the returned host conversation only while that token still owns the claim.
+
+OpenHands recovery uses the execution tag already written on every conversation. The search is ordered by creation time and bounded by the durable execution creation boundary; duplicate matches are an error rather than a best-effort choice. This closes both multi-process races and the post-success/pre-database-attach crash window without making the execution workspace itself the coordination authority.
+
 ### 2. Host-controlled batch integration
 
 Replace bundle/full-clone integration with a temporary detached `git worktree` owned by the control plane:

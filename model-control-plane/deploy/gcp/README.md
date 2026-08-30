@@ -105,3 +105,10 @@ To opt a repository into physical object sharing, perform preparation only at a 
 5. start one production-shaped execution and prove source/execution history objects share inodes while canonical HEAD and working tree remain unchanged.
 
 If any precondition or post-check is ambiguous, do not normalize the repository. Leave it unprepared and allow the runtime to use its safe private-clone fallback.
+
+
+## Crash-safe execution host launch
+
+Execution-host creation is guarded by durable SQLite launch claims. A service instance must recover by durable execution ID before creating, win the launch claim atomically, recover once more after the claim, and attach the returned conversation with the same token. OpenHands recovery uses authenticated conversation search and the immutable execution tag; duplicate matches fail closed. A fresh claim held by another process suppresses a second POST. Expired claims are taken over only after host recovery proves the previous execution is absent.
+
+Do not clear launch-claim columns manually during recovery. Use normal execution/plan reconciliation so an already-created host conversation can be adopted.

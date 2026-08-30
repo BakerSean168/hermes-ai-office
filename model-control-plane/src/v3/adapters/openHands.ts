@@ -8,6 +8,7 @@ import type {
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
+  ExecutionHostRecoveryInput,
   ExecutionHostSnapshot,
 } from '../ports.js';
 import type { ExecutionFailure, ExecutionStatus, UsageSummary } from '../types.js';
@@ -18,6 +19,12 @@ interface JsonRecord {
 
 function asRecord(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+}
+
+function executionTag(executionId: string): string {
+  const tag = executionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 128);
+  if (!tag) throw new Error('OPENHANDS_EXECUTION_TAG_INVALID');
+  return tag;
 }
 
 function number(value: unknown): number {
@@ -350,7 +357,7 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
         stuck_detection: true,
         autotitle: false,
         tags: {
-          execution: input.executionId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 128),
+          execution: executionTag(input.executionId),
           project: input.projectKey.replace(/[^a-zA-Z0-9]/g, '').slice(0, 128),
           phase: input.phase.toLowerCase().replace(/_/g, ''),
         },
@@ -362,6 +369,39 @@ export class OpenHandsExecutionHost implements ExecutionHostPort {
     const conversationId = String(payload.id ?? '');
     if (!conversationId) throw new Error('OPENHANDS_CONVERSATION_ID_MISSING');
     return this.#snapshot(payload, conversationId);
+  }
+
+  async recoverExecution(input: ExecutionHostRecoveryInput): Promise<ExecutionHostSnapshot | null> {
+    const expectedTag = executionTag(input.executionId);
+    const matches = new Map<string, JsonRecord>();
+    let pageId: string | undefined;
+    const maxPages = 100;
+    for (let page = 0; page < maxPages; page += 1) {
+      const query = new URLSearchParams({ limit: '100', sort_order: 'CREATED_AT_DESC' });
+      if (pageId) query.set('page_id', pageId);
+      const payload = await this.#json(`/api/conversations/search?${query.toString()}`);
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      for (const item of items) {
+        const conversation = asRecord(item);
+        const id = typeof conversation.id === 'string' ? conversation.id.trim() : '';
+        const tags = asRecord(conversation.tags);
+        if (!id || tags.execution !== expectedTag) continue;
+        matches.set(id, conversation);
+        if (matches.size > 1) throw new Error('OPENHANDS_EXECUTION_DUPLICATE');
+      }
+      const next = typeof payload.next_page_id === 'string' ? payload.next_page_id.trim() : '';
+      const createdTimes = items
+        .map((item) => Date.parse(String(asRecord(item).created_at ?? '')))
+        .filter(Number.isFinite);
+      const crossedCreationBoundary =
+        createdTimes.length > 0 && Math.min(...createdTimes) < input.createdAt - 60_000;
+      if (!next || crossedCreationBoundary) {
+        const match = [...matches.entries()][0];
+        return match ? this.#snapshot(match[1], match[0]) : null;
+      }
+      pageId = next;
+    }
+    throw new Error('OPENHANDS_EXECUTION_RECOVERY_SCAN_LIMIT');
   }
 
   async #snapshot(payload: JsonRecord, conversationId: string): Promise<ExecutionHostSnapshot> {

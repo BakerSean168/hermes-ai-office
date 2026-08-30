@@ -65,7 +65,10 @@ process.stdin.on('end', () => {
   return file;
 }
 
-function input(phase: 'VERIFY_REVIEW' | 'IMPLEMENT_FIX', backend: string): ExecutionHostCreateInput {
+function input(
+  phase: 'VERIFY_REVIEW' | 'IMPLEMENT_FIX',
+  backend: string,
+): ExecutionHostCreateInput {
   return {
     executionId: phase === 'VERIFY_REVIEW' ? 'exec_ant_review' : 'exec_ant_fix',
     projectKey: 'digital-biome',
@@ -79,7 +82,8 @@ function input(phase: 'VERIFY_REVIEW' | 'IMPLEMENT_FIX', backend: string): Execu
       backend,
       modelClass: phase === 'VERIFY_REVIEW' ? 'gemini-3.1-pro-high' : 'gemini-3.7-flash-high',
       transportMode: 'PROVIDER_NATIVE',
-      workspaceMode: phase === 'VERIFY_REVIEW' ? 'review_snapshot' : 'reuse_implementation_workspace',
+      workspaceMode:
+        phase === 'VERIFY_REVIEW' ? 'review_snapshot' : 'reuse_implementation_workspace',
       sessionPolicy: phase === 'VERIFY_REVIEW' ? 'fresh_required' : 'resume_preferred',
       reasons: [],
     },
@@ -159,7 +163,9 @@ test('Antigravity mount sandbox rejects root or mismatched consumer identities a
 test('Antigravity adapter sends the objective only through stdin and normalizes structured review output', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'antigravity-host-'));
   const workspaceRoot = path.join(directory, 'workspaces');
-  fs.mkdirSync(path.join(workspaceRoot, 'executions', 'exec_ant_review', 'repo'), { recursive: true });
+  fs.mkdirSync(path.join(workspaceRoot, 'executions', 'exec_ant_review', 'repo'), {
+    recursive: true,
+  });
   const host = new AntigravityExecutionHost({
     binary: fakeAgy(directory),
     stateRoot: path.join(directory, 'state'),
@@ -236,6 +242,12 @@ class StubHost implements ExecutionHostPort {
   async health() {
     return this.healthState;
   }
+  async recoverExecution(input: { executionId: string }) {
+    return {
+      conversationId: `${this.prefix}:recovered:${input.executionId}`,
+      status: 'RUNNING' as const,
+    };
+  }
   async createExecution(): Promise<ExecutionHostSnapshot> {
     this.creates += 1;
     return { conversationId: `${this.prefix}:conversation`, status: 'RUNNING' };
@@ -258,6 +270,19 @@ test('routed execution host reports degraded health when an enabled routed backe
   });
 
   assert.equal(await host.health(), 'DEGRADED');
+  const recovered = await host.recoverExecution({
+    executionId: 'exec_routed_recovery',
+    createdAt: Date.now(),
+    selection: {
+      backend: 'antigravity-review',
+      modelClass: 'gemini-3.1-pro-high',
+      transportMode: 'PROVIDER_NATIVE',
+      workspaceMode: 'review_snapshot',
+      sessionPolicy: 'fresh_required',
+      reasons: [],
+    },
+  });
+  assert.match(recovered?.conversationId ?? '', /^antigravity:recovered:/);
 });
 
 test('routed execution host isolates Antigravity backend routing from existing OpenHands routing', async () => {

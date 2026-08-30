@@ -19,6 +19,12 @@ export interface ExecutionHostCreateInput {
   correlationMetadata: Record<string, string>;
 }
 
+export interface ExecutionHostRecoveryInput {
+  executionId: string;
+  createdAt: number;
+  selection: ExecutionSelection;
+}
+
 export interface ExecutionHostSnapshot {
   conversationId: string;
   status: ExecutionStatus;
@@ -34,6 +40,7 @@ export interface ExecutionHostSnapshot {
 export interface ExecutionHostPort {
   health(): Promise<SourceHealthState>;
   createExecution(input: ExecutionHostCreateInput): Promise<ExecutionHostSnapshot>;
+  recoverExecution(input: ExecutionHostRecoveryInput): Promise<ExecutionHostSnapshot | null>;
   getExecution(conversationId: string): Promise<ExecutionHostSnapshot>;
   cancelExecution(conversationId: string): Promise<ExecutionHostSnapshot>;
   continueExecution?(conversationId: string, message: string): Promise<ExecutionHostSnapshot>;

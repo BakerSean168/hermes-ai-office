@@ -1,6 +1,7 @@
 import type {
   ExecutionHostCreateInput,
   ExecutionHostPort,
+  ExecutionHostRecoveryInput,
   ExecutionHostSnapshot,
 } from '../ports.js';
 
@@ -37,6 +38,10 @@ export class RoutedExecutionHost implements ExecutionHostPort {
 
   createExecution(input: ExecutionHostCreateInput): Promise<ExecutionHostSnapshot> {
     return (this.#byBackend[input.selection.backend] ?? this.#defaultHost).createExecution(input);
+  }
+
+  recoverExecution(input: ExecutionHostRecoveryInput): Promise<ExecutionHostSnapshot | null> {
+    return (this.#byBackend[input.selection.backend] ?? this.#defaultHost).recoverExecution(input);
   }
 
   #hostForConversation(conversationId: string): ExecutionHostPort {

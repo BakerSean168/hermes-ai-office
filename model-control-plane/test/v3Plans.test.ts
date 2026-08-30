@@ -33,6 +33,9 @@ class PlanHost implements ExecutionHostPort {
   async health() {
     return 'OK' as const;
   }
+  async recoverExecution() {
+    return null;
+  }
 
   async createExecution(input: ExecutionHostCreateInput) {
     const barrier = this.nextCreateBarrier;
@@ -3847,7 +3850,11 @@ test('stale GitHub governance publication never advances the durable fingerprint
 
     await runtime.v3.reconcilePlans();
     body = (await runtime.v3.getPlan(plan.planId, true))!;
-    assert.equal(successCalls, 3, 'periodic reconciliation continues until the exact head is observed');
+    assert.equal(
+      successCalls,
+      3,
+      'periodic reconciliation continues until the exact head is observed',
+    );
     assert.equal(body.governanceStatusRevision, HEAD);
     assert.equal(body.governanceStatusPlanStatus, 'SUCCEEDED');
   } finally {
