@@ -6,7 +6,7 @@ import { createRepositories, type V4Repositories } from './v4/persistence/reposi
 import { buildBoundedProjection } from './v4/supervisor/projection.js';
 import { DeliveryKernel, ExecutionKernel, PlanKernel, RecoveryKernel, ReviewKernel, WorkGraphKernel } from './v4/kernel/index.js';
 import { SupervisorActionExecutor, type SupervisorKernelPort } from './v4/supervisor/executor.js';
-import { OpenHandsSupervisorAdapter } from './v4/adapters/openhands.js';
+import { HttpOpenHandsSupervisorClient, OpenHandsSupervisorAdapter } from './v4/adapters/openhands.js';
 import { SupervisorWakeScheduler } from './v4/supervisor/scheduler.js';
 import { HttpSupervisorDecisionClient, SupervisorRuntime } from './v4/supervisor/runtime.js';
 
@@ -134,7 +134,7 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
     },
   };
   const supervisorActions = new SupervisorActionExecutor(repositories.actions, repositories.decisions, supervisorKernel, repositories.supervisors);
-  const openHands = new OpenHandsSupervisorAdapter();
+  const openHands = new OpenHandsSupervisorAdapter(env.MODEL_CP_OPENHANDS_URL ? new HttpOpenHandsSupervisorClient(env.MODEL_CP_OPENHANDS_URL, env.MODEL_CP_OPENHANDS_TOKEN) : undefined);
   const scheduler = new SupervisorWakeScheduler(repositories.supervisors, db);
   const modelClient = env.MODEL_CP_SUPERVISOR_ENDPOINT ? new HttpSupervisorDecisionClient(env.MODEL_CP_SUPERVISOR_ENDPOINT, env.MODEL_CP_SUPERVISOR_TOKEN) : undefined;
   const supervisorRuntime = new SupervisorRuntime(db, repositories.supervisors, scheduler, openHands, supervisorActions, modelClient);
