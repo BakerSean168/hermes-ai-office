@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { V4Error, failClosed } from '../domain/errors.js';
 
 export interface GitHubPullRequest {
@@ -20,30 +20,26 @@ export interface ExternalChangeRecord extends GitHubPullRequest {
 }
 
 export class GitHubPrIntake {
-  readonly changes = new Map<string, ExternalChangeRecord>();
-  constructor(readonly db?: DatabaseSync) {
-    this.db?.exec('CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  constructor(readonly db: DatabaseSync = new DatabaseSync(':memory:')) {
+    this.db.exec('CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)');
   }
 
   adopt(pr: GitHubPullRequest): ExternalChangeRecord {
     failClosed(pr.repository.length > 0, 'GITHUB_REPOSITORY_REQUIRED');
     failClosed(pr.baseSha.length > 0 && pr.headSha.length > 0, 'GITHUB_SHA_REQUIRED');
     const fingerprint = createHash('sha256').update([pr.repository, String(pr.number), pr.baseBranch, pr.baseSha, pr.headSha, pr.headRef, pr.headRepository].join('|')).digest('hex');
-    const durable = this.db?.prepare('SELECT * FROM external_changes WHERE fingerprint=?').get(fingerprint) as { external_change_id: string; repository: string; base_sha: string; head_sha: string; source_ref: string; status: ExternalChangeRecord['status']; evidence: string } | undefined;
+    const durable = this.db.prepare('SELECT * FROM external_changes WHERE fingerprint=?').get(fingerprint) as { external_change_id: string; repository: string; base_sha: string; head_sha: string; source_ref: string; status: ExternalChangeRecord['status']; evidence: string } | undefined;
     if (durable) return { ...pr, externalChangeId: durable.external_change_id, fingerprint, status: durable.status };
-    const existing = this.changes.get(fingerprint);
-    if (existing) return existing;
     const record: ExternalChangeRecord = { ...pr, externalChangeId: 'external-' + fingerprint.slice(0, 20), fingerprint, status: 'PENDING' };
-    this.changes.set(fingerprint, record);
-    this.db?.prepare('INSERT INTO external_changes(external_change_id,fingerprint,repository,base_sha,head_sha,source_ref,status,evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(record.externalChangeId, fingerprint, pr.repository, pr.baseSha, pr.headSha, pr.headRef, record.status, JSON.stringify(pr), new Date().toISOString(), new Date().toISOString());
+    this.db.prepare('INSERT INTO external_changes(external_change_id,fingerprint,repository,base_sha,head_sha,source_ref,status,evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(record.externalChangeId, fingerprint, pr.repository, pr.baseSha, pr.headSha, pr.headRef, record.status, JSON.stringify(pr), new Date().toISOString(), new Date().toISOString());
     return record;
   }
 
   invalidateIfHeadChanged(externalChangeId: string, currentHeadSha: string): ExternalChangeRecord {
-    const durable = this.db?.prepare('SELECT * FROM external_changes WHERE external_change_id=?').get(externalChangeId) as { external_change_id: string; fingerprint: string; repository: string; base_sha: string; head_sha: string; source_ref: string; status: ExternalChangeRecord['status']; evidence: string } | undefined;
-    const record = durable ? { repository: durable.repository, number: Number(JSON.parse(durable.evidence).number), baseBranch: JSON.parse(durable.evidence).baseBranch, baseSha: durable.base_sha, headSha: durable.head_sha, headRef: durable.source_ref, headRepository: JSON.parse(durable.evidence).headRepository, state: JSON.parse(durable.evidence).state, externalChangeId: durable.external_change_id, fingerprint: durable.fingerprint, status: durable.status } : Array.from(this.changes.values()).find((item) => item.externalChangeId === externalChangeId);
+    const durable = this.db.prepare('SELECT * FROM external_changes WHERE external_change_id=?').get(externalChangeId) as { external_change_id: string; fingerprint: string; repository: string; base_sha: string; head_sha: string; source_ref: string; status: ExternalChangeRecord['status']; evidence: string } | undefined;
+    const record = durable ? { repository: durable.repository, number: Number(JSON.parse(durable.evidence).number), baseBranch: JSON.parse(durable.evidence).baseBranch, baseSha: durable.base_sha, headSha: durable.head_sha, headRef: durable.source_ref, headRepository: JSON.parse(durable.evidence).headRepository, state: JSON.parse(durable.evidence).state, externalChangeId: durable.external_change_id, fingerprint: durable.fingerprint, status: durable.status } : undefined;
     if (!record) throw new V4Error('EXTERNAL_CHANGE_NOT_FOUND');
-    if (record.headSha !== currentHeadSha && record.status !== 'STALE') { record.status = 'STALE'; this.db?.prepare('UPDATE external_changes SET status=?,updated_at=? WHERE external_change_id=?').run('STALE', new Date().toISOString(), externalChangeId); }
+    if (record.headSha !== currentHeadSha && record.status !== 'STALE') { record.status = 'STALE'; this.db.prepare('UPDATE external_changes SET status=?,updated_at=? WHERE external_change_id=?').run('STALE', new Date().toISOString(), externalChangeId); }
     return record;
   }
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { V4Error, failClosed } from '../domain/errors.js';
 
 export interface JulesTaskRequest {
@@ -26,24 +26,20 @@ export interface JulesClient {
 interface JulesRow { idempotency_key: string; session_id: string; repository: string; base_revision: string; result: string; }
 
 export class JulesAdapter {
-  readonly requests = new Map<string, JulesTaskResult>();
-
-  constructor(readonly client?: JulesClient, readonly db?: DatabaseSync) {
-    this.db?.exec('CREATE TABLE IF NOT EXISTS v4_jules_sessions (idempotency_key TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_revision TEXT NOT NULL, result TEXT NOT NULL, updated_at TEXT NOT NULL)');
+  constructor(readonly client?: JulesClient, readonly db: DatabaseSync = new DatabaseSync(':memory:')) {
+    this.db.exec('CREATE TABLE IF NOT EXISTS v4_jules_sessions (idempotency_key TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_revision TEXT NOT NULL, result TEXT NOT NULL, updated_at TEXT NOT NULL)');
   }
 
   submit(input: JulesTaskRequest): JulesTaskResult {
     failClosed(input.idempotencyKey.length > 0, 'JULES_IDEMPOTENCY_REQUIRED');
     failClosed(input.repository.length > 0, 'JULES_REPOSITORY_REQUIRED');
     failClosed(input.baseRevision.length > 0, 'JULES_BASE_REQUIRED');
-    const durable = this.db?.prepare('SELECT * FROM v4_jules_sessions WHERE idempotency_key=?').get(input.idempotencyKey) as JulesRow | undefined;
+    const durable = this.db.prepare('SELECT * FROM v4_jules_sessions WHERE idempotency_key=?').get(input.idempotencyKey) as JulesRow | undefined;
     if (durable) {
       const existing = JSON.parse(durable.result) as JulesTaskResult;
       if (existing.repository !== input.repository || existing.baseRevision !== input.baseRevision) throw new V4Error('JULES_PROVENANCE_MISMATCH');
       return existing;
     }
-    const existing = this.requests.get(input.idempotencyKey);
-    if (existing) return existing;
     if (!this.client) throw new V4Error('JULES_CLIENT_UNAVAILABLE');
     const result = this.client.submit(input);
     this.persist(input, result);
@@ -57,16 +53,15 @@ export class JulesAdapter {
   }
 
   getResult(sessionId: string): JulesTaskResult {
-    const durable = this.db?.prepare('SELECT result FROM v4_jules_sessions WHERE session_id=?').get(sessionId) as { result: string } | undefined;
+    const durable = this.db.prepare('SELECT result FROM v4_jules_sessions WHERE session_id=?').get(sessionId) as { result: string } | undefined;
     if (durable) return JSON.parse(durable.result) as JulesTaskResult;
-    const result = this.client?.getResult(sessionId) ?? Array.from(this.requests.values()).find((item) => item.sessionId === sessionId);
+    const result = this.client?.getResult(sessionId);
     if (!result) throw new V4Error('JULES_SESSION_NOT_FOUND');
     return result;
   }
 
   private persist(request: JulesTaskRequest, result: JulesTaskResult): void {
-    this.requests.set(request.idempotencyKey, result);
-    this.db?.prepare('INSERT INTO v4_jules_sessions(idempotency_key,session_id,repository,base_revision,result,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET session_id=excluded.session_id,repository=excluded.repository,base_revision=excluded.base_revision,result=excluded.result,updated_at=excluded.updated_at').run(
+    this.db.prepare('INSERT INTO v4_jules_sessions(idempotency_key,session_id,repository,base_revision,result,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET session_id=excluded.session_id,repository=excluded.repository,base_revision=excluded.base_revision,result=excluded.result,updated_at=excluded.updated_at').run(
       request.idempotencyKey, result.sessionId, result.repository, result.baseRevision, JSON.stringify(result), new Date().toISOString());
   }
 }

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { DatabaseSync } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { V4Error, failClosed } from '../domain/errors.js';
 
 export interface MaintenanceProgram {
@@ -31,10 +31,8 @@ function fromRow(row: CandidateRow): ImprovementCandidate {
 }
 
 export class MaintenanceCandidateRegistry {
-  readonly candidates = new Map<string, ImprovementCandidate>();
-
-  constructor(readonly db?: DatabaseSync) {
-    this.db?.exec("CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT, pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+  constructor(readonly db: DatabaseSync = new DatabaseSync(':memory:')) {
+    this.db.exec("CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT, pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
   }
 
   create(program: MaintenanceProgram, input: { candidateId?: string; title: string; evidence: string[]; risk: ImprovementCandidate['risk'] }): { status: 'created' | 'existing'; candidate: ImprovementCandidate } {
@@ -42,25 +40,21 @@ export class MaintenanceCandidateRegistry {
     failClosed(input.title.trim().length > 0, 'CANDIDATE_TITLE_REQUIRED');
     failClosed(input.evidence.length > 0, 'CANDIDATE_EVIDENCE_REQUIRED');
     const fingerprint = createHash('sha256').update([program.projectKey, input.title.trim(), ...input.evidence.map((item) => item.trim()).sort()].join('|')).digest('hex');
-    const durable = this.db?.prepare('SELECT * FROM improvement_candidates WHERE fingerprint=?').get(fingerprint) as CandidateRow | undefined;
+    const durable = this.db.prepare('SELECT * FROM improvement_candidates WHERE fingerprint=?').get(fingerprint) as CandidateRow | undefined;
     if (durable) return { status: 'existing', candidate: fromRow(durable) };
-    const existing = this.candidates.get(fingerprint);
-    if (existing) return { status: 'existing', candidate: existing };
     const candidate: ImprovementCandidate = { candidateId: input.candidateId ?? 'candidate-' + fingerprint.slice(0, 20), programId: program.programId, fingerprint, title: input.title.trim(), evidence: input.evidence.map((item) => item.trim()), risk: input.risk, status: 'DISCOVERED' };
-    this.db?.prepare('INSERT INTO improvement_candidates(candidate_id,program_id,fingerprint,title,evidence,status,plan_id,pull_request_id,risk,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(candidate.candidateId, candidate.programId, candidate.fingerprint, candidate.title, JSON.stringify(candidate.evidence), candidate.status, null, null, candidate.risk, new Date().toISOString(), new Date().toISOString());
-    this.candidates.set(fingerprint, candidate);
+    this.db.prepare('INSERT INTO improvement_candidates(candidate_id,program_id,fingerprint,title,evidence,status,plan_id,pull_request_id,risk,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(candidate.candidateId, candidate.programId, candidate.fingerprint, candidate.title, JSON.stringify(candidate.evidence), candidate.status, null, null, candidate.risk, new Date().toISOString(), new Date().toISOString());
     return { status: 'created', candidate };
   }
 
   attachPlan(candidateId: string, planId: string): ImprovementCandidate {
-    const durable = this.db?.prepare('SELECT * FROM improvement_candidates WHERE candidate_id=?').get(candidateId) as CandidateRow | undefined;
-    const candidate = durable ? fromRow(durable) : Array.from(this.candidates.values()).find((item) => item.candidateId === candidateId);
+    const durable = this.db.prepare('SELECT * FROM improvement_candidates WHERE candidate_id=?').get(candidateId) as CandidateRow | undefined;
+    const candidate = durable ? fromRow(durable) : undefined;
     if (!candidate) throw new V4Error('CANDIDATE_NOT_FOUND');
     if (candidate.planId && candidate.planId !== planId) throw new V4Error('CANDIDATE_PLAN_IMMUTABLE');
     candidate.planId = planId;
     candidate.status = 'ADOPTED';
-    this.candidates.set(candidate.fingerprint, candidate);
-    this.db?.prepare('UPDATE improvement_candidates SET plan_id=?,status=?,updated_at=? WHERE candidate_id=? AND (plan_id IS NULL OR plan_id=?)').run(planId, 'ADOPTED', new Date().toISOString(), candidateId, planId);
+    this.db.prepare('UPDATE improvement_candidates SET plan_id=?,status=?,updated_at=? WHERE candidate_id=? AND (plan_id IS NULL OR plan_id=?)').run(planId, 'ADOPTED', new Date().toISOString(), candidateId, planId);
     return candidate;
   }
 }
