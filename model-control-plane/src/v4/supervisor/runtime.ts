@@ -22,7 +22,7 @@ export class OpenAICompatibleSupervisorDecisionClient implements SupervisorDecis
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: 'Return exactly one JSON object with version numeric 1 (not a string), planId, supervisorId, observationCursor integer, projectionDigest, idempotencyKey, preconditionSnapshot object, and action object. action must contain actionId, version numeric 1, type, planId, supervisorId, observationCursor, projectionDigest, idempotencyKey, preconditionSnapshot, payload, status PROPOSED. For NO_ACTION payload use {type:NO_ACTION,reason:string}. Do not return conversationId, reason, classification, prose, markdown, shell, workspace, credential, merge, deployment, or autonomous authority.' },
+          { role: 'system', content: 'Return exactly one JSON object with version numeric 1 (not a string), planId, supervisorId, observationCursor integer, projectionDigest, idempotencyKey, preconditionSnapshot object, and action object. action must contain actionId, version numeric 1, type, planId, supervisorId, observationCursor, projectionDigest, idempotencyKey, preconditionSnapshot, payload, status PROPOSED. For NO_ACTION payload use {type:NO_ACTION,reason:string}. Only choose an action whose required IDs are present in the projection; when no executionId/resourceId/workItemId/baseExecutionId is present, choose NO_ACTION. Do not return conversationId, reason, classification, prose, markdown, shell, workspace, credential, merge, deployment, or autonomous authority.' },
           { role: 'user', content: JSON.stringify({ conversationId: input.conversationId, supervisorId: input.supervisorId, planId: input.planId, projection: input.projection }) },
         ],
       }),
@@ -110,6 +110,7 @@ export class SupervisorRuntime {
     } catch (error) {
       const current = this.supervisors.getById(request.supervisorId);
       if (current.status === 'OBSERVING') this.supervisors.updateStatus(current.supervisorId, 'SLEEPING');
+      this.supervisors.deferWake(request.supervisorId, new Date(Date.now() + Math.min(this.leaseTtlMs, 30_000)).toISOString());
       const code = error instanceof V4Error ? (error.code + (error.message !== error.code ? ':' + error.message.replace(/[^A-Za-z0-9_.=:-]/g, '_').slice(0, 100) : '')) : error instanceof Error ? error.message.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 120) : 'SUPERVISOR_RUNTIME_FAILED';
       return { supervisorId: request.supervisorId, status: 'FAILED', code };
     } finally {

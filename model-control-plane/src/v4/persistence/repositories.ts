@@ -507,6 +507,13 @@ export class SupervisorRepository {
     return row ? this.getById(row.supervisor_id) : undefined;
   }
 
+  deferWake(supervisorId: string, nextWakeAt: string): MutationResult<Supervisor> {
+    const updatedAt = new Date().toISOString();
+    const result = this.db.prepare('UPDATE supervisors SET next_wake_at = ?, updated_at = ? WHERE supervisor_id = ?').run(nextWakeAt, updatedAt, supervisorId);
+    if (result.changes !== 1) throw new V4Error('SUPERVISOR_NOT_FOUND');
+    return { status: 'updated', value: this.getById(supervisorId) };
+  }
+
   updateStatus(supervisorId: string, next: SupervisorStatus): MutationResult<Supervisor> {
     return withTransaction(this.db, () => {
       const current = this.getById(supervisorId);
