@@ -249,6 +249,24 @@ test('supervisor runtime claims, asks typed model and releases lease', async () 
   db.close();
 });
 
+test('supervisor runtime releases lease after model failure and can be retried', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-failure-plan');
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  scheduler.schedule({ supervisorId: seeded.supervisor.supervisorId, observationCursor: 0, reason: 'UNKNOWN_FAILURE', requestedAt: new Date().toISOString() });
+  const host = new OpenHandsSupervisorAdapter({ createSupervisorConversation: () => ({ conversationId: 'conversation-failure', replaced: false }), resumeSupervisorConversation: () => ({ conversationId: 'conversation-failure', replaced: false }) });
+  const runtime = new SupervisorRuntime(db, seeded.repos.supervisors, scheduler, host, new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}), { decide: async () => { throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE'); } }, 'runtime-failure-owner');
+  const result = await runtime.runOnce();
+  assert.equal(result[0]?.status, 'FAILED');
+  const supervisor = seeded.repos.supervisors.getById(seeded.supervisor.supervisorId);
+  assert.equal(supervisor.lease, undefined);
+  assert.equal(supervisor.status, 'SLEEPING');
+  scheduler.schedule({ supervisorId: supervisor.supervisorId, observationCursor: supervisor.observationCursor, reason: 'OPERATOR_REQUEST', requestedAt: new Date().toISOString() });
+  assert.equal((await runtime.runOnce())[0]?.status, 'FAILED');
+  assert.equal(seeded.repos.supervisors.getById(supervisor.supervisorId).lease, undefined);
+  db.close();
+});
+
 test('supervisor HTTP model client bounds requests and rejects provider failures', async () => {
   let requestInit: RequestInit | undefined;
   const okClient = new HttpSupervisorDecisionClient('http://model.test/decision', 'secret', async (_input, init) => {
