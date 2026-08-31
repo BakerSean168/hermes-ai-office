@@ -186,6 +186,10 @@ test('OpenHands coding workers launch through Agent Harness capability materiali
   assert.match(dshVendorPatch, /expectedVersion = '0\.1\.1-rc\.2'/);
   assert.match(dshVendorPatch, /implicit maxTokens disabled/);
   assert.match(dshVendorPatch, /defaultMaxTokens/);
+  assert.match(dshVendorPatch, /unexpected SHA-256/);
+  assert.match(dshVendorPatch, /mixed file-generation state/);
+  assert.match(dshVendorPatch, /runtime final SHA-256 mismatch/);
+  assert.doesNotMatch(dshVendorPatch, /if \(source\.includes\(after\)\) return source/);
   const dshVerifier = fs.readFileSync(
     path.join(root, 'openhands_tools/verify_dsh_no_default_max_tokens.mjs'),
     'utf8',
