@@ -115,8 +115,6 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
         objective: payload.objective,
         relation: payload.relation,
       });
-      const parent = repositories.plans.getPlan(parentPlanId);
-      if (['READY', 'RUNNING'].includes(parent.status)) repositories.plans.updateStatus(parentPlanId, 'WAITING_FOR_SYSTEM_REPAIR');
       return { code: 'CHILD_PLAN_CREATED', linkedPlanId: result.plan.planId };
     },
     pauseForResource: (payload, planId) => {

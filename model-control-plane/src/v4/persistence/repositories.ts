@@ -79,6 +79,70 @@ export class PlanRepository {
     });
   }
 
+  createChildPlan(input: {
+    parentPlanId: string;
+    childPlanId: string;
+    repositoryPath: string;
+    objective: string;
+    relation: 'SYSTEM_REPAIR' | 'INFRASTRUCTURE_REPAIR' | 'FOLLOW_UP';
+  }): { plan: Plan; relationshipId: string } {
+    return withTransaction(this.db, () => {
+      const parent = this.getPlan(input.parentPlanId);
+      const childInput: CreatePlanInput = {
+        planId: input.childPlanId,
+        idempotencyKey: 'child-plan:' + input.parentPlanId + ':' + input.childPlanId,
+        projectKey: parent.projectKey,
+        objective: input.objective,
+        repositoryPath: input.repositoryPath,
+        baseRevision: parent.currentRevision,
+        parentPlanId: parent.planId,
+      };
+      validatePlanInput(childInput);
+      let row = this.db.prepare('SELECT * FROM plans WHERE idempotency_key=?').get(childInput.idempotencyKey) as PlanRow | undefined;
+      if (row) {
+        if (row.plan_id !== input.childPlanId || row.parent_plan_id !== parent.planId || row.objective !== input.objective || row.repository_path !== input.repositoryPath || row.base_revision !== parent.currentRevision) {
+          throw new DuplicateKeyError(childInput.idempotencyKey);
+        }
+      } else {
+        const conflictingId = this.db.prepare('SELECT plan_id FROM plans WHERE plan_id=?').get(input.childPlanId);
+        if (conflictingId) throw new DuplicateKeyError(input.childPlanId);
+        const createdAt = iso();
+        this.db.prepare('INSERT INTO plans(plan_id,idempotency_key,project_key,objective,repository_path,base_revision,current_revision,status,parent_plan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
+          input.childPlanId, childInput.idempotencyKey, childInput.projectKey, childInput.objective, childInput.repositoryPath,
+          childInput.baseRevision, childInput.baseRevision, 'DRAFT', parent.planId, createdAt, createdAt);
+        this.events.appendInTransaction(makeEvent(input.childPlanId, 'PLAN', 'PLAN_CREATED', {
+          planId: input.childPlanId, projectKey: childInput.projectKey, objective: childInput.objective,
+          repositoryPath: childInput.repositoryPath, baseRevision: childInput.baseRevision, parentPlanId: parent.planId,
+        }, childInput.idempotencyKey));
+        row = this.db.prepare('SELECT * FROM plans WHERE plan_id=?').get(input.childPlanId) as unknown as PlanRow;
+      }
+
+      const existing = this.db.prepare('SELECT relationship_id,parent_plan_id,kind FROM plan_relationships WHERE child_plan_id=?').get(input.childPlanId) as { relationship_id: string; parent_plan_id: string; kind: string } | undefined;
+      let relationshipId: string;
+      if (existing) {
+        if (existing.parent_plan_id !== parent.planId || existing.kind !== input.relation) throw new V4Error('PARENT_CHILD_PARENT_CONFLICT');
+        relationshipId = existing.relationship_id;
+      } else {
+        if (parent.planId === input.childPlanId) throw new V4Error('PARENT_CHILD_SELF_CYCLE');
+        const cycle = this.db.prepare('WITH RECURSIVE descendants(plan_id) AS (SELECT child_plan_id FROM plan_relationships WHERE parent_plan_id=? UNION SELECT relationships.child_plan_id FROM plan_relationships relationships JOIN descendants ON relationships.parent_plan_id=descendants.plan_id) SELECT plan_id FROM descendants WHERE plan_id=? LIMIT 1').get(input.childPlanId, parent.planId);
+        if (cycle) throw new V4Error('PARENT_CHILD_CYCLE');
+        relationshipId = id('relationship');
+        this.db.prepare('INSERT INTO plan_relationships(relationship_id,parent_plan_id,child_plan_id,kind,created_at) VALUES(?,?,?,?,?)').run(
+          relationshipId, parent.planId, input.childPlanId, input.relation, iso());
+        this.events.appendInTransaction(makeEvent(relationshipId, 'RELATIONSHIP', 'PARENT_CHILD_CREATED', {
+          relationshipId, parentPlanId: parent.planId, childPlanId: input.childPlanId, kind: input.relation,
+        }));
+      }
+
+      if ((input.relation === 'SYSTEM_REPAIR' || input.relation === 'INFRASTRUCTURE_REPAIR') && (parent.status === 'READY' || parent.status === 'RUNNING')) {
+        const updated = transitionPlan(parent, 'WAITING_FOR_SYSTEM_REPAIR', iso());
+        this.db.prepare('UPDATE plans SET status=?,updated_at=? WHERE plan_id=? AND status=?').run(updated.status, updated.updatedAt, parent.planId, parent.status);
+        this.events.appendInTransaction(makeEvent(parent.planId, 'PLAN', 'PLAN_STATUS_CHANGED', { from: parent.status, to: updated.status }));
+      }
+      return { plan: this.getPlan(row.plan_id), relationshipId };
+    });
+  }
+
   getPlan(planId: string): Plan {
     const row = this.db.prepare('SELECT * FROM plans WHERE plan_id=?').get(planId) as PlanRow | undefined;
     if (!row) throw new V4Error('PLAN_NOT_FOUND', 'Plan not found: ' + planId);

@@ -21,24 +21,7 @@ export class PlanKernel {
     objective: string;
     relation: 'SYSTEM_REPAIR' | 'INFRASTRUCTURE_REPAIR' | 'FOLLOW_UP';
   }): { plan: Plan; relationshipId: string } {
-    const parent = this.repositories.plans.getPlan(input.parentPlanId);
-    const result = this.repositories.plans.createPlan({
-      planId: input.childPlanId,
-      idempotencyKey: 'child-plan:' + input.parentPlanId + ':' + input.childPlanId,
-      projectKey: parent.projectKey,
-      objective: input.objective,
-      repositoryPath: input.repositoryPath,
-      baseRevision: parent.currentRevision,
-      parentPlanId: parent.planId,
-    });
-    const child = result.value ?? this.repositories.plans.getPlan(input.childPlanId);
-    const existingParent = this.repositories.relationships.getParent(child.planId);
-    if (existingParent && existingParent !== parent.planId) throw new V4Error('PARENT_CHILD_PARENT_CONFLICT');
-    const relationship = existingParent
-      ? { value: { relationshipId: 'existing', parentPlanId: parent.planId, childPlanId: child.planId, kind: input.relation } }
-      : this.repositories.relationships.createParentChild({ parentPlanId: parent.planId, childPlanId: child.planId, kind: input.relation });
-    if (!relationship.value) throw new V4Error('PARENT_CHILD_CREATE_FAILED');
-    return { plan: child, relationshipId: relationship.value.relationshipId };
+    return this.repositories.plans.createChildPlan(input);
   }
 
   ensureReadyGraph(planId: string, items: readonly {
