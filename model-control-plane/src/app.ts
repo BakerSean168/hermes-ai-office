@@ -8,6 +8,7 @@ import { DeliveryKernel, ExecutionKernel, PlanKernel, RecoveryKernel, ReviewKern
 import { SupervisorActionExecutor, type SupervisorKernelPort } from './v4/supervisor/executor.js';
 import { OpenHandsSupervisorAdapter } from './v4/adapters/openhands.js';
 import { SupervisorWakeScheduler } from './v4/supervisor/scheduler.js';
+import { HttpSupervisorDecisionClient, SupervisorRuntime } from './v4/supervisor/runtime.js';
 
 export interface BuildControlPlaneOptions {
   env?: NodeJS.ProcessEnv;
@@ -25,7 +26,7 @@ export interface ControlPlaneRuntime {
   port: number;
   repositories: V4Repositories;
   kernels: { plan: PlanKernel; graph: WorkGraphKernel; execution: ExecutionKernel; review: ReviewKernel; recovery: RecoveryKernel; delivery: DeliveryKernel };
-  supervisor: { actions: SupervisorActionExecutor; openHands: OpenHandsSupervisorAdapter; scheduler: SupervisorWakeScheduler };
+  supervisor: { actions: SupervisorActionExecutor; openHands: OpenHandsSupervisorAdapter; scheduler: SupervisorWakeScheduler; runtime: SupervisorRuntime };
 }
 
 function bodyRecord(value: unknown): Record<string, unknown> {
@@ -135,6 +136,8 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
   const supervisorActions = new SupervisorActionExecutor(repositories.actions, repositories.decisions, supervisorKernel, repositories.supervisors);
   const openHands = new OpenHandsSupervisorAdapter();
   const scheduler = new SupervisorWakeScheduler(repositories.supervisors, db);
+  const modelClient = env.MODEL_CP_SUPERVISOR_ENDPOINT ? new HttpSupervisorDecisionClient(env.MODEL_CP_SUPERVISOR_ENDPOINT, env.MODEL_CP_SUPERVISOR_TOKEN) : undefined;
+  const supervisorRuntime = new SupervisorRuntime(db, repositories.supervisors, scheduler, openHands, supervisorActions, modelClient);
   const app = Fastify({ logger: options.logger ?? true });
 
   app.get('/api/health', async () => ({
@@ -201,9 +204,12 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
     }
     void reply.code(500).send({ error: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) });
   });
-  app.addHook('onClose', async () => { db.close(); });
+  const runtimeInterval = env.MODEL_CP_SUPERVISOR_RUNTIME_ENABLED === 'true'
+    ? setInterval(() => { void supervisorRuntime.runOnce().catch(() => undefined); }, Number(env.MODEL_CP_SUPERVISOR_POLL_MS ?? 5000))
+    : undefined;
+  app.addHook('onClose', async () => { if (runtimeInterval) clearInterval(runtimeInterval); db.close(); });
 
   const host = env.MODEL_CP_HOST ?? '127.0.0.1';
   const port = Number(env.MODEL_CP_PORT ?? 8320);
-  return { app, db, dbFile: boot.dbFile, host, port, repositories, kernels, supervisor: { actions: supervisorActions, openHands, scheduler } };
+  return { app, db, dbFile: boot.dbFile, host, port, repositories, kernels, supervisor: { actions: supervisorActions, openHands, scheduler, runtime: supervisorRuntime } };
 }
