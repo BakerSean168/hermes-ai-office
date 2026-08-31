@@ -40,7 +40,8 @@ export class GitHubPrIntake {
   }
 
   invalidateIfHeadChanged(externalChangeId: string, currentHeadSha: string): ExternalChangeRecord {
-    const record = Array.from(this.changes.values()).find((item) => item.externalChangeId === externalChangeId);
+    const durable = this.db?.prepare('SELECT * FROM external_changes WHERE external_change_id=?').get(externalChangeId) as { external_change_id: string; fingerprint: string; repository: string; base_sha: string; head_sha: string; source_ref: string; status: ExternalChangeRecord['status']; evidence: string } | undefined;
+    const record = durable ? { repository: durable.repository, number: Number(JSON.parse(durable.evidence).number), baseBranch: JSON.parse(durable.evidence).baseBranch, baseSha: durable.base_sha, headSha: durable.head_sha, headRef: durable.source_ref, headRepository: JSON.parse(durable.evidence).headRepository, state: JSON.parse(durable.evidence).state, externalChangeId: durable.external_change_id, fingerprint: durable.fingerprint, status: durable.status } : Array.from(this.changes.values()).find((item) => item.externalChangeId === externalChangeId);
     if (!record) throw new V4Error('EXTERNAL_CHANGE_NOT_FOUND');
     if (record.headSha !== currentHeadSha && record.status !== 'STALE') { record.status = 'STALE'; this.db?.prepare('UPDATE external_changes SET status=?,updated_at=? WHERE external_change_id=?').run('STALE', new Date().toISOString(), externalChangeId); }
     return record;
