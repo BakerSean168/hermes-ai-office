@@ -194,6 +194,7 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   title TEXT NOT NULL,
   evidence TEXT NOT NULL,
   status TEXT NOT NULL,
+  risk TEXT NOT NULL DEFAULT 'LOW',
   plan_id TEXT,
   pull_request_id TEXT,
   created_at TEXT NOT NULL,

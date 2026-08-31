@@ -30,7 +30,7 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
-  'CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT, pull_request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
+  "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT, pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
   "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 1, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
@@ -62,6 +62,8 @@ function dropAllTables(db: DatabaseSync): void {
 
 function createSchema(db: DatabaseSync): void {
   db.exec(SCHEMA_V4_SQL);
+  const candidateColumns = db.prepare("PRAGMA table_info(improvement_candidates)").all() as unknown as Array<{ name: string }>;
+  if (!candidateColumns.some((column) => column.name === 'risk')) db.exec("ALTER TABLE improvement_candidates ADD COLUMN risk TEXT NOT NULL DEFAULT 'LOW'");
   const meta = db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id = 'pixel-v4'").get() as { schema_version?: number } | undefined;
   if (meta?.schema_version !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
 }
