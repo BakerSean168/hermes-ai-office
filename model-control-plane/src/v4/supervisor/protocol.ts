@@ -139,7 +139,7 @@ export function parseSupervisorDecision(raw: string, now = new Date().toISOStrin
   try { parsed = JSON.parse(raw) as unknown; } catch (error) { throw new V4Error('DECISION_JSON_INVALID', 'Decision must be one JSON object', error); }
   const root = asRecord(parsed, 'DECISION_OBJECT_REQUIRED');
   assertSafeEventPayload(root);
-  if (root.version !== SUPERVISOR_PROTOCOL_VERSION && root.version !== 'PIXEL_SUPERVISOR_DECISION_V1') throw new V4Error('DECISION_VERSION_UNSUPPORTED');
+  if (root.version !== SUPERVISOR_PROTOCOL_VERSION && root.version !== 'PIXEL_SUPERVISOR_DECISION_V1') throw new V4Error('DECISION_VERSION_UNSUPPORTED', 'version=' + typeof root.version + ':' + String(root.version).slice(0, 40));
   const planId = text(root.planId, 'DECISION_PLAN_REQUIRED', 200);
   const supervisorId = text(root.supervisorId, 'DECISION_SUPERVISOR_REQUIRED', 200);
   if (typeof root.observationCursor !== 'number' || !Number.isInteger(root.observationCursor) || root.observationCursor < 0) throw new V4Error('DECISION_CURSOR_INVALID');
