@@ -14,11 +14,12 @@ export interface SupervisorDecisionClient {
 }
 
 export class HttpSupervisorDecisionClient implements SupervisorDecisionClient {
-  constructor(readonly endpoint: string, readonly bearerToken?: string, readonly fetchImpl: typeof fetch = fetch) {}
+  constructor(readonly endpoint: string, readonly bearerToken?: string, readonly fetchImpl: typeof fetch = fetch, readonly timeoutMs = 30_000) {}
   async decide(input: { conversationId: string; supervisorId: string; planId: string; projection: SupervisorProjection }): Promise<string> {
     const response = await this.fetchImpl(this.endpoint, {
       method: 'POST',
       headers: Object.fromEntries([['content-type', 'application/json'], ...(this.bearerToken ? [['authorization', 'Bearer ' + this.bearerToken]] : [])]),
+      signal: AbortSignal.timeout(this.timeoutMs),
       body: JSON.stringify({ protocol: 'PIXEL_SUPERVISOR_DECISION_V1', conversationId: input.conversationId, supervisorId: input.supervisorId, planId: input.planId, projection: input.projection }),
     });
     if (!response.ok) throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE', 'Supervisor model HTTP ' + response.status);
