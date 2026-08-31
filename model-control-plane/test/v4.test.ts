@@ -23,6 +23,7 @@ import { JulesAdapter } from '../src/v4/adapters/jules.js';
 import { GitHubPrIntake } from '../src/v4/adapters/github.js';
 import { AntiGravityReadinessAdapter } from '../src/v4/adapters/antigravity.js';
 import { MaintenanceCandidateRegistry } from '../src/v4/adapters/maintenance.js';
+import { SupervisorWakeScheduler } from '../src/v4/supervisor/scheduler.js';
 
 function memory() {
   return openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
@@ -206,6 +207,22 @@ test('supervisor projection survives database restart and conversation recovery 
   const after = buildBoundedProjection(db, seeded.supervisor.supervisorId);
   assert.equal(after.digest, before.digest);
   assert.equal(after.cursor, before.cursor);
+  db.close();
+});
+
+test('supervisor wake queue is durable, idempotent and atomically drained', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-wake-'));
+  const file = path.join(directory, 'control-plane.sqlite');
+  let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  const scheduler = new SupervisorWakeScheduler(undefined, db);
+  const wake = { supervisorId: 'sup-1', observationCursor: 4, reason: 'EVENT' as const, requestedAt: '2026-01-01T00:00:00.000Z' };
+  assert.equal(scheduler.schedule(wake).status, 'created');
+  assert.equal(scheduler.schedule(wake).status, 'existing');
+  db.close();
+  db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  const recovered = new SupervisorWakeScheduler(undefined, db);
+  assert.deepEqual(recovered.drain(), [wake]);
+  assert.deepEqual(recovered.drain(), []);
   db.close();
 });
 
