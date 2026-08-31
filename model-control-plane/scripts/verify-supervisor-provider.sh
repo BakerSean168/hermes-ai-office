@@ -3,6 +3,7 @@ set -euo pipefail
 
 env_file="${MODEL_CP_SUPERVISOR_ENV_FILE:-/srv/hermes-personal/secrets/openhands-v3.env}"
 base_url="${MODEL_CP_SUPERVISOR_BASE_URL:-https://oracle.taile92a8e.ts.net:10446}"
+if [[ ! -r "$env_file" && $EUID -ne 0 ]]; then exec sudo -n "$0" "$@"; fi
 if [[ ! -r "$env_file" ]]; then
   echo "provider env file missing: $env_file" >&2
   exit 1
