@@ -41,7 +41,7 @@ export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient 
 
   private url(path: string): string { return this.baseUrl.replace(/\/$/, '') + path; }
   private headers(): Record<string, string> {
-    return Object.fromEntries([['content-type', 'application/json'], ...(this.bearerToken ? [['authorization', 'Bearer ' + this.bearerToken]] : [])]);
+    return Object.fromEntries([['content-type', 'application/json'], ...(this.bearerToken ? [['X-Session-API-Key', this.bearerToken]] : [])]);
   }
   private async parse(response: Response, replaced: boolean): Promise<SupervisorConversation> {
     if (!response.ok) throw new Error('OPENHANDS_SUPERVISOR_HTTP_' + response.status);

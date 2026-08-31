@@ -134,7 +134,7 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
     },
   };
   const supervisorActions = new SupervisorActionExecutor(repositories.actions, repositories.decisions, supervisorKernel, repositories.supervisors);
-  const openHands = new OpenHandsSupervisorAdapter(env.MODEL_CP_OPENHANDS_URL ? new HttpOpenHandsSupervisorClient(env.MODEL_CP_OPENHANDS_URL, env.MODEL_CP_OPENHANDS_TOKEN) : undefined);
+  const openHands = new OpenHandsSupervisorAdapter(env.MODEL_CP_OPENHANDS_URL ? new HttpOpenHandsSupervisorClient(env.MODEL_CP_OPENHANDS_URL, env.MODEL_CP_OPENHANDS_TOKEN ?? env.SESSION_API_KEY) : undefined);
   const scheduler = new SupervisorWakeScheduler(repositories.supervisors, db);
   const modelClient = env.MODEL_CP_SUPERVISOR_ENDPOINT
     ? new HttpSupervisorDecisionClient(env.MODEL_CP_SUPERVISOR_ENDPOINT, env.MODEL_CP_SUPERVISOR_TOKEN)

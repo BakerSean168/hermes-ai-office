@@ -9,7 +9,13 @@ Type=simple
 WorkingDirectory=/home/dev/projects/pixel-agents
 ExecStart=/usr/bin/node model-control-plane/dist/main.js
 ExecStartPre=/usr/bin/test -f /home/dev/projects/pixel-agents/model-control-plane/dist/main.js
+EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
+EnvironmentFile=/srv/hermes-personal/secrets/openhands-v3.env
 Environment=NODE_ENV=production
+Environment=MODEL_CP_OPENHANDS_URL=http://127.0.0.1:18000
+Environment=MODEL_CP_SUPERVISOR_MODEL=gpt-5.6-luna
+Environment=MODEL_CP_SUPERVISOR_RUNTIME_ENABLED=true
+Environment=MODEL_CP_SUPERVISOR_POLL_MS=5000
 Environment=MODEL_CP_HOST=127.0.0.1
 Environment=MODEL_CP_PORT=8320
 Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/pixel-v4.sqlite
