@@ -104,7 +104,8 @@ export class SupervisorRuntime {
     } catch (error) {
       const current = this.supervisors.getById(request.supervisorId);
       if (current.status === 'OBSERVING') this.supervisors.updateStatus(current.supervisorId, 'SLEEPING');
-      return { supervisorId: request.supervisorId, status: 'FAILED', code: error instanceof V4Error ? error.code : 'SUPERVISOR_RUNTIME_FAILED' };
+      const code = error instanceof V4Error ? error.code : error instanceof Error ? error.message.replace(/[^A-Za-z0-9_.:-]/g, '_').slice(0, 120) : 'SUPERVISOR_RUNTIME_FAILED';
+      return { supervisorId: request.supervisorId, status: 'FAILED', code };
     } finally {
       this.supervisors.releaseLease(request.supervisorId, this.ownerId, claim.value.leaseToken);
     }
