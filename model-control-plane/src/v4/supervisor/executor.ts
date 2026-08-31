@@ -52,6 +52,9 @@ export class SupervisorActionExecutor {
       const result = this.dispatch(action);
       if (result.code === 'KERNEL_PORT_UNAVAILABLE') throw new V4Error(result.code);
       const final = this.actions.recordSuccess(action.actionId, { ...result, completedAt: new Date().toISOString() });
+      if (result.linkedExecutionId) this.actions.attachExecution(action.actionId, result.linkedExecutionId);
+      if (result.linkedPlanId) this.actions.attachPlan(action.actionId, result.linkedPlanId);
+      if (result.pullRequestId) this.actions.attachPullRequest(action.actionId, result.pullRequestId);
       return { actionId: action.actionId, status: 'SUCCEEDED', code: result.code, action: final.value };
     } catch (error) {
       const code = error instanceof V4Error ? error.code : 'ACTION_EXECUTION_FAILED';

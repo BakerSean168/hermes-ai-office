@@ -22,7 +22,7 @@ export class DeliveryKernel {
 
   merge(policy: DeliveryPolicy, evidence: DeliveryEvidence, currentHeadSha: string, pullRequestId: string): { mergeSha?: string; prepared: boolean } {
     this.validate(policy, evidence, currentHeadSha);
-    if (!this.port?.merge) return { prepared: true };
+    if (!this.port?.merge) throw new V4Error('REAL_MERGE_DISABLED');
     const result = this.port.merge({ pullRequestId, expectedHeadSha: currentHeadSha });
     if (result.mergeSha.length === 0) throw new V4Error('DELIVERY_MERGE_EVIDENCE_INVALID');
     return { prepared: true, mergeSha: result.mergeSha };
