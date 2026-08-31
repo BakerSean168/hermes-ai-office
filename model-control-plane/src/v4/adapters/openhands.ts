@@ -19,7 +19,7 @@ export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient 
       headers: this.headers(),
       signal: AbortSignal.timeout(this.timeoutMs),
       body: JSON.stringify({
-        agent: 'CodeActAgent',
+        agent: { kind: 'Agent', llm: { model: 'litellm_proxy/gpt-5.6-luna' }, include_default_tools: [] },
         initial_message: { role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true },
         max_iterations: 1,
         autotitle: false,
