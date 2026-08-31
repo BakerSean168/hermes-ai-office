@@ -724,6 +724,245 @@ class PlanDelivery implements PlanDeliveryPort {
   }
 }
 
+test('operator attestation recovers legacy writer result revisions without weakening repository provenance', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-plan-legacy-result-revision-'));
+  const dbFile = path.join(directory, 'control-plane.sqlite');
+  const host = new PlanHost();
+  const WRITER_HEAD = '2222222222222222222222222222222222222222';
+  let integrationCalls = 0;
+  const seenIntegrationInputs: Array<Parameters<WorkspaceProvisioningPort['integrateBatch']>[0]> =
+    [];
+  const completionInputs: Array<
+    Parameters<WorkspaceProvisioningPort['verifyWriterCompletion']>[0]
+  > = [];
+  const legacyRepairWorkspace: WorkspaceProvisioningPort = {
+    ...workspace,
+    async verifyWriterCompletion(input) {
+      completionInputs.push(input);
+      return { startRevision: input.startRevision, headRevision: WRITER_HEAD };
+    },
+    async integrateBatch(input) {
+      integrationCalls += 1;
+      seenIntegrationInputs.push(input);
+      if (integrationCalls === 1) {
+        throw new Error('BATCH_INTEGRATION_CONFLICT:GIT_COMMAND_FAILED:simulated conflict');
+      }
+      return {
+        revision: 'legacy-recovered-candidate',
+        ref: `refs/ai-office/plans/${input.planId}/batches/${input.batchKey}`,
+      };
+    },
+  };
+  const runtime = await buildControlPlane({
+    dbFile,
+    logger: false,
+    env: {
+      ...process.env,
+      MODEL_CP_V3_PLAN_REVIEW_STRATEGY: 'BATCH_ONLY',
+    },
+    v3ExecutionHost: host,
+    v3Workspace: legacyRepairWorkspace,
+    v3BackendAvailability: {
+      'dsh-acp': true,
+      'opencode-acp': true,
+      'openhands-builtin': true,
+      'zcode-acp': false,
+      'claude-code-acp': false,
+      'codex-acp': false,
+      'codex-business-worker-headless': true,
+      'codex-business-review-headless': true,
+      'codex-review-headless': true,
+    },
+  });
+
+  try {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v3/development/plans',
+      headers: { 'idempotency-key': 'batch-only-legacy-result-revision' },
+      payload: {
+        projectKey: 'memoflow',
+        objective: 'Integrate two batch-only changes through a durable repair.',
+        analysisSummary:
+          'Exercise legacy provenance recovery after the repair is already scheduled.',
+        repository: { path: '/tmp/memoflow', baseRevision: 'base-revision' },
+        batches: [
+          {
+            key: 'batch-1',
+            title: 'Legacy repair batch',
+            workItems: [
+              {
+                key: 'first',
+                title: 'First change',
+                objective: 'Implement the first change.',
+                acceptanceCriteria: ['First change remains present.'],
+              },
+              {
+                key: 'second',
+                title: 'Second change',
+                objective: 'Implement the second change.',
+                acceptanceCriteria: ['Second change remains present.'],
+              },
+            ],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    const planId = created.json().planId as string;
+
+    await runtime.v3.reconcilePlans(planId);
+    let body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const originalItems = body.batches[0].workItems;
+    const originalExecutionIds = originalItems.map(
+      (item: { executions: Array<{ executionId: string }> }) => item.executions[0].executionId,
+    );
+    for (const item of originalItems) {
+      host.succeed(item.executions[0].refs.openhandsConversationId, 'IMPLEMENTED');
+    }
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const repair = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    assert.ok(repair);
+    assert.match(repair.objective, new RegExp(`approved revision: ${WRITER_HEAD}`));
+
+    const db = new DatabaseSync(dbFile);
+    try {
+      const degrade = db.prepare(
+        `UPDATE v3_execution_links
+            SET repository_root=NULL,result_revision=NULL,writer_start_revision=NULL
+          WHERE execution_id=?`,
+      );
+      for (const executionId of originalExecutionIds) degrade.run(executionId);
+    } finally {
+      db.close();
+    }
+    completionInputs.length = 0;
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    const runningRepair = body.batches[0].workItems.find((item: { key: string }) =>
+      item.key.startsWith('integration-repair-b1-'),
+    );
+    host.succeed(
+      runningRepair.executions[0].refs.openhandsConversationId,
+      'INTEGRATED AND COMMITTED',
+    );
+
+    await runtime.v3.reconcilePlans(planId);
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'BLOCKED');
+    assert.equal(body.blockedReason, 'BATCH_INTEGRATION_EVIDENCE_MISSING');
+    assert.equal(integrationCalls, 1);
+
+    const rejected = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/legacy-result-revisions`,
+      payload: {
+        items: [
+          {
+            workItemKey: originalItems[0].key,
+            executionId: originalExecutionIds[0],
+            resultRevision: WRITER_HEAD,
+          },
+          {
+            workItemKey: originalItems[1].key,
+            executionId: originalExecutionIds[1],
+            resultRevision: '3333333333333333333333333333333333333333',
+          },
+        ],
+      },
+    });
+    assert.equal(rejected.statusCode, 409);
+    assert.equal(rejected.json().error.code, 'LEGACY_RESULT_ATTESTATION_REVISION_MISMATCH');
+    const afterRejected = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(afterRejected.status, 'BLOCKED');
+    const rejectedDb = new DatabaseSync(dbFile);
+    try {
+      for (const executionId of originalExecutionIds) {
+        const row = rejectedDb
+          .prepare('SELECT result_revision FROM v3_execution_links WHERE execution_id=?')
+          .get(executionId) as { result_revision: string | null };
+        assert.equal(row.result_revision, null, 'failed multi-item attestation is all-or-nothing');
+      }
+    } finally {
+      rejectedDb.close();
+    }
+    completionInputs.length = 0;
+
+    const attested = await runtime.app.inject({
+      method: 'POST',
+      url: `/api/v3/development/plans/${planId}/legacy-result-revisions`,
+      payload: {
+        items: originalItems.map((item: { key: string }, index: number) => ({
+          workItemKey: item.key,
+          executionId: originalExecutionIds[index],
+          resultRevision: WRITER_HEAD,
+        })),
+      },
+    });
+    assert.equal(attested.statusCode, 200);
+    assert.equal(attested.json().accepted, true);
+
+    body = (
+      await runtime.app.inject({ method: 'GET', url: `/api/v3/development/plans/${planId}` })
+    ).json();
+    assert.equal(body.status, 'RUNNING');
+    assert.equal(body.batches[0].status, 'RUNNING');
+    assert.equal(body.batches[0].blockedReason, undefined);
+    assert.equal(body.batches[0].integratedRevision, 'legacy-recovered-candidate');
+    assert.equal(integrationCalls, 2);
+    assert.deepEqual(seenIntegrationInputs[1]?.requiredAncestorRevisions, [WRITER_HEAD]);
+    assert.equal(
+      body.events.filter(
+        (event: { type: string }) => event.type === 'LEGACY_RESULT_REVISION_ATTESTED',
+      ).length,
+      2,
+    );
+    const legacyCompletionInputs = completionInputs.filter((input) =>
+      originalExecutionIds.some((executionId: string) => input.workspaceRef.includes(executionId)),
+    );
+    assert.equal(legacyCompletionInputs.length, 2);
+    assert.ok(legacyCompletionInputs.every((input) => input.startRevision === 'base-revision'));
+
+    const verifyDb = new DatabaseSync(dbFile);
+    try {
+      for (const executionId of originalExecutionIds) {
+        const row = verifyDb
+          .prepare(
+            'SELECT repository_root,result_revision,writer_start_revision FROM v3_execution_links WHERE execution_id=?',
+          )
+          .get(executionId) as {
+          repository_root: string | null;
+          result_revision: string | null;
+          writer_start_revision: string | null;
+        };
+        assert.equal(row.repository_root, null);
+        assert.equal(row.writer_start_revision, null);
+        assert.equal(row.result_revision, WRITER_HEAD);
+      }
+    } finally {
+      verifyDb.close();
+    }
+  } finally {
+    await runtime.app.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('a durable plan survives worker timeout, failed review, integration failure, and gateway restart', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-office-plan-'));
   const dbFile = path.join(directory, 'control-plane.sqlite');

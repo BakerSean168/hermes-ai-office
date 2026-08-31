@@ -885,11 +885,12 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
           if (!record.writerStartRevision) {
             throw new Error('WRITER_COMPLETION_BASELINE_MISSING');
           }
-          await this.#workspace.verifyWriterCompletion({
+          const completion = await this.#workspace.verifyWriterCompletion({
             executionId: record.executionId,
             workspaceRef: record.workspaceRef,
             startRevision: record.writerStartRevision,
           });
+          record = this.#links.attachResultRevision(record.executionId, completion.headRevision);
           record = this.#links.updateStatus(record.executionId, 'SUCCEEDED', observedAtMs);
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error);
@@ -1010,6 +1011,10 @@ export class DevelopmentExecutionService implements DevelopmentExecutionServiceP
 
   resumePlanFromHandoff(planId: string, handoff: unknown) {
     return this.#planOrchestrator.resumeFromHandoff(planId, handoff);
+  }
+
+  attestLegacyResultRevisions(planId: string, input: unknown) {
+    return this.#planOrchestrator.attestLegacyResultRevisions(planId, input);
   }
 
   reconcilePlans(planId?: string, recoverBlocked = false, recoveryMode: PlanRecoveryMode = 'AUTO') {

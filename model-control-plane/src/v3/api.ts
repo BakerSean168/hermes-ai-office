@@ -28,7 +28,8 @@ function errorStatus(code: string): number {
     code.includes('UNSUPPORTED') ||
     code === 'HANDOFF_WORK_ITEM_UNKNOWN' ||
     code === 'HANDOFF_NEXT_WORK_ITEM_UNKNOWN' ||
-    code === 'HANDOFF_SYSTEM_WORK_ITEM_NOT_ALLOWED'
+    code === 'HANDOFF_SYSTEM_WORK_ITEM_NOT_ALLOWED' ||
+    code === 'LEGACY_RESULT_ATTESTATION_WORK_ITEM_UNKNOWN'
   )
     return 400;
   if (
@@ -501,6 +502,31 @@ export function registerV3Routes(
           planId: plan.planId,
           accepted: true,
           status: plan.status,
+          currentRevision: plan.currentRevision,
+          statusUrl: `/api/v3/development/plans/${plan.planId}`,
+        };
+      } catch (error) {
+        const code = errorCode(error);
+        reply.code(errorStatus(code));
+        return { error: { code } };
+      }
+    },
+  );
+
+  app.post<{ Params: { planId: string } }>(
+    '/api/v3/development/plans/:planId/legacy-result-revisions',
+    async (request, reply) => {
+      try {
+        const plan = await service.attestLegacyResultRevisions(request.params.planId, request.body);
+        if (!plan) {
+          reply.code(404);
+          return { error: { code: 'PLAN_NOT_FOUND' } };
+        }
+        return {
+          planId: plan.planId,
+          accepted: true,
+          status: plan.status,
+          blockedReason: plan.blockedReason ?? null,
           currentRevision: plan.currentRevision,
           statusUrl: `/api/v3/development/plans/${plan.planId}`,
         };

@@ -33,6 +33,7 @@ interface ExecutionLinkRow {
   repository_root: string | null;
   git_branch: string | null;
   source_revision: string | null;
+  result_revision: string | null;
   writer_start_revision: string | null;
   workspace_provision_token: string | null;
   workspace_provision_claimed_at: number | null;
@@ -81,6 +82,7 @@ export function ensureV3Schema(db: DatabaseSync): void {
       repository_root TEXT,
       git_branch TEXT,
       source_revision TEXT,
+      result_revision TEXT,
       writer_start_revision TEXT,
       workspace_provision_token TEXT,
       workspace_provision_claimed_at INTEGER,
@@ -121,6 +123,9 @@ export function ensureV3Schema(db: DatabaseSync): void {
   );
   if (!columns.has('repository_root')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN repository_root TEXT');
+  }
+  if (!columns.has('result_revision')) {
+    db.exec('ALTER TABLE v3_execution_links ADD COLUMN result_revision TEXT');
   }
   if (!columns.has('writer_start_revision')) {
     db.exec('ALTER TABLE v3_execution_links ADD COLUMN writer_start_revision TEXT');
@@ -237,6 +242,7 @@ function rowToRecord(row: ExecutionLinkRow): ExecutionLinkRecord {
     repositoryRoot: row.repository_root ?? undefined,
     gitBranch: row.git_branch ?? undefined,
     sourceRevision: row.source_revision ?? undefined,
+    resultRevision: row.result_revision ?? undefined,
     writerStartRevision: row.writer_start_revision ?? undefined,
     workspaceProvisionToken: row.workspace_provision_token ?? undefined,
     workspaceProvisionClaimedAt: row.workspace_provision_claimed_at ?? undefined,
@@ -637,6 +643,26 @@ export class ExecutionLinkRepository {
                  OR status_cache=?)`,
       )
       .run(status, endedAt, endedAt, now, executionId, status);
+    const record = this.get(executionId);
+    if (!record) throw new Error('EXECUTION_NOT_FOUND');
+    return record;
+  }
+
+  attachResultRevision(executionId: string, resultRevision: string): ExecutionLinkRecord {
+    const normalized = resultRevision.trim();
+    if (!normalized) throw new Error('EXECUTION_RESULT_REVISION_MISSING');
+    const existing = this.get(executionId);
+    if (!existing) throw new Error('EXECUTION_NOT_FOUND');
+    if (existing.resultRevision && existing.resultRevision !== normalized) {
+      throw new Error('EXECUTION_RESULT_REVISION_CONFLICT');
+    }
+    this.#db
+      .prepare(
+        `UPDATE v3_execution_links
+            SET result_revision=COALESCE(result_revision,?),updated_at=?
+          WHERE execution_id=?`,
+      )
+      .run(normalized, Date.now(), executionId);
     const record = this.get(executionId);
     if (!record) throw new Error('EXECUTION_NOT_FOUND');
     return record;

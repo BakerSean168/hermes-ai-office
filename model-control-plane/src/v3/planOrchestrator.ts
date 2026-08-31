@@ -68,7 +68,9 @@ function durableSnapshot(record: ExecutionLinkRecord): DevelopmentExecutionSnaps
       : null,
     timing: {
       startedAt: new Date(record.startedAt ?? record.createdAt).toISOString(),
-      lastObservedAt: record.hostUpdatedAt ? new Date(record.hostUpdatedAt).toISOString() : undefined,
+      lastObservedAt: record.hostUpdatedAt
+        ? new Date(record.hostUpdatedAt).toISOString()
+        : undefined,
       endedAt: ended ? new Date(record.endedAt ?? record.updatedAt).toISOString() : undefined,
       durationMs: ended
         ? Math.max(0, (record.endedAt ?? record.updatedAt) - (record.startedAt ?? record.createdAt))
@@ -395,6 +397,133 @@ export class DurablePlanOrchestrator {
   async resumeFromHandoff(planId: string, handoff: unknown) {
     return this.#enqueuePlanOperation(planId, async () => {
       await this.#handoff.resume(planId, handoff);
+      await this.#reconcilePlan(planId);
+      await this.#governance.reconcile(planId);
+      return this.getPlan(planId);
+    });
+  }
+
+  async attestLegacyResultRevisions(planId: string, raw: unknown) {
+    return this.#enqueuePlanOperation(planId, async () => {
+      const plan = this.#repository.get(planId);
+      if (!plan) return null;
+      if (
+        plan.status !== 'BLOCKED' ||
+        plan.blockedReason !== 'BATCH_INTEGRATION_EVIDENCE_MISSING'
+      ) {
+        throw new Error('LEGACY_RESULT_ATTESTATION_PLAN_NOT_BLOCKED');
+      }
+      const blockedBatch = this.#repository
+        .batches(planId)
+        .find((batch) => batch.status === 'BLOCKED');
+      if (!blockedBatch || blockedBatch.blockedReason !== 'BATCH_INTEGRATION_EVIDENCE_MISSING') {
+        throw new Error('LEGACY_RESULT_ATTESTATION_BATCH_NOT_BLOCKED');
+      }
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+        throw new Error('LEGACY_RESULT_ATTESTATION_INVALID');
+      }
+      const entries = (raw as { items?: unknown }).items;
+      if (!Array.isArray(entries) || entries.length === 0 || entries.length > 32) {
+        throw new Error('LEGACY_RESULT_ATTESTATION_ITEMS_INVALID');
+      }
+      const items = this.#repository.workItems(blockedBatch.batchId);
+      const itemByKey = new Map(items.map((item) => [item.key, item] as const));
+      const seen = new Set<string>();
+      const verified: Array<{
+        workItemId: string;
+        workItemKey: string;
+        executionId: string;
+        resultRevision: string;
+        alreadyRecorded: boolean;
+      }> = [];
+      for (const rawEntry of entries) {
+        if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) {
+          throw new Error('LEGACY_RESULT_ATTESTATION_ITEM_INVALID');
+        }
+        const entry = rawEntry as Record<string, unknown>;
+        const workItemKey = typeof entry.workItemKey === 'string' ? entry.workItemKey.trim() : '';
+        const executionId = typeof entry.executionId === 'string' ? entry.executionId.trim() : '';
+        const resultRevision =
+          typeof entry.resultRevision === 'string' ? entry.resultRevision.trim().toLowerCase() : '';
+        if (!workItemKey || !executionId || !/^[0-9a-f]{40}$/.test(resultRevision)) {
+          throw new Error('LEGACY_RESULT_ATTESTATION_ITEM_INVALID');
+        }
+        if (seen.has(workItemKey)) throw new Error('LEGACY_RESULT_ATTESTATION_ITEM_DUPLICATE');
+        seen.add(workItemKey);
+        const item = itemByKey.get(workItemKey);
+        if (!item) throw new Error('LEGACY_RESULT_ATTESTATION_WORK_ITEM_UNKNOWN');
+        if (isIntegrationRepairItem(item) || isBatchAggregateReviewItem(item)) {
+          throw new Error('LEGACY_RESULT_ATTESTATION_SYSTEM_WORK_ITEM_NOT_ALLOWED');
+        }
+        if (item.status !== 'SUCCEEDED') {
+          throw new Error('LEGACY_RESULT_ATTESTATION_WORK_ITEM_NOT_SUCCEEDED');
+        }
+        const implementationRecords = this.#repository
+          .executionIds(item.workItemId)
+          .map((candidateId) => this.#links.get(candidateId))
+          .filter(
+            (record): record is ExecutionLinkRecord =>
+              Boolean(record) &&
+              record!.statusCache === 'SUCCEEDED' &&
+              ['IMPLEMENT', 'IMPLEMENT_FIX'].includes(record!.phase),
+          );
+        const record = implementationRecords.at(-1);
+        if (!record || record.executionId !== executionId) {
+          throw new Error('LEGACY_RESULT_ATTESTATION_EXECUTION_MISMATCH');
+        }
+        if (record.resultRevision) {
+          if (record.resultRevision.toLowerCase() !== resultRevision) {
+            throw new Error('LEGACY_RESULT_ATTESTATION_REVISION_MISMATCH');
+          }
+          verified.push({
+            workItemId: item.workItemId,
+            workItemKey,
+            executionId,
+            resultRevision: record.resultRevision,
+            alreadyRecorded: true,
+          });
+          continue;
+        }
+        if (!record.workspaceRef) throw new Error('LEGACY_RESULT_ATTESTATION_WORKSPACE_MISSING');
+        const baseline = record.writerStartRevision ?? record.sourceRevision;
+        if (!baseline) throw new Error('LEGACY_RESULT_ATTESTATION_BASELINE_MISSING');
+        const completion = await this.#workspace.verifyWriterCompletion({
+          executionId,
+          workspaceRef: record.workspaceRef,
+          startRevision: baseline,
+        });
+        if (completion.headRevision.toLowerCase() !== resultRevision) {
+          throw new Error('LEGACY_RESULT_ATTESTATION_REVISION_MISMATCH');
+        }
+        verified.push({
+          workItemId: item.workItemId,
+          workItemKey,
+          executionId,
+          resultRevision: completion.headRevision,
+          alreadyRecorded: false,
+        });
+      }
+      // Persist only after every entry has passed its exact workspace/HEAD verification. A bad
+      // second entry therefore cannot partially attest the first entry in the same request.
+      for (const entry of verified) {
+        if (entry.alreadyRecorded) continue;
+        this.#links.attachResultRevision(entry.executionId, entry.resultRevision);
+        this.#repository.appendEvent(
+          planId,
+          'LEGACY_RESULT_REVISION_ATTESTED',
+          {
+            workItemKey: entry.workItemKey,
+            resultRevision: entry.resultRevision,
+            attestation: 'OPERATOR_SUBMITTED',
+          },
+          {
+            batchId: blockedBatch.batchId,
+            workItemId: entry.workItemId,
+            executionId: entry.executionId,
+          },
+        );
+      }
+      await this.#recovery.recover(planId, 'AUTO');
       await this.#reconcilePlan(planId);
       await this.#governance.reconcile(planId);
       return this.getPlan(planId);

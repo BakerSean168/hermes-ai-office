@@ -30,12 +30,11 @@ export interface WorkerLaunchOverride {
   modelClass?: string;
 }
 
-export interface ApprovedImplementationEvidence {
+export interface ImplementationIntegrationEvidence {
   workspaceRef: string;
   repositoryRoot: string;
   sourceRevision: string;
   executionId: string;
-  approvedRevision: string;
 }
 
 export interface ExternalAdoptionEvidence {
@@ -266,8 +265,7 @@ export class WorkItemCoordinator {
         const retryOverride =
           plan.source.kind !== 'EXTERNAL_CHANGE' && routeManagedPhase
             ? this.retryOverride(phase, records, {
-                advanceModel:
-                  phase === 'VERIFY_REVIEW' && snapshot.error?.retryable === true,
+                advanceModel: phase === 'VERIFY_REVIEW' && snapshot.error?.retryable === true,
               })
             : this.sourceBackend(plan, phase);
         await this.launch(
@@ -510,10 +508,35 @@ export class WorkItemCoordinator {
     return { revision, ref, evidence };
   }
 
-  approvedImplementationEvidence(
+  implementationIntegrationEvidence(item: WorkItemRecord): ImplementationIntegrationEvidence {
+    const records = this.#repository
+      .executionIds(item.workItemId)
+      .map((executionId) => this.#links.get(executionId))
+      .filter((record): record is ExecutionLinkRecord => Boolean(record));
+    const implementation = [...records]
+      .reverse()
+      .find(
+        (record) =>
+          ['ADOPT_CHANGE', 'IMPLEMENT', 'IMPLEMENT_FIX'].includes(record.phase) &&
+          record.statusCache === 'SUCCEEDED',
+      );
+    if (!implementation?.workspaceRef || !implementation.sourceRevision) {
+      throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+    }
+    const repositoryRoot = implementation.repositoryRoot;
+    if (!repositoryRoot) throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+    return {
+      workspaceRef: implementation.workspaceRef,
+      repositoryRoot,
+      sourceRevision: implementation.sourceRevision,
+      executionId: implementation.executionId,
+    };
+  }
+
+  async approvedRevisionEvidence(
     item: WorkItemRecord,
     options: { allowUnreviewed?: boolean } = {},
-  ): ApprovedImplementationEvidence {
+  ): Promise<string> {
     const records = this.#repository
       .executionIds(item.workItemId)
       .map((executionId) => this.#links.get(executionId))
@@ -533,20 +556,16 @@ export class WorkItemCoordinator {
           record.statusCache === 'SUCCEEDED' &&
           reviewVerdict(record.resultText ?? '') === 'APPROVED',
       );
-    if (!implementation?.workspaceRef || !implementation.sourceRevision) {
+    if (!implementation) throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+    if (!options.allowUnreviewed) {
+      if (!approvedReview?.sourceRevision) {
+        throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
+      }
+      return approvedReview.sourceRevision;
+    }
+    if (!implementation.resultRevision) {
       throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
     }
-    if (!options.allowUnreviewed && !approvedReview?.sourceRevision) {
-      throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
-    }
-    const repositoryRoot = implementation.repositoryRoot;
-    if (!repositoryRoot) throw new Error('BATCH_INTEGRATION_EVIDENCE_MISSING');
-    return {
-      workspaceRef: implementation.workspaceRef,
-      repositoryRoot,
-      sourceRevision: implementation.sourceRevision,
-      executionId: implementation.executionId,
-      approvedRevision: approvedReview?.sourceRevision ?? implementation.sourceRevision,
-    };
+    return implementation.resultRevision;
   }
 }

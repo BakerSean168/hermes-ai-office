@@ -45,13 +45,13 @@ export class BatchCoordinator {
     return this.#reviewStrategy === 'BATCH_ONLY' && plan.source.kind !== 'EXTERNAL_CHANGE';
   }
 
-  #scheduleIntegrationRepair(
+  async #scheduleIntegrationRepair(
     plan: PlanRecord,
     batch: BatchRecord,
     items: WorkItemRecord[],
     reason: string,
     message: string,
-  ): void {
+  ): Promise<void> {
     const originalItems = items.filter(
       (item) => !isIntegrationRepairItem(item) && !isBatchAggregateReviewItem(item),
     );
@@ -59,30 +59,33 @@ export class BatchCoordinator {
       originalItems.some(isPostMergeDeliveryRepairItem) && plan.mergeRevision
         ? plan.mergeRevision
         : undefined;
-    const sources = originalItems.map((item, index) => {
-      const external = this.#workItems.externalAdoptionEvidence(item);
-      if (external) {
+    const sources = await Promise.all(
+      originalItems.map(async (item, index) => {
+        const external = this.#workItems.externalAdoptionEvidence(item);
+        if (external) {
+          return {
+            kind: 'external' as const,
+            index,
+            itemKey: item.key,
+            title: item.title,
+            acceptanceCriteria: item.acceptanceCriteria,
+            approvedRevision: external.revision,
+            adoptionRef: external.ref,
+          };
+        }
         return {
-          kind: 'external' as const,
+          kind: 'execution' as const,
           index,
           itemKey: item.key,
           title: item.title,
           acceptanceCriteria: item.acceptanceCriteria,
-          approvedRevision: external.revision,
-          adoptionRef: external.ref,
+          ...this.#workItems.implementationIntegrationEvidence(item),
+          approvedRevision: await this.#workItems.approvedRevisionEvidence(item, {
+            allowUnreviewed: this.#allowUnreviewed(plan),
+          }),
         };
-      }
-      return {
-        kind: 'execution' as const,
-        index,
-        itemKey: item.key,
-        title: item.title,
-        acceptanceCriteria: item.acceptanceCriteria,
-        ...this.#workItems.approvedImplementationEvidence(item, {
-          allowUnreviewed: this.#allowUnreviewed(plan),
-        }),
-      };
-    });
+      }),
+    );
     const aggregateReviewFailure = reason === 'BATCH_AGGREGATE_REVIEW_FAILED';
     const baseRevision =
       (aggregateReviewFailure ? batch.integratedRevision : undefined) ??
@@ -231,17 +234,9 @@ export class BatchCoordinator {
     }>;
     let requiredAncestorRevisions: string[] | undefined;
     try {
-      implementations = integrationItems.map((item) => {
-        const evidence = this.#workItems.approvedImplementationEvidence(item, {
-          allowUnreviewed: this.#allowUnreviewed(plan),
-        });
-        return {
-          workspaceRef: evidence.workspaceRef,
-          repositoryRoot: evidence.repositoryRoot,
-          sourceRevision: evidence.sourceRevision,
-          executionId: evidence.executionId,
-        };
-      });
+      implementations = integrationItems.map((item) =>
+        this.#workItems.implementationIntegrationEvidence(item),
+      );
       const postMergeRepairItem = integrationItems.find(isPostMergeDeliveryRepairItem);
       const postMergeFailedRevision =
         (postMergeRepairItem || originalItems.some(isPostMergeDeliveryRepairItem)) &&
@@ -251,13 +246,15 @@ export class BatchCoordinator {
       requiredAncestorRevisions = repairItem
         ? [
             ...new Set([
-              ...originalItems.map(
-                (item) =>
-                  externalBaseline.get(item.workItemId)?.revision ??
-                  this.#workItems.approvedImplementationEvidence(item, {
-                    allowUnreviewed: this.#allowUnreviewed(plan),
-                  }).approvedRevision,
-              ),
+              ...(await Promise.all(
+                originalItems.map(
+                  async (item) =>
+                    externalBaseline.get(item.workItemId)?.revision ??
+                    (await this.#workItems.approvedRevisionEvidence(item, {
+                      allowUnreviewed: this.#allowUnreviewed(plan),
+                    })),
+                ),
+              )),
               ...(postMergeFailedRevision ? [postMergeFailedRevision] : []),
             ]),
           ]
@@ -336,7 +333,7 @@ export class BatchCoordinator {
         reason === 'BATCH_INTEGRATION_CONFLICT' ||
         reason === 'BATCH_INTEGRATION_REPAIR_INCOMPLETE'
       ) {
-        this.#scheduleIntegrationRepair(plan, batch, items, reason, message);
+        await this.#scheduleIntegrationRepair(plan, batch, items, reason, message);
         return;
       }
       this.#repository.setBatchStatus(batch.batchId, 'BLOCKED', { blockedReason: reason });
@@ -477,7 +474,13 @@ export class BatchCoordinator {
           executionId: latest.executionId,
         },
       );
-      this.#scheduleIntegrationRepair(plan, batch, items, 'BATCH_AGGREGATE_REVIEW_FAILED', result);
+      await this.#scheduleIntegrationRepair(
+        plan,
+        batch,
+        items,
+        'BATCH_AGGREGATE_REVIEW_FAILED',
+        result,
+      );
       return;
     }
     this.#repository.promoteBatchIntegration(batch.batchId);
