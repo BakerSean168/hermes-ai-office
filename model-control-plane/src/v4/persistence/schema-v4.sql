@@ -20,6 +20,7 @@ CREATE INDEX IF NOT EXISTS idx_events_cursor ON events(event_order);
 CREATE TABLE IF NOT EXISTS supervisor_wakes (wake_key TEXT PRIMARY KEY, supervisor_id TEXT NOT NULL, observation_cursor INTEGER NOT NULL, reason TEXT NOT NULL, requested_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_supervisor_wakes_requested ON supervisor_wakes(requested_at, wake_key);
 
+CREATE TABLE IF NOT EXISTS v4_jules_sessions (idempotency_key TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_revision TEXT NOT NULL, result TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS plans (
   plan_id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,

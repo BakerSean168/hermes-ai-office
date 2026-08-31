@@ -259,7 +259,7 @@ test('adapters deduplicate candidates, invalidate force-pushed PRs and gate reso
   const change = github.adopt({ repository: 'org/repo', number: 1, baseBranch: 'main', baseSha: 'base', headSha: 'head-a', headRef: 'feature', headRepository: 'org/repo', state: 'OPEN' });
   assert.equal(github.invalidateIfHeadChanged(change.externalChangeId, 'head-b').status, 'STALE');
   assert.throws(() => github.prepareMerge(change, { currentHeadSha: 'head-b', reviewId: 'review', checksPassed: true, autoMergeAuthorized: true }), V4Error);
-  const jules = new JulesAdapter();
+  const jules = new JulesAdapter({ submit: (input) => ({ sessionId: 'jules-test', repository: input.repository, baseRevision: input.baseRevision, status: 'RUNNING' as const }), getResult: () => ({ sessionId: 'jules-test', repository: 'org/repo', baseRevision: 'base', status: 'RUNNING' as const }) });
   const request = { idempotencyKey: 'jules-1', repository: 'org/repo', baseRevision: 'base', objective: 'work' };
   const result = jules.submit(request);
   assert.equal(jules.submit(request).sessionId, result.sessionId);
