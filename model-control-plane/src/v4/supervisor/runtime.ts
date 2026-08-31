@@ -22,7 +22,7 @@ export class OpenAICompatibleSupervisorDecisionClient implements SupervisorDecis
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: 'Return exactly one PIXEL_SUPERVISOR_DECISION_V1 JSON object. Never claim shell, workspace, credential, merge, deployment, or autonomous authority.' },
+          { role: 'system', content: 'Return exactly one JSON object with version numeric 1 (not a string), planId, supervisorId, observationCursor integer, projectionDigest, idempotencyKey, preconditionSnapshot object, and action object. action must contain actionId, version numeric 1, type, planId, supervisorId, observationCursor, projectionDigest, idempotencyKey, preconditionSnapshot, payload, status PROPOSED. For NO_ACTION payload use {type:NO_ACTION,reason:string}. Do not return conversationId, reason, classification, prose, markdown, shell, workspace, credential, merge, deployment, or autonomous authority.' },
           { role: 'user', content: JSON.stringify({ conversationId: input.conversationId, supervisorId: input.supervisorId, planId: input.planId, projection: input.projection }) },
         ],
       }),
