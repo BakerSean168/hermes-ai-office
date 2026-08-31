@@ -1,3 +1,7 @@
+# V4 Greenfield Supersession
+
+The Greenfield rebuild is now the governing direction. Read docs/adr/ADR-002-v4-greenfield-rebuild.md and docs/architecture/pixel-v4-greenfield-kernel.md before the legacy V4 document set. The legacy additive documents remain historical reference only.
+
 # Pixel V4 Document Set
 
 Pixel V4 adds a durable AI supervisor and autonomous maintenance programs over the V3 deterministic execution kernel.
