@@ -50,7 +50,7 @@ export function buildSupervisorProjection(db: DatabaseSync, supervisorId: string
     executions: executions.map((item) => ({ executionId: item.execution_id, workItemId: item.work_item_id ?? undefined, attempt: item.attempt, route: item.route, status: item.status, resultRevision: item.result_revision ?? undefined, errorCode: item.error_code ?? undefined, retryable: item.retryable === null ? undefined : Boolean(item.retryable) })),
     reviews: reviews.map((item) => ({ reviewId: item.review_id, implementationExecutionId: item.implementation_execution_id, sourceRevision: item.source_revision, reviewedSha: item.reviewed_sha, status: item.status, verdict: item.verdict ?? undefined })),
     supervisor: { supervisorId: supervisor.supervisor_id, status: supervisor.status, observationCursor: supervisor.observation_cursor, allowedActions: ['NO_ACTION', 'CONTINUE_EXECUTION', 'RETRY_EXECUTION', 'SWITCH_ROUTE', 'REQUEST_REVIEW', 'CREATE_REPAIR', 'REPLAN_REMAINDER', 'CREATE_CHILD_PLAN', 'PAUSE_FOR_RESOURCE', 'PARK_EXTERNAL_GATE', 'ESCALATE'] },
-    recentEvents: stored.events.map((item, index) => ({ cursor: after + index + 1, type: item.type, aggregateType: item.aggregateType, aggregateId: item.aggregateId, occurredAt: item.occurredAt })),
+    recentEvents: stored.events.map((item, index) => ({ cursor: item.cursor ?? stored.cursor, type: item.type, aggregateType: item.aggregateType, aggregateId: item.aggregateId, occurredAt: item.occurredAt })),
     cursor: stored.cursor,
     truncated: items.length >= maxItems || executions.length >= maxItems || reviews.length >= maxItems || stored.events.length >= maxEvents,
   };

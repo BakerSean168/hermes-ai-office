@@ -7,6 +7,7 @@ import { buildBoundedProjection } from './v4/supervisor/projection.js';
 import { DeliveryKernel, ExecutionKernel, PlanKernel, RecoveryKernel, ReviewKernel, WorkGraphKernel } from './v4/kernel/index.js';
 import { SupervisorActionExecutor, type SupervisorKernelPort } from './v4/supervisor/executor.js';
 import { OpenHandsSupervisorAdapter } from './v4/adapters/openhands.js';
+import { SupervisorWakeScheduler } from './v4/supervisor/scheduler.js';
 
 export interface BuildControlPlaneOptions {
   env?: NodeJS.ProcessEnv;
@@ -24,7 +25,7 @@ export interface ControlPlaneRuntime {
   port: number;
   repositories: V4Repositories;
   kernels: { plan: PlanKernel; graph: WorkGraphKernel; execution: ExecutionKernel; review: ReviewKernel; recovery: RecoveryKernel; delivery: DeliveryKernel };
-  supervisor: { actions: SupervisorActionExecutor; openHands: OpenHandsSupervisorAdapter };
+  supervisor: { actions: SupervisorActionExecutor; openHands: OpenHandsSupervisorAdapter; scheduler: SupervisorWakeScheduler };
 }
 
 function bodyRecord(value: unknown): Record<string, unknown> {
@@ -135,6 +136,7 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
   };
   const supervisorActions = new SupervisorActionExecutor(repositories.actions, repositories.decisions, supervisorKernel, repositories.supervisors);
   const openHands = new OpenHandsSupervisorAdapter();
+  const scheduler = new SupervisorWakeScheduler(repositories.supervisors, db);
   const app = Fastify({ logger: options.logger ?? true });
 
   app.get('/api/health', async () => ({
@@ -205,5 +207,5 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
 
   const host = env.MODEL_CP_HOST ?? '127.0.0.1';
   const port = Number(env.MODEL_CP_PORT ?? 8320);
-  return { app, db, dbFile: boot.dbFile, host, port, repositories, kernels, supervisor: { actions: supervisorActions, openHands } };
+  return { app, db, dbFile: boot.dbFile, host, port, repositories, kernels, supervisor: { actions: supervisorActions, openHands, scheduler } };
 }

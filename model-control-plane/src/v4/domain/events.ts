@@ -16,6 +16,7 @@ export interface EventEnvelope<TPayload = unknown> {
   payload: TPayload;
   occurredAt: string;
   correlationId: string;
+  cursor?: number;
 }
 
 export interface EventToAppend<TPayload = unknown>

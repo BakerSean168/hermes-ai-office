@@ -22,7 +22,7 @@ function fromRow(row: EventRow): EventEnvelope {
   try { payload = JSON.parse(row.payload) as unknown; } catch (error) { throw new V4Error('CORRUPTED_EVENT_PAYLOAD', 'Cannot decode event ' + row.event_id, error); }
   const event: EventEnvelope = {
     eventId: row.event_id, aggregateId: row.aggregate_id, aggregateType: row.aggregate_type, sequence: row.sequence,
-    type: row.type, payload, occurredAt: row.occurred_at, correlationId: row.correlation_id,
+    type: row.type, payload, occurredAt: row.occurred_at, correlationId: row.correlation_id, cursor: row.event_order,
   };
   validateEventEnvelope(event);
   return event;
