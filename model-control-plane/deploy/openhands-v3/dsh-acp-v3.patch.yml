@@ -1,7 +1,7 @@
 # Hermes AI Office overlay for the DSH ACP profile.
 # The worker's logical model is injected per execution by OpenHands as DSH_ACP_MODEL.
-# DSH's native DeepSeek adapter otherwise defaults to a 256k completion budget, which
-# can exceed the context window of models routed through LiteLLM.
+# LiteLLM owns provider/model output policy. The version-pinned DSH vendor patch keeps
+# an omitted maxTokens value omitted on the wire instead of materializing 256k.
 - id: acp-server
   config:
     provider: deepseek-official
@@ -11,5 +11,4 @@
   config:
     apiKeyEnv: DEEPSEEK_API_KEY
     baseURL: !!js process.env.DEEPSEEK_BASE_URL
-    maxTokens: 16384
     defaultContextWindow: 262144

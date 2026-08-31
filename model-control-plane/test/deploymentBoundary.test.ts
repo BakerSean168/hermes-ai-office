@@ -157,7 +157,10 @@ test('OpenHands coding workers launch through Agent Harness capability materiali
   assert.match(launcher, /prepare_root claude/);
   assert.match(launcher, /prepare_root dsh/);
   assert.match(launcher, /if \[\[ ! -d "\$DSH_HOME\/profiles\/acp" \]\]/);
-  assert.match(launcher, /plugin --profile acp add \/openhands-state\/tooling\/node_modules\/dsh-acp-server/);
+  assert.match(
+    launcher,
+    /plugin --profile acp add \/openhands-state\/tooling\/node_modules\/dsh-acp-server/,
+  );
   assert.match(launcher, /unset OPENCODE_CONFIG/);
   assert.match(launcher, /AGENT_HARNESS_STATE/);
   assert.match(launcher, /HERMES_V3_EXECUTION_ID/);
@@ -169,6 +172,27 @@ test('OpenHands coding workers launch through Agent Harness capability materiali
   assert.match(tooling, /@colbymchenry\/codegraph@\$CODEGRAPH_VERSION/);
   assert.match(tooling, /mcp-remote@\$MCP_REMOTE_VERSION/);
   assert.match(tooling, /nx-mcp@\$NX_MCP_VERSION/);
+  assert.match(tooling, /patch_dsh_no_default_max_tokens\.mjs/);
+  assert.match(tooling, /verify_dsh_no_default_max_tokens\.mjs/);
+  const dshPatch = fs.readFileSync(
+    path.join(root, 'deploy/openhands-v3/dsh-acp-v3.patch.yml'),
+    'utf8',
+  );
+  assert.doesNotMatch(dshPatch, /^\s*maxTokens:/m);
+  const dshVendorPatch = fs.readFileSync(
+    path.join(root, 'openhands_tools/patch_dsh_no_default_max_tokens.mjs'),
+    'utf8',
+  );
+  assert.match(dshVendorPatch, /expectedVersion = '0\.1\.1-rc\.2'/);
+  assert.match(dshVendorPatch, /implicit maxTokens disabled/);
+  assert.match(dshVendorPatch, /defaultMaxTokens/);
+  const dshVerifier = fs.readFileSync(
+    path.join(root, 'openhands_tools/verify_dsh_no_default_max_tokens.mjs'),
+    'utf8',
+  );
+  assert.match(dshVerifier, /implicitBody/);
+  assert.match(dshVerifier, /hasOwnProperty\.call\(implicitBody, 'max_tokens'\)/);
+  assert.match(dshVerifier, /explicitBody\.max_tokens !== 12345/);
   assert.match(gatewayUnit, /--transport streaming/);
   assert.match(gatewayUnit, /--host 127\.0\.0\.1 --port 18330/);
   assert.match(gatewayUnit, /--allow-unauthenticated/);
@@ -236,8 +260,12 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.equal(planner.static_env.AI_OFFICE_HEADLESS_MODEL, 'gpt-5.6-sol');
   assert.equal(planner.static_env.AI_OFFICE_HEADLESS_REASONING_EFFORT, 'medium');
   assert.equal(policy.phases.ORCHESTRATE.backend_candidates[0], 'openhands-builtin');
-  assert.ok(policy.phases.ORCHESTRATE.backend_candidates.includes('codex-business-planner-headless'));
-  assert.ok(policy.phases.INVESTIGATE_PLAN.backend_candidates.includes('codex-business-planner-headless'));
+  assert.ok(
+    policy.phases.ORCHESTRATE.backend_candidates.includes('codex-business-planner-headless'),
+  );
+  assert.ok(
+    policy.phases.INVESTIGATE_PLAN.backend_candidates.includes('codex-business-planner-headless'),
+  );
 
   assert.equal(worker.kind, 'acp');
   assert.equal(worker.default_model, 'gpt-5.6-luna');
@@ -247,7 +275,10 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.equal(worker.static_env.AI_OFFICE_HEADLESS_ROLE, 'worker');
   assert.equal(policy.phases.IMPLEMENT.backend_candidates[0], 'dsh-acp');
   assert.equal(policy.phases.IMPLEMENT_FIX.backend_candidates[0], 'dsh-acp');
-  assert.equal(policy.phases.IMPLEMENT.backend_candidates.includes('codex-business-worker-headless'), false);
+  assert.equal(
+    policy.phases.IMPLEMENT.backend_candidates.includes('codex-business-worker-headless'),
+    false,
+  );
   assert.equal(worker.static_env.AI_OFFICE_HEADLESS_MODEL, 'gpt-5.6-luna');
   assert.equal(worker.static_env.AI_OFFICE_HEADLESS_REASONING_EFFORT, 'xhigh');
 
@@ -264,7 +295,10 @@ test('provider-native Business Codex review is explicit, persistent, and exclude
   assert.match(adapter, /AI_OFFICE_HEADLESS_REASONING_EFFORT/);
   assert.match(adapter, /HEADLESS_ROLE === 'planner'/);
   assert.match(adapter, /PLAN_TRANSPORT_ERROR/);
-  assert.match(adapter, /model_reasoning_effort=\$\{JSON\.stringify\(HEADLESS_REASONING_EFFORT\)\}/);
+  assert.match(
+    adapter,
+    /model_reasoning_effort=\$\{JSON\.stringify\(HEADLESS_REASONING_EFFORT\)\}/,
+  );
   assert.match(adapter, /HEADLESS_REVIEW_CODEX_AUTH_MISSING/);
   assert.match(adapter, /delete env\.CODEX_API_KEY/);
   assert.doesNotMatch(adapter, /--ignore-user-config/);
@@ -332,7 +366,6 @@ test('provider-native Antigravity remains opt-in and executes behind the mount s
   assert.match(repairPublisher, /fs\.chmodSync\(tempRoot, 0o700\)/);
 });
 
-
 test('GitHub webhook ingress installs dependency-free ESM artifacts outside protected home', () => {
   const unit = fs.readFileSync(
     path.join(root, 'deploy/gcp/hermes-github-webhook-ingress.service'),
@@ -342,7 +375,10 @@ test('GitHub webhook ingress installs dependency-free ESM artifacts outside prot
     path.join(root, 'deploy/gcp/install-github-webhook-ingress.sh'),
     'utf8',
   );
-  assert.match(unit, /ExecStart=\/usr\/bin\/node \/usr\/local\/lib\/hermes-github-webhook-ingress\/githubWebhookIngressMain\.js/);
+  assert.match(
+    unit,
+    /ExecStart=\/usr\/bin\/node \/usr\/local\/lib\/hermes-github-webhook-ingress\/githubWebhookIngressMain\.js/,
+  );
   assert.match(unit, /ProtectHome=true/);
   assert.match(installer, /\{"type":"module","private":true\}/);
   assert.match(installer, /\/usr\/local\/lib\/hermes-github-webhook-ingress/);

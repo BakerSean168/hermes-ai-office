@@ -43,6 +43,16 @@ if [[ "$current_dsh" != "$DSH_VERSION" ]]; then
 fi
 
 docker exec "$CONTAINER" test -x "$DSH_ROOT/node_modules/.bin/dsh"
+# DSH's DeepSeek adapter currently materializes a 256k request max_tokens when
+# the deployment leaves maxTokens unset. LiteLLM owns provider/model output
+# policy for AI Office, so omission must remain omission on the wire. Apply a
+# version-pinned, drift-detecting vendor patch after every install/check.
+docker exec "$CONTAINER" node \
+  /opt/hermes-ai-office-tools/patch_dsh_no_default_max_tokens.mjs \
+  "$DSH_ROOT/node_modules/@deepseek-ai/dsh-llm-deepseek"
+docker exec "$CONTAINER" node \
+  /opt/hermes-ai-office-tools/verify_dsh_no_default_max_tokens.mjs \
+  "$DSH_ROOT/node_modules/@deepseek-ai/dsh-llm-deepseek"
 printf '%-20s' "dsh"
 docker exec "$CONTAINER" "$DSH_ROOT/node_modules/.bin/dsh" --version
 
