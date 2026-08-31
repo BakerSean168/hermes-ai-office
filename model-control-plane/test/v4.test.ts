@@ -24,6 +24,9 @@ import { GitHubPrIntake } from '../src/v4/adapters/github.js';
 import { AntiGravityReadinessAdapter } from '../src/v4/adapters/antigravity.js';
 import { MaintenanceCandidateRegistry } from '../src/v4/adapters/maintenance.js';
 import { SupervisorWakeScheduler } from '../src/v4/supervisor/scheduler.js';
+import { SupervisorRuntime } from '../src/v4/supervisor/runtime.js';
+import { OpenHandsSupervisorAdapter } from '../src/v4/adapters/openhands.js';
+import { SupervisorActionExecutor } from '../src/v4/supervisor/executor.js';
 
 function memory() {
   return openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
@@ -223,6 +226,25 @@ test('supervisor wake queue is durable, idempotent and atomically drained', () =
   const recovered = new SupervisorWakeScheduler(undefined, db);
   assert.deepEqual(recovered.drain(), [wake]);
   assert.deepEqual(recovered.drain(), []);
+  db.close();
+});
+
+test('supervisor runtime claims, asks typed model and releases lease', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-plan');
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  scheduler.schedule({ supervisorId: seeded.supervisor.supervisorId, observationCursor: 0, reason: 'NEW_PLAN', requestedAt: new Date().toISOString() });
+  const client = { decide: async (input: { projection: { cursor: number; digest: string }; supervisorId: string; planId: string }) => JSON.stringify({
+    version: 1, decisionId: 'decision-runtime', planId: input.planId, supervisorId: input.supervisorId, observationCursor: input.projection.cursor,
+    projectionDigest: input.projection.digest, idempotencyKey: 'runtime-noop', preconditionSnapshot: {},
+    action: { type: 'NO_ACTION', idempotencyKey: 'runtime-noop', payload: { type: 'NO_ACTION', reason: 'healthy' } },
+  }) };
+  const host = new OpenHandsSupervisorAdapter({ createSupervisorConversation: () => ({ conversationId: 'conversation-runtime', replaced: false }), resumeSupervisorConversation: () => ({ conversationId: 'conversation-runtime', replaced: false }) });
+  const runtime = new SupervisorRuntime(db, seeded.repos.supervisors, scheduler, host, new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}), client, 'runtime-test-owner');
+  const result = await runtime.runOnce();
+  assert.equal(result[0]?.status, 'SUCCEEDED');
+  assert.equal(seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).conversationId, 'conversation-runtime');
+  assert.equal(seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).lease, undefined);
   db.close();
 });
 
