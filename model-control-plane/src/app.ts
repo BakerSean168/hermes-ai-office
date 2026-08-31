@@ -209,7 +209,7 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
     void reply.code(500).send({ error: 'INTERNAL_ERROR', message: error instanceof Error ? error.message : String(error) });
   });
   const runtimeInterval = env.MODEL_CP_SUPERVISOR_RUNTIME_ENABLED === 'true'
-    ? setInterval(() => { void supervisorRuntime.runOnce().catch(() => undefined); }, Number(env.MODEL_CP_SUPERVISOR_POLL_MS ?? 5000))
+    ? setInterval(() => { void supervisorRuntime.runOnce().then((results) => { for (const result of results) if (result.status !== 'SKIPPED') app.log.info({ supervisorId: result.supervisorId, status: result.status, code: result.code }, 'supervisor runtime cycle'); }).catch((error) => app.log.error({ error: error instanceof Error ? error.message : String(error) }, 'supervisor runtime cycle failed')); }, Number(env.MODEL_CP_SUPERVISOR_POLL_MS ?? 5000))
     : undefined;
   app.addHook('onClose', async () => { if (runtimeInterval) clearInterval(runtimeInterval); db.close(); });
 
