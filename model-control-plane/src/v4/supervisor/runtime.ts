@@ -9,6 +9,32 @@ import type { SupervisorRepository } from '../persistence/repositories.js';
 import type { OpenHandsSupervisorAdapter } from '../adapters/openhands.js';
 import { V4Error } from '../domain/errors.js';
 
+export class OpenAICompatibleSupervisorDecisionClient implements SupervisorDecisionClient {
+  constructor(readonly baseUrl: string, readonly model: string, readonly bearerToken: string, readonly fetchImpl: typeof fetch = fetch, readonly timeoutMs = 60_000) {}
+  async decide(input: { conversationId: string; supervisorId: string; planId: string; projection: SupervisorProjection }): Promise<string> {
+    const endpoint = this.baseUrl.replace(/\/$/, '') + (this.baseUrl.endsWith('/v1') ? '/chat/completions' : '/v1/chat/completions');
+    const response = await this.fetchImpl(endpoint, {
+      method: 'POST',
+      headers: Object.fromEntries([['content-type', 'application/json'], ['authorization', 'Bearer ' + this.bearerToken]]),
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        model: this.model,
+        temperature: 0,
+        response_format: { type: 'json_object' },
+        messages: [
+          { role: 'system', content: 'Return exactly one PIXEL_SUPERVISOR_DECISION_V1 JSON object. Never claim shell, workspace, credential, merge, deployment, or autonomous authority.' },
+          { role: 'user', content: JSON.stringify({ conversationId: input.conversationId, supervisorId: input.supervisorId, planId: input.planId, projection: input.projection }) },
+        ],
+      }),
+    });
+    if (!response.ok) throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE', 'Supervisor provider HTTP ' + response.status);
+    const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = payload.choices?.[0]?.message?.content;
+    if (typeof content !== 'string' || content.length === 0 || content.length > 64_000) throw new V4Error('SUPERVISOR_DECISION_INVALID');
+    return content;
+  }
+}
+
 export interface SupervisorDecisionClient {
   decide(input: { conversationId: string; supervisorId: string; planId: string; projection: SupervisorProjection }): Promise<string>;
 }

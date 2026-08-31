@@ -8,7 +8,7 @@ import { DeliveryKernel, ExecutionKernel, PlanKernel, RecoveryKernel, ReviewKern
 import { SupervisorActionExecutor, type SupervisorKernelPort } from './v4/supervisor/executor.js';
 import { HttpOpenHandsSupervisorClient, OpenHandsSupervisorAdapter } from './v4/adapters/openhands.js';
 import { SupervisorWakeScheduler } from './v4/supervisor/scheduler.js';
-import { HttpSupervisorDecisionClient, SupervisorRuntime } from './v4/supervisor/runtime.js';
+import { HttpSupervisorDecisionClient, OpenAICompatibleSupervisorDecisionClient, SupervisorRuntime } from './v4/supervisor/runtime.js';
 
 export interface BuildControlPlaneOptions {
   env?: NodeJS.ProcessEnv;
@@ -136,7 +136,11 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
   const supervisorActions = new SupervisorActionExecutor(repositories.actions, repositories.decisions, supervisorKernel, repositories.supervisors);
   const openHands = new OpenHandsSupervisorAdapter(env.MODEL_CP_OPENHANDS_URL ? new HttpOpenHandsSupervisorClient(env.MODEL_CP_OPENHANDS_URL, env.MODEL_CP_OPENHANDS_TOKEN) : undefined);
   const scheduler = new SupervisorWakeScheduler(repositories.supervisors, db);
-  const modelClient = env.MODEL_CP_SUPERVISOR_ENDPOINT ? new HttpSupervisorDecisionClient(env.MODEL_CP_SUPERVISOR_ENDPOINT, env.MODEL_CP_SUPERVISOR_TOKEN) : undefined;
+  const modelClient = env.MODEL_CP_SUPERVISOR_ENDPOINT
+    ? new HttpSupervisorDecisionClient(env.MODEL_CP_SUPERVISOR_ENDPOINT, env.MODEL_CP_SUPERVISOR_TOKEN)
+    : env.MODEL_CP_V3_LITELLM_URL && env.LITELLM_V3_KEY && env.MODEL_CP_SUPERVISOR_MODEL
+      ? new OpenAICompatibleSupervisorDecisionClient(env.MODEL_CP_V3_LITELLM_URL, env.MODEL_CP_SUPERVISOR_MODEL, env.LITELLM_V3_KEY)
+      : undefined;
   const supervisorRuntime = new SupervisorRuntime(db, repositories.supervisors, scheduler, openHands, supervisorActions, modelClient);
   const app = Fastify({ logger: options.logger ?? true });
 
