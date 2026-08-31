@@ -103,6 +103,7 @@ export class SupervisorRuntime {
       const decision = parseSupervisorDecision(raw);
       const result = this.actions.execute(decision, projection);
       if (result.status === 'SUCCEEDED' || result.status === 'DUPLICATE' || result.status === 'REJECTED') {
+        this.supervisors.deferWake(supervisor.supervisorId, new Date(Date.now() + 30_000).toISOString());
         const current = this.supervisors.getById(supervisor.supervisorId);
         if (current.status === 'OBSERVING') this.supervisors.updateStatus(current.supervisorId, 'SLEEPING');
       }
