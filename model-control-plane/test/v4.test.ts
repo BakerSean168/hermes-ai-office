@@ -26,6 +26,7 @@ import { MaintenanceCandidateRegistry } from '../src/v4/adapters/maintenance.js'
 import { SupervisorWakeScheduler } from '../src/v4/supervisor/scheduler.js';
 import { SupervisorRuntime } from '../src/v4/supervisor/runtime.js';
 import { OpenHandsSupervisorAdapter } from '../src/v4/adapters/openhands.js';
+import { HttpSupervisorDecisionClient } from '../src/v4/supervisor/runtime.js';
 import { SupervisorActionExecutor } from '../src/v4/supervisor/executor.js';
 
 function memory() {
@@ -246,6 +247,18 @@ test('supervisor runtime claims, asks typed model and releases lease', async () 
   assert.equal(seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).conversationId, 'conversation-runtime');
   assert.equal(seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).lease, undefined);
   db.close();
+});
+
+test('supervisor HTTP model client bounds requests and rejects provider failures', async () => {
+  let requestInit: RequestInit | undefined;
+  const okClient = new HttpSupervisorDecisionClient('http://model.test/decision', 'secret', async (_input, init) => {
+    requestInit = init;
+    return new Response('{"typed":true}', { status: 200 });
+  });
+  assert.equal(await okClient.decide({ conversationId: 'c', supervisorId: 's', planId: 'p', projection: { cursor: 0, digest: 'd' } as never }), '{"typed":true}');
+  assert.ok(requestInit?.signal);
+  const failing = new HttpSupervisorDecisionClient('http://model.test/decision', undefined, async () => new Response('busy', { status: 503 }));
+  await assert.rejects(() => failing.decide({ conversationId: 'c', supervisorId: 's', planId: 'p', projection: { cursor: 0, digest: 'd' } as never }), (error: unknown) => error instanceof V4Error && error.code === 'SUPERVISOR_MODEL_UNAVAILABLE');
 });
 
 test('adapters deduplicate candidates, invalidate force-pushed PRs and gate resources', () => {
