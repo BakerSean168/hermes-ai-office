@@ -6,8 +6,50 @@ export interface SupervisorConversation {
 }
 
 export interface OpenHandsSupervisorClient {
-  createSupervisorConversation(input: { supervisorId: string; planId: string; projectionDigest: string; boundedInstruction: string }): SupervisorConversation;
-  resumeSupervisorConversation(input: { conversationId: string; boundedInstruction: string }): SupervisorConversation;
+  createSupervisorConversation(input: { supervisorId: string; planId: string; projectionDigest: string; boundedInstruction: string }): SupervisorConversation | Promise<SupervisorConversation>;
+  resumeSupervisorConversation(input: { conversationId: string; boundedInstruction: string }): SupervisorConversation | Promise<SupervisorConversation>;
+}
+
+export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient {
+  constructor(readonly baseUrl: string, readonly bearerToken?: string, readonly fetchImpl: typeof fetch = fetch, readonly timeoutMs = 30_000) {}
+
+  async createSupervisorConversation(input: { supervisorId: string; planId: string; projectionDigest: string; boundedInstruction: string }): Promise<SupervisorConversation> {
+    const response = await this.fetchImpl(this.url('/api/conversations'), {
+      method: 'POST',
+      headers: this.headers(),
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({
+        agent: 'CodeActAgent',
+        initial_message: { role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true },
+        max_iterations: 1,
+        autotitle: false,
+        tags: { supervisor: input.supervisorId, plan: input.planId, projection: input.projectionDigest },
+      }),
+    });
+    return this.parse(response, false);
+  }
+
+  async resumeSupervisorConversation(input: { conversationId: string; boundedInstruction: string }): Promise<SupervisorConversation> {
+    const response = await this.fetchImpl(this.url('/api/conversations/' + encodeURIComponent(input.conversationId) + '/events'), {
+      method: 'POST',
+      headers: this.headers(),
+      signal: AbortSignal.timeout(this.timeoutMs),
+      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true }),
+    });
+    return this.parse(response, false);
+  }
+
+  private url(path: string): string { return this.baseUrl.replace(/\/$/, '') + path; }
+  private headers(): Record<string, string> {
+    return Object.fromEntries([['content-type', 'application/json'], ...(this.bearerToken ? [['authorization', 'Bearer ' + this.bearerToken]] : [])]);
+  }
+  private async parse(response: Response, replaced: boolean): Promise<SupervisorConversation> {
+    if (!response.ok) throw new Error('OPENHANDS_SUPERVISOR_HTTP_' + response.status);
+    const payload = await response.json() as { id?: unknown; conversation_id?: unknown };
+    const conversationId = String(payload.id ?? payload.conversation_id ?? '');
+    if (!conversationId) throw new Error('OPENHANDS_SUPERVISOR_CONVERSATION_ID_MISSING');
+    return { conversationId, replaced };
+  }
 }
 
 function boundedInstruction(projection: SupervisorProjection): string {
@@ -22,10 +64,10 @@ function boundedInstruction(projection: SupervisorProjection): string {
 export class OpenHandsSupervisorAdapter {
   constructor(readonly client?: OpenHandsSupervisorClient) {}
 
-  startOrResume(input: { supervisorId: string; planId: string; conversationId?: string; projection: SupervisorProjection }): SupervisorConversation {
+  async startOrResume(input: { supervisorId: string; planId: string; conversationId?: string; projection: SupervisorProjection }): Promise<SupervisorConversation> {
     const instruction = boundedInstruction(input.projection);
-    if (input.conversationId && this.client) return this.client.resumeSupervisorConversation({ conversationId: input.conversationId, boundedInstruction: instruction });
-    if (this.client) return this.client.createSupervisorConversation({ supervisorId: input.supervisorId, planId: input.planId, projectionDigest: input.projection.digest, boundedInstruction: instruction });
-    return { conversationId: input.conversationId ?? 'supervisor-conversation-' + input.supervisorId, replaced: Boolean(input.conversationId) };
+    if (input.conversationId && this.client) return await this.client.resumeSupervisorConversation({ conversationId: input.conversationId, boundedInstruction: instruction });
+    if (this.client) return await this.client.createSupervisorConversation({ supervisorId: input.supervisorId, planId: input.planId, projectionDigest: input.projection.digest, boundedInstruction: instruction });
+    throw new Error('OPENHANDS_SUPERVISOR_CLIENT_UNAVAILABLE');
   }
 }

@@ -64,7 +64,7 @@ export class SupervisorRuntime {
       if (supervisor.status === 'CREATED') this.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
       if (['ACTIVE', 'SLEEPING', 'WAITING_FOR_RESOURCE', 'WAITING_FOR_SYSTEM_REPAIR', 'WAITING_FOR_EXTERNAL_EVIDENCE'].includes(supervisor.status)) this.supervisors.updateStatus(supervisor.supervisorId, 'OBSERVING');
       const projection = buildBoundedProjection(this.db, supervisor.supervisorId);
-      const conversation = this.host.startOrResume({ supervisorId: supervisor.supervisorId, planId: supervisor.planId, conversationId: supervisor.conversationId, projection });
+      const conversation = await this.host.startOrResume({ supervisorId: supervisor.supervisorId, planId: supervisor.planId, conversationId: supervisor.conversationId, projection });
       this.supervisors.attachConversation(supervisor.supervisorId, conversation.conversationId);
       if (!this.client) throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE');
       const raw = await this.client.decide({ conversationId: conversation.conversationId, supervisorId: supervisor.supervisorId, planId: supervisor.planId, projection });
