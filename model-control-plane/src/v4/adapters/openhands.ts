@@ -37,7 +37,8 @@ export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient 
       signal: AbortSignal.timeout(this.timeoutMs),
       body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true }),
     });
-    return this.parse(response, false);
+    if (!response.ok) throw new Error('OPENHANDS_SUPERVISOR_HTTP_' + response.status);
+    return { conversationId: input.conversationId, replaced: false };
   }
 
   private url(path: string): string { return this.baseUrl.replace(/\/$/, '') + path; }
