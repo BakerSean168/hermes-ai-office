@@ -7,6 +7,7 @@
 - Primary canary: Digital Biome autonomous maintenance
 - Related decision: `docs/adr/ADR-001-durable-ai-supervisor-and-deterministic-kernel.md`
 - Architecture:
+  - `docs/architecture/pixel-v4-current-gap-analysis.md`
   - `docs/architecture/pixel-v4-durable-supervisor-runtime.md`
   - `docs/architecture/pixel-v4-supervisor-action-protocol.md`
   - `docs/architecture/autonomous-improvement-programs-and-external-pr-governance.md`
