@@ -93,6 +93,9 @@ export class SupervisorRuntime {
     if (!claim.value || claim.status === 'rejected') return { supervisorId: request.supervisorId, status: 'SKIPPED', code: claim.reason ?? 'LEASE_HELD' };
     try {
       const supervisor = this.supervisors.getById(request.supervisorId);
+      if (supervisor.lastDecisionAt && request.observationCursor <= supervisor.observationCursor) {
+        return { supervisorId: request.supervisorId, status: 'SKIPPED', code: 'STALE_WAKE' };
+      }
       if (supervisor.status === 'CREATED') this.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
       if (['ACTIVE', 'SLEEPING', 'WAITING_FOR_RESOURCE', 'WAITING_FOR_SYSTEM_REPAIR', 'WAITING_FOR_EXTERNAL_EVIDENCE'].includes(supervisor.status)) this.supervisors.updateStatus(supervisor.supervisorId, 'OBSERVING');
       const projection = buildBoundedProjection(this.db, supervisor.supervisorId);
