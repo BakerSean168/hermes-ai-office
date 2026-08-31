@@ -31,7 +31,11 @@ export class OpenAICompatibleSupervisorDecisionClient implements SupervisorDecis
     const payload = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
     const content = payload.choices?.[0]?.message?.content;
     if (typeof content !== 'string' || content.length === 0 || content.length > 64_000) throw new V4Error('SUPERVISOR_DECISION_INVALID');
-    return content;
+    const trimmed = content.trim();
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start < 0 || end <= start) throw new V4Error('SUPERVISOR_DECISION_INVALID');
+    return trimmed.slice(start, end + 1);
   }
 }
 
