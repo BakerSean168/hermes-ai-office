@@ -513,8 +513,14 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY,
         0o600,
       );
-    } catch {
-      throw new V4Error('WORKSPACE_INTEGRATION_LOCKED');
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') throw new V4Error('WORKSPACE_INTEGRATION_LOCKED');
+      throw new V4Error(
+        'WORKSPACE_INTEGRATION_LOCK_FAILED',
+        'Unable to create the integration lock: ' + (code ?? 'UNKNOWN'),
+        error,
+      );
     }
     try {
       const current = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);

@@ -42,6 +42,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
     '/srv/hermes-personal/data/model-control-plane',
     '/opt/data/hermes-ai-office-v3/workspaces',
     '/home/dev/projects/memoflow-platform-1003',
+    '/home/dev/projects/memoflow/.git',
     '/home/dev/projects/digital-biome',
   ])
     assert.match(
@@ -100,6 +101,8 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(probe, /trap - EXIT/);
   assert.doesNotMatch(probe, /\ncleanup\ntrap - EXIT/);
   assert.match(release, /memoflow-platform-1003\/\.pixel-v4-release/);
+  assert.match(release, /memoflow\/\.git\/pixel-v4-release/);
+  assert.match(probe, /memo_git_probe/);
   assert.match(release, /digital-biome\/\.pixel-v4-release/);
   assert.match(release, /trap cleanup_probe EXIT/);
 });

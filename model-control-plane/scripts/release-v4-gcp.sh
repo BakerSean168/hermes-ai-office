@@ -31,11 +31,12 @@ probe_id="$$-$(date -u +%s)"
 probe_unit="pixel-v4-release-probe-$probe_id"
 probe_dir="/opt/data/hermes-ai-office-v3/workspaces/v4/executions/.pixel-v4-release-$probe_id"
 memo_probe="/home/dev/projects/memoflow-platform-1003/.pixel-v4-release-$probe_id"
+memo_git_probe="/home/dev/projects/memoflow/.git/pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
 probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
 cleanup_probe() {
   sudo rm -rf "$probe_dir"
-  sudo rm -f "$memo_probe" "$digital_probe"
+  sudo rm -f "$memo_probe" "$memo_git_probe" "$digital_probe"
 }
 trap cleanup_probe EXIT
 sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
@@ -59,11 +60,13 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
   -p ReadWritePaths=/srv/hermes-personal/data/model-control-plane \
   -p ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces \
   -p ReadWritePaths=/home/dev/projects/memoflow-platform-1003 \
+  -p ReadWritePaths=/home/dev/projects/memoflow/.git \
   -p ReadWritePaths=/home/dev/projects/digital-biome \
   "$probe_script" \
   "$target_root/model-control-plane/dist/main.js" \
   "$probe_dir" \
   "$memo_probe" \
+  "$memo_git_probe" \
   "$digital_probe" \
   10001 \
   10001

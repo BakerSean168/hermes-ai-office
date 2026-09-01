@@ -55,6 +55,7 @@ AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 ReadWritePaths=/srv/hermes-personal/data/model-control-plane
 ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces
 ReadWritePaths=/home/dev/projects/memoflow-platform-1003
+ReadWritePaths=/home/dev/projects/memoflow/.git
 ReadWritePaths=/home/dev/projects/digital-biome
 
 [Install]

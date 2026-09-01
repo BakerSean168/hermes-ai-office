@@ -332,6 +332,25 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
       error instanceof V4Error && error.code === 'WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT',
   );
 
+  const gitDirectory = path.resolve(
+    value.repositoryPath,
+    git(value.repositoryPath, ['rev-parse', '--git-dir']),
+  );
+  const integrationLock = path.join(gitDirectory, 'pixel-v4-integration.lock');
+  write(integrationLock, 'held');
+  await assert.rejects(
+    () =>
+      value.adapter.integrateAcceptedRevision({
+        repositoryPath: value.repositoryPath,
+        expectedRevision: value.baseRevision,
+        acceptedRevision,
+        candidateWorkspace: candidate,
+      }),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_INTEGRATION_LOCKED',
+  );
+  fs.rmSync(integrationLock);
+
   const integrated = await value.adapter.integrateAcceptedRevision({
     repositoryPath: value.repositoryPath,
     expectedRevision: value.baseRevision,
