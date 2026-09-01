@@ -21,6 +21,7 @@ const probe = fs.readFileSync(probePath, 'utf8');
 const openHandsBuild = fs.readFileSync(path.join(root, 'scripts/build-openhands-v3-source.sh'), 'utf8');
 const openHandsCompose = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
 const openHandsTooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
+const gitWorkspace = fs.readFileSync(path.join(root, 'src/v4/adapters/gitWorkspace.ts'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -122,6 +123,9 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(release, /docker exec --user 10001:10001 hermes-openhands-v3/);
   assert.match(probe, /trap - EXIT/);
   assert.doesNotMatch(probe, /\ncleanup\ntrap - EXIT/);
+  assert.match(probe, /repository-owner Git probe failed/);
+  assert.match(probe, /GIT_OPTIONAL_LOCKS=0/);
+  assert.match(gitWorkspace, /GIT_OPTIONAL_LOCKS: '0'/);
   assert.match(release, /memoflow-platform-1003\/\.pixel-v4-release/);
   assert.match(release, /memoflow\/\.git\/pixel-v4-release/);
   assert.match(probe, /memo_git_probe/);

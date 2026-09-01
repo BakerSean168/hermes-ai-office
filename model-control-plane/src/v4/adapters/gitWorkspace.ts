@@ -221,10 +221,24 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     revision: string,
   ): Promise<RepositoryObservation> {
     const root = await this.repositoryRoot(repositoryPath);
-    const headRevision = await this.git(root, ['rev-parse', '--verify', 'HEAD^{commit}']);
-    const branch = await this.gitOptional(root, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
-    const clean = (await this.git(root, ['status', '--porcelain=v1', '-z'])).length === 0;
-    const commitExists = await this.gitSucceeds(root, ['cat-file', '-e', revision + '^{commit}']);
+    const repositoryIdentity = this.repositoryIdentity(root);
+    const headRevision = await this.git(
+      root,
+      ['rev-parse', '--verify', 'HEAD^{commit}'],
+      repositoryIdentity,
+    );
+    const branch = await this.gitOptional(
+      root,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      repositoryIdentity,
+    );
+    const clean =
+      (await this.git(root, ['status', '--porcelain=v1', '-z'], repositoryIdentity)).length === 0;
+    const commitExists = await this.gitSucceeds(
+      root,
+      ['cat-file', '-e', revision + '^{commit}'],
+      repositoryIdentity,
+    );
     return {
       repositoryPath: path.resolve(repositoryPath),
       rootPath: root,
@@ -525,9 +539,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ) {
       throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
     }
+    const repositoryIdentity = this.repositoryIdentity(repositoryRoot);
     const gitDirectory = path.resolve(
       repositoryRoot,
-      await this.git(repositoryRoot, ['rev-parse', '--git-dir']),
+      await this.git(repositoryRoot, ['rev-parse', '--git-dir'], repositoryIdentity),
     );
     const lockPath = path.join(gitDirectory, 'pixel-v4-integration.lock');
     let lock: number | undefined;
@@ -550,12 +565,20 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       gitDirectory,
       'pixel-v4-integration-' + randomUUID() + '.bundle',
     );
-    const repositoryStat = fs.statSync(repositoryRoot);
-    const repositoryIdentity = { uid: repositoryStat.uid, gid: repositoryStat.gid };
     try {
-      const current = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
+      const current = await this.git(
+        repositoryRoot,
+        ['rev-parse', '--verify', 'HEAD^{commit}'],
+        repositoryIdentity,
+      );
       if (current !== input.expectedRevision) throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
-      if ((await this.git(repositoryRoot, ['status', '--porcelain=v1', '-z'])).length !== 0)
+      if (
+        (await this.git(
+          repositoryRoot,
+          ['status', '--porcelain=v1', '-z'],
+          repositoryIdentity,
+        )).length !== 0
+      )
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
       // A direct local-path fetch starts git-upload-pack in the worker-owned clone. That
       // child does not inherit our per-command safe.directory setting. An exact-HEAD
@@ -567,20 +590,24 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         repositoryIdentity,
       );
       if (
-        !(await this.gitSucceeds(repositoryRoot, [
-          'merge-base',
-          '--is-ancestor',
-          input.expectedRevision,
-          input.acceptedRevision,
-        ]))
+        !(await this.gitSucceeds(
+          repositoryRoot,
+          [
+            'merge-base',
+            '--is-ancestor',
+            input.expectedRevision,
+            input.acceptedRevision,
+          ],
+          repositoryIdentity,
+        ))
       ) {
         throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
       }
-      const beforeMerge = await this.git(repositoryRoot, [
-        'rev-parse',
-        '--verify',
-        'HEAD^{commit}',
-      ]);
+      const beforeMerge = await this.git(
+        repositoryRoot,
+        ['rev-parse', '--verify', 'HEAD^{commit}'],
+        repositoryIdentity,
+      );
       if (beforeMerge !== input.expectedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
       await this.git(
@@ -588,10 +615,20 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         ['merge', '--ff-only', input.acceptedRevision],
         repositoryIdentity,
       );
-      const after = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
+      const after = await this.git(
+        repositoryRoot,
+        ['rev-parse', '--verify', 'HEAD^{commit}'],
+        repositoryIdentity,
+      );
       if (after !== input.acceptedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_RESULT_MISMATCH');
-      if ((await this.git(repositoryRoot, ['status', '--porcelain=v1', '-z'])).length !== 0)
+      if (
+        (await this.git(
+          repositoryRoot,
+          ['status', '--porcelain=v1', '-z'],
+          repositoryIdentity,
+        )).length !== 0
+      )
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
       return await this.observeRepository(repositoryRoot, input.acceptedRevision);
     } finally {
@@ -844,21 +881,35 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ], identity);
   }
 
-  private async gitOptional(cwd: string, args: string[]): Promise<string | undefined> {
+  private async gitOptional(
+    cwd: string,
+    args: string[],
+    identity?: { uid: number; gid: number },
+  ): Promise<string | undefined> {
     try {
-      return await this.git(cwd, args);
+      return identity ? await this.git(cwd, args, identity) : await this.git(cwd, args);
     } catch {
       return undefined;
     }
   }
 
-  private async gitSucceeds(cwd: string, args: string[]): Promise<boolean> {
+  private async gitSucceeds(
+    cwd: string,
+    args: string[],
+    identity?: { uid: number; gid: number },
+  ): Promise<boolean> {
     try {
-      await this.git(cwd, args);
+      if (identity) await this.git(cwd, args, identity);
+      else await this.git(cwd, args);
       return true;
     } catch {
       return false;
     }
+  }
+
+  private repositoryIdentity(repositoryRoot: string): { uid: number; gid: number } {
+    const stat = fs.statSync(repositoryRoot);
+    return { uid: stat.uid, gid: stat.gid };
   }
 
   private async runGit(
@@ -878,6 +929,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
           LC_ALL: 'C',
           GIT_CONFIG_NOSYSTEM: '1',
           GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_OPTIONAL_LOCKS: '0',
           GIT_TERMINAL_PROMPT: '0',
         },
       });

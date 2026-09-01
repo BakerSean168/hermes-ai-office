@@ -423,6 +423,26 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   );
   fs.rmSync(integrationLock);
 
+  const repositoryOwner = fs.statSync(value.repositoryPath);
+  const repositoryGitCalls: Array<{
+    args: string[];
+    identity?: { uid: number; gid: number };
+  }> = [];
+  type GitInternals = {
+    git(
+      cwd: string,
+      args: string[],
+      identity?: { uid: number; gid: number },
+    ): Promise<string>;
+  };
+  const internals = value.adapter as unknown as GitInternals;
+  const originalGit = internals.git.bind(value.adapter);
+  internals.git = async (cwd, args, identity) => {
+    if (path.resolve(cwd) === path.resolve(value.repositoryPath))
+      repositoryGitCalls.push({ args, ...(identity ? { identity } : {}) });
+    return await originalGit(cwd, args, identity);
+  };
+
   const previousDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
   process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1';
   let integrated;
@@ -440,10 +460,16 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   assert.equal(integrated.headRevision, acceptedRevision);
   assert.equal(integrated.clean, true);
   assert.equal(git(value.repositoryPath, ['rev-parse', 'HEAD']), acceptedRevision);
-  const repositoryOwner = fs.statSync(value.repositoryPath);
   const indexOwner = fs.statSync(path.join(gitDirectory, 'index'));
   assert.equal(indexOwner.uid, repositoryOwner.uid);
   assert.equal(indexOwner.gid, repositoryOwner.gid);
+  assert.ok(repositoryGitCalls.length > 0);
+  assert.ok(
+    repositoryGitCalls.every(
+      ({ identity }) =>
+        identity?.uid === repositoryOwner.uid && identity.gid === repositoryOwner.gid,
+    ),
+  );
 });
 
 test('LocalGitWorkspace provisions from a linked worktree under forced different ownership', async () => {
