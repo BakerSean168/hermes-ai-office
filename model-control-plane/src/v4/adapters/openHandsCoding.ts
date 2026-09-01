@@ -270,7 +270,12 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       phase: input.phase,
       expectedWorkspacePath: input.workspace.executionPath,
     });
-    return await this.snapshot(response, conversationId);
+    const initial = await this.snapshot(response, conversationId);
+    if (initial.status === 'PAUSED') {
+      await this.request('/api/conversations/' + encodeURIComponent(conversationId) + '/run', { method: 'POST' });
+      return await this.inspect(conversationId);
+    }
+    return initial;
   }
 
   async recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined> {

@@ -64,6 +64,35 @@ test('OpenHands implementation and review launches use distinct models, tools an
   await assert.rejects(() => review.launch(launchInput('IMPLEMENT')), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_REVIEW_PHASE_REQUIRED');
 });
 
+test('OpenHands launch explicitly runs an idle initial conversation before returning', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  let running = false;
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    calls.push({ url: value, method: String(init.method ?? 'GET') });
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(JSON.stringify({ id: 'idle-session', execution_status: 'idle', workspace: body.workspace, tags: body.tags }), { status: 201 });
+    }
+    if (value.endsWith('/api/conversations/idle-session/run') && init.method === 'POST') {
+      running = true;
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+    if (value.endsWith('/api/conversations/idle-session')) {
+      return new Response(JSON.stringify({ id: 'idle-session', execution_status: running ? 'running' : 'idle' }), { status: 200 });
+    }
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsExecutionProvider(options(fake));
+  const snapshot = await provider.launch(launchInput('IMPLEMENT'));
+  assert.equal(snapshot.status, 'RUNNING');
+  assert.deepEqual(calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]), [
+    ['POST', '/api/conversations'],
+    ['POST', '/api/conversations/idle-session/run'],
+    ['GET', '/api/conversations/idle-session'],
+  ]);
+});
+
 test('OpenHands recovery is paginated, provenance checked and duplicate-safe', async () => {
   let mode: 'single' | 'duplicate' | 'mismatch' = 'single';
   const fake = (async (url: string | URL | Request) => {
