@@ -166,6 +166,38 @@ test('LocalGitWorkspace provisions an exact revision idempotently with durable p
   );
 });
 
+test('LocalGitWorkspace materializes exact initialized submodules without using remote URLs', async () => {
+  const value = fixture();
+  const childRoot = path.join(value.allowedRoot, 'child-source');
+  fs.mkdirSync(childRoot, { recursive: true });
+  const child = repository(childRoot);
+  git(value.repositoryPath, [
+    '-c',
+    'protocol.file.allow=always',
+    'submodule',
+    'add',
+    '--',
+    child.repositoryPath,
+    'vendor/child',
+  ]);
+  const gitmodules = path.join(value.repositoryPath, '.gitmodules');
+  write(
+    gitmodules,
+    fs.readFileSync(gitmodules, 'utf8').replace(child.repositoryPath, 'https://invalid.example/child.git'),
+  );
+  const parentRevision = commit(value.repositoryPath, 'feat: add exact child submodule');
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-submodule',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: parentRevision,
+    phase: 'IMPLEMENT',
+  });
+  const childWorkspace = path.join(workspace.hostPath, 'vendor/child');
+  assert.equal(git(childWorkspace, ['rev-parse', 'HEAD']), child.baseRevision);
+  assert.equal(git(workspace.hostPath, ['status', '--porcelain=v1']), '');
+  assert.ok(fs.statSync(path.join(childWorkspace, '.git')).isDirectory());
+});
+
 test('LocalGitWorkspace implementation verification rejects no-op, dirty and mismatched evidence then accepts exact committed work', async () => {
   const value = fixture();
   const workspace = await value.adapter.provision({

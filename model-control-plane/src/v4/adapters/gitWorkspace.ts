@@ -23,6 +23,8 @@ const MAX_EVIDENCE_BYTES = 256_000;
 const MAX_DIFF_STAT_BYTES = 64_000;
 const MAX_CHANGED_FILES = 1_000;
 const MAX_IDENTIFIER = 180;
+const MAX_SUBMODULES = 64;
+const MAX_SUBMODULE_DEPTH = 4;
 
 export interface LocalGitWorkspaceOptions {
   allowedRepositoryRoots: string[];
@@ -336,6 +338,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
           input.sourceRevision,
         ]);
       }
+      await this.materializeSubmodules(cloneSource, stagingRepo, input.sourceRevision, staging);
       const createdAt = new Date().toISOString();
       const descriptor: StoredWorkspaceDescriptor = {
         version: 1,
@@ -574,6 +577,73 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       if (lock !== undefined) fs.closeSync(lock);
       fs.rmSync(transferBundle, { force: true });
       fs.rmSync(lockPath, { force: true });
+    }
+  }
+
+  private async materializeSubmodules(
+    sourceRepository: string,
+    targetRepository: string,
+    revision: string,
+    bundleRoot: string,
+    depth = 0,
+    state: { count: number } = { count: 0 },
+  ): Promise<void> {
+    if (depth > MAX_SUBMODULE_DEPTH) throw new V4Error('WORKSPACE_SUBMODULE_DEPTH_EXCEEDED');
+    const tree = await this.git(sourceRepository, ['ls-tree', '-r', '-z', revision]);
+    const entries = tree.split('\0').filter(Boolean);
+    for (const entry of entries) {
+      const match = /^160000 commit ([0-9a-f]{40,64})\t(.+)$/.exec(entry);
+      if (!match) continue;
+      if (state.count >= MAX_SUBMODULES) throw new V4Error('WORKSPACE_SUBMODULE_LIMIT_EXCEEDED');
+      state.count += 1;
+      const expectedRevision = match[1]!;
+      const relativePath = match[2]!;
+      const normalized = relativePath.replace(/\\/g, '/');
+      if (
+        !normalized ||
+        normalized.startsWith('/') ||
+        path.posix.normalize(normalized) !== normalized ||
+        normalized.split('/').some((part) => !part || part === '.' || part === '..')
+      ) {
+        throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
+      }
+      const sourcePath = path.resolve(sourceRepository, normalized);
+      const targetPath = path.resolve(targetRepository, normalized);
+      if (!inside(sourcePath, sourceRepository) || !inside(targetPath, targetRepository))
+        throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
+      const sourceStat = fs.lstatSync(sourcePath, { throwIfNoEntry: false });
+      if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink())
+        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_MISSING');
+      const sourceReal = fs.realpathSync(sourcePath);
+      if (!inside(sourceReal, fs.realpathSync(sourceRepository)))
+        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_INVALID');
+      const sourceHead = await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}']);
+      if (sourceHead !== expectedRevision)
+        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_REVISION_MISMATCH');
+
+      const existing = fs.lstatSync(targetPath, { throwIfNoEntry: false });
+      if (existing) {
+        if (!existing.isDirectory() || existing.isSymbolicLink() || fs.readdirSync(targetPath).length > 0)
+          throw new V4Error('WORKSPACE_SUBMODULE_TARGET_NOT_EMPTY');
+        fs.rmSync(targetPath, { recursive: true, force: true });
+      }
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      const bundle = path.join(bundleRoot, '.pixel-v4-submodule-' + state.count + '-' + randomUUID() + '.bundle');
+      try {
+        await this.git(sourcePath, ['bundle', 'create', bundle, 'HEAD']);
+        await this.runGit(['clone', '--no-hardlinks', '--no-checkout', '--', bundle, targetPath]);
+        await this.git(targetPath, ['checkout', '--detach', expectedRevision]);
+      } finally {
+        fs.rmSync(bundle, { force: true });
+      }
+      await this.materializeSubmodules(
+        sourcePath,
+        targetPath,
+        expectedRevision,
+        bundleRoot,
+        depth + 1,
+        state,
+      );
     }
   }
 
