@@ -23,9 +23,13 @@ fi
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
 artifact_sha="$(find "$repo_root/model-control-plane/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
+sudo install -d -o root -g root -m 0711 \
+  /opt/data/hermes-ai-office-v3/workspaces/v4 \
+  /opt/data/hermes-ai-office-v3/workspaces/v4/executions
+
 probe_id="$$-$(date -u +%s)"
 probe_unit="pixel-v4-release-probe-$probe_id"
-probe_dir="/opt/data/hermes-ai-office-v3/workspaces/.pixel-v4-release-$probe_id"
+probe_dir="/opt/data/hermes-ai-office-v3/workspaces/v4/executions/.pixel-v4-release-$probe_id"
 memo_probe="/home/dev/projects/memoflow-platform-1003/.pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
 probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
@@ -63,6 +67,9 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
   "$digital_probe" \
   10001 \
   10001
+sudo docker exec --user 10001:10001 hermes-openhands-v3 \
+  /bin/sh -c 'test -d "$1" && test -w "$1" && touch "$1/container-write" && rm -f "$1/container-write"' \
+  sh "/workspace/v4/executions/.pixel-v4-release-$probe_id"
 cleanup_probe
 trap - EXIT
 

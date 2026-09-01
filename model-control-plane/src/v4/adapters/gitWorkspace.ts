@@ -237,7 +237,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       input.sourceRevision.trim().length > 0 && input.sourceRevision.length <= MAX_IDENTIFIER,
       'WORKSPACE_SOURCE_REVISION_REQUIRED',
     );
-    const executionDirectory = path.join(this.managedHostRoot, 'v4', 'executions', executionId);
+    const executionsRoot = this.ensureManagedExecutionParents();
+    const executionDirectory = path.join(executionsRoot, executionId);
     const hostPath = path.join(executionDirectory, 'repo');
     const evidenceHostPath = path.join(executionDirectory, 'completion-evidence.json');
     const descriptorPath = path.join(executionDirectory, 'workspace.json');
@@ -310,9 +311,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       throw new V4Error('WORKSPACE_SOURCE_REVISION_MISSING');
     }
 
-    const parent = path.dirname(executionDirectory);
-    fs.mkdirSync(parent, { recursive: true, mode: 0o750 });
-    this.assertManagedDirectory(parent);
     const staging = executionDirectory + '.staging-' + randomUUID();
     fs.mkdirSync(staging, { mode: 0o750 });
     try {
@@ -558,6 +556,30 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       if (lock !== undefined) fs.closeSync(lock);
       fs.rmSync(lockPath, { force: true });
     }
+  }
+
+  private ensureManagedExecutionParents(): string {
+    const managerUid = process.getuid?.();
+    const managerGid = process.getgid?.();
+    const directories = [
+      path.join(this.managedHostRoot, 'v4'),
+      path.join(this.managedHostRoot, 'v4', 'executions'),
+    ];
+    for (const directory of directories) {
+      fs.mkdirSync(directory, { recursive: true, mode: 0o711 });
+      this.assertManagedDirectory(directory);
+      const stat = fs.statSync(directory);
+      if (
+        managerUid !== undefined &&
+        managerGid !== undefined &&
+        (stat.uid !== managerUid || stat.gid !== managerGid)
+      ) {
+        if (managerUid !== 0) throw new V4Error('WORKSPACE_MANAGED_PARENT_OWNER_INVALID');
+        fs.chownSync(directory, managerUid, managerGid);
+      }
+      fs.chmodSync(directory, 0o711);
+    }
+    return directories[1]!;
   }
 
   private assignWorkspaceOwner(executionDirectory: string, repository: string): void {

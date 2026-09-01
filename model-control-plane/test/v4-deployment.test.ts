@@ -61,6 +61,10 @@ test('V4 installer takes a SQLite backup and requires V4 execution health', () =
   assert.match(installer, /http:\/\/127\.0\.0\.1:8320\/api\/health/);
   assert.match(installer, /payload\.apiVersion !== 4/);
   assert.match(installer, /payload\.executionRuntime\?\.enabled !== true/);
+  assert.match(
+    installer,
+    /install -d -o root -g root -m 0711 "\$WORKSPACE_DIR\/v4" "\$WORKSPACE_DIR\/v4\/executions"/,
+  );
   assert.doesNotMatch(installer, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });
 
@@ -91,6 +95,9 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(release, /probe-v4-service-sandbox\.sh/);
   assert.match(probe, /test -r "\$entry_file"/);
   assert.match(probe, /chown -R "\$owner_uid:\$owner_gid"/);
+  assert.match(release, /install -d -o root -g root -m 0711/);
+  assert.match(probe, /setpriv --reuid="\$owner_uid" --regid="\$owner_gid"/);
+  assert.match(release, /docker exec --user 10001:10001 hermes-openhands-v3/);
   assert.match(release, /memoflow-platform-1003\/\.pixel-v4-release/);
   assert.match(release, /digital-biome\/\.pixel-v4-release/);
   assert.match(release, /trap cleanup_probe EXIT/);

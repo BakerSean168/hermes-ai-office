@@ -365,3 +365,23 @@ test('LocalGitWorkspace provisions from a linked worktree under forced different
   assert.equal(workspace.sourceRepositoryPath, linked);
   assert.equal(fs.existsSync(path.join(path.dirname(workspace.hostPath), 'source.bundle')), false);
 });
+
+test('LocalGitWorkspace keeps managed parents controller-owned but traversable by the worker', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-parent-permissions',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  const v4Root = path.join(value.managedRoot, 'v4');
+  const executionsRoot = path.join(v4Root, 'executions');
+  const executionDirectory = path.dirname(workspace.hostPath);
+  for (const directory of [v4Root, executionsRoot]) {
+    const stat = fs.statSync(directory);
+    assert.equal(stat.mode & 0o777, 0o711);
+    assert.equal(stat.uid, process.getuid?.() ?? stat.uid);
+    assert.equal(stat.gid, process.getgid?.() ?? stat.gid);
+  }
+  assert.equal(fs.statSync(executionDirectory).mode & 0o777, 0o750);
+});

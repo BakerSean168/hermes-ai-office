@@ -45,6 +45,7 @@ fi
 
 install -d -m 0750 "$ROOT" "$DATA_DIR" "$BACKUP_DIR" "$SECRETS_DIR" "$OPENHANDS_DIR"
 install -d -o 10001 -g 10001 -m 0750 "$WORKSPACE_DIR"
+install -d -o root -g root -m 0711 "$WORKSPACE_DIR/v4" "$WORKSPACE_DIR/v4/executions"
 
 if [[ -f "$V4_DB" ]]; then
   backup_path="$BACKUP_DIR/pixel-v4-$(date -u +%Y%m%dT%H%M%SZ).sqlite"
