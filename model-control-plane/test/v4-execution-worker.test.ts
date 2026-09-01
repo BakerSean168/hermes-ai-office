@@ -172,7 +172,7 @@ class FakeProvider implements ExecutionProviderPort {
   async replace(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot> {
     this.replaceCalls += 1;
     this.lastReplacement = input;
-    return { ...this.replaceSnapshot, observedAt: now(60 + this.replaceCalls) };
+    return { ...this.replaceSnapshot, observedAt: now(-1_000) };
   }
 }
 

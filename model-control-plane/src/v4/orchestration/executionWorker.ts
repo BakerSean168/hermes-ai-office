@@ -300,21 +300,22 @@ export class ExecutionWorker {
       if (swapped.status === 'rejected' || !swapped.value)
         throw new V4Error(swapped.reason ?? 'STALE_PROVIDER_SESSION');
       session = this.repositories.sessions.get(executionId);
-      if (TERMINAL_PROVIDER_STATUSES.has(replacement.status))
-        this.recordTerminalProviderStatus(executionId, session, replacement);
-      else this.recordActiveProviderStatus(executionId, session, replacement);
+      const currentReplacement = await provider.inspect(replacement.providerSessionId);
+      if (TERMINAL_PROVIDER_STATUSES.has(currentReplacement.status))
+        this.recordTerminalProviderStatus(executionId, session, currentReplacement);
+      else this.recordActiveProviderStatus(executionId, session, currentReplacement);
       return {
         executionId,
         status:
-          replacement.status === 'FAILED' || replacement.status === 'STUCK' || replacement.status === 'CANCELLED'
+          currentReplacement.status === 'FAILED' || currentReplacement.status === 'STUCK' || currentReplacement.status === 'CANCELLED'
             ? 'FAILED'
-            : replacement.status === 'PAUSED' || replacement.status === 'WAITING_FOR_CONFIRMATION'
+            : currentReplacement.status === 'PAUSED' || currentReplacement.status === 'WAITING_FOR_CONFIRMATION'
               ? 'WAITING'
-              : replacement.status === 'SUCCEEDED'
+              : currentReplacement.status === 'SUCCEEDED'
                 ? 'SUCCEEDED'
                 : 'RUNNING',
-        code: 'PROVIDER_SESSION_REPLACED_' + replacement.status,
-        providerSessionId: replacement.providerSessionId,
+        code: 'PROVIDER_SESSION_REPLACED_' + currentReplacement.status,
+        providerSessionId: currentReplacement.providerSessionId,
       };
     } catch (error) {
       return { executionId, status: 'FAILED', code: errorCode(error) };
