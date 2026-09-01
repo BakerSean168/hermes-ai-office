@@ -23,6 +23,42 @@ fi
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
 artifact_sha="$(find "$repo_root/model-control-plane/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
+probe_id="$$-$(date -u +%s)"
+probe_unit="pixel-v4-release-probe-$probe_id"
+probe_dir="/opt/data/hermes-ai-office-v3/workspaces/.pixel-v4-release-$probe_id"
+memo_probe="/home/dev/projects/memoflow-platform-1003/.pixel-v4-release-$probe_id"
+digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
+cleanup_probe() {
+  sudo rm -rf "$probe_dir"
+  sudo rm -f "$memo_probe" "$digital_probe"
+}
+trap cleanup_probe EXIT
+sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
+  -p User=root \
+  -p WorkingDirectory="$target_root" \
+  -p NoNewPrivileges=yes \
+  -p PrivateTmp=yes \
+  -p PrivateDevices=yes \
+  -p ProtectSystem=strict \
+  -p ProtectHome=read-only \
+  -p ProtectKernelTunables=yes \
+  -p ProtectKernelModules=yes \
+  -p ProtectControlGroups=yes \
+  -p ProtectClock=yes \
+  -p ProtectHostname=yes \
+  -p RestrictRealtime=yes \
+  -p LockPersonality=yes \
+  -p RestrictSUIDSGID=yes \
+  -p 'CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER' \
+  -p 'AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER' \
+  -p ReadWritePaths=/srv/hermes-personal/data/model-control-plane \
+  -p ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces \
+  -p ReadWritePaths=/home/dev/projects/memoflow-platform-1003 \
+  -p ReadWritePaths=/home/dev/projects/digital-biome \
+  /bin/bash -lc "set -euo pipefail; test -r model-control-plane/dist/main.js; mkdir '$probe_dir'; touch '$probe_dir/file'; chown -R 10001:10001 '$probe_dir'; test "\$(stat -c %u '$probe_dir')" = 10001; touch '$memo_probe' '$digital_probe'; rm -f '$memo_probe' '$digital_probe'; rm -rf '$probe_dir'"
+cleanup_probe
+trap - EXIT
+
 if sudo test -f "$db_file"; then
   sudo install -d -m 0700 "$backup_dir"
   backup_path="$backup_dir/pixel-v4-release-$(date -u +%Y%m%dT%H%M%SZ).sqlite"
@@ -39,8 +75,10 @@ NODE
   sudo chmod 0600 "$backup_path"
 fi
 
-install -d "$target_dist"
-rsync -a --delete "$repo_root/model-control-plane/dist/" "$target_dist/"
+if [[ "$repo_root" != "$target_root" ]]; then
+  install -d "$target_dist"
+  rsync -a --delete "$repo_root/model-control-plane/dist/" "$target_dist/"
+fi
 sudo install -m 0644 "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service" "/etc/systemd/system/$service"
 sudo systemctl daemon-reload
 sudo systemctl restart "$service"

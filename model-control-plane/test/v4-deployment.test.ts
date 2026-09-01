@@ -5,17 +5,32 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const service = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-model-control-plane.service'), 'utf8');
-const installer = fs.readFileSync(path.join(root, 'deploy/gcp/install-gcp-execution-plane.sh'), 'utf8');
+const service = fs.readFileSync(
+  path.join(root, 'deploy/gcp/hermes-model-control-plane.service'),
+  'utf8',
+);
+const installer = fs.readFileSync(
+  path.join(root, 'deploy/gcp/install-gcp-execution-plane.sh'),
+  'utf8',
+);
 const release = fs.readFileSync(path.join(root, 'scripts/release-v4-gcp.sh'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
-  assert.match(service, /MODEL_CP_DB=\/srv\/hermes-personal\/data\/model-control-plane\/pixel-v4\.sqlite/);
+  assert.match(
+    service,
+    /MODEL_CP_DB=\/srv\/hermes-personal\/data\/model-control-plane\/pixel-v4\.sqlite/,
+  );
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
-  assert.match(service, /MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5\.6-luna,implementation-efficient,implementation-glm=glm-5\.2/);
-  assert.match(service, /MODEL_CP_V4_REVIEW_ROUTES=gpt-5\.6-sol,codex-auto-review,review-glm=glm-5\.2/);
+  assert.match(
+    service,
+    /MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5\.6-luna,implementation-efficient,implementation-glm=glm-5\.2/,
+  );
+  assert.match(
+    service,
+    /MODEL_CP_V4_REVIEW_ROUTES=gpt-5\.6-sol,codex-auto-review,review-glm=glm-5\.2/,
+  );
   assert.match(service, /ProtectSystem=strict/);
   assert.match(service, /ProtectHome=read-only/);
   for (const writable of [
@@ -23,8 +38,14 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
     '/opt/data/hermes-ai-office-v3/workspaces',
     '/home/dev/projects/memoflow-platform-1003',
     '/home/dev/projects/digital-biome',
-  ]) assert.match(service, new RegExp('ReadWritePaths=' + writable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  ])
+    assert.match(
+      service,
+      new RegExp('ReadWritePaths=' + writable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+    );
   assert.doesNotMatch(service, /ReadWritePaths=\/home\/dev\/projects\s*$/m);
+  assert.match(service, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
+  assert.match(service, /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
   assert.doesNotMatch(service, /(?:SESSION_API_KEY|LITELLM_V3_KEY|OH_SECRET_KEY)=\S+/);
 });
 
@@ -51,4 +72,19 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /runtime\.reviewRoutes\[0\] !== 'gpt-5\.6-sol'/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
+});
+
+test('V4 release never rsyncs a build directory onto itself', () => {
+  assert.match(release, /if \[\[ "\$repo_root" != "\$target_root" \]\]; then/);
+  assert.match(release, /rsync -a --delete/);
+});
+
+test('V4 release proves the exact service sandbox can read, chown and write only approved paths', () => {
+  assert.match(release, /systemd-run --wait --pipe --collect/);
+  assert.match(release, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
+  assert.match(release, /test -r model-control-plane\/dist\/main\.js/);
+  assert.match(release, /chown -R 10001:10001/);
+  assert.match(release, /memoflow-platform-1003\/\.pixel-v4-release/);
+  assert.match(release, /digital-biome\/\.pixel-v4-release/);
+  assert.match(release, /trap cleanup_probe EXIT/);
 });
