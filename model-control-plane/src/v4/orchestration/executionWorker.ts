@@ -110,7 +110,11 @@ export class ExecutionWorker {
     return results;
   }
 
-  async continueExecution(executionId: string, instruction = 'Continue the same bounded execution from its durable workspace and finish the original objective.'): Promise<ExecutionWorkerResult> {
+  async continueExecution(
+    executionId: string,
+    instruction = 'Continue the same bounded execution from its durable workspace and finish the original objective.',
+    options: { interruptCurrent?: boolean } = {},
+  ): Promise<ExecutionWorkerResult> {
     const claim = this.repositories.executions.claimLease(executionId, this.ownerId, this.leaseTtlMs);
     if (!claim.value || claim.status === 'rejected') return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     try {
@@ -119,9 +123,18 @@ export class ExecutionWorker {
       const provider = this.routes.get(execution.identity.route);
       if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
       if (!provider.continue) return { executionId, status: 'WAITING', code: 'PROVIDER_CONTINUE_UNAVAILABLE' };
-      const session = this.repositories.sessions.get(executionId);
-      if (!session.providerSessionId) return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
-      const snapshot = await provider.continue(session.providerSessionId, instruction);
+      let session = this.repositories.sessions.get(executionId);
+      const providerSessionId = session.providerSessionId;
+      if (!providerSessionId) return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
+      if (options.interruptCurrent) {
+        if (!provider.interrupt) return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
+        const interrupted = await provider.interrupt(providerSessionId);
+        if (TERMINAL_PROVIDER_STATUSES.has(interrupted.status))
+          this.recordTerminalProviderStatus(executionId, session, interrupted);
+        else this.recordActiveProviderStatus(executionId, session, interrupted);
+        session = this.repositories.sessions.get(executionId);
+      }
+      const snapshot = await provider.continue(providerSessionId, instruction);
       if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status)) this.recordTerminalProviderStatus(executionId, session, snapshot);
       else this.recordActiveProviderStatus(executionId, session, snapshot);
       return {

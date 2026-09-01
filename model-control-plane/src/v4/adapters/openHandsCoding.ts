@@ -324,6 +324,23 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       method: 'POST',
       body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: instruction }], run: true }),
     });
+    let snapshot = await this.inspect(providerSessionId);
+    if (snapshot.status === 'PAUSED') {
+      try {
+        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
+      } catch (error) {
+        if (!(error instanceof V4Error) || error.code !== 'OPENHANDS_HTTP_409') throw error;
+        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
+        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
+      }
+      snapshot = await this.inspect(providerSessionId);
+    }
+    return snapshot;
+  }
+
+  async interrupt(providerSessionId: string): Promise<ProviderSessionSnapshot> {
+    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
     return await this.inspect(providerSessionId);
   }
 

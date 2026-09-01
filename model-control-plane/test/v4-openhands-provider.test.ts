@@ -149,6 +149,38 @@ test('OpenHands inspect, continue and cancel sanitize terminal provider evidence
   assert.ok(calls.some((call) => call.url.endsWith('/pause') && call.method === 'POST'));
 });
 
+test('OpenHands paused continuation explicitly runs and recovers a stale in-flight task with interrupt', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  let state: 'paused' | 'running' = 'paused';
+  let runAttempts = 0;
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    calls.push({ url: value, method: String(init.method ?? 'GET') });
+    if (value.endsWith('/events') && init.method === 'POST')
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    if (value.endsWith('/interrupt') && init.method === 'POST') {
+      state = 'paused';
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+    if (value.endsWith('/run') && init.method === 'POST') {
+      runAttempts += 1;
+      if (runAttempts === 1) return new Response(JSON.stringify({ detail: 'still running' }), { status: 409 });
+      state = 'running';
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+    if (value.endsWith('/agent_final_response')) return new Response(JSON.stringify({ response: '' }), { status: 200 });
+    if (value.includes('/events/search')) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (value.endsWith('/api/conversations/session-stuck'))
+      return new Response(JSON.stringify({ id: 'session-stuck', execution_status: state }), { status: 200 });
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsExecutionProvider(options(fake));
+  const snapshot = await provider.continue('session-stuck', 'Continue the same bounded execution.');
+  assert.equal(snapshot.status, 'RUNNING');
+  assert.equal(runAttempts, 2);
+  assert.ok(calls.some((call) => call.url.endsWith('/interrupt') && call.method === 'POST'));
+});
+
 test('OpenHands status and transport failures fail closed', async () => {
   assert.deepEqual([
     'created', 'queued', 'running', 'idle', 'paused', 'waiting_for_confirmation', 'finished', 'error', 'stuck', 'deleting', 'other',

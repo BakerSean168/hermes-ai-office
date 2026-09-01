@@ -164,6 +164,7 @@ export interface ExecutionProviderPort {
   recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined>;
   inspect(providerSessionId: string): Promise<ProviderSessionSnapshot>;
   continue?(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot>;
+  interrupt?(providerSessionId: string): Promise<ProviderSessionSnapshot>;
   cancel?(providerSessionId: string): Promise<ProviderSessionSnapshot>;
 }
 

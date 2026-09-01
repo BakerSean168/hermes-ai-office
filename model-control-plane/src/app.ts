@@ -720,7 +720,11 @@ export async function buildControlPlane(
       typeof body.instruction === 'string' && body.instruction.trim()
         ? body.instruction.trim()
         : undefined;
-    return await requireAutomation().worker.continueExecution(executionId, instruction);
+    if (body.interruptCurrent !== undefined && typeof body.interruptCurrent !== 'boolean')
+      throw new V4Error('EXECUTION_CONTINUE_INTERRUPT_INVALID');
+    return await requireAutomation().worker.continueExecution(executionId, instruction, {
+      interruptCurrent: body.interruptCurrent === true,
+    });
   });
 
   app.get('/api/v4/supervisors/:supervisorId/projection', async (request) => {

@@ -127,10 +127,12 @@ class FakeProvider implements ExecutionProviderPort {
   recoverCalls = 0;
   inspectCalls = 0;
   continueCalls = 0;
+  interruptCalls = 0;
   launchSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(10) };
   recoveredSnapshot?: ProviderSessionSnapshot;
   inspectSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(20) };
   continueSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(30) };
+  interruptSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'PAUSED', observedAt: now(25) };
   launchError?: Error;
   lastLaunch?: ProviderLaunchInput;
   lastContinueInstruction?: string;
@@ -156,6 +158,11 @@ class FakeProvider implements ExecutionProviderPort {
     this.continueCalls += 1;
     this.lastContinueInstruction = instruction;
     return { ...this.continueSnapshot, observedAt: now(50 + this.continueCalls) };
+  }
+
+  async interrupt(_providerSessionId: string): Promise<ProviderSessionSnapshot> {
+    this.interruptCalls += 1;
+    return { ...this.interruptSnapshot, observedAt: now(40 + this.interruptCalls) };
   }
 }
 
@@ -435,6 +442,37 @@ test('execution worker keeps review workspace failures strict and never asks the
   assert.equal(seeded.repositories.executions.get(reviewer.identity.executionId).retryable, false);
   assert.equal(review.status, 'PENDING');
   workspace.verifyReview = originalVerifyReview;
+  seeded.db.close();
+});
+
+test('execution worker can interrupt a stuck provider turn and continue the same durable session', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-interrupt-resume',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-interrupt-resume' },
+  );
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  const resumed = await worker.continueExecution(
+    execution.identity.executionId,
+    'Resume the same bounded work.',
+    { interruptCurrent: true },
+  );
+  assert.equal(resumed.status, 'RUNNING');
+  assert.equal(provider.launchCalls, 1);
+  assert.equal(provider.interruptCalls, 1);
+  assert.equal(provider.continueCalls, 1);
+  assert.equal(provider.lastContinueInstruction, 'Resume the same bounded work.');
+  assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerStatus, 'RUNNING');
   seeded.db.close();
 });
 
