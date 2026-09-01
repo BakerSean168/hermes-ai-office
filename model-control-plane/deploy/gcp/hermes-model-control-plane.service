@@ -1,31 +1,59 @@
 [Unit]
-Description=Pixel Agent V4 Control Plane (GCP execution host)
-After=network-online.target docker.service tailscaled.service
-Wants=network-online.target
-Requires=docker.service
+Description=Hermes Pixel Agent V4 Durable Coding Control Plane
+After=network-online.target hermes-openhands-v3.service
+Wants=network-online.target hermes-openhands-v3.service
 
 [Service]
 Type=simple
-WorkingDirectory=/home/dev/projects/pixel-agents
-ExecStart=/usr/bin/node model-control-plane/dist/main.js
-ExecStartPre=/usr/bin/test -f /home/dev/projects/pixel-agents/model-control-plane/dist/main.js
-EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
-EnvironmentFile=/srv/hermes-personal/secrets/openhands-v3.env
+User=root
+WorkingDirectory=/srv/hermes-personal/model-control-plane
 Environment=NODE_ENV=production
-Environment=MODEL_CP_OPENHANDS_URL=http://127.0.0.1:18000
-Environment=MODEL_CP_SUPERVISOR_MODEL=gpt-5.6-luna
-Environment=MODEL_CP_SUPERVISOR_RUNTIME_ENABLED=true
-Environment=MODEL_CP_SUPERVISOR_POLL_MS=5000
 Environment=MODEL_CP_HOST=127.0.0.1
 Environment=MODEL_CP_PORT=8320
 Environment=MODEL_CP_DB=/srv/hermes-personal/data/model-control-plane/pixel-v4.sqlite
-Restart=always
-RestartSec=3
-UMask=0077
+Environment=MODEL_CP_OPENHANDS_URL=http://127.0.0.1:18000
+Environment=MODEL_CP_SUPERVISOR_MODEL=gpt-5.6-sol
+Environment=MODEL_CP_SUPERVISOR_RUNTIME_ENABLED=true
+Environment=MODEL_CP_SUPERVISOR_POLL_MS=5000
+Environment=MODEL_CP_EXECUTION_RUNTIME_ENABLED=true
+Environment=MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true
+Environment=MODEL_CP_AUTOMATION_POLL_MS=5000
+Environment=MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS=/home/dev/projects
+Environment=MODEL_CP_V4_WORKSPACE_HOST_ROOT=/opt/data/hermes-ai-office-v3/workspaces
+Environment=MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT=/workspace
+Environment=MODEL_CP_V4_WORKSPACE_UID=10001
+Environment=MODEL_CP_V4_WORKSPACE_GID=10001
+Environment=MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5.6-luna,implementation-efficient,implementation-glm=glm-5.2
+Environment=MODEL_CP_V4_REVIEW_ROUTES=gpt-5.6-sol,codex-auto-review,review-glm=glm-5.2
+Environment=MODEL_CP_V4_MAX_IMPLEMENTATION_ATTEMPTS=3
+Environment=MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=3
+Environment=MODEL_CP_V4_MAX_REPAIR_CYCLES=3
+EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
+EnvironmentFile=/srv/hermes-personal/secrets/openhands-v3.env
+ExecStart=/usr/bin/node /srv/hermes-personal/model-control-plane/dist/main.js
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=45
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ReadWritePaths=/srv/hermes-personal/data/model-control-plane
+ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces
+ReadWritePaths=/home/dev/projects/memoflow-platform-1003
+ReadWritePaths=/home/dev/projects/digital-biome
 
 [Install]
 WantedBy=multi-user.target

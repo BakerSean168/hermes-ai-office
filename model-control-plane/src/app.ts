@@ -60,9 +60,20 @@ function requiredText(value: unknown, code: string): string {
   return value.trim();
 }
 
-function listValue(value: string | undefined, fallback: string[]): string[] {
+interface RouteSpec { route: string; model: string; }
+
+function routeSpecs(value: string | undefined, fallback: string[]): RouteSpec[] {
   const items = (value ? value.split(',') : fallback).map((item) => item.trim()).filter(Boolean);
-  return [...new Set(items)];
+  const seen = new Set<string>();
+  return items.map((item) => {
+    const separator = item.indexOf('=');
+    const route = (separator < 0 ? item : item.slice(0, separator)).trim();
+    const model = (separator < 0 ? item : item.slice(separator + 1)).trim();
+    if (!route || !model) throw new V4Error('EXECUTION_ROUTE_SPEC_INVALID');
+    if (seen.has(route)) throw new V4Error('EXECUTION_ROUTE_DUPLICATE');
+    seen.add(route);
+    return { route, model };
+  });
 }
 
 function rootList(value: string | undefined): string[] {
@@ -96,8 +107,10 @@ function buildExecutionAutomation(
   if (allowedRepositoryRoots.length === 0) throw new V4Error('WORKSPACE_ALLOWED_ROOT_REQUIRED');
   const managedHostRoot = requiredText(env.MODEL_CP_V4_WORKSPACE_HOST_ROOT, 'WORKSPACE_MANAGED_ROOT_REQUIRED');
   const executionRoot = requiredText(env.MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT ?? '/workspace', 'WORKSPACE_EXECUTION_ROOT_REQUIRED');
-  const implementationRoutes = listValue(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, ['gpt-5.6-luna', 'implementation-efficient', 'glm-5.2']);
-  const reviewRoutes = listValue(env.MODEL_CP_V4_REVIEW_ROUTES, ['gpt-5.6-sol', 'review-premium']);
+  const implementationSpecs = routeSpecs(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, ['gpt-5.6-luna', 'implementation-efficient', 'implementation-glm=glm-5.2']);
+  const reviewSpecs = routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, ['gpt-5.6-sol', 'codex-auto-review', 'review-glm=glm-5.2']);
+  const implementationRoutes = implementationSpecs.map((item) => item.route);
+  const reviewRoutes = reviewSpecs.map((item) => item.route);
   if (implementationRoutes.some((route) => reviewRoutes.includes(route))) throw new V4Error('EXECUTION_ROUTE_ROLE_CONFLICT');
 
   const common = {
@@ -111,13 +124,13 @@ function buildExecutionAutomation(
     maxIterations: integerValue(env.MODEL_CP_V4_PROVIDER_MAX_ITERATIONS, 500, 1, 1_000, 'OPENHANDS_ITERATION_LIMIT_INVALID'),
   };
   const routes: ExecutionWorkerRoute[] = [
-    ...implementationRoutes.map((route) => ({
+    ...implementationSpecs.map(({ route, model }) => ({
       route,
-      provider: new OpenHandsExecutionProvider({ ...common, implementationModel: route }),
+      provider: new OpenHandsExecutionProvider({ ...common, implementationModel: model }),
     })),
-    ...reviewRoutes.map((route) => ({
+    ...reviewSpecs.map(({ route, model }) => ({
       route,
-      provider: new OpenHandsReviewProvider({ ...common, reviewModel: route }),
+      provider: new OpenHandsReviewProvider({ ...common, reviewModel: model }),
     })),
   ];
   const workspace = new LocalGitWorkspaceAdapter({
@@ -172,23 +185,15 @@ export async function buildControlPlane(options: BuildControlPlaneOptions = {}):
   };
 
   const supervisorKernel: SupervisorKernelPort = {
-    createExecution: (payload, planId) => {
+    createExecution: async (payload, planId) => {
       const runtime = requireAutomation();
-      if (!runtime.implementationRoutes.includes(payload.route)) throw new V4Error('EXECUTION_ROUTE_UNAVAILABLE');
-      let plan = repositories.plans.getPlan(planId);
+      if (payload.route !== runtime.implementationRoutes[0]) throw new V4Error('INITIAL_ROUTE_POLICY_MISMATCH');
       const item = repositories.plans.getWorkItem(payload.workItemId);
       if (item.planId !== planId) throw new V4Error('EXECUTION_WORK_ITEM_MISMATCH');
-      if (plan.status === 'READY') {
-        const started = repositories.plans.compareAndSetStatus(planId, 'READY', 'RUNNING');
-        if (started.status === 'rejected') throw new V4Error(started.reason ?? 'STALE_PLAN_STATUS');
-        plan = repositories.plans.getPlan(planId);
-      }
-      if (item.status === 'PENDING' || item.status === 'READY') repositories.plans.updateWorkItemStatus(item.workItemId, 'RUNNING');
-      const execution = runtime.plans.createInitialExecution(plan, repositories.plans.getWorkItem(item.workItemId), {
-        implementationRoutes: [payload.route],
-        reviewRoutes: runtime.reviewRoutes,
-      });
-      return { code: 'EXECUTION_QUEUED', linkedExecutionId: execution.identity.executionId };
+      const result = await runtime.plans.runPlan(planId);
+      if (result.workItemId && result.workItemId !== payload.workItemId) throw new V4Error('WORK_ITEM_NOT_RUNNABLE');
+      if (!result.executionId) throw new V4Error(result.code);
+      return { code: result.code, linkedExecutionId: result.executionId };
     },
     continueExecution: async (payload) => {
       const result = await requireAutomation().worker.continueExecution(payload.executionId);

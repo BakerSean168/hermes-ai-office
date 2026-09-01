@@ -233,6 +233,27 @@ test('execution worker launches once, persists provider correlation, then comple
   seeded.db.close();
 });
 
+test('execution worker accepts the real OpenHands idle launch state and resumes the same session later', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, { executionId: 'exec-idle-launch', planId: seeded.plan.planId, workItemId: seeded.item.workItemId });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  provider.launchSnapshot = { provider: provider.provider, providerSessionId: 'idle-session', status: 'PAUSED', observedAt: now(10) };
+  const worker = new ExecutionWorker(seeded.repositories, workspace, [{ route: 'implementation', provider }], { ownerId: 'worker-idle' });
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'WAITING');
+  assert.equal(launched.code, 'PROVIDER_PAUSED');
+  assert.equal(seeded.repositories.executions.get(execution.identity.executionId).status, 'RUNNING');
+  assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerStatus, 'PAUSED');
+  provider.inspectSnapshot = { provider: provider.provider, providerSessionId: 'idle-session', status: 'RUNNING', observedAt: now(20) };
+  const resumed = await worker.runExecution(execution.identity.executionId);
+  assert.equal(resumed.status, 'RUNNING');
+  assert.equal(provider.launchCalls, 1);
+  assert.equal(provider.inspectCalls, 1);
+  assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerStatus, 'RUNNING');
+  seeded.db.close();
+});
+
 test('execution worker recovers a provider session after launch response loss without a duplicate launch', async () => {
   const seeded = seed();
   const execution = createExecution(seeded.repositories, { executionId: 'exec-response-loss', planId: seeded.plan.planId, workItemId: seeded.item.workItemId });

@@ -63,7 +63,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
       MODEL_CP_V4_WORKSPACE_HOST_ROOT: value.managed,
       MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
       MODEL_CP_V4_IMPLEMENTATION_ROUTES: 'gpt-5.6-luna,implementation-efficient',
-      MODEL_CP_V4_REVIEW_ROUTES: 'gpt-5.6-sol',
+      MODEL_CP_V4_REVIEW_ROUTES: 'gpt-5.6-sol,review-glm=glm-5.2',
       MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 0),
       MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
     },
@@ -73,7 +73,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
     enabled: true,
     autonomousPolling: false,
     implementationRoutes: ['gpt-5.6-luna', 'implementation-efficient'],
-    reviewRoutes: ['gpt-5.6-sol'],
+    reviewRoutes: ['gpt-5.6-sol', 'review-glm'],
   });
   const created = await runtime.app.inject({
     method: 'POST',
