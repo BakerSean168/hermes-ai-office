@@ -78,6 +78,40 @@ CREATE TABLE IF NOT EXISTS executions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS execution_sessions (
+  execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id),
+  phase TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  provider_session_id TEXT UNIQUE,
+  workspace_host_path TEXT NOT NULL,
+  workspace_execution_path TEXT NOT NULL,
+  evidence_host_path TEXT NOT NULL,
+  evidence_execution_path TEXT NOT NULL,
+  workspace_created_at TEXT NOT NULL,
+  source_repository_path TEXT NOT NULL,
+  source_revision TEXT NOT NULL,
+  provider_status TEXT NOT NULL,
+  last_heartbeat_at TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  final_response TEXT,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_sessions_status ON execution_sessions(provider_status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_execution_sessions_provider ON execution_sessions(provider, provider_session_id);
+CREATE TABLE IF NOT EXISTS execution_evidence (
+  evidence_id TEXT PRIMARY KEY,
+  execution_id TEXT NOT NULL REFERENCES executions(execution_id),
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  source_revision TEXT,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(execution_id, kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_evidence_execution ON execution_evidence(execution_id, created_at);
 CREATE TABLE IF NOT EXISTS reviews (
   review_id TEXT PRIMARY KEY,
   idempotency_key TEXT NOT NULL UNIQUE,
@@ -195,10 +229,10 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   evidence TEXT NOT NULL,
   status TEXT NOT NULL,
   risk TEXT NOT NULL DEFAULT 'LOW',
-  plan_id TEXT,
+  plan_id TEXT REFERENCES plans(plan_id),
   pull_request_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 1, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 2, CAST(strftime('%s','now') AS INTEGER));

@@ -1,0 +1,154 @@
+export const EXECUTION_PHASES = ['IMPLEMENT', 'IMPLEMENT_FIX', 'REVIEW'] as const;
+export type ExecutionPhase = (typeof EXECUTION_PHASES)[number];
+
+export const PROVIDER_SESSION_STATUSES = [
+  'CREATED', 'QUEUED', 'RUNNING', 'PAUSED', 'WAITING_FOR_CONFIRMATION',
+  'SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED', 'UNKNOWN',
+] as const;
+export type ProviderSessionStatus = (typeof PROVIDER_SESSION_STATUSES)[number];
+
+export const EXECUTION_EVIDENCE_KINDS = [
+  'WORKSPACE', 'REVISION', 'DIFF', 'TEST', 'PROVIDER_OUTPUT', 'REVIEW', 'RECOVERY',
+] as const;
+export type ExecutionEvidenceKind = (typeof EXECUTION_EVIDENCE_KINDS)[number];
+
+export interface RepositoryObservation {
+  repositoryPath: string;
+  rootPath: string;
+  headRevision: string;
+  branch?: string;
+  clean: boolean;
+  commitExists: boolean;
+  observedAt: string;
+}
+
+export interface WorkspaceDescriptor {
+  executionId: string;
+  hostPath: string;
+  executionPath: string;
+  evidenceHostPath: string;
+  evidenceExecutionPath: string;
+  sourceRepositoryPath: string;
+  sourceRevision: string;
+  createdAt: string;
+}
+
+export interface TestCommandEvidence {
+  command: string;
+  status: 'PASS' | 'FAIL' | 'SKIP';
+  exitCode?: number;
+  summary?: string;
+}
+
+export interface ImplementationCompletionEvidence {
+  version: 1;
+  executionId: string;
+  phase: 'IMPLEMENT' | 'IMPLEMENT_FIX';
+  sourceRevision: string;
+  resultRevision: string;
+  summary: string;
+  tests: TestCommandEvidence[];
+}
+
+export interface ReviewCompletionEvidence {
+  version: 1;
+  executionId: string;
+  phase: 'REVIEW';
+  reviewedSha: string;
+  verdict: 'PASS' | 'FAIL' | 'INVALID';
+  findings: string[];
+  checks: TestCommandEvidence[];
+  summary: string;
+}
+
+export type CompletionEvidence = ImplementationCompletionEvidence | ReviewCompletionEvidence;
+
+export interface ProviderSessionSnapshot {
+  provider: string;
+  providerSessionId: string;
+  status: ProviderSessionStatus;
+  finalResponse?: string;
+  errorCode?: string;
+  retryable?: boolean;
+  observedAt: string;
+}
+
+export interface ExecutionSession {
+  executionId: string;
+  phase: ExecutionPhase;
+  provider: string;
+  providerSessionId?: string;
+  workspace: WorkspaceDescriptor;
+  sourceRevision: string;
+  providerStatus: ProviderSessionStatus;
+  lastHeartbeatAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  finalResponse?: string;
+  errorCode?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExecutionEvidence {
+  evidenceId: string;
+  executionId: string;
+  kind: ExecutionEvidenceKind;
+  name: string;
+  sourceRevision?: string;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface ProviderLaunchInput {
+  executionId: string;
+  planId: string;
+  projectKey: string;
+  workItemId?: string;
+  phase: ExecutionPhase;
+  objective: string;
+  acceptanceCriteria: string[];
+  sourceRevision: string;
+  baselineRevision?: string;
+  route: string;
+  workspace: WorkspaceDescriptor;
+  reviewFindings?: string[];
+}
+
+export interface ProviderRecoveryInput {
+  executionId: string;
+  createdAt: string;
+}
+
+export interface WorkspaceCompletionSnapshot {
+  workspace: WorkspaceDescriptor;
+  clean: boolean;
+  headRevision: string;
+  sourceRevision: string;
+  descendantOfSource: boolean;
+  changedFiles: string[];
+  diffStat: string;
+  evidence: CompletionEvidence;
+  observedAt: string;
+}
+
+export interface WorkspaceProviderPort {
+  observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
+  provision(input: { executionId: string; repositoryPath: string; sourceRevision: string }): Promise<WorkspaceDescriptor>;
+  verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot>;
+  verifyReview(workspace: WorkspaceDescriptor, reviewedSha: string): Promise<WorkspaceCompletionSnapshot>;
+  integrateAcceptedRevision(input: { repositoryPath: string; expectedRevision: string; acceptedRevision: string }): Promise<RepositoryObservation>;
+}
+
+export interface ExecutionProviderPort {
+  readonly provider: string;
+  launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot>;
+  recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined>;
+  inspect(providerSessionId: string): Promise<ProviderSessionSnapshot>;
+  continue?(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot>;
+  cancel?(providerSessionId: string): Promise<ProviderSessionSnapshot>;
+}
+
+export interface ReviewProviderPort extends ExecutionProviderPort {
+  readonly independentReview: true;
+}

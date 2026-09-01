@@ -200,7 +200,7 @@ test('supervisor protocol, bounded projection, stale decision and duplicate wake
   db.close();
 });
 
-test('supervisor projection survives database restart and conversation recovery is lineage-safe', () => {
+test('supervisor projection survives database restart with stable durable lineage', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-supervisor-restart-'));
   const file = path.join(directory, 'control-plane.sqlite');
   let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
@@ -233,18 +233,22 @@ test('supervisor wake queue is durable, idempotent and atomically drained', () =
 test('maintenance candidates survive database restart with immutable plan binding', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-maintenance-'));
   const file = path.join(dir, 'control-plane.sqlite');
-  const program = { programId: 'program-db', projectKey: 'pixel', implementationRoutes: [], reviewRoutes: [], autonomousScope: 'CONSERVATIVE' as const, autoMerge: false, enabled: true };
+  const program = { programId: 'program-db', projectKey: 'pixel', implementationRoutes: ['implementation-route'], reviewRoutes: ['review-route'], autonomousScope: 'CONSERVATIVE' as const, autoMerge: false, enabled: true };
   let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
-  db.prepare('INSERT INTO maintenance_programs(program_id,project_key,policy,status,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(program.programId, program.projectKey, '{}', 'ACTIVE', new Date().toISOString(), new Date().toISOString());
+  const maintenancePlan = createRepositories(db).plans.createPlan({
+    idempotencyKey: 'maintenance-plan', projectKey: 'pixel', objective: 'Apply a durable improvement', repositoryPath: '/repo', baseRevision: 'base-sha',
+  }).value;
+  assert.ok(maintenancePlan);
   const first = new MaintenanceCandidateRegistry(db);
   const created = first.create(program, { title: 'Durable candidate', evidence: ['metric:1'], risk: 'LOW' });
-  first.attachPlan(created.candidate.candidateId, 'plan-1');
+  assert.throws(() => first.attachPlan(created.candidate.candidateId, 'missing-plan'), (error: unknown) => error instanceof V4Error && error.code === 'PLAN_NOT_FOUND');
+  first.attachPlan(created.candidate.candidateId, maintenancePlan.planId);
   db.close();
   db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
   const second = new MaintenanceCandidateRegistry(db);
   const recovered = second.create(program, { title: 'Durable candidate', evidence: ['metric:1'], risk: 'LOW' });
   assert.equal(recovered.status, 'existing');
-  assert.equal(recovered.candidate.planId, 'plan-1');
+  assert.equal(recovered.candidate.planId, maintenancePlan.planId);
   assert.throws(() => second.attachPlan(recovered.candidate.candidateId, 'plan-2'), V4Error);
   db.close();
 });

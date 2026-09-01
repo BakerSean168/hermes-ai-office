@@ -12,6 +12,7 @@ import { transitionSupervisor, validateSupervisor, type Supervisor, type Supervi
 import { transitionWorkItem, validateGraphItems, type GraphVersion, type WorkItem, type WorkItemStatus } from '../domain/workGraph.js';
 import { withTransaction } from './database.js';
 import { EventStore } from './eventStore.js';
+import { ExecutionEvidenceRepository, ExecutionSessionRepository } from './executionArtifacts.js';
 
 export type MutationStatus = 'created' | 'existing' | 'updated' | 'rejected';
 export interface MutationResult<T> { status: MutationStatus; value?: T; reason?: string; }
@@ -155,6 +156,46 @@ export class PlanRepository {
     return row ? this.getPlan(row.plan_id) : undefined;
   }
 
+  listPlans(input: { status?: PlanStatus; limit?: number } = {}): Plan[] {
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 1000));
+    const rows = input.status
+      ? this.db.prepare('SELECT plan_id FROM plans WHERE status=? ORDER BY updated_at DESC LIMIT ?').all(input.status, limit) as unknown as Array<{ plan_id: string }>
+      : this.db.prepare('SELECT plan_id FROM plans ORDER BY updated_at DESC LIMIT ?').all(limit) as unknown as Array<{ plan_id: string }>;
+    return rows.map((row) => this.getPlan(row.plan_id));
+  }
+
+  reconcileCurrentRevision(planId: string, expectedRevision: string, observedRevision: string, reason: string): MutationResult<Plan> {
+    failClosed(expectedRevision.trim().length > 0 && observedRevision.trim().length > 0, 'PLAN_REVISION_REQUIRED');
+    failClosed(reason.trim().length > 0, 'PLAN_REVISION_REASON_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getPlan(planId);
+      if (current.currentRevision === observedRevision) return { status: 'existing', value: current };
+      if (current.currentRevision !== expectedRevision) return { status: 'rejected', value: current, reason: 'STALE_REVISION' };
+      if (current.status === 'SUCCEEDED' || current.status === 'FAILED' || current.status === 'CANCELLED') throw new V4Error('PLAN_REVISION_TERMINAL');
+      const updatedAt = iso();
+      const result = this.db.prepare('UPDATE plans SET current_revision=?,updated_at=? WHERE plan_id=? AND current_revision=?').run(observedRevision, updatedAt, planId, expectedRevision);
+      if (Number(result.changes) !== 1) return { status: 'rejected', value: this.getPlan(planId), reason: 'STALE_REVISION' };
+      this.events.appendInTransaction(makeEvent(planId, 'PLAN', 'PLAN_REVISION_RECONCILED', { from: expectedRevision, to: observedRevision, reason }));
+      return { status: 'updated', value: this.getPlan(planId) };
+    });
+  }
+
+  advanceAcceptedRevision(planId: string, expectedRevision: string, acceptedRevision: string, reason: string): MutationResult<Plan> {
+    failClosed(expectedRevision.trim().length > 0 && acceptedRevision.trim().length > 0, 'PLAN_REVISION_REQUIRED');
+    failClosed(reason.trim().length > 0, 'PLAN_REVISION_REASON_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getPlan(planId);
+      if (current.currentRevision === acceptedRevision) return { status: 'existing', value: current };
+      if (current.currentRevision !== expectedRevision) return { status: 'rejected', value: current, reason: 'STALE_REVISION' };
+      if (current.status !== 'RUNNING') throw new V4Error('PLAN_NOT_RUNNING');
+      const updatedAt = iso();
+      const result = this.db.prepare('UPDATE plans SET current_revision=?,updated_at=? WHERE plan_id=? AND current_revision=? AND status=?').run(acceptedRevision, updatedAt, planId, expectedRevision, 'RUNNING');
+      if (Number(result.changes) !== 1) return { status: 'rejected', value: this.getPlan(planId), reason: 'STALE_REVISION' };
+      this.events.appendInTransaction(makeEvent(planId, 'PLAN', 'PLAN_ACCEPTED_REVISION_ADVANCED', { from: expectedRevision, to: acceptedRevision, reason }));
+      return { status: 'updated', value: this.getPlan(planId) };
+    });
+  }
+
   updateStatus(planId: string, next: PlanStatus): MutationResult<Plan> {
     return withTransaction(this.db, () => {
       const current = this.getPlan(planId);
@@ -270,6 +311,28 @@ export class PlanRepository {
     });
   }
 
+
+  acceptWorkItemRevision(workItemId: string, revision: string): MutationResult<WorkItem> {
+    failClosed(revision.trim().length > 0, 'WORK_ITEM_ACCEPTED_REVISION_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getWorkItem(workItemId);
+      if (current.status === 'SUCCEEDED') {
+        if (current.exactAcceptedRevision === revision) return { status: 'existing', value: current };
+        throw new V4Error('WORK_ITEM_ACCEPTED_REVISION_IMMUTABLE');
+      }
+      if (current.status !== 'RUNNING') throw new V4Error('WORK_ITEM_NOT_RUNNING');
+      const plan = this.getPlan(current.planId);
+      if (plan.currentRevision !== revision) throw new V4Error('WORK_ITEM_REVISION_NOT_PLAN_CURRENT');
+      const updated = transitionWorkItem(current, 'SUCCEEDED', iso());
+      const result = this.db.prepare('UPDATE work_items SET status=?,exact_accepted_revision=?,updated_at=? WHERE work_item_id=? AND status=? AND exact_accepted_revision IS NULL').run(
+        'SUCCEEDED', revision, updated.updatedAt, workItemId, 'RUNNING',
+      );
+      if (Number(result.changes) !== 1) return { status: 'rejected', value: this.getWorkItem(workItemId), reason: 'STALE_STATUS' };
+      this.events.appendInTransaction(makeEvent(workItemId, 'WORK_ITEM', 'WORK_ITEM_REVISION_ACCEPTED', { planId: current.planId, revision }));
+      return { status: 'updated', value: this.getWorkItem(workItemId) };
+    });
+  }
+
   rejectCompletedWorkRemoval(oldVersionId: string, proposedKeys: readonly string[]): void {
     const rows = this.db.prepare('SELECT item_key FROM work_items WHERE graph_version_id=? AND status=?').all(oldVersionId, 'SUCCEEDED') as unknown as Array<{ item_key: string }>;
     const keys = new Set(proposedKeys);
@@ -301,7 +364,25 @@ export class ExecutionRepository {
     validateExecutionIdentity(input.identity);
     return withTransaction(this.db, () => {
       const existing = this.db.prepare('SELECT * FROM executions WHERE idempotency_key=?').get(input.idempotencyKey) as ExecutionRow | undefined;
-      if (existing) return { status: 'existing', value: executionFrom(existing) };
+      if (existing) {
+        const same = existing.execution_id === requestedId
+          && existing.plan_id === input.identity.planId
+          && existing.work_item_id === (input.identity.workItemId ?? null)
+          && existing.attempt === input.identity.attempt
+          && existing.route === input.identity.route
+          && existing.source_revision === (input.identity.sourceRevision ?? null)
+          && existing.objective === input.objective;
+        if (!same) throw new DuplicateKeyError(input.idempotencyKey);
+        return { status: 'existing', value: executionFrom(existing) };
+      }
+      const idConflict = this.db.prepare('SELECT idempotency_key FROM executions WHERE execution_id=?').get(requestedId) as { idempotency_key: string } | undefined;
+      if (idConflict) throw new DuplicateKeyError(requestedId);
+      const plan = this.db.prepare('SELECT plan_id FROM plans WHERE plan_id=?').get(input.identity.planId) as { plan_id: string } | undefined;
+      if (!plan) throw new V4Error('PLAN_NOT_FOUND');
+      if (input.identity.workItemId) {
+        const workItem = this.db.prepare('SELECT plan_id FROM work_items WHERE work_item_id=?').get(input.identity.workItemId) as { plan_id: string } | undefined;
+        if (!workItem || workItem.plan_id !== input.identity.planId) throw new V4Error('EXECUTION_WORK_ITEM_MISMATCH');
+      }
       const createdAt = iso();
       this.db.prepare('INSERT INTO executions(execution_id,idempotency_key,plan_id,work_item_id,attempt,route,source_revision,objective,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
         input.executionId ?? input.identity.executionId, input.idempotencyKey, input.identity.planId, input.identity.workItemId ?? null,
@@ -320,6 +401,38 @@ export class ExecutionRepository {
   findByIdempotencyKey(key: string): Execution | undefined {
     const row = this.db.prepare('SELECT * FROM executions WHERE idempotency_key=?').get(key) as ExecutionRow | undefined;
     return row ? executionFrom(row) : undefined;
+  }
+
+
+  listByPlan(planId: string): Execution[] {
+    const rows = this.db.prepare('SELECT * FROM executions WHERE plan_id=? ORDER BY created_at,execution_id').all(planId) as unknown as ExecutionRow[];
+    return rows.map(executionFrom);
+  }
+
+  listByWorkItem(workItemId: string): Execution[] {
+    const rows = this.db.prepare('SELECT * FROM executions WHERE work_item_id=? ORDER BY attempt,created_at').all(workItemId) as unknown as ExecutionRow[];
+    return rows.map(executionFrom);
+  }
+
+  listByStatuses(statuses: readonly ExecutionStatus[], limit = 100): Execution[] {
+    failClosed(statuses.length > 0, 'EXECUTION_STATUSES_REQUIRED');
+    const safeLimit = Math.max(1, Math.min(limit, 1000));
+    const placeholders = statuses.map(() => '?').join(',');
+    const rows = this.db.prepare('SELECT * FROM executions WHERE status IN (' + placeholders + ') ORDER BY updated_at LIMIT ?').all(...statuses, safeLimit) as unknown as ExecutionRow[];
+    return rows.map(executionFrom);
+  }
+
+  claimLease(executionId: string, ownerId: string, ttlMs: number, at = Date.now()): MutationResult<Lease> {
+    this.get(executionId);
+    return new LeaseRepository(this.db, this.events).claim('EXECUTION', executionId, ownerId, ttlMs, at);
+  }
+
+  renewLease(executionId: string, ownerId: string, leaseToken: string, ttlMs: number, at = Date.now()): MutationResult<Lease> {
+    return new LeaseRepository(this.db, this.events).renew('EXECUTION', executionId, ownerId, leaseToken, ttlMs, at);
+  }
+
+  releaseLease(executionId: string, ownerId: string, leaseToken: string): MutationResult<void> {
+    return new LeaseRepository(this.db, this.events).release('EXECUTION', executionId, ownerId, leaseToken);
   }
 
   updateStatus(executionId: string, next: ExecutionStatus): MutationResult<Execution> {
@@ -381,6 +494,56 @@ function reviewFrom(row: ReviewRow): Review {
     createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
+interface ReviewExecutionBindingRow {
+  plan_id: string;
+  work_item_id: string | null;
+  source_revision: string | null;
+  status: ExecutionStatus;
+  result_revision: string | null;
+  phase: string | null;
+  provider_status: string | null;
+  provider_session_id: string | null;
+}
+
+function reviewerBinding(db: DatabaseSync, executionId: string): ReviewExecutionBindingRow | undefined {
+  return db.prepare(`SELECT executions.plan_id,executions.work_item_id,executions.source_revision,executions.status,executions.result_revision,
+    execution_sessions.phase,execution_sessions.provider_status,execution_sessions.provider_session_id
+    FROM executions LEFT JOIN execution_sessions ON execution_sessions.execution_id=executions.execution_id
+    WHERE executions.execution_id=?`).get(executionId) as ReviewExecutionBindingRow | undefined;
+}
+
+function assertReviewerBinding(db: DatabaseSync, review: Pick<Review, 'planId' | 'workItemId' | 'implementationExecutionId' | 'sourceRevision'>, reviewerExecutionId: string): ReviewExecutionBindingRow {
+  if (reviewerExecutionId === review.implementationExecutionId) throw new V4Error('REVIEWER_NOT_INDEPENDENT');
+  const reviewer = reviewerBinding(db, reviewerExecutionId);
+  if (!reviewer
+    || reviewer.plan_id !== review.planId
+    || reviewer.work_item_id !== (review.workItemId ?? null)
+    || reviewer.source_revision !== review.sourceRevision) {
+    throw new V4Error('REVIEWER_EXECUTION_INVALID');
+  }
+  if (reviewer.phase !== 'REVIEW' || !reviewer.provider_session_id) throw new V4Error('REVIEWER_SESSION_INVALID');
+  const implementation = reviewerBinding(db, review.implementationExecutionId);
+  if (implementation?.provider_session_id && implementation.provider_session_id === reviewer.provider_session_id) {
+    throw new V4Error('REVIEWER_NOT_INDEPENDENT');
+  }
+  return reviewer;
+}
+
+function assertReviewCompletion(db: DatabaseSync, review: Review): void {
+  if (!review.reviewerExecutionId) throw new V4Error('REVIEWER_EXECUTION_REQUIRED');
+  const reviewer = assertReviewerBinding(db, review, review.reviewerExecutionId);
+  if (reviewer.status !== 'SUCCEEDED' || reviewer.result_revision !== review.sourceRevision || reviewer.provider_status !== 'SUCCEEDED') {
+    throw new V4Error('REVIEWER_EXECUTION_NOT_SUCCEEDED');
+  }
+  const implementation = reviewerBinding(db, review.implementationExecutionId);
+  if (!implementation
+    || (implementation.phase !== 'IMPLEMENT' && implementation.phase !== 'IMPLEMENT_FIX')
+    || implementation.provider_status !== 'SUCCEEDED'
+    || !implementation.provider_session_id) {
+    throw new V4Error('IMPLEMENTATION_SESSION_NOT_SUCCEEDED');
+  }
+}
+
 export class ReviewRepository {
   constructor(readonly db: DatabaseSync, readonly events = new EventStore(db)) {}
 
@@ -392,24 +555,29 @@ export class ReviewRepository {
         const same = existing.plan_id === input.planId
           && existing.work_item_id === (input.workItemId ?? null)
           && existing.implementation_execution_id === input.implementationExecutionId
-          && existing.reviewer_execution_id === (input.reviewerExecutionId ?? null)
-          && existing.source_revision === input.sourceRevision;
+          && existing.source_revision === input.sourceRevision
+          && (input.reviewerExecutionId === undefined || existing.reviewer_execution_id === input.reviewerExecutionId);
         if (!same) throw new DuplicateKeyError(input.idempotencyKey);
         return { status: 'existing', value: reviewFrom(existing) };
       }
-      const execution = this.db.prepare('SELECT plan_id,result_revision FROM executions WHERE execution_id=?').get(input.implementationExecutionId) as { plan_id: string; result_revision: string | null } | undefined;
+      const execution = this.db.prepare('SELECT plan_id,work_item_id,source_revision,status,result_revision FROM executions WHERE execution_id=?').get(input.implementationExecutionId) as { plan_id: string; work_item_id: string | null; source_revision: string | null; status: ExecutionStatus; result_revision: string | null } | undefined;
       if (!execution) throw new V4Error('IMPLEMENTATION_EXECUTION_NOT_FOUND');
       if (execution.plan_id !== input.planId) throw new V4Error('REVIEW_PLAN_MISMATCH');
+      if (execution.status !== 'SUCCEEDED' || !execution.result_revision) throw new V4Error('IMPLEMENTATION_EXECUTION_NOT_SUCCEEDED');
+      if (execution.work_item_id !== (input.workItemId ?? null)) throw new V4Error('REVIEW_WORK_ITEM_MISMATCH');
       if (input.workItemId) {
         const workItem = this.db.prepare('SELECT plan_id FROM work_items WHERE work_item_id=?').get(input.workItemId) as { plan_id: string } | undefined;
         if (!workItem || workItem.plan_id !== input.planId) throw new V4Error('REVIEW_WORK_ITEM_MISMATCH');
       }
-      if (input.reviewerExecutionId) {
-        const reviewer = this.db.prepare('SELECT plan_id FROM executions WHERE execution_id=?').get(input.reviewerExecutionId) as { plan_id: string } | undefined;
-        if (!reviewer || reviewer.plan_id !== input.planId) throw new V4Error('REVIEWER_EXECUTION_INVALID');
-      }
       if (execution.result_revision !== input.sourceRevision) throw new V4Error('REVIEW_SOURCE_NOT_IMPLEMENTATION_RESULT');
-      if (input.reviewerExecutionId === input.implementationExecutionId) throw new V4Error('REVIEWER_NOT_INDEPENDENT');
+      if (input.reviewerExecutionId) {
+        assertReviewerBinding(this.db, {
+          planId: input.planId,
+          workItemId: input.workItemId,
+          implementationExecutionId: input.implementationExecutionId,
+          sourceRevision: input.sourceRevision,
+        }, input.reviewerExecutionId);
+      }
       const reviewId = input.reviewId ?? id('review');
       const createdAt = iso();
       this.db.prepare('INSERT INTO reviews(review_id,idempotency_key,plan_id,work_item_id,implementation_execution_id,reviewer_execution_id,source_revision,reviewed_sha,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
@@ -430,6 +598,32 @@ export class ReviewRepository {
     return rows.map(reviewFrom);
   }
 
+
+  listByWorkItem(workItemId: string): Review[] {
+    const rows = this.db.prepare('SELECT * FROM reviews WHERE work_item_id=? ORDER BY created_at').all(workItemId) as unknown as ReviewRow[];
+    return rows.map(reviewFrom);
+  }
+
+  findByImplementationExecution(implementationExecutionId: string): Review | undefined {
+    const row = this.db.prepare('SELECT * FROM reviews WHERE implementation_execution_id=? ORDER BY created_at DESC LIMIT 1').get(implementationExecutionId) as ReviewRow | undefined;
+    return row ? reviewFrom(row) : undefined;
+  }
+
+  attachReviewerExecution(reviewId: string, reviewerExecutionId: string): MutationResult<Review> {
+    failClosed(reviewerExecutionId.trim().length > 0, 'REVIEWER_EXECUTION_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getById(reviewId);
+      if (current.reviewerExecutionId === reviewerExecutionId) return { status: 'existing', value: current };
+      if (current.reviewerExecutionId) throw new V4Error('REVIEWER_EXECUTION_IMMUTABLE');
+      assertReviewerBinding(this.db, current, reviewerExecutionId);
+      const updatedAt = iso();
+      const result = this.db.prepare('UPDATE reviews SET reviewer_execution_id=?,updated_at=? WHERE review_id=? AND reviewer_execution_id IS NULL').run(reviewerExecutionId, updatedAt, reviewId);
+      if (Number(result.changes) !== 1) return { status: 'rejected', value: this.getById(reviewId), reason: 'STALE_REVIEWER_EXECUTION' };
+      this.events.appendInTransaction(makeEvent(reviewId, 'REVIEW', 'REVIEWER_EXECUTION_ATTACHED', { reviewerExecutionId, implementationExecutionId: current.implementationExecutionId }));
+      return { status: 'updated', value: this.getById(reviewId) };
+    });
+  }
+
   updateStatus(reviewId: string, next: ReviewStatus): MutationResult<Review> {
     return withTransaction(this.db, () => {
       const current = this.getById(reviewId);
@@ -444,6 +638,7 @@ export class ReviewRepository {
   recordVerdict(reviewId: string, verdict: 'PASS' | 'FAIL' | 'INVALID', findings: string[] = []): MutationResult<Review> {
     return withTransaction(this.db, () => {
       const current = this.getById(reviewId);
+      assertReviewCompletion(this.db, current);
       const next: ReviewStatus = verdict === 'PASS' ? 'PASSED' : verdict === 'INVALID' ? 'STALE' : 'FAILED';
       const sameFindings = JSON.stringify(current.findings ?? []) === JSON.stringify(findings);
       if (current.status === next) {
@@ -557,8 +752,29 @@ export class SupervisorRepository {
       const current = this.getById(supervisorId);
       failClosed(conversationId.trim().length > 0, 'SUPERVISOR_CONVERSATION_REQUIRED');
       if (current.conversationId === conversationId) return { status: 'existing', value: current };
+      if (current.status === 'COMPLETED' || current.status === 'CANCELLED') throw new V4Error('SUPERVISOR_TERMINAL');
       if (current.conversationId && current.conversationId !== conversationId) throw new V4Error('SUPERVISOR_CONVERSATION_IMMUTABLE');
-      this.db.prepare('UPDATE supervisors SET conversation_id=?,updated_at=? WHERE supervisor_id=?').run(conversationId, iso(), supervisorId);
+      const updatedAt = iso();
+      this.db.prepare('UPDATE supervisors SET conversation_id=?,updated_at=? WHERE supervisor_id=?').run(conversationId, updatedAt, supervisorId);
+      this.events.appendInTransaction(makeEvent(supervisorId, 'SUPERVISOR', 'SUPERVISOR_CONVERSATION_ATTACHED', { conversationId }));
+      return { status: 'updated', value: this.getById(supervisorId) };
+    });
+  }
+
+  replaceConversation(supervisorId: string, expectedConversationId: string | undefined, conversationId: string, reason: string): MutationResult<Supervisor> {
+    failClosed(conversationId.trim().length > 0, 'SUPERVISOR_CONVERSATION_REQUIRED');
+    failClosed(reason.trim().length > 0, 'SUPERVISOR_CONVERSATION_REPLACEMENT_REASON_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getById(supervisorId);
+      if (current.conversationId === conversationId) return { status: 'existing', value: current };
+      if (current.conversationId !== expectedConversationId) return { status: 'rejected', value: current, reason: 'STALE_CONVERSATION' };
+      if (current.status === 'COMPLETED' || current.status === 'CANCELLED') throw new V4Error('SUPERVISOR_TERMINAL');
+      const updatedAt = iso();
+      const result = expectedConversationId === undefined
+        ? this.db.prepare('UPDATE supervisors SET conversation_id=?,updated_at=? WHERE supervisor_id=? AND conversation_id IS NULL').run(conversationId, updatedAt, supervisorId)
+        : this.db.prepare('UPDATE supervisors SET conversation_id=?,updated_at=? WHERE supervisor_id=? AND conversation_id=?').run(conversationId, updatedAt, supervisorId, expectedConversationId);
+      if (Number(result.changes) !== 1) return { status: 'rejected', value: this.getById(supervisorId), reason: 'STALE_CONVERSATION' };
+      this.events.appendInTransaction(makeEvent(supervisorId, 'SUPERVISOR', 'SUPERVISOR_CONVERSATION_REPLACED', { from: expectedConversationId ?? null, to: conversationId, reason }));
       return { status: 'updated', value: this.getById(supervisorId) };
     });
   }
@@ -918,6 +1134,7 @@ export class RelationshipRepository implements PlanRelationshipRepository {
 
 export interface V4Repositories {
   plans: PlanRepository; executions: ExecutionRepository; reviews: ReviewRepository; supervisors: SupervisorRepository;
+  sessions: ExecutionSessionRepository; evidence: ExecutionEvidenceRepository;
   decisions: DecisionRepository; actions: ActionRepository; resources: ResourceRepository; relationships: RelationshipRepository;
   events: EventStore;
 }
@@ -925,6 +1142,7 @@ export interface V4Repositories {
 export function createRepositories(db: DatabaseSync): V4Repositories {
   const events = new EventStore(db);
   return { plans: new PlanRepository(db, events), executions: new ExecutionRepository(db, events), reviews: new ReviewRepository(db, events),
-    supervisors: new SupervisorRepository(db, events), decisions: new DecisionRepository(db, events), actions: new ActionRepository(db, events),
+    supervisors: new SupervisorRepository(db, events), sessions: new ExecutionSessionRepository(db, events), evidence: new ExecutionEvidenceRepository(db, events),
+    decisions: new DecisionRepository(db, events), actions: new ActionRepository(db, events),
     resources: new ResourceRepository(db, events), relationships: new RelationshipRepository(db, events), events };
 }
