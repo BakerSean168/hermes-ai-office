@@ -211,6 +211,19 @@ test('LocalGitWorkspace implementation verification rejects no-op, dirty and mis
     () => value.adapter.verifyImplementation(workspace),
     (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_IMPLEMENTATION_NOOP',
   );
+  write(
+    workspace.evidenceHostPath,
+    JSON.stringify(
+      implementationEvidence(workspace, value.baseRevision, { outcome: 'SATISFIED' }),
+    ),
+  );
+  const satisfied = await value.adapter.verifyImplementation(workspace);
+  assert.equal(satisfied.headRevision, value.baseRevision);
+  assert.equal(satisfied.descendantOfSource, true);
+  assert.deepEqual(satisfied.changedFiles, []);
+  assert.equal(satisfied.diffStat, '');
+  assert.equal(satisfied.evidence.outcome, 'SATISFIED');
+  fs.rmSync(workspace.evidenceHostPath);
   configureWriter(workspace);
   write(path.join(workspace.hostPath, 'feature.txt'), 'feature\n');
   const resultRevision = commit(workspace.hostPath, 'feat: add feature');
@@ -220,6 +233,15 @@ test('LocalGitWorkspace implementation verification rejects no-op, dirty and mis
     (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_DIRTY',
   );
   fs.rmSync(path.join(workspace.hostPath, 'dirty.txt'));
+  write(
+    workspace.evidenceHostPath,
+    JSON.stringify(implementationEvidence(workspace, resultRevision, { outcome: 'SATISFIED' })),
+  );
+  await assert.rejects(
+    () => value.adapter.verifyImplementation(workspace),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID',
+  );
   write(workspace.evidenceHostPath, JSON.stringify(implementationEvidence(workspace, 'wrong-sha')));
   await assert.rejects(
     () => value.adapter.verifyImplementation(workspace),

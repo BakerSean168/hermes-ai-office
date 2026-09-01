@@ -53,8 +53,8 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
       new RegExp('ReadWritePaths=' + writable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     );
   assert.doesNotMatch(service, /ReadWritePaths=\/home\/dev\/projects\s*$/m);
-  assert.match(service, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
-  assert.match(service, /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
+  assert.match(service, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
+  assert.match(service, /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
   assert.doesNotMatch(service, /(?:SESSION_API_KEY|LITELLM_V3_KEY|OH_SECRET_KEY)=\S+/);
 });
 
@@ -113,10 +113,11 @@ test('V4 release never rsyncs a build directory onto itself', () => {
 
 test('V4 release proves the exact service sandbox can read, chown and write only approved paths', () => {
   assert.match(release, /systemd-run --wait --pipe --collect/);
-  assert.match(release, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
+  assert.match(release, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
   assert.match(release, /probe-v4-service-sandbox\.sh/);
   assert.match(probe, /test -r "\$entry_file"/);
   assert.match(probe, /chown -R "\$owner_uid:\$owner_gid"/);
+  assert.match(probe, /spawnSync\('\/usr\/bin\/id', \['-u'\], \{ encoding: 'utf8', uid, gid \}\)/);
   assert.match(release, /install -d -o root -g root -m 0711/);
   assert.match(release, /docker exec --user 10001:10001 hermes-openhands-v3/);
   assert.match(probe, /trap - EXIT/);

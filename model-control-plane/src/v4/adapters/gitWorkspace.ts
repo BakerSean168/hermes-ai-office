@@ -94,6 +94,9 @@ function decodeImplementationEvidence(value: unknown): ImplementationCompletionE
   if (root.version !== 1 || (root.phase !== 'IMPLEMENT' && root.phase !== 'IMPLEMENT_FIX'))
     throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_INVALID');
   if (!Array.isArray(root.tests)) throw new V4Error('WORKSPACE_TEST_EVIDENCE_INVALID');
+  const outcome = root.outcome ?? 'CHANGED';
+  if (outcome !== 'CHANGED' && outcome !== 'SATISFIED')
+    throw new V4Error('WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID');
   const tests = root.tests.map(decodeTest);
   return {
     version: 1,
@@ -113,6 +116,7 @@ function decodeImplementationEvidence(value: unknown): ImplementationCompletionE
       'WORKSPACE_EVIDENCE_RESULT_REQUIRED',
       MAX_IDENTIFIER,
     ),
+    outcome,
     summary: requiredString(root.summary, 'WORKSPACE_EVIDENCE_SUMMARY_REQUIRED', 8_000),
     tests,
   };
@@ -378,15 +382,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       '--verify',
       'HEAD^{commit}',
     ]);
-    if (headRevision === descriptor.sourceRevision)
+    if (headRevision === descriptor.sourceRevision && !fs.existsSync(descriptor.evidenceHostPath))
       throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
-    const descendantOfSource = await this.gitSucceeds(descriptor.hostPath, [
-      'merge-base',
-      '--is-ancestor',
-      descriptor.sourceRevision,
-      headRevision,
-    ]);
-    if (!descendantOfSource) throw new V4Error('WORKSPACE_RESULT_NOT_DESCENDANT');
     const evidence = decodeImplementationEvidence(this.readEvidence(descriptor.evidenceHostPath));
     if (
       evidence.executionId !== descriptor.executionId ||
@@ -395,6 +392,21 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ) {
       throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
     }
+    const satisfiedWithoutChange =
+      headRevision === descriptor.sourceRevision && evidence.outcome === 'SATISFIED';
+    if (headRevision === descriptor.sourceRevision && !satisfiedWithoutChange)
+      throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
+    if (headRevision !== descriptor.sourceRevision && evidence.outcome === 'SATISFIED')
+      throw new V4Error('WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID');
+    const descendantOfSource =
+      satisfiedWithoutChange ||
+      (await this.gitSucceeds(descriptor.hostPath, [
+        'merge-base',
+        '--is-ancestor',
+        descriptor.sourceRevision,
+        headRevision,
+      ]));
+    if (!descendantOfSource) throw new V4Error('WORKSPACE_RESULT_NOT_DESCENDANT');
     if (
       evidence.tests.length === 0 ||
       evidence.tests.some((item) => item.status === 'FAIL') ||
@@ -402,21 +414,28 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ) {
       throw new V4Error('WORKSPACE_IMPLEMENTATION_TEST_GATE_FAILED');
     }
-    const changedFilesRaw = await this.git(descriptor.hostPath, [
-      'diff',
-      '--name-only',
-      '-z',
-      descriptor.sourceRevision + '..' + headRevision,
-    ]);
-    const changedFiles = changedFilesRaw.split('\0').filter(Boolean);
-    if (changedFiles.length === 0 || changedFiles.length > MAX_CHANGED_FILES)
+    const changedFiles = satisfiedWithoutChange
+      ? []
+      : (
+          await this.git(descriptor.hostPath, [
+            'diff',
+            '--name-only',
+            '-z',
+            descriptor.sourceRevision + '..' + headRevision,
+          ])
+        )
+          .split('\0')
+          .filter(Boolean);
+    if (changedFiles.length > MAX_CHANGED_FILES || (!satisfiedWithoutChange && changedFiles.length === 0))
       throw new V4Error('WORKSPACE_CHANGED_FILES_INVALID');
-    const diffStat = await this.git(descriptor.hostPath, [
-      'diff',
-      '--stat',
-      '--summary',
-      descriptor.sourceRevision + '..' + headRevision,
-    ]);
+    const diffStat = satisfiedWithoutChange
+      ? ''
+      : await this.git(descriptor.hostPath, [
+          'diff',
+          '--stat',
+          '--summary',
+          descriptor.sourceRevision + '..' + headRevision,
+        ]);
     if (Buffer.byteLength(diffStat, 'utf8') > MAX_DIFF_STAT_BYTES)
       throw new V4Error('WORKSPACE_DIFF_STAT_TOO_LARGE');
     return {

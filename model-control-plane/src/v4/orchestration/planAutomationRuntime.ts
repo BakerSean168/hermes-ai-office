@@ -125,7 +125,17 @@ export class PlanAutomationRuntime {
     ];
     const unique = new Map(plans.map((plan) => [plan.planId, plan]));
     const results: PlanAutomationResult[] = [];
-    for (const plan of unique.values()) results.push(await this.runPlan(plan.planId));
+    for (const plan of unique.values()) {
+      try {
+        results.push(await this.runPlan(plan.planId));
+      } catch (error) {
+        results.push({
+          planId: plan.planId,
+          status: 'WAITING',
+          code: error instanceof V4Error ? error.code : 'PLAN_AUTOMATION_CYCLE_FAILED',
+        });
+      }
+    }
     return results;
   }
 

@@ -146,7 +146,8 @@ function phasePrompt(input: ProviderLaunchInput): string {
         executionId: input.executionId,
         phase: input.phase,
         sourceRevision: input.sourceRevision,
-        resultRevision: '<exact git HEAD after commit>',
+        resultRevision: '<exact git HEAD after commit or unchanged source HEAD>',
+        outcome: 'CHANGED|SATISFIED',
         summary: 'bounded implementation summary',
         tests: [{ command: 'exact command', status: 'PASS|FAIL|SKIP', exitCode: 0, summary: 'bounded result' }],
       });
@@ -167,8 +168,9 @@ function phasePrompt(input: ProviderLaunchInput): string {
         'Do not broaden scope, access credentials, merge, deploy, or modify remotes.',
         'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
         'If a JavaScript workspace has no installed dependencies, bootstrap only from its checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
-        'Run focused checks, commit every intended change, and leave the workspace clean.',
-        'A no-op or planning-only response is not successful implementation.',
+        'If tracked changes are required, set outcome=CHANGED, run focused checks, commit every intended change, and leave the workspace clean.',
+        'If the supplied exact source revision already satisfies the entire bounded objective, do not manufacture a commit. Verify every acceptance criterion with focused checks, keep exact HEAD and a clean tree, and set outcome=SATISFIED. This path is still subject to independent review.',
+        'A planning-only response or an unverified no-op is not successful implementation.',
         'Before finishing, atomically write one JSON object outside the Git repository at ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
       ];
   const text = [

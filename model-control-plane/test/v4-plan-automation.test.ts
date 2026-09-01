@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { V4Error } from '../src/v4/domain/errors.js';
 import type { Execution } from '../src/v4/domain/execution.js';
 import {
   PlanAutomationRuntime,
@@ -609,5 +610,59 @@ test('plan automation project allowlist prevents stale plans from becoming write
   assert.equal(result.code, 'PLAN_POLICY_UNAVAILABLE');
   assert.equal(calls, 0);
   assert.equal(seeded.repositories.executions.listByPlan(seeded.plan.planId).length, 0);
+  seeded.db.close();
+});
+
+
+test('automation polling isolates one plan infrastructure exception and continues later plans', async () => {
+  const seeded = seed();
+  const secondPlan = seeded.repositories.plans.createPlan({
+    idempotencyKey: 'automation-plan-second',
+    projectKey: 'automation-project',
+    objective: 'complete the second autonomous plan',
+    repositoryPath: '/repositories/automation-project-second',
+    baseRevision: 'base-sha',
+  }).value!;
+  const secondGraph = seeded.repositories.plans.createGraphVersion({
+    planId: secondPlan.planId,
+    reason: 'second automation graph',
+  }).value!;
+  seeded.repositories.plans.appendGraphWorkItem({
+    graphVersionId: secondGraph.graphVersionId,
+    itemKey: 'second',
+    title: 'second',
+    objective: 'complete second',
+    acceptanceCriteria: ['tests pass'],
+    dependencies: [],
+  });
+  seeded.repositories.plans.updateStatus(secondPlan.planId, 'READY');
+
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  class FaultIsolatingRuntime extends PlanAutomationRuntime {
+    override async runPlan(planId: string) {
+      if (planId === seeded.plan.planId) throw new V4Error('WORKSPACE_GIT_COMMAND_FAILED');
+      return { planId, status: 'RUNNING' as const, code: 'SECOND_PLAN_REACHED' };
+    }
+  }
+  const automation = new FaultIsolatingRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      implementationRoutes: ['implementation-efficient'],
+      reviewRoutes: ['review-glm'],
+    }),
+  );
+  const results = await automation.runOnce();
+  const byPlan = new Map(results.map((result) => [result.planId, result]));
+  assert.deepEqual(
+    [byPlan.get(seeded.plan.planId)?.status, byPlan.get(seeded.plan.planId)?.code],
+    ['WAITING', 'WORKSPACE_GIT_COMMAND_FAILED'],
+  );
+  assert.deepEqual(
+    [byPlan.get(secondPlan.planId)?.status, byPlan.get(secondPlan.planId)?.code],
+    ['RUNNING', 'SECOND_PLAN_REACHED'],
+  );
   seeded.db.close();
 });

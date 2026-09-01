@@ -48,6 +48,7 @@ export interface ImplementationCompletionEvidence {
   phase: 'IMPLEMENT' | 'IMPLEMENT_FIX';
   sourceRevision: string;
   resultRevision: string;
+  outcome?: 'CHANGED' | 'SATISFIED';
   summary: string;
   tests: TestCommandEvidence[];
 }
