@@ -368,6 +368,10 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   assert.equal(integrated.headRevision, acceptedRevision);
   assert.equal(integrated.clean, true);
   assert.equal(git(value.repositoryPath, ['rev-parse', 'HEAD']), acceptedRevision);
+  const repositoryOwner = fs.statSync(value.repositoryPath);
+  const indexOwner = fs.statSync(path.join(gitDirectory, 'index'));
+  assert.equal(indexOwner.uid, repositoryOwner.uid);
+  assert.equal(indexOwner.gid, repositoryOwner.gid);
 });
 
 test('LocalGitWorkspace provisions from a linked worktree under forced different ownership', async () => {

@@ -526,6 +526,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       gitDirectory,
       'pixel-v4-integration-' + randomUUID() + '.bundle',
     );
+    const repositoryStat = fs.statSync(repositoryRoot);
+    const repositoryIdentity = { uid: repositoryStat.uid, gid: repositoryStat.gid };
     try {
       const current = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
       if (current !== input.expectedRevision) throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
@@ -535,13 +537,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       // child does not inherit our per-command safe.directory setting. An exact-HEAD
       // bundle preserves the ownership boundary and gives the controller a passive input.
       await this.git(candidate.hostPath, ['bundle', 'create', transferBundle, 'HEAD']);
-      await this.git(repositoryRoot, [
-        'fetch',
-        '--no-tags',
-        '--',
-        transferBundle,
-        input.acceptedRevision,
-      ]);
+      await this.git(
+        repositoryRoot,
+        ['fetch', '--no-tags', '--', transferBundle, input.acceptedRevision],
+        repositoryIdentity,
+      );
       if (
         !(await this.gitSucceeds(repositoryRoot, [
           'merge-base',
@@ -559,7 +559,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       ]);
       if (beforeMerge !== input.expectedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
-      await this.git(repositoryRoot, ['merge', '--ff-only', input.acceptedRevision]);
+      await this.git(
+        repositoryRoot,
+        ['merge', '--ff-only', input.acceptedRevision],
+        repositoryIdentity,
+      );
       const after = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
       if (after !== input.acceptedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_RESULT_MISMATCH');
@@ -733,7 +737,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     }
   }
 
-  private async git(cwd: string, args: string[]): Promise<string> {
+  private async git(
+    cwd: string,
+    args: string[],
+    identity?: { uid: number; gid: number },
+  ): Promise<string> {
     return await this.runGit([
       '-c',
       'core.fsmonitor=false',
@@ -744,7 +752,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       '-C',
       cwd,
       ...args,
-    ]);
+    ], identity);
   }
 
   private async gitOptional(cwd: string, args: string[]): Promise<string | undefined> {
@@ -764,12 +772,16 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     }
   }
 
-  private async runGit(args: string[]): Promise<string> {
+  private async runGit(
+    args: string[],
+    identity?: { uid: number; gid: number },
+  ): Promise<string> {
     try {
       const result = await execFileAsync('git', args, {
         encoding: 'utf8',
         timeout: this.commandTimeoutMs,
         maxBuffer: this.maxBufferBytes,
+        ...(identity ?? {}),
         env: {
           PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
           HOME: process.env.HOME ?? '/nonexistent',
