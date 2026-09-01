@@ -727,6 +727,32 @@ export async function buildControlPlane(
     });
   });
 
+  app.post('/api/v4/executions/:executionId/replace-provider-session', async (request) => {
+    const executionId = requiredText(
+      (request.params as { executionId?: string }).executionId,
+      'EXECUTION_ID_REQUIRED',
+    );
+    const body = request.body === undefined ? {} : bodyRecord(request.body);
+    const idempotencyKey = requiredText(
+      request.headers['idempotency-key'] ?? body.idempotencyKey,
+      'PROVIDER_REPLACEMENT_IDEMPOTENCY_REQUIRED',
+    );
+    const instruction =
+      typeof body.instruction === 'string' && body.instruction.trim()
+        ? body.instruction.trim()
+        : undefined;
+    const reason =
+      typeof body.reason === 'string' && body.reason.trim()
+        ? body.reason.trim()
+        : undefined;
+    return await requireAutomation().worker.replaceStalledProviderSession(
+      executionId,
+      idempotencyKey,
+      instruction,
+      reason,
+    );
+  });
+
   app.get('/api/v4/supervisors/:supervisorId/projection', async (request) => {
     const supervisorId = requiredText(
       (request.params as { supervisorId?: string }).supervisorId,

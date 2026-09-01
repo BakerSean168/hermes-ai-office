@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
 import { OpenHandsExecutionProvider, OpenHandsReviewProvider, mapOpenHandsStatus } from '../src/v4/adapters/openHandsCoding.js';
-import type { ProviderLaunchInput } from '../src/v4/orchestration/contracts.js';
+import type { ProviderLaunchInput, ProviderSessionReplacementInput } from '../src/v4/orchestration/contracts.js';
 
 const secrets = { sessionApiKey: 'session-secret-value', liteLlmApiKey: 'sk-super-secret-value' };
 
@@ -119,6 +119,68 @@ test('OpenHands recovery is paginated, provenance checked and duplicate-safe', a
   await assert.rejects(() => provider.recover(input), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_EXECUTION_DUPLICATE');
   mode = 'mismatch';
   await assert.rejects(() => provider.recover(input), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_WORKSPACE_PROVENANCE_MISMATCH');
+});
+
+test('OpenHands replacement conversation is crash-safe and excluded from initial recovery duplicates', async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  let replacement: Record<string, any> | undefined;
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    requests.push({ url: value, init });
+    if (value.includes('/api/conversations/search')) {
+      return new Response(JSON.stringify({
+        items: replacement
+          ? [
+              replacement,
+              {
+                id: 'original-session', execution_status: 'paused', created_at: '2026-09-01T00:00:00.000Z',
+                workspace: { working_dir: '/workspace/executions/exec-1/repo' },
+                tags: { execution: 'exec1', project: 'pixel-agents', phase: 'implement' },
+              },
+            ]
+          : [],
+      }), { status: 200 });
+    }
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      replacement = {
+        id: 'replacement-session',
+        execution_status: 'running',
+        created_at: '2026-09-01T00:01:00.000Z',
+        workspace: body.workspace,
+        tags: body.tags,
+      };
+      return new Response(JSON.stringify(replacement), { status: 201 });
+    }
+    if (value.endsWith('/api/conversations/replacement-session'))
+      return new Response(JSON.stringify(replacement), { status: 200 });
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsExecutionProvider(options(fake));
+  const input: ProviderSessionReplacementInput = {
+    ...launchInput('IMPLEMENT'),
+    previousProviderSessionId: 'original-session',
+    recoveryKey: 'replace:exec-1:original-session',
+    instruction: 'Preserve the existing workspace and finish the bounded work.',
+  };
+  const first = await provider.replace(input);
+  const second = await provider.replace(input);
+  assert.equal(first.providerSessionId, 'replacement-session');
+  assert.equal(second.providerSessionId, 'replacement-session');
+  const creates = requests.filter((request) => request.url.endsWith('/api/conversations') && request.init.method === 'POST');
+  assert.equal(creates.length, 1);
+  const createBody = JSON.parse(String(creates[0]!.init.body)) as Record<string, any>;
+  assert.match(String(createBody.tags.recovery), /^repl-[0-9a-f]{40}$/);
+  assert.match(createBody.initial_message.content[0].text, /replaces a stalled provider session/);
+  assert.match(createBody.initial_message.content[0].text, /Preserve the existing workspace/);
+  const recovered = await provider.recover({
+    executionId: 'exec-1',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    projectKey: 'pixel-agents',
+    phase: 'IMPLEMENT',
+    expectedWorkspacePath: '/workspace/executions/exec-1/repo',
+  });
+  assert.equal(recovered?.providerSessionId, 'original-session');
 });
 
 test('OpenHands inspect, continue and cancel sanitize terminal provider evidence', async () => {

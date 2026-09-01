@@ -125,6 +125,12 @@ export interface ProviderRecoveryInput {
   expectedWorkspacePath?: string;
 }
 
+export interface ProviderSessionReplacementInput extends ProviderLaunchInput {
+  previousProviderSessionId: string;
+  recoveryKey: string;
+  instruction: string;
+}
+
 export interface WorkspaceCompletionSnapshot {
   workspace: WorkspaceDescriptor;
   clean: boolean;
@@ -163,6 +169,7 @@ export interface ExecutionProviderPort {
   launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot>;
   recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined>;
   inspect(providerSessionId: string): Promise<ProviderSessionSnapshot>;
+  replace?(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot>;
   continue?(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot>;
   interrupt?(providerSessionId: string): Promise<ProviderSessionSnapshot>;
   cancel?(providerSessionId: string): Promise<ProviderSessionSnapshot>;

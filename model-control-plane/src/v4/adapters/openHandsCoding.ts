@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import { V4Error, failClosed } from '../domain/errors.js';
 import type {
   ExecutionPhase,
   ExecutionProviderPort,
   ProviderLaunchInput,
   ProviderRecoveryInput,
+  ProviderSessionReplacementInput,
   ProviderSessionSnapshot,
   ProviderSessionStatus,
   ReviewProviderPort,
@@ -93,6 +95,11 @@ function executionTag(executionId: string): string {
   const normalized = executionId.replace(/[^A-Za-z0-9]/g, '').slice(0, 128);
   if (!normalized) throw new V4Error('OPENHANDS_EXECUTION_TAG_INVALID');
   return normalized;
+}
+
+function recoveryTag(recoveryKey: string): string {
+  failClosed(recoveryKey.trim().length > 0 && recoveryKey.length <= 1_000, 'OPENHANDS_RECOVERY_KEY_INVALID');
+  return 'repl-' + createHash('sha256').update(recoveryKey).digest('hex').slice(0, 40);
 }
 
 export function mapOpenHandsStatus(value: unknown): ProviderSessionStatus {
@@ -191,6 +198,95 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   }
 
   async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
+    this.validateLaunchInput(input);
+    return await this.createConversation(input, phasePrompt(input));
+  }
+
+  async recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined> {
+    failClosed(input.executionId.trim().length > 0, 'EXECUTION_ID_REQUIRED');
+    const expectedTag = executionTag(input.executionId);
+    const matches = new Map<string, JsonRecord>();
+    let pageId: string | undefined;
+    const createdAt = Date.parse(input.createdAt);
+    failClosed(Number.isFinite(createdAt), 'EXECUTION_CREATED_AT_INVALID');
+    for (let page = 0; page < MAX_RECOVERY_PAGES; page += 1) {
+      const query = new URLSearchParams({ limit: '100', sort_order: 'CREATED_AT_DESC' });
+      if (pageId) query.set('page_id', pageId);
+      const payload = await this.json('/api/conversations/search?' + query.toString());
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      for (const item of items) {
+        const conversation = record(item);
+        const id = boundedText(conversation.id, 200);
+        const tags = record(conversation.tags);
+        if (!id || tags.execution !== expectedTag || tags.recovery !== undefined) continue;
+        this.validateConversation(conversation, input);
+        matches.set(id, conversation);
+        if (matches.size > 1) throw new V4Error('OPENHANDS_EXECUTION_DUPLICATE');
+      }
+      const next = boundedText(payload.next_page_id, 2_000);
+      const times = items.map((item) => Date.parse(String(record(item).created_at ?? ''))).filter(Number.isFinite);
+      if (!next || (times.length > 0 && Math.min(...times) < createdAt - 60_000)) break;
+      pageId = next;
+    }
+    const match = [...matches.entries()][0];
+    return match ? await this.snapshot(match[1], match[0]) : undefined;
+  }
+
+  async replace(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot> {
+    this.validateLaunchInput(input);
+    failClosed(
+      input.previousProviderSessionId.trim().length > 0 && input.previousProviderSessionId.length <= 200,
+      'EXPECTED_PROVIDER_SESSION_ID_REQUIRED',
+    );
+    failClosed(input.instruction.trim().length > 0, 'OPENHANDS_REPLACEMENT_INSTRUCTION_REQUIRED');
+    const tag = recoveryTag(input.recoveryKey);
+    const existing = await this.findReplacement(input, tag);
+    if (existing) return await this.ensureRunning(existing.providerSessionId, existing);
+    const text = [
+      phasePrompt(input),
+      '',
+      'Provider session recovery:',
+      '- This conversation replaces a stalled provider session for the same durable execution.',
+      '- Preserve all intended existing workspace changes and continue from the current workspace state.',
+      '- Do not reset, discard, or duplicate already completed work.',
+      input.instruction.trim(),
+    ].join('\n');
+    if (Buffer.byteLength(text, 'utf8') > MAX_INSTRUCTION_TEXT)
+      throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
+    return await this.createConversation(input, text, { recovery: tag });
+  }
+
+  async inspect(providerSessionId: string): Promise<ProviderSessionSnapshot> {
+    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
+    const payload = await this.json('/api/conversations/' + encodeURIComponent(providerSessionId));
+    return await this.snapshot(payload, providerSessionId);
+  }
+
+  async continue(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot> {
+    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
+    failClosed(instruction.trim().length > 0, 'OPENHANDS_CONTINUE_INSTRUCTION_REQUIRED');
+    if (Buffer.byteLength(instruction, 'utf8') > MAX_INSTRUCTION_TEXT) throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/events', {
+      method: 'POST',
+      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: instruction }], run: true }),
+    });
+    const snapshot = await this.inspect(providerSessionId);
+    return await this.ensureRunning(providerSessionId, snapshot);
+  }
+
+  async interrupt(providerSessionId: string): Promise<ProviderSessionSnapshot> {
+    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
+    return await this.inspect(providerSessionId);
+  }
+
+  async cancel(providerSessionId: string): Promise<ProviderSessionSnapshot> {
+    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/pause', { method: 'POST' });
+    return await this.inspect(providerSessionId);
+  }
+
+  private validateLaunchInput(input: ProviderLaunchInput): void {
     this.validatePhase(input.phase);
     failClosed(input.executionId.trim().length > 0, 'EXECUTION_ID_REQUIRED');
     failClosed(input.planId.trim().length > 0, 'PLAN_ID_REQUIRED');
@@ -199,7 +295,13 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     failClosed(input.workspace.executionId === input.executionId, 'OPENHANDS_WORKSPACE_EXECUTION_MISMATCH');
     failClosed(input.workspace.sourceRevision === input.sourceRevision, 'OPENHANDS_WORKSPACE_REVISION_MISMATCH');
     failClosed(input.workspace.executionPath.trim().length > 0, 'OPENHANDS_WORKSPACE_REQUIRED');
+  }
 
+  private async createConversation(
+    input: ProviderLaunchInput,
+    initialText: string,
+    extraTags: Record<string, string> = {},
+  ): Promise<ProviderSessionSnapshot> {
     const tools = this.mode === 'REVIEW'
       ? [{ name: 'terminal' }, { name: 'task_tracker' }]
       : [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }];
@@ -239,7 +341,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         },
       },
       tool_module_qualnames: toolModuleQualnames,
-      initial_message: { role: 'user', content: [{ type: 'text', text: phasePrompt(input) }], run: true },
+      initial_message: { role: 'user', content: [{ type: 'text', text: initialText }], run: true },
       max_iterations: this.options.maxIterations,
       stuck_detection: true,
       autotitle: false,
@@ -250,6 +352,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         plan: tagValue(input.planId),
         ...(input.workItemId ? { workitem: tagValue(input.workItemId) } : {}),
         role: this.mode === 'REVIEW' ? 'independentreview' : 'implementation',
+        ...extraTags,
       },
       secrets: {
         CI: { kind: 'StaticSecret', value: '1' },
@@ -273,20 +376,15 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       expectedWorkspacePath: input.workspace.executionPath,
     });
     const initial = await this.snapshot(response, conversationId);
-    if (initial.status === 'PAUSED') {
-      await this.request('/api/conversations/' + encodeURIComponent(conversationId) + '/run', { method: 'POST' });
-      return await this.inspect(conversationId);
-    }
-    return initial;
+    return await this.ensureRunning(conversationId, initial);
   }
 
-  async recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined> {
-    failClosed(input.executionId.trim().length > 0, 'EXECUTION_ID_REQUIRED');
-    const expectedTag = executionTag(input.executionId);
+  private async findReplacement(
+    input: ProviderSessionReplacementInput,
+    tag: string,
+  ): Promise<ProviderSessionSnapshot | undefined> {
     const matches = new Map<string, JsonRecord>();
     let pageId: string | undefined;
-    const createdAt = Date.parse(input.createdAt);
-    failClosed(Number.isFinite(createdAt), 'EXECUTION_CREATED_AT_INVALID');
     for (let page = 0; page < MAX_RECOVERY_PAGES; page += 1) {
       const query = new URLSearchParams({ limit: '100', sort_order: 'CREATED_AT_DESC' });
       if (pageId) query.set('page_id', pageId);
@@ -296,57 +394,36 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         const conversation = record(item);
         const id = boundedText(conversation.id, 200);
         const tags = record(conversation.tags);
-        if (!id || tags.execution !== expectedTag) continue;
-        this.validateConversation(conversation, input);
+        if (!id || tags.recovery !== tag) continue;
+        this.validateConversation(conversation, {
+          executionId: input.executionId,
+          projectKey: input.projectKey,
+          phase: input.phase,
+          expectedWorkspacePath: input.workspace.executionPath,
+        });
         matches.set(id, conversation);
-        if (matches.size > 1) throw new V4Error('OPENHANDS_EXECUTION_DUPLICATE');
+        if (matches.size > 1) throw new V4Error('OPENHANDS_REPLACEMENT_DUPLICATE');
       }
       const next = boundedText(payload.next_page_id, 2_000);
-      const times = items.map((item) => Date.parse(String(record(item).created_at ?? ''))).filter(Number.isFinite);
-      if (!next || (times.length > 0 && Math.min(...times) < createdAt - 60_000)) break;
+      if (!next) break;
       pageId = next;
     }
     const match = [...matches.entries()][0];
     return match ? await this.snapshot(match[1], match[0]) : undefined;
   }
 
-  async inspect(providerSessionId: string): Promise<ProviderSessionSnapshot> {
-    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    const payload = await this.json('/api/conversations/' + encodeURIComponent(providerSessionId));
-    return await this.snapshot(payload, providerSessionId);
-  }
-
-  async continue(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot> {
-    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    failClosed(instruction.trim().length > 0, 'OPENHANDS_CONTINUE_INSTRUCTION_REQUIRED');
-    if (Buffer.byteLength(instruction, 'utf8') > MAX_INSTRUCTION_TEXT) throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
-    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/events', {
-      method: 'POST',
-      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: instruction }], run: true }),
-    });
-    let snapshot = await this.inspect(providerSessionId);
-    if (snapshot.status === 'PAUSED') {
-      try {
-        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
-      } catch (error) {
-        if (!(error instanceof V4Error) || error.code !== 'OPENHANDS_HTTP_409') throw error;
-        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
-        await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
-      }
-      snapshot = await this.inspect(providerSessionId);
+  private async ensureRunning(
+    providerSessionId: string,
+    snapshot: ProviderSessionSnapshot,
+  ): Promise<ProviderSessionSnapshot> {
+    if (snapshot.status !== 'PAUSED') return snapshot;
+    try {
+      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
+    } catch (error) {
+      if (!(error instanceof V4Error) || error.code !== 'OPENHANDS_HTTP_409') throw error;
+      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
+      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
     }
-    return snapshot;
-  }
-
-  async interrupt(providerSessionId: string): Promise<ProviderSessionSnapshot> {
-    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
-    return await this.inspect(providerSessionId);
-  }
-
-  async cancel(providerSessionId: string): Promise<ProviderSessionSnapshot> {
-    failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/pause', { method: 'POST' });
     return await this.inspect(providerSessionId);
   }
 

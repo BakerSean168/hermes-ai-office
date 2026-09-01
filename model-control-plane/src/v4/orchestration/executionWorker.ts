@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { V4Error } from '../domain/errors.js';
 import type { Execution } from '../domain/execution.js';
@@ -146,6 +146,175 @@ export class ExecutionWorker {
             : snapshot.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'RUNNING',
         code: 'PROVIDER_' + snapshot.status,
         providerSessionId: snapshot.providerSessionId,
+      };
+    } catch (error) {
+      return { executionId, status: 'FAILED', code: errorCode(error) };
+    } finally {
+      this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
+    }
+  }
+
+  async replaceStalledProviderSession(
+    executionId: string,
+    idempotencyKey: string,
+    instruction = 'Resume the same bounded execution from the existing durable workspace and finish the original objective.',
+    reason = 'stalled provider session recovery',
+  ): Promise<ExecutionWorkerResult> {
+    const claim = this.repositories.executions.claimLease(executionId, this.ownerId, this.leaseTtlMs);
+    if (!claim.value || claim.status === 'rejected')
+      return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
+    try {
+      const execution = this.repositories.executions.get(executionId);
+      if (execution.status !== 'RUNNING')
+        return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_RESUMABLE' };
+      if (!idempotencyKey.trim() || idempotencyKey.length > 1_000)
+        throw new V4Error('PROVIDER_REPLACEMENT_IDEMPOTENCY_REQUIRED');
+      if (!instruction.trim() || instruction.length > 32_000)
+        throw new V4Error('PROVIDER_REPLACEMENT_INSTRUCTION_INVALID');
+      if (!reason.trim() || reason.length > 2_000)
+        throw new V4Error('PROVIDER_SESSION_REPLACEMENT_INVALID');
+      const provider = this.routes.get(execution.identity.route);
+      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      if (!provider.replace) return { executionId, status: 'WAITING', code: 'PROVIDER_REPLACE_UNAVAILABLE' };
+      if (!provider.interrupt) return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
+      const evidenceName =
+        'provider-session-replacement-' +
+        createHash('sha256').update(idempotencyKey.trim()).digest('hex').slice(0, 40);
+      const existingEvidence = this.repositories.evidence.find(executionId, 'RECOVERY', evidenceName);
+      if (existingEvidence) {
+        const previous = existingEvidence.payload.previousProviderSessionId;
+        const replacementId = existingEvidence.payload.providerSessionId;
+        const storedReason = existingEvidence.payload.reason;
+        if (
+          typeof previous !== 'string' ||
+          typeof replacementId !== 'string' ||
+          typeof storedReason !== 'string' ||
+          !storedReason.trim()
+        )
+          throw new V4Error('PROVIDER_REPLACEMENT_EVIDENCE_INVALID');
+        let session = this.repositories.sessions.get(executionId);
+        if (session.providerSessionId === previous) {
+          const swapped = this.repositories.sessions.replaceProviderSession(
+            executionId,
+            previous,
+            replacementId,
+            storedReason,
+          );
+          if (swapped.status === 'rejected' || !swapped.value)
+            throw new V4Error(swapped.reason ?? 'STALE_PROVIDER_SESSION');
+          session = this.repositories.sessions.get(executionId);
+        } else if (session.providerSessionId !== replacementId) {
+          throw new V4Error('PROVIDER_REPLACEMENT_IDEMPOTENCY_CONFLICT');
+        }
+        const snapshot = await provider.inspect(replacementId);
+        if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status))
+          this.recordTerminalProviderStatus(executionId, session, snapshot);
+        else this.recordActiveProviderStatus(executionId, session, snapshot);
+        return {
+          executionId,
+          status:
+            snapshot.status === 'FAILED' || snapshot.status === 'STUCK' || snapshot.status === 'CANCELLED'
+              ? 'FAILED'
+              : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+                ? 'WAITING'
+                : snapshot.status === 'SUCCEEDED'
+                  ? 'SUCCEEDED'
+                  : 'RUNNING',
+          code: 'PROVIDER_SESSION_REPLACEMENT_EXISTING_' + snapshot.status,
+          providerSessionId: replacementId,
+        };
+      }
+      let session = this.repositories.sessions.get(executionId);
+      const previousProviderSessionId = session.providerSessionId;
+      if (!previousProviderSessionId)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
+      const observed = await provider.inspect(previousProviderSessionId);
+      if (TERMINAL_PROVIDER_STATUSES.has(observed.status))
+        return {
+          executionId,
+          status: 'WAITING',
+          code: 'PROVIDER_TERMINAL_REPLACEMENT_REFUSED',
+          providerSessionId: previousProviderSessionId,
+        };
+      if (observed.status !== 'PAUSED') {
+        const interrupted = await provider.interrupt(previousProviderSessionId);
+        if (TERMINAL_PROVIDER_STATUSES.has(interrupted.status))
+          return {
+            executionId,
+            status: 'WAITING',
+            code: 'PROVIDER_TERMINAL_REPLACEMENT_REFUSED',
+            providerSessionId: previousProviderSessionId,
+          };
+        this.recordActiveProviderStatus(executionId, session, interrupted);
+        session = this.repositories.sessions.get(executionId);
+      } else {
+        this.recordActiveProviderStatus(executionId, session, observed);
+        session = this.repositories.sessions.get(executionId);
+      }
+      const plan = this.repositories.plans.getPlan(execution.identity.planId);
+      const workItem = execution.identity.workItemId
+        ? this.repositories.plans.getWorkItem(execution.identity.workItemId)
+        : undefined;
+      const recoveryKey =
+        'provider-session-replacement:' + execution.identity.executionId + ':' + idempotencyKey.trim();
+      const replacement = await provider.replace({
+        executionId: execution.identity.executionId,
+        planId: execution.identity.planId,
+        projectKey: plan.projectKey,
+        workItemId: execution.identity.workItemId,
+        phase: execution.identity.phase,
+        objective: execution.objective,
+        acceptanceCriteria: workItem?.acceptanceCriteria ?? [],
+        sourceRevision: execution.identity.sourceRevision!,
+        route: execution.identity.route,
+        workspace: session.workspace,
+        ...(execution.identity.phase === 'IMPLEMENT_FIX'
+          ? { reviewFindings: this.reviewFindings(execution) }
+          : {}),
+        previousProviderSessionId,
+        recoveryKey,
+        instruction,
+      });
+      if (replacement.providerSessionId === previousProviderSessionId)
+        throw new V4Error('PROVIDER_REPLACEMENT_SESSION_UNCHANGED');
+      this.repositories.evidence.append({
+        executionId,
+        kind: 'RECOVERY',
+        name: evidenceName,
+        sourceRevision: execution.identity.sourceRevision,
+        payload: {
+          idempotencyKey: idempotencyKey.trim(),
+          previousProviderSessionId,
+          providerSessionId: replacement.providerSessionId,
+          recoveryKey,
+          reason: reason.trim(),
+          observedStatus: replacement.status,
+        },
+      });
+      const swapped = this.repositories.sessions.replaceProviderSession(
+        executionId,
+        previousProviderSessionId,
+        replacement.providerSessionId,
+        reason.trim(),
+      );
+      if (swapped.status === 'rejected' || !swapped.value)
+        throw new V4Error(swapped.reason ?? 'STALE_PROVIDER_SESSION');
+      session = this.repositories.sessions.get(executionId);
+      if (TERMINAL_PROVIDER_STATUSES.has(replacement.status))
+        this.recordTerminalProviderStatus(executionId, session, replacement);
+      else this.recordActiveProviderStatus(executionId, session, replacement);
+      return {
+        executionId,
+        status:
+          replacement.status === 'FAILED' || replacement.status === 'STUCK' || replacement.status === 'CANCELLED'
+            ? 'FAILED'
+            : replacement.status === 'PAUSED' || replacement.status === 'WAITING_FOR_CONFIRMATION'
+              ? 'WAITING'
+              : replacement.status === 'SUCCEEDED'
+                ? 'SUCCEEDED'
+                : 'RUNNING',
+        code: 'PROVIDER_SESSION_REPLACED_' + replacement.status,
+        providerSessionId: replacement.providerSessionId,
       };
     } catch (error) {
       return { executionId, status: 'FAILED', code: errorCode(error) };

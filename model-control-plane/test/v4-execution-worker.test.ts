@@ -8,6 +8,7 @@ import type {
   ExecutionProviderPort,
   ProviderLaunchInput,
   ProviderRecoveryInput,
+  ProviderSessionReplacementInput,
   ProviderSessionSnapshot,
   ReviewProviderPort,
   WorkspaceCompletionSnapshot,
@@ -128,14 +129,17 @@ class FakeProvider implements ExecutionProviderPort {
   inspectCalls = 0;
   continueCalls = 0;
   interruptCalls = 0;
+  replaceCalls = 0;
   launchSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(10) };
   recoveredSnapshot?: ProviderSessionSnapshot;
   inspectSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(20) };
   continueSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'RUNNING', observedAt: now(30) };
   interruptSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-1', status: 'PAUSED', observedAt: now(25) };
+  replaceSnapshot: ProviderSessionSnapshot = { provider: this.provider, providerSessionId: 'provider-session-2', status: 'RUNNING', observedAt: now(35) };
   launchError?: Error;
   lastLaunch?: ProviderLaunchInput;
   lastContinueInstruction?: string;
+  lastReplacement?: ProviderSessionReplacementInput;
 
   async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
     this.launchCalls += 1;
@@ -149,9 +153,9 @@ class FakeProvider implements ExecutionProviderPort {
     return this.recoveredSnapshot ? { ...this.recoveredSnapshot, observedAt: now(10) } : undefined;
   }
 
-  async inspect(_providerSessionId: string): Promise<ProviderSessionSnapshot> {
+  async inspect(providerSessionId: string): Promise<ProviderSessionSnapshot> {
     this.inspectCalls += 1;
-    return { ...this.inspectSnapshot, observedAt: now(100 + this.inspectCalls) };
+    return { ...this.inspectSnapshot, providerSessionId, observedAt: now(100 + this.inspectCalls) };
   }
 
   async continue(_providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot> {
@@ -163,6 +167,12 @@ class FakeProvider implements ExecutionProviderPort {
   async interrupt(_providerSessionId: string): Promise<ProviderSessionSnapshot> {
     this.interruptCalls += 1;
     return { ...this.interruptSnapshot, observedAt: now(40 + this.interruptCalls) };
+  }
+
+  async replace(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot> {
+    this.replaceCalls += 1;
+    this.lastReplacement = input;
+    return { ...this.replaceSnapshot, observedAt: now(60 + this.replaceCalls) };
   }
 }
 
@@ -473,6 +483,67 @@ test('execution worker can interrupt a stuck provider turn and continue the same
   assert.equal(provider.continueCalls, 1);
   assert.equal(provider.lastContinueInstruction, 'Resume the same bounded work.');
   assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerStatus, 'RUNNING');
+  seeded.db.close();
+});
+
+test('execution worker replaces a stalled provider session without changing execution attempt or workspace', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-session-replace',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+    attempt: 3,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-session-replace' },
+  );
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  const before = seeded.repositories.sessions.get(execution.identity.executionId);
+  const replaced = await worker.replaceStalledProviderSession(
+    execution.identity.executionId,
+    'replace-session-test-key',
+    'Resume from the existing workspace and finish.',
+    'stalled llm turn',
+  );
+  assert.equal(replaced.status, 'RUNNING');
+  assert.equal(replaced.code, 'PROVIDER_SESSION_REPLACED_RUNNING');
+  assert.equal(provider.interruptCalls, 1);
+  assert.equal(provider.replaceCalls, 1);
+  assert.equal(provider.lastReplacement?.previousProviderSessionId, before.providerSessionId);
+  assert.equal(provider.lastReplacement?.workspace.hostPath, before.workspace.hostPath);
+  assert.equal(provider.lastReplacement?.instruction, 'Resume from the existing workspace and finish.');
+  const durableExecution = seeded.repositories.executions.get(execution.identity.executionId);
+  const durableSession = seeded.repositories.sessions.get(execution.identity.executionId);
+  assert.equal(durableExecution.identity.attempt, 3);
+  assert.equal(durableExecution.identity.route, 'implementation');
+  assert.equal(durableExecution.status, 'RUNNING');
+  assert.equal(durableSession.providerSessionId, 'provider-session-2');
+  assert.equal(durableSession.providerStatus, 'RUNNING');
+  assert.equal(durableSession.workspace.hostPath, before.workspace.hostPath);
+  assert.equal(
+    seeded.repositories.evidence
+      .listByExecution(execution.identity.executionId)
+      .filter((item) => item.kind === 'RECOVERY' && item.name.startsWith('provider-session-replacement-')).length,
+    1,
+  );
+  const repeated = await worker.replaceStalledProviderSession(
+    execution.identity.executionId,
+    'replace-session-test-key',
+    'This changed instruction must not create another provider session.',
+    'replayed operator request',
+  );
+  assert.equal(repeated.status, 'RUNNING');
+  assert.equal(repeated.code, 'PROVIDER_SESSION_REPLACEMENT_EXISTING_RUNNING');
+  assert.equal(repeated.providerSessionId, 'provider-session-2');
+  assert.equal(provider.replaceCalls, 1);
+  assert.equal(provider.interruptCalls, 1);
+  assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId, 'provider-session-2');
   seeded.db.close();
 });
 
