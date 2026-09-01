@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const service = fs.readFileSync(path.join(root, 'deploy/gcp/hermes-model-control-plane.service'), 'utf8');
 const installer = fs.readFileSync(path.join(root, 'deploy/gcp/install-gcp-execution-plane.sh'), 'utf8');
+const release = fs.readFileSync(path.join(root, 'scripts/release-v4-gcp.sh'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -35,4 +36,19 @@ test('V4 installer takes a SQLite backup and requires V4 execution health', () =
   assert.match(installer, /payload\.apiVersion !== 4/);
   assert.match(installer, /payload\.executionRuntime\?\.enabled !== true/);
   assert.doesNotMatch(installer, /PIXEL_V4_ALLOW_DATA_RESET=true/);
+});
+
+test('V4 release deploys the reviewed canonical SHA and fails closed on partial health', () => {
+  assert.match(service, /WorkingDirectory=\/home\/dev\/projects\/pixel-agents/);
+  assert.match(service, /ExecStart=\/usr\/bin\/node model-control-plane\/dist\/main\.js/);
+  assert.match(release, /target_root="\/home\/dev\/projects\/pixel-agents"/);
+  assert.match(release, /source_sha=.*rev-parse HEAD/);
+  assert.match(release, /target_sha=.*rev-parse HEAD/);
+  assert.match(release, /canonical source SHA/);
+  assert.match(release, /await backup\(db, target\)/);
+  assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
+  assert.match(release, /runtime\.implementationRoutes\[0\] !== 'gpt-5\.6-luna'/);
+  assert.match(release, /runtime\.reviewRoutes\[0\] !== 'gpt-5\.6-sol'/);
+  assert.match(release, /api\/v4\/plans\/__release_probe__/);
+  assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });

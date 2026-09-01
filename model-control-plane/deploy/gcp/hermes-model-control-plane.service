@@ -1,12 +1,13 @@
 [Unit]
 Description=Hermes Pixel Agent V4 Durable Coding Control Plane
-After=network-online.target hermes-openhands-v3.service
-Wants=network-online.target hermes-openhands-v3.service
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target
+Requires=docker.service
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/srv/hermes-personal/model-control-plane
+WorkingDirectory=/home/dev/projects/pixel-agents
 Environment=NODE_ENV=production
 Environment=MODEL_CP_HOST=127.0.0.1
 Environment=MODEL_CP_PORT=8320
@@ -30,7 +31,7 @@ Environment=MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=3
 Environment=MODEL_CP_V4_MAX_REPAIR_CYCLES=3
 EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
 EnvironmentFile=/srv/hermes-personal/secrets/openhands-v3.env
-ExecStart=/usr/bin/node /srv/hermes-personal/model-control-plane/dist/main.js
+ExecStart=/usr/bin/node model-control-plane/dist/main.js
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=90
