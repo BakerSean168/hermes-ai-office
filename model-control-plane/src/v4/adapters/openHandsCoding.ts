@@ -154,6 +154,8 @@ function phasePrompt(input: ProviderLaunchInput): string {
     : [
         'Implement the bounded objective in the supplied isolated workspace.',
         'Do not broaden scope, access credentials, merge, deploy, or modify remotes.',
+        'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
+        'If a JavaScript workspace has no installed dependencies, bootstrap only from its checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
         'Run focused checks, commit every intended change, and leave the workspace clean.',
         'A no-op or planning-only response is not successful implementation.',
         'Before finishing, atomically write one JSON object outside the Git repository at ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,

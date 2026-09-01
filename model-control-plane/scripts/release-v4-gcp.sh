@@ -73,6 +73,11 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
 sudo docker exec --user 10001:10001 hermes-openhands-v3 \
   /bin/sh -c 'test -d "$1" && test -w "$1" && touch "$1/container-write" && rm -f "$1/container-write"' \
   sh "/workspace/v4/executions/.pixel-v4-release-$probe_id"
+openhands_node_major="$(sudo docker exec --user 10001:10001 hermes-openhands-v3 node -p 'process.versions.node.split(".")[0]')"
+if [[ "$openhands_node_major" != "24" ]]; then
+  echo "OpenHands coding runtime must use Node 24, got major $openhands_node_major" >&2
+  exit 1
+fi
 cleanup_probe
 trap - EXIT
 

@@ -6,6 +6,7 @@ EXPECTED_COMMIT="${OPENHANDS_AGENT_SDK_COMMIT:-bf57d16f3dde05b0b03fa0af3f7e0ae92
 CACHE_ROOT="${OPENHANDS_BUILD_CACHE_ROOT:-${HOME}/.cache/hermes-ai-office-v3/upstream}"
 SOURCE_DIR="$CACHE_ROOT/software-agent-sdk-$REF"
 IMAGE="${OPENHANDS_SOURCE_IMAGE:-hermes-openhands-agent-server:1.39.1-source}"
+BASE_IMAGE="${OPENHANDS_BASE_IMAGE:-nikolaik/python-nodejs:python3.13-nodejs24-slim}"
 REPO="https://github.com/OpenHands/software-agent-sdk.git"
 
 case "$(uname -m)" in
@@ -33,8 +34,9 @@ docker build \
   --file "$SOURCE_DIR/openhands-agent-server/openhands/agent_server/docker/Dockerfile" \
   --target source-minimal \
   --tag "$IMAGE" \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
   --build-arg OPENHANDS_BUILD_GIT_SHA="$ACTUAL_COMMIT" \
   --build-arg OPENHANDS_BUILD_GIT_REF="$REF" \
   "$SOURCE_DIR"
 
-echo "$IMAGE $ACTUAL_COMMIT $PLATFORM"
+echo "$IMAGE $ACTUAL_COMMIT $PLATFORM $BASE_IMAGE"

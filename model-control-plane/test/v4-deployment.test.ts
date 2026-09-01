@@ -18,6 +18,7 @@ const releasePath = path.join(root, 'scripts/release-v4-gcp.sh');
 const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
 const release = fs.readFileSync(releasePath, 'utf8');
 const probe = fs.readFileSync(probePath, 'utf8');
+const openHandsBuild = fs.readFileSync(path.join(root, 'scripts/build-openhands-v3-source.sh'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -83,6 +84,13 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /runtime\.automationProjectKeys/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
+});
+
+test('OpenHands coding runtime is built and release-gated on Node 24', () => {
+  assert.match(openHandsBuild, /OPENHANDS_BASE_IMAGE:-nikolaik\/python-nodejs:python3\.13-nodejs24-slim/);
+  assert.match(openHandsBuild, /--build-arg BASE_IMAGE="\$BASE_IMAGE"/);
+  assert.match(release, /process\.versions\.node\.split/);
+  assert.match(release, /OpenHands coding runtime must use Node 24/);
 });
 
 test('V4 release never rsyncs a build directory onto itself', () => {

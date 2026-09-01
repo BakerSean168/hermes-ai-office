@@ -53,6 +53,9 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.deepEqual(reviewBody.agent.tools.map((item: { name: string }) => item.name), ['terminal', 'task_tracker']);
   assert.equal(implementationBody.initial_message.run, true);
   assert.match(implementationBody.initial_message.content[0].text, /\/workspace\/executions\/exec-1\/evidence\.json/);
+  assert.match(implementationBody.initial_message.content[0].text, /honor checked-in runtime declarations/);
+  assert.match(implementationBody.initial_message.content[0].text, /immutable\/frozen-lockfile mode/);
+  assert.match(implementationBody.initial_message.content[0].text, /never rewrite the lockfile/);
   assert.match(reviewBody.initial_message.content[0].text, /\"phase\":\"REVIEW\"/);
   assert.equal(implementationBody.agent.llm.api_mode, 'chat');
   assert.equal(implementationBody.agent.llm.reasoning_effort, null);
