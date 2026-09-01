@@ -68,6 +68,8 @@ export interface SupervisorRunResult {
 }
 
 export class SupervisorRuntime {
+  private cycleRunning = false;
+
   constructor(
     readonly db: DatabaseSync,
     readonly supervisors: SupervisorRepository,
@@ -76,16 +78,31 @@ export class SupervisorRuntime {
     readonly actions: SupervisorActionExecutor,
     readonly client?: SupervisorDecisionClient,
     readonly ownerId = 'supervisor-worker-' + randomUUID(),
-    readonly leaseTtlMs = 30_000,
+    readonly leaseTtlMs = 90_000,
   ) {}
 
   async runOnce(now = new Date().toISOString()): Promise<SupervisorRunResult[]> {
-    const requests = this.scheduler.drain().concat(this.scheduler.recoverDue(now));
-    const unique = new Map<string, WakeRequest>();
-    for (const request of requests) unique.set(request.supervisorId + ':' + request.observationCursor + ':' + request.reason, request);
-    const results: SupervisorRunResult[] = [];
-    for (const request of unique.values()) results.push(await this.runOne(request));
-    return results;
+    if (this.cycleRunning) return [];
+    this.cycleRunning = true;
+    try {
+      const requests = this.scheduler.drain().concat(this.scheduler.recoverDue(now));
+      const unique = new Map<string, WakeRequest>();
+      for (const request of requests) {
+        const current = unique.get(request.supervisorId);
+        if (
+          !current ||
+          request.observationCursor > current.observationCursor ||
+          (request.observationCursor === current.observationCursor &&
+            current.reason === 'STALL' && request.reason !== 'STALL')
+        )
+          unique.set(request.supervisorId, request);
+      }
+      const results: SupervisorRunResult[] = [];
+      for (const request of unique.values()) results.push(await this.runOne(request));
+      return results;
+    } finally {
+      this.cycleRunning = false;
+    }
   }
 
   private async runOne(request: WakeRequest): Promise<SupervisorRunResult> {

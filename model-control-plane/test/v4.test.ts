@@ -362,6 +362,98 @@ test('supervisor runtime claims, asks typed model and releases lease', async () 
   db.close();
 });
 
+test('supervisor runtime coalesces durable and due wakes for one supervisor into one decision', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-coalesce-plan');
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  seeded.repos.supervisors.deferWake(seeded.supervisor.supervisorId, '1970-01-01T00:00:00.000Z');
+  scheduler.schedule({
+    supervisorId: seeded.supervisor.supervisorId,
+    observationCursor: seeded.supervisor.observationCursor,
+    reason: 'TERMINAL_RESULT',
+    requestedAt: new Date().toISOString(),
+  });
+  let decisions = 0;
+  const client = { decide: async (input: { projection: { cursor: number; digest: string }; supervisorId: string; planId: string }) => {
+    decisions += 1;
+    return JSON.stringify({
+      version: 1, decisionId: 'decision-coalesced', planId: input.planId, supervisorId: input.supervisorId, observationCursor: input.projection.cursor,
+      projectionDigest: input.projection.digest, idempotencyKey: 'runtime-coalesced-noop', preconditionSnapshot: {},
+      action: { type: 'NO_ACTION', idempotencyKey: 'runtime-coalesced-noop', payload: { type: 'NO_ACTION', reason: 'coalesced' } },
+    });
+  } };
+  const host = new OpenHandsSupervisorAdapter({
+    createSupervisorConversation: () => ({ conversationId: 'conversation-coalesce', replaced: false }),
+    resumeSupervisorConversation: () => ({ conversationId: 'conversation-coalesce', replaced: false }),
+  });
+  const runtime = new SupervisorRuntime(
+    db, seeded.repos.supervisors, scheduler, host,
+    new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}, seeded.repos.supervisors),
+    client, 'runtime-coalesce-owner',
+  );
+
+  const result = await runtime.runOnce(new Date().toISOString());
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.status, 'SUCCEEDED');
+  assert.equal(decisions, 1);
+  db.close();
+});
+
+test('supervisor runtime refuses overlapping local poll cycles without draining the pending wake', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-overlap-plan');
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  scheduler.schedule({
+    supervisorId: seeded.supervisor.supervisorId,
+    observationCursor: seeded.supervisor.observationCursor,
+    reason: 'NEW_PLAN',
+    requestedAt: new Date().toISOString(),
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let decisions = 0;
+  const client = { decide: async (input: { projection: { cursor: number; digest: string }; supervisorId: string; planId: string }) => {
+    decisions += 1;
+    await gate;
+    return JSON.stringify({
+      version: 1, decisionId: 'decision-overlap', planId: input.planId, supervisorId: input.supervisorId, observationCursor: input.projection.cursor,
+      projectionDigest: input.projection.digest, idempotencyKey: 'runtime-overlap-noop', preconditionSnapshot: {},
+      action: { type: 'NO_ACTION', idempotencyKey: 'runtime-overlap-noop', payload: { type: 'NO_ACTION', reason: 'overlap' } },
+    });
+  } };
+  const host = new OpenHandsSupervisorAdapter({
+    createSupervisorConversation: () => ({ conversationId: 'conversation-overlap', replaced: false }),
+    resumeSupervisorConversation: () => ({ conversationId: 'conversation-overlap', replaced: false }),
+  });
+  const runtime = new SupervisorRuntime(
+    db, seeded.repos.supervisors, scheduler, host,
+    new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}, seeded.repos.supervisors),
+    client, 'runtime-overlap-owner',
+  );
+
+  const first = runtime.runOnce();
+  while (decisions === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  scheduler.schedule({
+    supervisorId: seeded.supervisor.supervisorId,
+    observationCursor: seeded.supervisor.observationCursor,
+    reason: 'OPERATOR_REQUEST',
+    requestedAt: new Date().toISOString(),
+  });
+  const overlapping = await runtime.runOnce();
+  assert.deepEqual(overlapping, []);
+  assert.equal(
+    Number((db.prepare('SELECT COUNT(*) AS count FROM supervisor_wakes').get() as { count: number }).count),
+    1,
+  );
+  release();
+  const completed = await first;
+  assert.equal(completed[0]?.status, 'SUCCEEDED');
+  const followup = await runtime.runOnce();
+  assert.equal(followup[0]?.code, 'STALE_WAKE');
+  assert.equal(decisions, 1);
+  db.close();
+});
+
 test('supervisor runtime releases lease after model failure and can be retried', async () => {
   const db = memory();
   const seeded = seedPlan(db, 'runtime-failure-plan');
