@@ -408,6 +408,125 @@ test('plan automation surfaces an active worker failure instead of reporting fal
   seeded.db.close();
 });
 
+test('plan reconcile recovers a historical non-retryable finalization failure without rewriting the failed execution', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const passiveRunner: ExecutionRunnerPort = {
+    runExecution: async (executionId) => ({ executionId, status: 'RUNNING', code: 'RUNNING' }),
+  };
+  const automation = runtime(seeded.repositories, passiveRunner, workspace);
+  const queued = await automation.runPlan(seeded.plan.planId);
+  const failedExecutionId = queued.executionId!;
+  const failedExecution = seeded.repositories.executions.get(failedExecutionId);
+  const item = seeded.repositories.plans.getWorkItem(queued.workItemId!);
+  seeded.repositories.executions.updateStatus(failedExecutionId, 'RUNNING');
+  seeded.repositories.executions.recordResult(failedExecutionId, {
+    status: 'FAILED',
+    errorCode: 'WORKSPACE_DIRTY',
+    retryable: false,
+  });
+  seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
+  seeded.repositories.plans.updateStatus(seeded.plan.planId, 'FAILED');
+
+  const reconciled = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(reconciled.status, 'RUNNING');
+  assert.equal(reconciled.code, 'FINALIZATION_RECOVERY_QUEUED');
+  assert.notEqual(reconciled.executionId, failedExecutionId);
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'RUNNING');
+  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).status, 'RUNNING');
+
+  const historical = seeded.repositories.executions.get(failedExecutionId);
+  assert.equal(historical.status, 'FAILED');
+  assert.equal(historical.errorCode, 'WORKSPACE_DIRTY');
+  assert.equal(historical.retryable, false);
+  const recovery = seeded.repositories.executions.get(reconciled.executionId!);
+  assert.equal(recovery.status, 'QUEUED');
+  assert.equal(recovery.identity.phase, 'IMPLEMENT');
+  assert.equal(recovery.identity.parentExecutionId, failedExecutionId);
+  assert.equal(recovery.identity.sourceRevision, failedExecution.identity.sourceRevision);
+  assert.equal(recovery.identity.route, failedExecution.identity.route);
+  assert.equal(recovery.identity.attempt, failedExecution.identity.attempt + 1);
+
+  const repeated = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(repeated.executionId, recovery.identity.executionId);
+  assert.equal(
+    seeded.repositories.executions
+      .listByWorkItem(item.workItemId)
+      .filter((execution) => execution.identity.phase === 'IMPLEMENT').length,
+    2,
+  );
+  seeded.db.close();
+});
+
+test('plan reconcile recovers after a crash that durably queued the retry before reviving plan state', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const passiveRunner: ExecutionRunnerPort = {
+    runExecution: async (executionId) => ({ executionId, status: 'RUNNING', code: 'RUNNING' }),
+  };
+  const automation = runtime(seeded.repositories, passiveRunner, workspace);
+  const queued = await automation.runPlan(seeded.plan.planId);
+  const failedExecution = seeded.repositories.executions.get(queued.executionId!);
+  const item = seeded.repositories.plans.getWorkItem(queued.workItemId!);
+  seeded.repositories.executions.updateStatus(failedExecution.identity.executionId, 'RUNNING');
+  seeded.repositories.executions.recordResult(failedExecution.identity.executionId, {
+    status: 'FAILED',
+    errorCode: 'WORKSPACE_DIRTY',
+    retryable: false,
+  });
+  seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
+  seeded.repositories.plans.updateStatus(seeded.plan.planId, 'FAILED');
+
+  const crashRecovery = seeded.repositories.executions.create({
+    idempotencyKey: 'simulated-crash-recovery',
+    identity: {
+      ...failedExecution.identity,
+      executionId: 'execution-simulated-crash-recovery',
+      parentExecutionId: failedExecution.identity.executionId,
+      attempt: failedExecution.identity.attempt + 1,
+    },
+    objective: failedExecution.objective,
+  }).value!;
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'FAILED');
+  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).status, 'FAILED');
+
+  const reconciled = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(reconciled.code, 'RECOVERY_EXECUTION_ACTIVE');
+  assert.equal(reconciled.executionId, crashRecovery.identity.executionId);
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'RUNNING');
+  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).status, 'RUNNING');
+  assert.equal(seeded.repositories.executions.listByWorkItem(item.workItemId).length, 2);
+  seeded.db.close();
+});
+
+test('plan reconcile refuses unrelated non-retryable failures and preserves the failed plan', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const passiveRunner: ExecutionRunnerPort = {
+    runExecution: async (executionId) => ({ executionId, status: 'RUNNING', code: 'RUNNING' }),
+  };
+  const automation = runtime(seeded.repositories, passiveRunner, workspace);
+  const queued = await automation.runPlan(seeded.plan.planId);
+  const executionId = queued.executionId!;
+  const item = seeded.repositories.plans.getWorkItem(queued.workItemId!);
+  seeded.repositories.executions.updateStatus(executionId, 'RUNNING');
+  seeded.repositories.executions.recordResult(executionId, {
+    status: 'FAILED',
+    errorCode: 'WORKSPACE_RESULT_NOT_DESCENDANT',
+    retryable: false,
+  });
+  seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
+  seeded.repositories.plans.updateStatus(seeded.plan.planId, 'FAILED');
+
+  const result = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'IMPLEMENTATION_NOT_RETRYABLE');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'FAILED');
+  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).status, 'FAILED');
+  assert.equal(seeded.repositories.executions.listByWorkItem(item.workItemId).length, 1);
+  seeded.db.close();
+});
+
 test('plan automation project allowlist prevents stale plans from becoming writers', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();

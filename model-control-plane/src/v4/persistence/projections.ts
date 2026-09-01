@@ -41,8 +41,8 @@ export function buildSupervisorProjection(db: DatabaseSync, supervisorId: string
   const items = graph ? db.prepare('SELECT * FROM work_items WHERE graph_version_id=? ORDER BY item_key LIMIT ?').all(graph.graph_version_id, maxItems) as unknown as Array<{ work_item_id: string; item_key: string; title: string; objective: string; status: string; dependencies: string; exact_accepted_revision: string | null }> : [];
   const executions = db.prepare('SELECT * FROM executions WHERE plan_id=? ORDER BY updated_at DESC LIMIT ?').all(plan.plan_id, maxItems) as unknown as Array<{ execution_id: string; work_item_id: string | null; phase: string; parent_execution_id: string | null; attempt: number; route: string; status: string; result_revision: string | null; error_code: string | null; retryable: number | null }>;
   const reviews = db.prepare('SELECT * FROM reviews WHERE plan_id=? ORDER BY updated_at DESC LIMIT ?').all(plan.plan_id, maxItems) as unknown as Array<{ review_id: string; implementation_execution_id: string; source_revision: string; reviewed_sha: string; status: string; verdict: string | null }>;
-  const after = options.afterCursor ?? 0;
-  const stored = new EventStore(db).listAfterCursor(after, maxEvents);
+  const after = options.afterCursor ?? supervisor.observation_cursor;
+  const stored = new EventStore(db).listRecentAfterCursor(after, maxEvents);
   const base = {
     projectionVersion: 1 as const,
     plan: { planId: plan.plan_id, projectKey: plan.project_key, objective: shorten(plan.objective, 4000), repositoryPath: shorten(plan.repository_path, 500), baseRevision: plan.base_revision, currentRevision: plan.current_revision, status: plan.status },

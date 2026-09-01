@@ -38,6 +38,12 @@ export interface ExecutionWorkerResult {
 const TERMINAL_PROVIDER_STATUSES = new Set(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
 const MAX_RESULT_SUMMARY = 8_000;
 const MAX_ERROR_CODE = 500;
+const FINALIZATION_EVIDENCE_NAME = 'provider-finalization-requested';
+const FINALIZABLE_IMPLEMENTATION_CODES = new Set([
+  'WORKSPACE_DIRTY',
+  'WORKSPACE_EVIDENCE_INVALID',
+  'WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH',
+]);
 
 function errorCode(error: unknown): string {
   if (error instanceof V4Error) return error.code;
@@ -213,6 +219,58 @@ export class ExecutionWorker {
         };
       }
 
+      let completion: WorkspaceCompletionSnapshot | undefined;
+      if (snapshot.status === 'SUCCEEDED') {
+        try {
+          completion = execution.identity.phase === 'REVIEW'
+            ? await this.workspace.verifyReview(session.workspace, execution.identity.sourceRevision)
+            : await this.workspace.verifyImplementation(session.workspace);
+        } catch (error) {
+          const code = errorCode(error);
+          const canFinalize =
+            execution.identity.phase !== 'REVIEW' &&
+            FINALIZABLE_IMPLEMENTATION_CODES.has(code) &&
+            Boolean(provider.continue) &&
+            Boolean(session.providerSessionId) &&
+            !this.repositories.evidence.find(executionId, 'RECOVERY', FINALIZATION_EVIDENCE_NAME);
+          if (!canFinalize) {
+            this.recordTerminalProviderStatus(executionId, session, snapshot);
+            throw error;
+          }
+          snapshot = await provider.continue!(
+            session.providerSessionId!,
+            this.finalizationInstruction(execution, session, code),
+          );
+          this.repositories.evidence.append({
+            executionId,
+            kind: 'RECOVERY',
+            name: FINALIZATION_EVIDENCE_NAME,
+            sourceRevision: execution.identity.sourceRevision,
+            payload: { triggerCode: code, providerSessionId: session.providerSessionId! },
+          });
+          if (!TERMINAL_PROVIDER_STATUSES.has(snapshot.status)) {
+            this.recordActiveProviderStatus(executionId, session, snapshot);
+            return {
+              executionId,
+              status:
+                snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+                  ? 'WAITING'
+                  : 'RUNNING',
+              code: 'PROVIDER_FINALIZATION_' + snapshot.status,
+              providerSessionId: snapshot.providerSessionId,
+            };
+          }
+          if (snapshot.status === 'SUCCEEDED') {
+            try {
+              completion = await this.workspace.verifyImplementation(session.workspace);
+            } catch (finalizationError) {
+              this.recordTerminalProviderStatus(executionId, session, snapshot);
+              throw finalizationError;
+            }
+          }
+        }
+      }
+
       this.recordTerminalProviderStatus(executionId, session, snapshot);
       if (snapshot.status === 'FAILED' || snapshot.status === 'STUCK') {
         const code = bounded(snapshot.errorCode, MAX_ERROR_CODE) ?? (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
@@ -228,10 +286,7 @@ export class ExecutionWorker {
         this.repositories.executions.updateStatus(executionId, 'CANCELLED');
         return { executionId, status: 'FAILED', code: 'PROVIDER_CANCELLED', providerSessionId: snapshot.providerSessionId };
       }
-
-      const completion = execution.identity.phase === 'REVIEW'
-        ? await this.workspace.verifyReview(session.workspace, execution.identity.sourceRevision)
-        : await this.workspace.verifyImplementation(session.workspace);
+      if (!completion) throw new V4Error('WORKSPACE_COMPLETION_MISSING');
       this.persistCompletion(execution, completion, snapshot);
       this.repositories.executions.recordResult(executionId, {
         status: 'SUCCEEDED',
@@ -250,12 +305,49 @@ export class ExecutionWorker {
       const code = errorCode(error);
       const execution = this.repositories.executions.get(executionId);
       if (execution.status === 'RUNNING' && code.startsWith('WORKSPACE_')) {
-        this.repositories.executions.recordResult(executionId, { status: 'FAILED', errorCode: code, retryable: false });
+        const retryable =
+          execution.identity.phase !== 'REVIEW' && FINALIZABLE_IMPLEMENTATION_CODES.has(code);
+        this.repositories.executions.recordResult(executionId, {
+          status: 'FAILED',
+          errorCode: code,
+          retryable,
+        });
       }
       return { executionId, status: 'FAILED', code };
     } finally {
       this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
     }
+  }
+
+  private finalizationInstruction(
+    execution: Execution,
+    session: ExecutionSession,
+    triggerCode: string,
+  ): string {
+    const evidenceTemplate = JSON.stringify({
+      version: 1,
+      executionId: execution.identity.executionId,
+      phase: execution.identity.phase,
+      sourceRevision: execution.identity.sourceRevision,
+      resultRevision: '<exact git HEAD after commit>',
+      summary: 'bounded implementation summary',
+      tests: [
+        {
+          command: 'exact command',
+          status: 'PASS|FAIL|SKIP',
+          exitCode: 0,
+          summary: 'bounded result',
+        },
+      ],
+    });
+    return [
+      'Finalize the existing Pixel implementation in the same workspace.',
+      'The provider already reported completion, but deterministic verification returned ' + triggerCode + '.',
+      'Do not broaden scope and do not discard intended existing work.',
+      'Inspect the current changes, run focused checks for the original objective, commit every intended repository change, and leave git status clean.',
+      'Then atomically write one JSON object outside the Git repository at ' + session.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
+      'The resultRevision must be the exact committed git HEAD. Finish only after the commit, checks, clean-status verification, and evidence write all succeed.',
+    ].join('\n');
   }
 
   private assertProviderPhase(provider: ExecutionProviderPort, execution: Execution): void {

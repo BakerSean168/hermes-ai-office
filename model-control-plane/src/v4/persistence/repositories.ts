@@ -8,7 +8,7 @@ import { transitionPlan, validatePlanInput, type CreatePlanInput, type Plan, typ
 import { transitionReview, validateReviewLineage, type Review, type ReviewStatus } from '../domain/review.js';
 import { type Lease, validateResourceObservation, type ResourceObservation } from '../domain/resource.js';
 import { transitionAction, validateActionShape, type ActionStatus, type SupervisorAction } from '../domain/action.js';
-import { transitionSupervisor, validateSupervisor, type Supervisor, type SupervisorDecision, type SupervisorStatus } from '../domain/supervisor.js';
+import { transitionSupervisor, validateSupervisor, type Supervisor, type SupervisorDecision, type SupervisorStatus, type SupervisorWakeReason } from '../domain/supervisor.js';
 import { transitionWorkItem, validateGraphItems, type GraphVersion, type WorkItem, type WorkItemStatus } from '../domain/workGraph.js';
 import { withTransaction } from './database.js';
 import { EventStore } from './eventStore.js';
@@ -24,6 +24,30 @@ const decode = <T>(value: string): T => JSON.parse(value) as T;
 
 function makeEvent(aggregateId: string, aggregateType: EventEnvelope['aggregateType'], type: string, payload: Record<string, unknown>, correlationId = aggregateId) {
   return { eventId: randomUUID(), aggregateId, aggregateType, type, payload, occurredAt: iso(), correlationId };
+}
+
+
+function scheduleSupervisorWakeForPlan(
+  db: DatabaseSync,
+  planId: string,
+  reason: SupervisorWakeReason,
+  requestedAt = iso(),
+): void {
+  const supervisor = db.prepare('SELECT supervisor_id,observation_cursor FROM supervisors WHERE plan_id=?').get(planId) as
+    | { supervisor_id: string; observation_cursor: number }
+    | undefined;
+  if (!supervisor) return;
+  const row = db.prepare('SELECT COALESCE(MAX(event_order),0) AS cursor FROM events').get() as { cursor: number };
+  const cursor = Number(row.cursor);
+  if (!Number.isInteger(cursor) || cursor <= supervisor.observation_cursor) return;
+  const wakeKey = supervisor.supervisor_id + ':' + cursor + ':' + reason;
+  db.prepare('INSERT OR IGNORE INTO supervisor_wakes(wake_key,supervisor_id,observation_cursor,reason,requested_at) VALUES(?,?,?,?,?)').run(
+    wakeKey,
+    supervisor.supervisor_id,
+    cursor,
+    reason,
+    requestedAt,
+  );
 }
 
 interface PlanRow {
@@ -312,6 +336,48 @@ export class PlanRepository {
   }
 
 
+  recoverFailedPlanWorkItem(planId: string, workItemId: string): { plan: Plan; workItem: WorkItem } {
+    return withTransaction(this.db, () => {
+      const plan = this.getPlan(planId);
+      const item = this.getWorkItem(workItemId);
+      failClosed(item.planId === planId, 'PLAN_RECOVERY_WORK_ITEM_MISMATCH');
+      if (plan.status === 'RUNNING' && item.status === 'RUNNING')
+        return { plan, workItem: item };
+      if (plan.status !== 'FAILED') throw new V4Error('PLAN_NOT_RECOVERABLE');
+      if (item.status !== 'FAILED' && item.status !== 'BLOCKED')
+        throw new V4Error('PLAN_RECOVERY_WORK_ITEM_INVALID');
+
+      const updatedAt = iso();
+      const readyItem = transitionWorkItem(item, 'READY', updatedAt);
+      const runningItem = transitionWorkItem(readyItem, 'RUNNING', updatedAt);
+      transitionPlan(plan, 'RUNNING', updatedAt);
+      const itemResult = this.db.prepare('UPDATE work_items SET status=?,updated_at=? WHERE work_item_id=? AND status=?').run(
+        'RUNNING',
+        runningItem.updatedAt,
+        workItemId,
+        item.status,
+      );
+      if (Number(itemResult.changes) !== 1) throw new StaleStateError('WORK_ITEM_RECOVERY_STALE');
+      const planResult = this.db.prepare('UPDATE plans SET status=?,updated_at=? WHERE plan_id=? AND status=?').run(
+        'RUNNING',
+        updatedAt,
+        planId,
+        'FAILED',
+      );
+      if (Number(planResult.changes) !== 1) throw new StaleStateError('PLAN_RECOVERY_STALE');
+      this.events.appendInTransaction(makeEvent(workItemId, 'WORK_ITEM', 'WORK_ITEM_STATUS_CHANGED', {
+        planId, from: item.status, to: 'READY', recovery: true,
+      }));
+      this.events.appendInTransaction(makeEvent(workItemId, 'WORK_ITEM', 'WORK_ITEM_STATUS_CHANGED', {
+        planId, from: 'READY', to: 'RUNNING', recovery: true,
+      }));
+      this.events.appendInTransaction(makeEvent(planId, 'PLAN', 'PLAN_STATUS_CHANGED', {
+        from: 'FAILED', to: 'RUNNING', recovery: true, workItemId,
+      }));
+      return { plan: this.getPlan(planId), workItem: this.getWorkItem(workItemId) };
+    });
+  }
+
   acceptWorkItemRevision(workItemId: string, revision: string): MutationResult<WorkItem> {
     failClosed(revision.trim().length > 0, 'WORK_ITEM_ACCEPTED_REVISION_REQUIRED');
     return withTransaction(this.db, () => {
@@ -483,6 +549,8 @@ export class ExecutionRepository {
       const updated = transitionExecution(current, next, iso());
       this.db.prepare('UPDATE executions SET status=?,updated_at=? WHERE execution_id=?').run(next, updated.updatedAt, executionId);
       this.events.appendInTransaction(makeEvent(executionId, 'EXECUTION', 'EXECUTION_STATUS_CHANGED', { planId: current.identity.planId, from: current.status, to: next }));
+      if (next === 'CANCELLED')
+        scheduleSupervisorWakeForPlan(this.db, current.identity.planId, 'TERMINAL_RESULT');
       return { status: 'updated', value: this.get(executionId) };
     });
   }
@@ -496,6 +564,8 @@ export class ExecutionRepository {
       const result = this.db.prepare('UPDATE executions SET status=?,updated_at=? WHERE execution_id=? AND status=?').run(next, iso(), executionId, expected);
       if (Number(result.changes) !== 1) return { status: 'rejected', value: this.get(executionId), reason: 'STALE_STATUS' };
       this.events.appendInTransaction(makeEvent(executionId, 'EXECUTION', 'EXECUTION_STATUS_CHANGED', { planId: current.identity.planId, from: expected, to: next }));
+      if (next === 'CANCELLED')
+        scheduleSupervisorWakeForPlan(this.db, current.identity.planId, 'TERMINAL_RESULT');
       return { status: 'updated', value: this.get(executionId) };
     });
   }
@@ -517,6 +587,7 @@ export class ExecutionRepository {
         input.status, input.resultRevision ?? null, input.resultSummary ?? null, input.errorCode ?? null,
         input.retryable === undefined ? null : Number(input.retryable), updated.updatedAt, executionId);
       this.events.appendInTransaction(makeEvent(executionId, 'EXECUTION', 'EXECUTION_RESULT_RECORDED', { status: input.status, resultRevision: input.resultRevision ?? null, errorCode: input.errorCode ?? null }));
+      scheduleSupervisorWakeForPlan(this.db, current.identity.planId, 'TERMINAL_RESULT');
       return { status: 'updated', value: this.get(executionId) };
     });
   }

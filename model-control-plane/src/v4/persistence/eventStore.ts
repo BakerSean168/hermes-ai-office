@@ -69,6 +69,13 @@ export class EventStore {
     return { cursor: last ? last.event_order : cursor, events: rows.map(fromRow) };
   }
 
+  listRecentAfterCursor(cursor = 0, limit = 500): { cursor: number; events: EventEnvelope[] } {
+    const rows = this.db.prepare('SELECT event_order,event_id,aggregate_id,aggregate_type,sequence,type,payload,occurred_at,correlation_id FROM events WHERE event_order>? ORDER BY event_order DESC LIMIT ?').all(cursor, limit) as unknown as EventRow[];
+    rows.reverse();
+    const last = rows.at(-1);
+    return { cursor: last ? last.event_order : cursor, events: rows.map(fromRow) };
+  }
+
   replay<T>(aggregateId: string, initial: T, reducer: (state: T, event: EventEnvelope) => T): T {
     return this.listByAggregate(aggregateId).reduce(reducer, initial);
   }

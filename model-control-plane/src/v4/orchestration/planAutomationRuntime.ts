@@ -83,6 +83,12 @@ function latest<T extends { createdAt: string }>(items: T[]): T | undefined {
   return [...items].sort((left, right) => left.createdAt.localeCompare(right.createdAt)).at(-1);
 }
 
+const FINALIZATION_RECOVERY_CODES = new Set([
+  'WORKSPACE_DIRTY',
+  'WORKSPACE_EVIDENCE_INVALID',
+  'WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH',
+]);
+
 export class StaticPlanAutomationPolicyResolver implements PlanAutomationPolicyResolver {
   readonly overrides: ReadonlyMap<string, PlanAutomationPolicy>;
   readonly allowedProjectKeys?: ReadonlySet<string>;
@@ -193,6 +199,132 @@ export class PlanAutomationRuntime {
       status: 'RUNNING',
       code: 'IMPLEMENTATION_QUEUED',
     };
+  }
+
+  async reconcilePlan(planId: string, mode = 'auto'): Promise<PlanAutomationResult> {
+    if (mode !== 'auto') throw new V4Error('PLAN_RECONCILE_MODE_INVALID');
+    let plan = this.repositories.plans.getPlan(planId);
+    if (plan.status === 'READY' || plan.status === 'RUNNING') return await this.runPlan(planId);
+    if (plan.status !== 'FAILED')
+      return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
+
+    const rawPolicy = this.policies.resolve(plan.projectKey);
+    if (!rawPolicy) return { planId, status: 'WAITING', code: 'PLAN_POLICY_UNAVAILABLE' };
+    const policy = normalizePolicy(rawPolicy);
+    const graph = this.repositories.plans.getActiveGraphVersion(planId);
+    if (!graph) throw new V4Error('PLAN_GRAPH_MISSING');
+    const items = this.repositories.plans.listWorkItems(planId, graph.graphVersionId);
+    const failedItems = items.filter((item) => item.status === 'FAILED' || item.status === 'BLOCKED');
+    if (failedItems.length !== 1) throw new V4Error('PLAN_RECOVERY_WORK_ITEM_AMBIGUOUS');
+    const item = failedItems[0]!;
+    const executions = this.repositories.executions.listByPlan(planId);
+    const active = executions.find(
+      (execution) => execution.status === 'QUEUED' || execution.status === 'RUNNING',
+    );
+    if (active) {
+      if (active.identity.workItemId !== item.workItemId)
+        throw new V4Error('PLAN_RECOVERY_ACTIVE_EXECUTION_CONFLICT');
+      this.reviveFailedPlan(plan, item);
+      return {
+        planId,
+        workItemId: item.workItemId,
+        executionId: active.identity.executionId,
+        status: 'RUNNING',
+        code: 'RECOVERY_EXECUTION_ACTIVE',
+      };
+    }
+
+    const candidates = executions.filter(
+      (execution) =>
+        execution.identity.workItemId === item.workItemId &&
+        (execution.identity.phase === 'IMPLEMENT' || execution.identity.phase === 'IMPLEMENT_FIX'),
+    );
+    const candidate = latest(candidates);
+    if (!candidate) throw new V4Error('PLAN_RECOVERY_EXECUTION_MISSING');
+    if (
+      candidate.status !== 'FAILED' &&
+      candidate.status !== 'BLOCKED' &&
+      candidate.status !== 'CANCELLED'
+    )
+      throw new V4Error('PLAN_RECOVERY_EXECUTION_INVALID');
+    const finalizationRecovery =
+      Boolean(candidate.errorCode && FINALIZATION_RECOVERY_CODES.has(candidate.errorCode));
+    if (!candidate.retryable && !finalizationRecovery)
+      return {
+        planId,
+        workItemId: item.workItemId,
+        executionId: candidate.identity.executionId,
+        status: 'FAILED',
+        code: 'IMPLEMENTATION_NOT_RETRYABLE',
+      };
+
+    let parentExecutionId: string;
+    let sourceRevision: string;
+    let attempts: number;
+    if (candidate.identity.phase === 'IMPLEMENT') {
+      attempts = candidates.filter((execution) => execution.identity.phase === 'IMPLEMENT').length;
+      if (attempts >= policy.maxImplementationAttempts)
+        return {
+          planId,
+          workItemId: item.workItemId,
+          executionId: candidate.identity.executionId,
+          status: 'FAILED',
+          code: 'IMPLEMENTATION_ATTEMPTS_EXHAUSTED',
+        };
+      parentExecutionId = candidate.identity.executionId;
+      if (!candidate.identity.sourceRevision) throw new V4Error('EXECUTION_SOURCE_REVISION_REQUIRED');
+      sourceRevision = candidate.identity.sourceRevision;
+    } else {
+      const repairRoot = candidate.identity.parentExecutionId
+        ? this.repositories.executions.get(candidate.identity.parentExecutionId)
+        : undefined;
+      if (!repairRoot?.resultRevision) throw new V4Error('REPAIR_PARENT_INVALID');
+      attempts = candidates.filter(
+        (execution) =>
+          execution.identity.phase === 'IMPLEMENT_FIX' &&
+          execution.identity.parentExecutionId === repairRoot.identity.executionId,
+      ).length;
+      if (attempts >= policy.maxImplementationAttempts)
+        return {
+          planId,
+          workItemId: item.workItemId,
+          executionId: candidate.identity.executionId,
+          status: 'FAILED',
+          code: 'REPAIR_ATTEMPTS_EXHAUSTED',
+        };
+      parentExecutionId = repairRoot.identity.executionId;
+      sourceRevision = repairRoot.resultRevision;
+    }
+
+    const route = finalizationRecovery
+      ? candidate.identity.route
+      : policy.implementationRoutes[Math.min(attempts, policy.implementationRoutes.length - 1)]!;
+    const recovery = this.createExecution({
+      plan,
+      item,
+      phase: candidate.identity.phase,
+      parentExecutionId,
+      attempt: candidate.identity.attempt + 1,
+      route,
+      sourceRevision,
+      objective: candidate.identity.phase === 'IMPLEMENT' ? item.objective : candidate.objective,
+    });
+    this.reviveFailedPlan(plan, item);
+    plan = this.repositories.plans.getPlan(planId);
+    return {
+      planId,
+      workItemId: item.workItemId,
+      executionId: recovery.identity.executionId,
+      status: 'RUNNING',
+      code: finalizationRecovery
+        ? 'FINALIZATION_RECOVERY_QUEUED'
+        : 'IMPLEMENTATION_RECOVERY_QUEUED',
+      revision: plan.currentRevision,
+    };
+  }
+
+  private reviveFailedPlan(plan: Plan, item: WorkItem): void {
+    this.repositories.plans.recoverFailedPlanWorkItem(plan.planId, item.workItemId);
   }
 
   createInitialExecution(

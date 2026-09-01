@@ -665,6 +665,15 @@ export async function buildControlPlane(
     return await requireAutomation().plans.runPlan(planId);
   });
 
+  app.post('/api/v4/plans/:planId/reconcile', async (request, reply) => {
+    const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    const body = request.body === undefined ? {} : bodyRecord(request.body);
+    const mode = body.mode === undefined ? 'auto' : requiredText(body.mode, 'PLAN_RECONCILE_MODE_INVALID');
+    const result = await requireAutomation().plans.reconcilePlan(planId, mode);
+    reply.code(202);
+    return { ...result, statusUrl: '/api/v4/plans/' + encodeURIComponent(planId) };
+  });
+
   app.get('/api/v4/executions', async (request) => {
     const query = request.query as { limit?: string; planId?: string; status?: string };
     const limit = integerValue(query.limit, 100, 1, 1000, 'EXECUTION_LIST_LIMIT_INVALID');

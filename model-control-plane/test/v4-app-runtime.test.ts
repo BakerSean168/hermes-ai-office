@@ -165,5 +165,45 @@ test('V4 app creates a durable first execution through the public plan runtime A
   });
   assert.equal(execution.statusCode, 200);
   assert.equal(execution.json().session, undefined);
+
+  const executionId = body.executions[0].identity.executionId as string;
+  const workItemId = body.workItems[0].workItemId as string;
+  runtime.repositories.executions.updateStatus(executionId, 'RUNNING');
+  runtime.repositories.executions.recordResult(executionId, {
+    status: 'FAILED',
+    errorCode: 'WORKSPACE_DIRTY',
+    retryable: false,
+  });
+  runtime.repositories.plans.updateWorkItemStatus(workItemId, 'FAILED');
+  runtime.repositories.plans.updateStatus(planId, 'FAILED');
+
+  const invalidReconcile = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/plans/' + planId + '/reconcile',
+    payload: { mode: 'force' },
+  });
+  assert.equal(invalidReconcile.statusCode, 400);
+  assert.equal(invalidReconcile.json().error, 'PLAN_RECONCILE_MODE_INVALID');
+
+  const reconcile = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/plans/' + planId + '/reconcile',
+    payload: { mode: 'auto' },
+  });
+  assert.equal(reconcile.statusCode, 202);
+  assert.equal(reconcile.json().code, 'FINALIZATION_RECOVERY_QUEUED');
+  assert.equal(reconcile.json().statusUrl, '/api/v4/plans/' + planId);
+  assert.notEqual(reconcile.json().executionId, executionId);
+  assert.equal(providerCalled, false);
+
+  const recovered = await runtime.app.inject({ method: 'GET', url: '/api/v4/plans/' + planId });
+  assert.equal(recovered.json().plan.status, 'RUNNING');
+  assert.equal(recovered.json().workItems[0].status, 'RUNNING');
+  assert.equal(recovered.json().executions.length, 2);
+  assert.equal(recovered.json().executions[0].status, 'FAILED');
+  assert.equal(recovered.json().executions[0].errorCode, 'WORKSPACE_DIRTY');
+  assert.equal(recovered.json().executions[1].status, 'QUEUED');
+  assert.equal(recovered.json().executions[1].identity.parentExecutionId, executionId);
+  assert.equal(recovered.json().executions[1].identity.route, 'gpt-5.6-luna');
   await runtime.app.close();
 });

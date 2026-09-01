@@ -200,6 +200,96 @@ test('supervisor protocol, bounded projection, stale decision and duplicate wake
   db.close();
 });
 
+test('supervisor projection advances to the newest bounded event window after its durable cursor', () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'projection-window-plan');
+  const initial = buildBoundedProjection(db, seeded.supervisor.supervisorId, { maxEvents: 200 });
+  seeded.repos.supervisors.advanceObservation(
+    seeded.supervisor.supervisorId,
+    initial.cursor,
+    initial.digest,
+    new Date(Date.now() + 60_000).toISOString(),
+  );
+  for (let index = 0; index < 80; index += 1) {
+    seeded.repos.events.append({
+      eventId: 'projection-window-' + index,
+      aggregateId: seeded.plan.planId,
+      aggregateType: 'PLAN',
+      type: 'PROJECTION_WINDOW_EVENT',
+      payload: { index },
+      occurredAt: new Date().toISOString(),
+      correlationId: seeded.plan.planId,
+    });
+  }
+  const latestCursor = Number(
+    (db.prepare('SELECT MAX(event_order) AS cursor FROM events').get() as { cursor: number }).cursor,
+  );
+  const projection = buildBoundedProjection(db, seeded.supervisor.supervisorId, { maxEvents: 50 });
+  assert.equal(projection.cursor, latestCursor);
+  assert.equal(projection.recentEvents.length, 50);
+  assert.ok(projection.recentEvents[0]!.cursor > initial.cursor);
+  assert.equal(projection.recentEvents.at(-1)?.cursor, latestCursor);
+  assert.equal(projection.truncated, true);
+  db.close();
+});
+
+test('terminal execution result atomically schedules a durable supervisor wake that survives restart', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-terminal-wake-'));
+  const file = path.join(directory, 'control-plane.sqlite');
+  let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  const seeded = seedPlan(db, 'terminal-wake-plan');
+  seeded.repos.plans.compareAndSetStatus(seeded.plan.planId, 'READY', 'RUNNING');
+  const execution = seeded.repos.executions.create({
+    idempotencyKey: 'terminal-wake-execution',
+    identity: {
+      executionId: 'terminal-wake-execution',
+      planId: seeded.plan.planId,
+      workItemId: seeded.item.workItemId,
+      phase: 'IMPLEMENT',
+      attempt: 1,
+      route: 'implementation',
+      sourceRevision: seeded.plan.currentRevision,
+    },
+    objective: seeded.item.objective,
+  }).value!;
+  seeded.repos.executions.updateStatus(execution.identity.executionId, 'RUNNING');
+  seeded.repos.executions.recordResult(execution.identity.executionId, {
+    status: 'FAILED',
+    errorCode: 'WORKSPACE_DIRTY',
+    retryable: true,
+  });
+  assert.equal(
+    seeded.repos.executions.recordResult(execution.identity.executionId, {
+      status: 'FAILED',
+      errorCode: 'WORKSPACE_DIRTY',
+      retryable: true,
+    }).status,
+    'existing',
+  );
+  const wakeRow = db.prepare('SELECT supervisor_id,observation_cursor,reason FROM supervisor_wakes').get() as {
+    supervisor_id: string;
+    observation_cursor: number;
+    reason: string;
+  };
+  const latestCursor = Number(
+    (db.prepare('SELECT MAX(event_order) AS cursor FROM events').get() as { cursor: number }).cursor,
+  );
+  assert.equal(wakeRow.supervisor_id, seeded.supervisor.supervisorId);
+  assert.equal(wakeRow.observation_cursor, latestCursor);
+  assert.equal(wakeRow.reason, 'TERMINAL_RESULT');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM supervisor_wakes').get()?.count, 1);
+  db.close();
+
+  db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  const recovered = new SupervisorWakeScheduler(createRepositories(db).supervisors, db).drain();
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0]?.supervisorId, seeded.supervisor.supervisorId);
+  assert.equal(recovered[0]?.observationCursor, latestCursor);
+  assert.equal(recovered[0]?.reason, 'TERMINAL_RESULT');
+  assert.equal(new SupervisorWakeScheduler(createRepositories(db).supervisors, db).drain().length, 0);
+  db.close();
+});
+
 test('supervisor projection survives database restart with stable durable lineage', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-supervisor-restart-'));
   const file = path.join(directory, 'control-plane.sqlite');
