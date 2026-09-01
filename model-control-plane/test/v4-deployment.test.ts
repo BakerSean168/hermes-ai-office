@@ -27,6 +27,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
+  assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome/);
   assert.match(
     service,
     /MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5\.6-luna,implementation-efficient,implementation-glm=glm-5\.2/,
@@ -74,6 +75,7 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.implementationRoutes\[0\] !== 'gpt-5\.6-luna'/);
   assert.match(release, /runtime\.reviewRoutes\[0\] !== 'gpt-5\.6-sol'/);
+  assert.match(release, /runtime\.automationProjectKeys/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });

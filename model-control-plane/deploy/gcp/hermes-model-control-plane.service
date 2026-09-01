@@ -19,6 +19,7 @@ Environment=MODEL_CP_SUPERVISOR_POLL_MS=5000
 Environment=MODEL_CP_EXECUTION_RUNTIME_ENABLED=true
 Environment=MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true
 Environment=MODEL_CP_AUTOMATION_POLL_MS=5000
+Environment=MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome
 Environment=MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS=/home/dev/projects
 Environment=MODEL_CP_V4_WORKSPACE_HOST_ROOT=/opt/data/hermes-ai-office-v3/workspaces
 Environment=MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT=/workspace

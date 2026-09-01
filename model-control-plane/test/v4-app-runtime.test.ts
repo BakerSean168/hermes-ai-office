@@ -50,7 +50,10 @@ test('V4 app creates a durable first execution through the public plan runtime A
     dbFile: ':memory:',
     environment: 'test',
     logger: false,
-    fetchImpl: (async () => { providerCalled = true; throw new Error('provider should not launch in first plan cycle'); }) as typeof fetch,
+    fetchImpl: (async () => {
+      providerCalled = true;
+      throw new Error('provider should not launch in first plan cycle');
+    }) as typeof fetch,
     env: {
       NODE_ENV: 'test',
       MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
@@ -64,6 +67,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
       MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
       MODEL_CP_V4_IMPLEMENTATION_ROUTES: 'gpt-5.6-luna,implementation-efficient',
       MODEL_CP_V4_REVIEW_ROUTES: 'gpt-5.6-sol,review-glm=glm-5.2',
+      MODEL_CP_V4_AUTOMATION_PROJECTS: 'app-runtime-project',
       MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 0),
       MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
     },
@@ -74,6 +78,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
     autonomousPolling: false,
     implementationRoutes: ['gpt-5.6-luna', 'implementation-efficient'],
     reviewRoutes: ['gpt-5.6-sol', 'review-glm'],
+    automationProjectKeys: ['app-runtime-project'],
   });
   const created = await runtime.app.inject({
     method: 'POST',
@@ -84,13 +89,15 @@ test('V4 app creates a durable first execution through the public plan runtime A
       objective: 'exercise public V4 execution creation',
       repositoryPath: value.repository,
       baseRevision: value.revision,
-      workItems: [{
-        itemKey: 'first',
-        title: 'First',
-        objective: 'Implement first item',
-        dependencies: [],
-        acceptanceCriteria: ['commit the change', 'pass review'],
-      }],
+      workItems: [
+        {
+          itemKey: 'first',
+          title: 'First',
+          objective: 'Implement first item',
+          dependencies: [],
+          acceptanceCriteria: ['commit the change', 'pass review'],
+        },
+      ],
     },
   });
   assert.equal(created.statusCode, 201);
@@ -109,7 +116,10 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(body.executions[0].identity.route, 'gpt-5.6-luna');
   assert.equal(body.executions[0].identity.sourceRevision, value.revision);
   assert.equal(body.executions[0].status, 'QUEUED');
-  const execution = await runtime.app.inject({ method: 'GET', url: '/api/v4/executions/' + body.executions[0].identity.executionId });
+  const execution = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/executions/' + body.executions[0].identity.executionId,
+  });
   assert.equal(execution.statusCode, 200);
   assert.equal(execution.json().session, undefined);
   await runtime.app.close();
