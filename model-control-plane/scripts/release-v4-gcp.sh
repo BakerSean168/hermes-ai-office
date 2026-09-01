@@ -28,6 +28,7 @@ probe_unit="pixel-v4-release-probe-$probe_id"
 probe_dir="/opt/data/hermes-ai-office-v3/workspaces/.pixel-v4-release-$probe_id"
 memo_probe="/home/dev/projects/memoflow-platform-1003/.pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
+probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
 cleanup_probe() {
   sudo rm -rf "$probe_dir"
   sudo rm -f "$memo_probe" "$digital_probe"
@@ -55,7 +56,13 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
   -p ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces \
   -p ReadWritePaths=/home/dev/projects/memoflow-platform-1003 \
   -p ReadWritePaths=/home/dev/projects/digital-biome \
-  /bin/bash -lc "set -euo pipefail; test -r model-control-plane/dist/main.js; mkdir '$probe_dir'; touch '$probe_dir/file'; chown -R 10001:10001 '$probe_dir'; test "\$(stat -c %u '$probe_dir')" = 10001; touch '$memo_probe' '$digital_probe'; rm -f '$memo_probe' '$digital_probe'; rm -rf '$probe_dir'"
+  "$probe_script" \
+  "$target_root/model-control-plane/dist/main.js" \
+  "$probe_dir" \
+  "$memo_probe" \
+  "$digital_probe" \
+  10001 \
+  10001
 cleanup_probe
 trap - EXIT
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -13,7 +14,10 @@ const installer = fs.readFileSync(
   path.join(root, 'deploy/gcp/install-gcp-execution-plane.sh'),
   'utf8',
 );
-const release = fs.readFileSync(path.join(root, 'scripts/release-v4-gcp.sh'), 'utf8');
+const releasePath = path.join(root, 'scripts/release-v4-gcp.sh');
+const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
+const release = fs.readFileSync(releasePath, 'utf8');
+const probe = fs.readFileSync(probePath, 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -82,9 +86,15 @@ test('V4 release never rsyncs a build directory onto itself', () => {
 test('V4 release proves the exact service sandbox can read, chown and write only approved paths', () => {
   assert.match(release, /systemd-run --wait --pipe --collect/);
   assert.match(release, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER/);
-  assert.match(release, /test -r model-control-plane\/dist\/main\.js/);
-  assert.match(release, /chown -R 10001:10001/);
+  assert.match(release, /probe-v4-service-sandbox\.sh/);
+  assert.match(probe, /test -r "\$entry_file"/);
+  assert.match(probe, /chown -R "\$owner_uid:\$owner_gid"/);
   assert.match(release, /memoflow-platform-1003\/\.pixel-v4-release/);
   assert.match(release, /digital-biome\/\.pixel-v4-release/);
   assert.match(release, /trap cleanup_probe EXIT/);
+});
+
+test('V4 release and sandbox probe scripts are valid Bash', () => {
+  execFileSync('bash', ['-n', releasePath]);
+  execFileSync('bash', ['-n', probePath]);
 });
