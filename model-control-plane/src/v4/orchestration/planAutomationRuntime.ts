@@ -246,6 +246,31 @@ export class PlanAutomationRuntime {
       };
     }
 
+    const workItemReviews = this.repositories.reviews.listByWorkItem(item.workItemId);
+    const latestReview = latest(workItemReviews);
+    if (latestReview?.status === 'PASSED') {
+      const reviewedCandidate = executions.find(
+        (execution) => execution.identity.executionId === latestReview.implementationExecutionId,
+      );
+      if (
+        !reviewedCandidate ||
+        reviewedCandidate.status !== 'SUCCEEDED' ||
+        !reviewedCandidate.resultRevision ||
+        reviewedCandidate.resultRevision !== latestReview.reviewedSha
+      ) {
+        throw new V4Error('PLAN_REVIEWED_CANDIDATE_INVALID');
+      }
+      this.reviveFailedPlan(plan, item);
+      const revivedPlan = this.repositories.plans.getPlan(planId);
+      const revivedItem = this.repositories.plans.getWorkItem(item.workItemId);
+      return await this.acceptReviewedCandidate(
+        revivedPlan,
+        revivedItem,
+        reviewedCandidate,
+        latestReview,
+      );
+    }
+
     const candidates = executions.filter(
       (execution) =>
         execution.identity.workItemId === item.workItemId &&

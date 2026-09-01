@@ -666,3 +666,36 @@ test('automation polling isolates one plan infrastructure exception and continue
   );
   seeded.db.close();
 });
+
+
+test('plan reconcile reuses the latest PASS reviewed candidate after an integration-era plan failure', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = runtime(seeded.repositories, runner, workspace);
+
+  const queued = await automation.runPlan(seeded.plan.planId);
+  await runner.runExecution(queued.executionId!);
+  const reviewQueued = await automation.runPlan(seeded.plan.planId);
+  assert.equal(reviewQueued.code, 'REVIEW_QUEUED');
+  await runner.runExecution(reviewQueued.executionId!);
+
+  const review = seeded.repositories.reviews.listByPlan(seeded.plan.planId).at(-1)!;
+  assert.equal(review.status, 'PASSED');
+  const candidate = seeded.repositories.executions.get(review.implementationExecutionId);
+  assert.equal(candidate.status, 'SUCCEEDED');
+  assert.ok(candidate.resultRevision);
+
+  const item = seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]!;
+  seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
+  seeded.repositories.plans.compareAndSetStatus(seeded.plan.planId, 'RUNNING', 'FAILED');
+
+  const recovered = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(recovered.status, 'SUCCEEDED');
+  assert.equal(recovered.code, 'PLAN_SUCCEEDED');
+  assert.equal(workspace.repositoryHead, candidate.resultRevision);
+  assert.equal(workspace.integrateCalls, 1);
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision, candidate.resultRevision);
+  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).exactAcceptedRevision, candidate.resultRevision);
+  seeded.db.close();
+});
