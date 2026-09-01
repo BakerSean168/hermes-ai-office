@@ -22,5 +22,4 @@ test "$(stat -c %u "$probe_dir")" = "$owner_uid"
 test "$(stat -c %g "$probe_dir")" = "$owner_gid"
 touch -- "$memo_probe" "$digital_probe"
 
-cleanup
 trap - EXIT
