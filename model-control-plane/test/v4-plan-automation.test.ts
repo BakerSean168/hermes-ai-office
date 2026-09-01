@@ -352,6 +352,43 @@ test('plan automation retries an INVALID review without creating a product repai
   seeded.db.close();
 });
 
+test('explicit review reconciliation revives an exhausted INVALID review at the same exact revision', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  runner.reviewVerdicts = ['INVALID', 'INVALID'];
+  const automation = runtime(seeded.repositories, runner, workspace);
+  const failed = await drive(automation, seeded.plan.planId);
+  assert.equal(failed.at(-1)?.code, 'REVIEW_ATTEMPTS_EXHAUSTED');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'FAILED');
+
+  runner.reviewVerdicts = ['PASS'];
+  const recovered = await automation.reconcilePlan(seeded.plan.planId, 'retry-review');
+  assert.equal(recovered.code, 'REVIEW_RECOVERY_QUEUED');
+  const results = await drive(automation, seeded.plan.planId);
+  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED');
+  const executions = seeded.repositories.executions.listByPlan(seeded.plan.planId);
+  assert.equal(
+    executions.filter((execution) => execution.identity.phase === 'IMPLEMENT_FIX').length,
+    0,
+  );
+  const implementation = executions.find(
+    (execution) => execution.identity.phase === 'IMPLEMENT' && execution.status === 'SUCCEEDED',
+  )!;
+  assert.ok(
+    seeded.repositories.evidence.find(
+      implementation.identity.executionId,
+      'RECOVERY',
+      'operator-review-recovery',
+    ),
+  );
+  assert.equal(
+    seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
+    implementation.resultRevision,
+  );
+  seeded.db.close();
+});
+
 test('plan automation advances dependency-ready work sequentially on the accepted plan revision', async () => {
   const seeded = seed([{ itemKey: 'first' }, { itemKey: 'second', dependencies: ['first'] }]);
   const workspace = new AutomationWorkspace();

@@ -88,6 +88,7 @@ const FINALIZATION_RECOVERY_CODES = new Set([
   'WORKSPACE_EVIDENCE_INVALID',
   'WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH',
 ]);
+const REVIEW_RECOVERY_EVIDENCE_NAME = 'operator-review-recovery';
 
 export class StaticPlanAutomationPolicyResolver implements PlanAutomationPolicyResolver {
   readonly overrides: ReadonlyMap<string, PlanAutomationPolicy>;
@@ -202,6 +203,7 @@ export class PlanAutomationRuntime {
   }
 
   async reconcilePlan(planId: string, mode = 'auto'): Promise<PlanAutomationResult> {
+    if (mode === 'retry-review') return this.reconcileFailedReview(planId);
     if (mode !== 'auto') throw new V4Error('PLAN_RECONCILE_MODE_INVALID');
     let plan = this.repositories.plans.getPlan(planId);
     if (plan.status === 'READY' || plan.status === 'RUNNING') return await this.runPlan(planId);
@@ -323,6 +325,93 @@ export class PlanAutomationRuntime {
     };
   }
 
+  private reconcileFailedReview(planId: string): PlanAutomationResult {
+    const plan = this.repositories.plans.getPlan(planId);
+    if (plan.status !== 'FAILED')
+      return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
+    const rawPolicy = this.policies.resolve(plan.projectKey);
+    if (!rawPolicy) return { planId, status: 'WAITING', code: 'PLAN_POLICY_UNAVAILABLE' };
+    const policy = normalizePolicy(rawPolicy);
+    const graph = this.repositories.plans.getActiveGraphVersion(planId);
+    if (!graph) throw new V4Error('PLAN_GRAPH_MISSING');
+    const failedItems = this.repositories.plans
+      .listWorkItems(planId, graph.graphVersionId)
+      .filter((item) => item.status === 'FAILED' || item.status === 'BLOCKED');
+    if (failedItems.length !== 1) throw new V4Error('PLAN_RECOVERY_WORK_ITEM_AMBIGUOUS');
+    const item = failedItems[0]!;
+    const executions = this.repositories.executions.listByWorkItem(item.workItemId);
+    if (executions.some((execution) => execution.status === 'QUEUED' || execution.status === 'RUNNING'))
+      throw new V4Error('PLAN_RECOVERY_ACTIVE_EXECUTION_CONFLICT');
+    const candidate = latest(
+      executions.filter(
+        (execution) =>
+          (execution.identity.phase === 'IMPLEMENT' ||
+            execution.identity.phase === 'IMPLEMENT_FIX') &&
+          execution.status === 'SUCCEEDED' &&
+          Boolean(execution.resultRevision),
+      ),
+    );
+    if (!candidate?.resultRevision) throw new V4Error('PLAN_REVIEW_RECOVERY_CANDIDATE_MISSING');
+    const reviews = this.repositories.reviews
+      .listByWorkItem(item.workItemId)
+      .filter((review) => review.implementationExecutionId === candidate.identity.executionId);
+    const prior = latest(reviews);
+    if (!prior || (prior.status !== 'FAILED' && prior.status !== 'STALE' && prior.status !== 'CANCELLED'))
+      throw new V4Error('PLAN_REVIEW_RECOVERY_NOT_REQUIRED');
+
+    const existing = this.repositories.evidence.find(
+      candidate.identity.executionId,
+      'RECOVERY',
+      REVIEW_RECOVERY_EVIDENCE_NAME,
+    );
+    const attemptValue = existing?.payload.attempt;
+    const attempt = existing
+      ? Number(attemptValue)
+      : reviews.length + 1;
+    if (!Number.isInteger(attempt) || attempt < 1)
+      throw new V4Error('PLAN_REVIEW_RECOVERY_EVIDENCE_INVALID');
+    const reviewId = stableId(
+      'review',
+      candidate.identity.executionId,
+      candidate.resultRevision,
+      attempt,
+    );
+    if (existing) {
+      if (
+        existing.payload.reviewId !== reviewId ||
+        existing.payload.resultRevision !== candidate.resultRevision
+      )
+        throw new V4Error('PLAN_REVIEW_RECOVERY_EVIDENCE_INVALID');
+    } else {
+      this.repositories.evidence.append({
+        executionId: candidate.identity.executionId,
+        kind: 'RECOVERY',
+        name: REVIEW_RECOVERY_EVIDENCE_NAME,
+        sourceRevision: candidate.resultRevision,
+        payload: {
+          attempt,
+          reviewId,
+          resultRevision: candidate.resultRevision,
+          priorReviewId: prior.reviewId,
+          reason: 'independent-review-runtime-recovered',
+        },
+      });
+    }
+    const created = this.createReview(candidate, item, policy, attempt);
+    if (created.review.reviewId !== reviewId)
+      throw new V4Error('PLAN_REVIEW_RECOVERY_EVIDENCE_INVALID');
+    this.reviveFailedPlan(plan, item);
+    return {
+      planId,
+      workItemId: item.workItemId,
+      executionId: created.execution.identity.executionId,
+      reviewId,
+      status: 'RUNNING',
+      code: 'REVIEW_RECOVERY_QUEUED',
+      revision: candidate.resultRevision,
+    };
+  }
+
   private reviveFailedPlan(plan: Plan, item: WorkItem): void {
     this.repositories.plans.recoverFailedPlanWorkItem(plan.planId, item.workItemId);
   }
@@ -384,7 +473,19 @@ export class PlanAutomationRuntime {
       (execution) =>
         execution.identity.phase === 'IMPLEMENT' || execution.identity.phase === 'IMPLEMENT_FIX',
     );
-    const candidate = latest(candidates);
+    const newestCandidate = latest(candidates);
+    const recoveredCandidate = latest(
+      candidates.filter((execution) => {
+        if (execution.status !== 'SUCCEEDED' || !execution.resultRevision) return false;
+        const evidence = this.repositories.evidence.find(
+          execution.identity.executionId,
+          'RECOVERY',
+          REVIEW_RECOVERY_EVIDENCE_NAME,
+        );
+        return Boolean(evidence && (!newestCandidate || evidence.createdAt >= newestCandidate.createdAt));
+      }),
+    );
+    const candidate = recoveredCandidate ?? newestCandidate;
     if (!candidate) {
       const execution = this.createInitialExecution(plan, item, policy);
       return {
