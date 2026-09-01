@@ -8,8 +8,8 @@ from .config import BASE_URL
 
 
 def fetch_json(path: str, *, timeout: float = 12.0) -> Dict[str, Any]:
-    if not path.startswith("/api/v3/") and path != "/api/health":
-        raise ValueError("dashboard may access only V3 control-plane APIs")
+    if not path.startswith("/api/v4/") and path != "/api/health":
+        raise ValueError("dashboard reads may access only V4 control-plane APIs")
     request = urllib.request.Request(BASE_URL + path, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         value = json.load(response)

@@ -65,7 +65,7 @@ def _fetch_all_executions(max_items: int):
 @router.get("/health")
 async def health() -> Dict[str, Any]:
     try:
-        value = await asyncio.to_thread(_fetch_json, "/api/v3/health")
+        value = await asyncio.to_thread(_fetch_json, "/api/health")
         return {"ok": True, "controlPlane": value}
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
@@ -129,8 +129,10 @@ async def sync_and_continue(plan_id: str) -> Dict[str, Any]:
 async def plan_detail(plan_id: str) -> Dict[str, Any]:
     safe_plan_id = urllib.parse.quote(str(plan_id), safe="")
     try:
-        raw = await asyncio.to_thread(_fetch_json, f"/api/v3/development/plans/{safe_plan_id}")
-        return _plan_detail(raw)
+        raw = await asyncio.to_thread(_fetch_json, f"/api/v4/plans/{safe_plan_id}")
+        plan = raw.get("plan") if isinstance(raw.get("plan"), dict) else {}
+        project_keys = {str(plan.get("planId") or ""): str(plan.get("projectKey") or "")}
+        return _plan_detail(_assembly._v4_plan(raw, project_keys))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise HTTPException(status_code=404, detail="plan not found") from exc
@@ -154,6 +156,7 @@ async def dashboard(limit: int = 0) -> Dict[str, Any]:
 @router.get("/model-registry")
 async def model_registry() -> Dict[str, Any]:
     try:
-        return await asyncio.to_thread(_fetch_json, "/api/v3/development/model-registry")
+        health = await asyncio.to_thread(_fetch_json, "/api/health")
+        return _assembly._health_views(health)[2]
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

@@ -72,6 +72,12 @@ class DashboardTest(unittest.TestCase):
         source = API_PATH.read_text(encoding="utf-8")
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
+        assembly_source = (ROOT / "dashboard" / "plugin_api" / "assembly.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("/api/v3/", assembly_source)
+        self.assertIn("/api/v4/plans", assembly_source)
+        self.assertIn("/api/v4/executions", assembly_source)
 
     def test_execution_skips_incomplete_legacy_route_metadata_without_breaking_dashboard(self) -> None:
         row = api._execution(
@@ -174,35 +180,27 @@ class DashboardTest(unittest.TestCase):
         self.assertIsNone(providers["paid"]["successRate"])
         self.assertEqual(result["logicalModels"][0]["totalTokens"], 330)
 
-    def test_fetch_all_executions_pages_without_hydrating_execution_hosts(self) -> None:
-        original_page_size = api._config.HISTORY_PAGE_SIZE
-        api._config.HISTORY_PAGE_SIZE = 2
+    def test_fetch_all_executions_uses_bounded_v4_list(self) -> None:
         paths: list[str] = []
 
         def fetch(path: str, **_kwargs: object):
             paths.append(path)
-            if "offset=0" in path:
-                return {"items": [{"executionId": "e3"}, {"executionId": "e2"}]}
-            if "offset=2" in path:
-                return {"items": [{"executionId": "e1"}]}
-            return {"items": []}
+            return {"items": [{"identity": {"executionId": "e3"}}, {"identity": {"executionId": "e2"}}]}
 
-        try:
-            with mock.patch.object(api, "_fetch_json", side_effect=fetch):
-                limited = api._fetch_all_executions(2)
-                self.assertEqual([item["executionId"] for item in limited], ["e3", "e2"])
-                self.assertTrue(all("hydrate=0" in path for path in paths))
+        with mock.patch.object(api, "_fetch_json", side_effect=fetch):
+            limited = api._fetch_all_executions(2)
 
-                paths.clear()
-                items = api._fetch_all_executions(0)
-                self.assertEqual([item["executionId"] for item in items], ["e3", "e2", "e1"])
-                self.assertTrue(all("hydrate=0" in path for path in paths))
-                self.assertFalse(any("hydrate=1" in path for path in paths))
-        finally:
-            api._config.HISTORY_PAGE_SIZE = original_page_size
+        self.assertEqual(
+            [item["identity"]["executionId"] for item in limited],
+            ["e3", "e2"],
+        )
+        self.assertEqual(len(paths), 1)
+        self.assertIn("/api/v4/executions?limit=2", paths[0])
+        self.assertNotIn("offset", paths[0])
+        self.assertNotIn("hydrate", paths[0])
 
-    def test_dashboard_cold_refresh_reads_independent_sources_concurrently(self) -> None:
-        barrier = threading.Barrier(5, timeout=2)
+    def test_dashboard_cold_refresh_reads_independent_v4_sources_concurrently(self) -> None:
+        barrier = threading.Barrier(3, timeout=2)
         paths: list[str] = []
         lock = threading.Lock()
 
@@ -210,15 +208,19 @@ class DashboardTest(unittest.TestCase):
             with lock:
                 paths.append(path)
             barrier.wait()
-            if path.endswith("runtime-summary"):
-                return {"sourceHealth": {"openhands": "OK", "litellm": "OK"}}
-            if path.endswith("readiness"):
-                return {"ready": True, "gates": {"representativeWorkflows": {"current": 1, "required": 1}}}
-            if path.endswith("model-registry"):
-                return {"deployments": {"items": []}}
-            if "/plans?" in path:
-                return {"items": []}
-            if "/executions?" in path:
+            if path == "/api/health":
+                return {
+                    "status": "ok",
+                    "apiVersion": 4,
+                    "mode": "greenfield",
+                    "executionRuntime": {
+                        "enabled": True,
+                        "autonomousPolling": True,
+                        "implementationRoutes": ["implementation-efficient"],
+                        "reviewRoutes": ["review-glm"],
+                    },
+                }
+            if "/api/v4/plans?" in path or "/api/v4/executions?" in path:
                 return {"items": []}
             raise AssertionError(path)
 
@@ -228,7 +230,7 @@ class DashboardTest(unittest.TestCase):
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
                 value = api._build_dashboard(1)
             self.assertEqual(value["schemaVersion"], CONTRACT["properties"]["schemaVersion"]["const"])
-            self.assertEqual(len(paths), 5)
+            self.assertEqual(len(paths), 3)
             self.assertEqual(barrier.n_waiting, 0)
         finally:
             api._assembly._CACHE = old_cache
@@ -238,15 +240,19 @@ class DashboardTest(unittest.TestCase):
 
         def fetch(path: str, **_kwargs: object):
             paths.append(path)
-            if path.endswith("runtime-summary"):
-                return {"sourceHealth": {"openhands": "OK", "litellm": "OK"}}
-            if path.endswith("readiness"):
-                return {"ready": True, "gates": {"representativeWorkflows": {"current": 1, "required": 1}}}
-            if path.endswith("model-registry"):
-                return {"deployments": {"items": []}}
-            if "/plans?" in path:
-                return {"items": []}
-            if "/executions?" in path:
+            if path == "/api/health":
+                return {
+                    "status": "ok",
+                    "apiVersion": 4,
+                    "mode": "greenfield",
+                    "executionRuntime": {
+                        "enabled": True,
+                        "autonomousPolling": True,
+                        "implementationRoutes": ["implementation-efficient"],
+                        "reviewRoutes": ["review-glm"],
+                    },
+                }
+            if "/api/v4/plans?" in path or "/api/v4/executions?" in path:
                 return {"items": []}
             raise AssertionError(path)
 
@@ -255,7 +261,7 @@ class DashboardTest(unittest.TestCase):
         try:
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
                 api._build_dashboard(1)
-            self.assertIn("/api/v3/development/plans?limit=100&view=summary", paths)
+            self.assertIn("/api/v4/plans?limit=100&view=summary", paths)
         finally:
             api._assembly._CACHE = old_cache
 
@@ -849,15 +855,26 @@ class DashboardTest(unittest.TestCase):
         paths = {route.path for route in api.router.routes}
         self.assertIn("/plans/{plan_id}", paths)
         raw = {
-            "planId": "plan-1", "projectKey": "example", "objective": "Ship", "status": "SUCCEEDED",
-            "currentRevision": "abc", "blockedReason": None, "deliveryStage": "SUCCEEDED",
-            "pullRequestUrl": "https://github.test/pull/1", "mergeRevision": "merged",
-            "createdAt": 1, "updatedAt": 2, "batches": [], "events": []
+            "plan": {
+                "planId": "plan-1",
+                "projectKey": "example",
+                "objective": "Ship",
+                "status": "SUCCEEDED",
+                "currentRevision": "abc",
+                "createdAt": "2026-09-01T00:00:00Z",
+                "updatedAt": "2026-09-01T00:01:00Z",
+            },
+            "graph": {
+                "graphVersionId": "graph-1",
+                "createdAt": "2026-09-01T00:00:00Z",
+            },
+            "workItems": [],
+            "executions": [],
         }
         with mock.patch.object(api, "_fetch_json", return_value=raw) as fetch:
             detail = asyncio.run(api.plan_detail("plan-1"))
         self.assertEqual(detail["plan"]["planId"], "plan-1")
-        fetch.assert_called_once_with("/api/v3/development/plans/plan-1")
+        fetch.assert_called_once_with("/api/v4/plans/plan-1")
 
     def test_frontend_plan_cards_open_on_demand_timeline_detail(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
