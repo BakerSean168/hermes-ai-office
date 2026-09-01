@@ -315,17 +315,62 @@ def _merge_ai_office_plans(kanban):
     """Project durable V3 plans into the same read-only graph Pixel Office consumes."""
     try:
         request = urllib.request.Request(
-            AI_OFFICE_CONTROL_PLANE + "/api/v3/development/plans?limit=100",
+            AI_OFFICE_CONTROL_PLANE + "/api/v4/plans?limit=100",
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=2) as response:
             payload = json.load(response)
-        plans = payload.get("items") if isinstance(payload, dict) else []
+        aggregates = payload.get("items") if isinstance(payload, dict) else []
+        plans = []
+        for aggregate in aggregates if isinstance(aggregates, list) else []:
+            if not isinstance(aggregate, dict) or not isinstance(aggregate.get("plan"), dict):
+                continue
+            plan = dict(aggregate["plan"])
+            executions_by_item = {}
+            for execution in aggregate.get("executions") or []:
+                if not isinstance(execution, dict):
+                    continue
+                identity = execution.get("identity") if isinstance(execution.get("identity"), dict) else {}
+                item_id = str(identity.get("workItemId") or "")
+                normalized = dict(execution)
+                normalized.update(identity)
+                normalized["timing"] = {"startedAt": execution.get("createdAt")}
+                executions_by_item.setdefault(item_id, []).append(normalized)
+            work_items = []
+            for work_item in aggregate.get("workItems") or []:
+                if not isinstance(work_item, dict):
+                    continue
+                normalized = dict(work_item)
+                normalized["key"] = normalized.get("itemKey")
+                normalized["executions"] = executions_by_item.get(str(work_item.get("workItemId") or ""), [])
+                work_items.append(normalized)
+            graph = aggregate.get("graph") if isinstance(aggregate.get("graph"), dict) else {}
+            if graph or work_items:
+                plan["batches"] = [
+                    {
+                        "batchId": graph.get("graphVersionId") or (str(plan.get("planId")) + ":graph"),
+                        "key": "v4-work-graph",
+                        "title": "V4 Work Graph",
+                        "status": plan.get("status"),
+                        "createdAt": graph.get("createdAt") or plan.get("createdAt"),
+                        "updatedAt": plan.get("updatedAt"),
+                        "workItems": work_items,
+                    }
+                ]
+            plans.append(plan)
         status_map = {
+            "DRAFT": "todo",
             "PENDING": "todo",
+            "READY": "todo",
             "RUNNING": "running",
+            "WAITING_FOR_RESOURCE": "blocked",
+            "WAITING_FOR_SYSTEM_REPAIR": "blocked",
+            "WAITING_FOR_EXTERNAL_EVIDENCE": "blocked",
+            "SAFETY_HOLD": "blocked",
             "BLOCKED": "blocked",
+            "FAILED": "blocked",
             "SUCCEEDED": "done",
+            "SUPERSEDED": "done",
             "CANCELLED": "cancelled",
         }
         projected_tasks = []
@@ -391,7 +436,7 @@ def _merge_ai_office_plans(kanban):
                     )
                     projected_links.append({"parent_id": batch_id, "child_id": item_id})
                     for execution in item.get("executions") or []:
-                        if not isinstance(execution, dict) or execution.get("status") in {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}:
+                        if not isinstance(execution, dict) or execution.get("status") in {"SUCCEEDED", "FAILED", "BLOCKED", "STUCK", "CANCELLED"}:
                             continue
                         projected_runs.append(
                             {

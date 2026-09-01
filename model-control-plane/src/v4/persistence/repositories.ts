@@ -426,6 +426,25 @@ export class ExecutionRepository {
   }
 
 
+  list(input: { planId?: string; status?: ExecutionStatus; limit?: number } = {}): Execution[] {
+    const limit = Math.max(1, Math.min(input.limit ?? 100, 1000));
+    const clauses: string[] = [];
+    const parameters: Array<string | number> = [];
+    if (input.planId) {
+      clauses.push('plan_id=?');
+      parameters.push(input.planId);
+    }
+    if (input.status) {
+      clauses.push('status=?');
+      parameters.push(input.status);
+    }
+    const where = clauses.length > 0 ? ' WHERE ' + clauses.join(' AND ') : '';
+    const rows = this.db
+      .prepare('SELECT * FROM executions' + where + ' ORDER BY updated_at DESC,execution_id LIMIT ?')
+      .all(...parameters, limit) as unknown as ExecutionRow[];
+    return rows.map(executionFrom);
+  }
+
   listByPlan(planId: string): Execution[] {
     const rows = this.db.prepare('SELECT * FROM executions WHERE plan_id=? ORDER BY created_at,execution_id').all(planId) as unknown as ExecutionRow[];
     return rows.map(executionFrom);

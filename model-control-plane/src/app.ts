@@ -13,6 +13,11 @@ import {
 } from './v4/adapters/openhands.js';
 import { V4Error } from './v4/domain/errors.js';
 import {
+  EXECUTION_STATUSES,
+  type ExecutionStatus,
+} from './v4/domain/execution.js';
+import { PLAN_STATUSES, type PlanStatus } from './v4/domain/plan.js';
+import {
   DeliveryKernel,
   ExecutionKernel,
   PlanKernel,
@@ -546,6 +551,33 @@ export async function buildControlPlane(
     },
   }));
 
+  const planView = (planId: string) => {
+    const plan = repositories.plans.getPlan(planId);
+    const graph = repositories.plans.getActiveGraphVersion(planId);
+    return {
+      plan,
+      graph,
+      workItems: graph ? repositories.plans.listWorkItems(planId, graph.graphVersionId) : [],
+      executions: repositories.executions.listByPlan(planId),
+      reviews: repositories.reviews.listByPlan(planId),
+      sessions: repositories.sessions.listByPlan(planId),
+      supervisor: repositories.supervisors.getByPlanId(planId),
+    };
+  };
+
+  app.get('/api/v4/plans', async (request) => {
+    const query = request.query as { limit?: string; status?: string };
+    const limit = integerValue(query.limit, 100, 1, 1000, 'PLAN_LIST_LIMIT_INVALID');
+    const status = query.status;
+    if (status && !(PLAN_STATUSES as readonly string[]).includes(status))
+      throw new V4Error('PLAN_STATUS_INVALID');
+    const plans = repositories.plans.listPlans({
+      limit,
+      ...(status ? { status: status as PlanStatus } : {}),
+    });
+    return { items: plans.map((plan) => planView(plan.planId)), count: plans.length };
+  });
+
   app.post('/api/v4/plans', async (request, reply) => {
     const body = bodyRecord(request.body);
     const idempotencyKey = requiredText(
@@ -605,22 +637,26 @@ export async function buildControlPlane(
 
   app.get('/api/v4/plans/:planId', async (request) => {
     const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
-    const plan = repositories.plans.getPlan(planId);
-    const graph = repositories.plans.getActiveGraphVersion(planId);
-    return {
-      plan,
-      graph,
-      workItems: graph ? repositories.plans.listWorkItems(planId, graph.graphVersionId) : [],
-      executions: repositories.executions.listByPlan(planId),
-      reviews: repositories.reviews.listByPlan(planId),
-      sessions: repositories.sessions.listByPlan(planId),
-      supervisor: repositories.supervisors.getByPlanId(planId),
-    };
+    return planView(planId);
   });
 
   app.post('/api/v4/plans/:planId/run', async (request) => {
     const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
     return await requireAutomation().plans.runPlan(planId);
+  });
+
+  app.get('/api/v4/executions', async (request) => {
+    const query = request.query as { limit?: string; planId?: string; status?: string };
+    const limit = integerValue(query.limit, 100, 1, 1000, 'EXECUTION_LIST_LIMIT_INVALID');
+    const status = query.status;
+    if (status && !(EXECUTION_STATUSES as readonly string[]).includes(status))
+      throw new V4Error('EXECUTION_STATUS_INVALID');
+    const items = repositories.executions.list({
+      limit,
+      ...(query.planId ? { planId: requiredText(query.planId, 'EXECUTION_PLAN_REQUIRED') } : {}),
+      ...(status ? { status: status as ExecutionStatus } : {}),
+    });
+    return { items, count: items.length };
   });
 
   app.get('/api/v4/executions/:executionId', async (request) => {

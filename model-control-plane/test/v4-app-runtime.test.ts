@@ -116,6 +116,39 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(body.executions[0].identity.route, 'gpt-5.6-luna');
   assert.equal(body.executions[0].identity.sourceRevision, value.revision);
   assert.equal(body.executions[0].status, 'QUEUED');
+
+  const plans = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/plans?status=RUNNING&limit=10',
+  });
+  assert.equal(plans.statusCode, 200);
+  assert.equal(plans.json().count, 1);
+  assert.equal(plans.json().items[0].plan.planId, planId);
+  assert.equal(plans.json().items[0].workItems[0].itemKey, 'first');
+  assert.equal(plans.json().items[0].executions.length, 1);
+
+  const executions = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/executions?planId=' + planId + '&status=QUEUED&limit=10',
+  });
+  assert.equal(executions.statusCode, 200);
+  assert.equal(executions.json().count, 1);
+  assert.equal(executions.json().items[0].identity.planId, planId);
+
+  const invalidPlanStatus = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/plans?status=NOT_A_STATUS',
+  });
+  assert.equal(invalidPlanStatus.statusCode, 400);
+  assert.equal(invalidPlanStatus.json().error, 'PLAN_STATUS_INVALID');
+
+  const invalidExecutionStatus = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/executions?status=NOT_A_STATUS',
+  });
+  assert.equal(invalidExecutionStatus.statusCode, 400);
+  assert.equal(invalidExecutionStatus.json().error, 'EXECUTION_STATUS_INVALID');
+
   const execution = await runtime.app.inject({
     method: 'GET',
     url: '/api/v4/executions/' + body.executions[0].identity.executionId,
