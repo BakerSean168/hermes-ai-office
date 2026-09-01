@@ -306,6 +306,23 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
 
   write(
     review.evidenceHostPath,
+    JSON.stringify(reviewEvidence(review, reviewedSha)) + '\\n\n',
+  );
+  const normalizedTrailingLiteralNewline = await value.adapter.verifyReview(review, reviewedSha);
+  if (normalizedTrailingLiteralNewline.evidence.phase === 'REVIEW')
+    assert.equal(normalizedTrailingLiteralNewline.evidence.verdict, 'PASS');
+
+  write(
+    review.evidenceHostPath,
+    JSON.stringify(reviewEvidence(review, reviewedSha)) + ' trailing-garbage',
+  );
+  await assert.rejects(
+    () => value.adapter.verifyReview(review, reviewedSha),
+    (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_EVIDENCE_INVALID',
+  );
+
+  write(
+    review.evidenceHostPath,
     JSON.stringify(
       reviewEvidence(review, reviewedSha, {
         verdict: 'FAIL',

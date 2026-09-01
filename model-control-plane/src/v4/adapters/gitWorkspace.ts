@@ -807,7 +807,16 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     )
       throw new V4Error('WORKSPACE_EVIDENCE_INVALID');
     try {
-      const value = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+      const raw = fs.readFileSync(file, 'utf8');
+      let value: unknown;
+      try {
+        value = JSON.parse(raw) as unknown;
+      } catch (strictError) {
+        const trimmed = raw.trimEnd();
+        const normalized = trimmed.replace(/(?:\\n)+$/, '');
+        if (normalized === trimmed) throw strictError;
+        value = JSON.parse(normalized) as unknown;
+      }
       const decoded = record(value, 'WORKSPACE_EVIDENCE_INVALID');
       assertSafeEventPayload(decoded);
       return decoded;
