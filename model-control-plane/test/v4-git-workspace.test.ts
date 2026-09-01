@@ -193,6 +193,8 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
   const failed = await value.adapter.verifyReview(review, reviewedSha);
   if (failed.evidence.phase === 'REVIEW') assert.equal(failed.evidence.verdict, 'FAIL');
 
+  assert.throws(() => write(path.join(review.hostPath, 'blocked.txt'), 'blocked\n'));
+  fs.chmodSync(review.hostPath, 0o750);
   write(path.join(review.hostPath, 'dirty.txt'), 'dirty\n');
   await assert.rejects(
     () => value.adapter.verifyReview(review, reviewedSha),

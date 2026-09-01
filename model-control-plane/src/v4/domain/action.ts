@@ -7,11 +7,12 @@ export const ACTION_STATUSES = [
 export type ActionStatus = (typeof ACTION_STATUSES)[number];
 
 export type SupervisorActionType =
-  | 'NO_ACTION' | 'CONTINUE_EXECUTION' | 'RETRY_EXECUTION' | 'SWITCH_ROUTE'
+  | 'NO_ACTION' | 'CREATE_EXECUTION' | 'CONTINUE_EXECUTION' | 'RETRY_EXECUTION' | 'SWITCH_ROUTE'
   | 'REQUEST_REVIEW' | 'CREATE_REPAIR' | 'REPLAN_REMAINDER' | 'CREATE_CHILD_PLAN'
   | 'PAUSE_FOR_RESOURCE' | 'PARK_EXTERNAL_GATE' | 'ESCALATE';
 
 export interface NoActionPayload { type: 'NO_ACTION'; reason: string; }
+export interface CreateExecutionPayload { type: 'CREATE_EXECUTION'; workItemId: string; route: string; }
 export interface ContinueExecutionPayload { type: 'CONTINUE_EXECUTION'; executionId: string; }
 export interface RetryExecutionPayload { type: 'RETRY_EXECUTION'; executionId: string; reason: string; }
 export interface SwitchRoutePayload { type: 'SWITCH_ROUTE'; executionId: string; route: string; }
@@ -34,7 +35,7 @@ export interface ParkExternalGatePayload { type: 'PARK_EXTERNAL_GATE'; gate: 'NA
 export interface EscalatePayload { type: 'ESCALATE'; reason: string; severity: 'LOW' | 'MEDIUM' | 'HIGH'; }
 
 export type SupervisorActionPayload =
-  | NoActionPayload | ContinueExecutionPayload | RetryExecutionPayload | SwitchRoutePayload
+  | NoActionPayload | CreateExecutionPayload | ContinueExecutionPayload | RetryExecutionPayload | SwitchRoutePayload
   | RequestReviewPayload | CreateRepairPayload | ReplanRemainderPayload | CreateChildPlanPayload
   | PauseForResourcePayload | ParkExternalGatePayload | EscalatePayload;
 

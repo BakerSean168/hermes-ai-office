@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite';
 
 import { DuplicateKeyError, StaleStateError, V4Error, failClosed } from '../domain/errors.js';
 import { assertSafeEventPayload, type EventEnvelope } from '../domain/events.js';
-import { transitionExecution, validateExecutionIdentity, type Execution, type ExecutionIdentity, type ExecutionStatus } from '../domain/execution.js';
+import { transitionExecution, validateExecutionIdentity, type Execution, type ExecutionIdentity, type ExecutionPhase, type ExecutionStatus } from '../domain/execution.js';
 import { transitionPlan, validatePlanInput, type CreatePlanInput, type Plan, type PlanStatus } from '../domain/plan.js';
 import { transitionReview, validateReviewLineage, type Review, type ReviewStatus } from '../domain/review.js';
 import { type Lease, validateResourceObservation, type ResourceObservation } from '../domain/resource.js';
@@ -341,13 +341,13 @@ export class PlanRepository {
 }
 
 interface ExecutionRow {
-  execution_id: string; idempotency_key: string; plan_id: string; work_item_id: string | null; attempt: number; route: string;
+  execution_id: string; idempotency_key: string; plan_id: string; work_item_id: string | null; phase: ExecutionPhase; parent_execution_id: string | null; attempt: number; route: string;
   source_revision: string | null; objective: string; status: ExecutionStatus; result_revision: string | null; result_summary: string | null;
   error_code: string | null; retryable: number | null; created_at: string; updated_at: string;
 }
 function executionFrom(row: ExecutionRow): Execution {
   return { identity: { executionId: row.execution_id, planId: row.plan_id, workItemId: row.work_item_id ?? undefined,
-      attempt: row.attempt, route: row.route, sourceRevision: row.source_revision ?? undefined },
+      phase: row.phase, parentExecutionId: row.parent_execution_id ?? undefined, attempt: row.attempt, route: row.route, sourceRevision: row.source_revision ?? undefined },
     idempotencyKey: row.idempotency_key, objective: row.objective, status: row.status,
     resultRevision: row.result_revision ?? undefined, resultSummary: row.result_summary ?? undefined,
     errorCode: row.error_code ?? undefined, retryable: row.retryable === null ? undefined : Boolean(row.retryable),
@@ -368,6 +368,8 @@ export class ExecutionRepository {
         const same = existing.execution_id === requestedId
           && existing.plan_id === input.identity.planId
           && existing.work_item_id === (input.identity.workItemId ?? null)
+          && existing.phase === input.identity.phase
+          && existing.parent_execution_id === (input.identity.parentExecutionId ?? null)
           && existing.attempt === input.identity.attempt
           && existing.route === input.identity.route
           && existing.source_revision === (input.identity.sourceRevision ?? null)
@@ -383,11 +385,31 @@ export class ExecutionRepository {
         const workItem = this.db.prepare('SELECT plan_id FROM work_items WHERE work_item_id=?').get(input.identity.workItemId) as { plan_id: string } | undefined;
         if (!workItem || workItem.plan_id !== input.identity.planId) throw new V4Error('EXECUTION_WORK_ITEM_MISMATCH');
       }
+      if (input.identity.phase === 'IMPLEMENT' && input.identity.parentExecutionId) {
+        const parent = this.get(input.identity.parentExecutionId);
+        if (parent.identity.planId !== input.identity.planId || parent.identity.workItemId !== input.identity.workItemId || parent.identity.phase !== 'IMPLEMENT') {
+          throw new V4Error('EXECUTION_PARENT_INVALID');
+        }
+        if (parent.status !== 'FAILED' && parent.status !== 'BLOCKED' && parent.status !== 'CANCELLED') throw new V4Error('EXECUTION_PARENT_INVALID');
+        if (parent.identity.sourceRevision !== input.identity.sourceRevision) throw new V4Error('EXECUTION_PARENT_REVISION_MISMATCH');
+      }
+      if (input.identity.phase === 'REVIEW' || input.identity.phase === 'IMPLEMENT_FIX') {
+        if (!input.identity.parentExecutionId) throw new V4Error('EXECUTION_PARENT_REQUIRED');
+        const parent = this.get(input.identity.parentExecutionId);
+        if (parent.identity.planId !== input.identity.planId || parent.identity.workItemId !== input.identity.workItemId) throw new V4Error('EXECUTION_PARENT_INVALID');
+        if (parent.status !== 'SUCCEEDED' || !parent.resultRevision || parent.resultRevision !== input.identity.sourceRevision) {
+          throw new V4Error('EXECUTION_PARENT_REVISION_MISMATCH');
+        }
+        if (input.identity.phase === 'IMPLEMENT_FIX' && parent.identity.phase === 'REVIEW') throw new V4Error('EXECUTION_PARENT_INVALID');
+      }
       const createdAt = iso();
-      this.db.prepare('INSERT INTO executions(execution_id,idempotency_key,plan_id,work_item_id,attempt,route,source_revision,objective,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
+      this.db.prepare('INSERT INTO executions(execution_id,idempotency_key,plan_id,work_item_id,phase,parent_execution_id,attempt,route,source_revision,objective,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)').run(
         input.executionId ?? input.identity.executionId, input.idempotencyKey, input.identity.planId, input.identity.workItemId ?? null,
-        input.identity.attempt, input.identity.route, input.identity.sourceRevision ?? null, input.objective, 'QUEUED', createdAt, createdAt);
-      this.events.appendInTransaction(makeEvent(input.identity.executionId, 'EXECUTION', 'EXECUTION_CREATED', { planId: input.identity.planId, workItemId: input.identity.workItemId ?? null, attempt: input.identity.attempt }));
+        input.identity.phase, input.identity.parentExecutionId ?? null, input.identity.attempt, input.identity.route, input.identity.sourceRevision ?? null, input.objective, 'QUEUED', createdAt, createdAt);
+      this.events.appendInTransaction(makeEvent(input.identity.executionId, 'EXECUTION', 'EXECUTION_CREATED', {
+        planId: input.identity.planId, workItemId: input.identity.workItemId ?? null, phase: input.identity.phase,
+        parentExecutionId: input.identity.parentExecutionId ?? null, attempt: input.identity.attempt,
+      }));
       return { status: 'created', value: this.get(input.identity.executionId) };
     });
   }
@@ -606,6 +628,11 @@ export class ReviewRepository {
 
   findByImplementationExecution(implementationExecutionId: string): Review | undefined {
     const row = this.db.prepare('SELECT * FROM reviews WHERE implementation_execution_id=? ORDER BY created_at DESC LIMIT 1').get(implementationExecutionId) as ReviewRow | undefined;
+    return row ? reviewFrom(row) : undefined;
+  }
+
+  findByReviewerExecution(reviewerExecutionId: string): Review | undefined {
+    const row = this.db.prepare('SELECT * FROM reviews WHERE reviewer_execution_id=? ORDER BY created_at DESC LIMIT 1').get(reviewerExecutionId) as ReviewRow | undefined;
     return row ? reviewFrom(row) : undefined;
   }
 

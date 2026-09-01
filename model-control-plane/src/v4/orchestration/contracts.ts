@@ -1,5 +1,7 @@
-export const EXECUTION_PHASES = ['IMPLEMENT', 'IMPLEMENT_FIX', 'REVIEW'] as const;
-export type ExecutionPhase = (typeof EXECUTION_PHASES)[number];
+import type { ExecutionPhase as DomainExecutionPhase } from '../domain/execution.js';
+
+export { EXECUTION_PHASES } from '../domain/execution.js';
+export type ExecutionPhase = DomainExecutionPhase;
 
 export const PROVIDER_SESSION_STATUSES = [
   'CREATED', 'QUEUED', 'RUNNING', 'PAUSED', 'WAITING_FOR_CONFIRMATION',

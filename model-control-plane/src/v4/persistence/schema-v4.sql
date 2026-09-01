@@ -66,6 +66,8 @@ CREATE TABLE IF NOT EXISTS executions (
   idempotency_key TEXT NOT NULL UNIQUE,
   plan_id TEXT NOT NULL REFERENCES plans(plan_id),
   work_item_id TEXT REFERENCES work_items(work_item_id),
+  phase TEXT NOT NULL,
+  parent_execution_id TEXT REFERENCES executions(execution_id),
   attempt INTEGER NOT NULL,
   route TEXT NOT NULL,
   source_revision TEXT,
@@ -235,4 +237,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 2, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 3, CAST(strftime('%s','now') AS INTEGER));

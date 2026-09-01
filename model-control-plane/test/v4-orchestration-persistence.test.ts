@@ -16,6 +16,42 @@ function tempDatabase(prefix: string): string {
   return path.join(fs.mkdtempSync(path.join(os.tmpdir(), prefix)), 'control-plane.sqlite');
 }
 
+function downgradeExecutionsToV2(file: string): void {
+  const raw = new DatabaseSync(file);
+  raw.exec(`
+    PRAGMA foreign_keys = OFF;
+    PRAGMA legacy_alter_table = ON;
+    ALTER TABLE executions RENAME TO executions_v3;
+    CREATE TABLE executions (
+      execution_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      plan_id TEXT NOT NULL REFERENCES plans(plan_id),
+      work_item_id TEXT REFERENCES work_items(work_item_id),
+      attempt INTEGER NOT NULL,
+      route TEXT NOT NULL,
+      source_revision TEXT,
+      objective TEXT NOT NULL,
+      status TEXT NOT NULL,
+      result_revision TEXT,
+      result_summary TEXT,
+      error_code TEXT,
+      retryable INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO executions(
+      execution_id,idempotency_key,plan_id,work_item_id,attempt,route,source_revision,objective,status,
+      result_revision,result_summary,error_code,retryable,created_at,updated_at
+    ) SELECT execution_id,idempotency_key,plan_id,work_item_id,attempt,route,source_revision,objective,status,
+      result_revision,result_summary,error_code,retryable,created_at,updated_at FROM executions_v3;
+    DROP TABLE executions_v3;
+    UPDATE schema_meta SET schema_version=2 WHERE schema_id='pixel-v4';
+    PRAGMA legacy_alter_table = OFF;
+    PRAGMA foreign_keys = ON;
+  `);
+  raw.close();
+}
+
 function seed(db: DatabaseSync, key = 'orchestration-seed') {
   const repositories = createRepositories(db);
   const plan = repositories.plans.createPlan({
@@ -47,6 +83,7 @@ function seed(db: DatabaseSync, key = 'orchestration-seed') {
 }
 
 function downgradeFixtureToV1(file: string): void {
+  downgradeExecutionsToV2(file);
   const raw = new DatabaseSync(file);
   raw.exec(`
     PRAGMA foreign_keys = OFF;
@@ -126,7 +163,7 @@ test('adapters require the centralized current V4 schema and never create privat
   raw.close();
 });
 
-test('schema v1 migrates in place to v2 and preserves durable production state across restart', () => {
+test('schema v1 migrates in place through v3 and preserves durable production state across restart', () => {
   const file = tempDatabase('pixel-v4-migrate-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'migration-plan');
@@ -161,6 +198,58 @@ test('schema v1 migrates in place to v2 and preserves durable production state a
   assert.deepEqual(restarted.plans.getPlan(before.plan.planId), before.plan);
   assert.equal(restarted.events.listAfterCursor(0, 1000).events.length, before.events.length);
   db.close();
+});
+
+test('schema v2 migrates execution phase lineage to v3 without losing queued work', () => {
+  const file = tempDatabase('pixel-v4-v2-to-v3-');
+  let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
+  const seeded = seed(db, 'v2-execution-plan');
+  seeded.repositories.plans.compareAndSetStatus(seeded.plan.planId, 'READY', 'RUNNING');
+  seeded.repositories.plans.updateWorkItemStatus(seeded.workItem.workItemId, 'RUNNING');
+  const execution = seeded.repositories.executions.create({
+    idempotencyKey: 'v2-queued-execution',
+    identity: {
+      executionId: 'v2-queued-execution',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      phase: 'IMPLEMENT',
+      attempt: 1,
+      route: 'implementation-efficient',
+      sourceRevision: 'base-sha',
+    },
+    objective: seeded.workItem.objective,
+  }).value!;
+  const beforeEvents = seeded.repositories.events.listAfterCursor(0, 1000).events;
+  db.close();
+
+  downgradeExecutionsToV2(file);
+  db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
+  const repositories = createRepositories(db);
+  const recovered = repositories.executions.get(execution.identity.executionId);
+  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, 3);
+  assert.equal(recovered.identity.phase, 'IMPLEMENT');
+  assert.equal(recovered.identity.parentExecutionId, undefined);
+  assert.equal(recovered.status, 'QUEUED');
+  assert.equal(recovered.identity.sourceRevision, 'base-sha');
+  assert.deepEqual(repositories.events.listAfterCursor(0, 1000).events, beforeEvents);
+  db.close();
+
+  const partialFile = tempDatabase('pixel-v4-v2-partial-v3-');
+  db = openV4Database(partialFile, { environment: 'test', env: { NODE_ENV: 'test' } });
+  seed(db, 'partial-v3-plan');
+  db.close();
+  downgradeExecutionsToV2(partialFile);
+  const raw = new DatabaseSync(partialFile);
+  raw.exec("ALTER TABLE executions ADD COLUMN phase TEXT NOT NULL DEFAULT 'IMPLEMENT'");
+  raw.close();
+  assert.throws(
+    () => openV4Database(partialFile, { environment: 'test', env: { NODE_ENV: 'test' } }),
+    (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_INCOMPLETE',
+  );
+  const untouched = new DatabaseSync(partialFile, { readOnly: true });
+  assert.equal(untouched.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, 2);
+  assert.equal(untouched.prepare('SELECT count(*) AS count FROM plans').get()?.count, 1);
+  untouched.close();
 });
 
 test('unknown newer and incomplete V4 schemas fail closed without resetting durable rows', () => {
@@ -250,6 +339,7 @@ test('execution sessions and evidence are durable, idempotent, correlated, and i
       executionId: 'execution-implementation',
       planId: seeded.plan.planId,
       workItemId: seeded.workItem.workItemId,
+      phase: 'IMPLEMENT',
       attempt: 1,
       route: 'openhands-luna',
       sourceRevision: 'base-sha',
@@ -357,7 +447,7 @@ test('execution leases allow takeover only after expiry', () => {
   const seeded = seed(db, 'execution-lease-plan');
   const execution = seeded.repositories.executions.create({
     idempotencyKey: 'leased-execution',
-    identity: { executionId: 'leased-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, attempt: 1, route: 'openhands', sourceRevision: 'base-sha' },
+    identity: { executionId: 'leased-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'IMPLEMENT', attempt: 1, route: 'openhands', sourceRevision: 'base-sha' },
     objective: 'lease me',
   }).value!;
   assert.equal(seeded.repositories.executions.create({ idempotencyKey: 'leased-execution', identity: execution.identity, objective: 'lease me' }).status, 'existing');
@@ -415,7 +505,7 @@ test('review binding requires a distinct reviewer execution for the same plan an
   seeded.repositories.plans.updateWorkItemStatus(seeded.workItem.workItemId, 'RUNNING');
   const implementation = seeded.repositories.executions.create({
     idempotencyKey: 'implementation-for-review',
-    identity: { executionId: 'implementation-for-review', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, attempt: 1, route: 'luna', sourceRevision: 'base-sha' },
+    identity: { executionId: 'implementation-for-review', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'IMPLEMENT', attempt: 1, route: 'luna', sourceRevision: 'base-sha' },
     objective: 'implement',
   }).value!;
   const workspaceFor = (executionId: string, sourceRevision: string, suffix: string): WorkspaceDescriptor => ({
@@ -449,21 +539,20 @@ test('review binding requires a distinct reviewer execution for the same plan an
   }).value!;
   const reviewer = seeded.repositories.executions.create({
     idempotencyKey: 'reviewer-execution',
-    identity: { executionId: 'reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, attempt: 1, route: 'sol-review', sourceRevision: 'result-sha' },
+    identity: { executionId: 'reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 1, route: 'sol-review', sourceRevision: 'result-sha' },
     objective: 'independently review result-sha',
   }).value!;
   assert.throws(
     () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, implementation.identity.executionId),
     (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_NOT_INDEPENDENT',
   );
-  const wrongSourceReviewer = seeded.repositories.executions.create({
-    idempotencyKey: 'wrong-source-reviewer',
-    identity: { executionId: 'wrong-source-reviewer', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, attempt: 1, route: 'sol-review', sourceRevision: 'other-sha' },
-    objective: 'review the wrong source',
-  }).value!;
   assert.throws(
-    () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, wrongSourceReviewer.identity.executionId),
-    (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_EXECUTION_INVALID',
+    () => seeded.repositories.executions.create({
+      idempotencyKey: 'wrong-source-reviewer',
+      identity: { executionId: 'wrong-source-reviewer', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 1, route: 'sol-review', sourceRevision: 'other-sha' },
+      objective: 'review the wrong source',
+    }),
+    (error: unknown) => error instanceof V4Error && error.code === 'EXECUTION_PARENT_REVISION_MISMATCH',
   );
   assert.throws(
     () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, reviewer.identity.executionId),
@@ -492,7 +581,7 @@ test('review binding requires a distinct reviewer execution for the same plan an
   assert.equal(seeded.repositories.reviews.create({ idempotencyKey: 'review-result-sha', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, implementationExecutionId: implementation.identity.executionId, sourceRevision: 'result-sha' }).status, 'existing');
   const secondReviewer = seeded.repositories.executions.create({
     idempotencyKey: 'second-reviewer-execution',
-    identity: { executionId: 'second-reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, attempt: 2, route: 'opus-review', sourceRevision: 'result-sha' },
+    identity: { executionId: 'second-reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 2, route: 'opus-review', sourceRevision: 'result-sha' },
     objective: 'second independent review',
   }).value!;
   assert.throws(

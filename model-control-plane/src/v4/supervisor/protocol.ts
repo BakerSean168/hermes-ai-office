@@ -9,7 +9,7 @@ export const SUPERVISOR_PROTOCOL_VERSION = 1 as const;
 const MAX_BYTES = 32_000;
 const MAX_STRING = 8_000;
 const ACTION_TYPES: readonly SupervisorActionType[] = [
-  'NO_ACTION', 'CONTINUE_EXECUTION', 'RETRY_EXECUTION', 'SWITCH_ROUTE', 'REQUEST_REVIEW',
+  'NO_ACTION', 'CREATE_EXECUTION', 'CONTINUE_EXECUTION', 'RETRY_EXECUTION', 'SWITCH_ROUTE', 'REQUEST_REVIEW',
   'CREATE_REPAIR', 'REPLAN_REMAINDER', 'CREATE_CHILD_PLAN', 'PAUSE_FOR_RESOURCE',
   'PARK_EXTERNAL_GATE', 'ESCALATE',
 ];
@@ -98,6 +98,7 @@ function parsePayload(type: SupervisorActionType, value: unknown): SupervisorAct
   if (payload.type !== type) throw new V4Error('ACTION_PAYLOAD_TYPE_MISMATCH');
   switch (type) {
     case 'NO_ACTION': return { type, reason: text(payload.reason, 'ACTION_REASON_REQUIRED') };
+    case 'CREATE_EXECUTION': return { type, workItemId: text(payload.workItemId, 'WORK_ITEM_ID_REQUIRED', 200), route: text(payload.route, 'ACTION_ROUTE_REQUIRED', 200) };
     case 'CONTINUE_EXECUTION': return { type, executionId: text(payload.executionId, 'EXECUTION_ID_REQUIRED', 200) };
     case 'RETRY_EXECUTION': return { type, executionId: text(payload.executionId, 'EXECUTION_ID_REQUIRED', 200), reason: text(payload.reason, 'ACTION_REASON_REQUIRED') };
     case 'SWITCH_ROUTE': return { type, executionId: text(payload.executionId, 'EXECUTION_ID_REQUIRED', 200), route: text(payload.route, 'ACTION_ROUTE_REQUIRED', 200) };

@@ -123,18 +123,40 @@ function phasePrompt(input: ProviderLaunchInput): string {
   const findings = input.reviewFindings?.length
     ? ['Review findings to repair:', ...input.reviewFindings.map((item) => '- ' + item.trim())]
     : [];
+  const evidenceTemplate = input.phase === 'REVIEW'
+    ? JSON.stringify({
+        version: 1,
+        executionId: input.executionId,
+        phase: 'REVIEW',
+        reviewedSha: input.sourceRevision,
+        verdict: 'PASS|FAIL|INVALID',
+        findings: ['concrete finding when not PASS'],
+        checks: [{ command: 'exact command', status: 'PASS|FAIL|SKIP', exitCode: 0, summary: 'bounded result' }],
+        summary: 'bounded review summary',
+      })
+    : JSON.stringify({
+        version: 1,
+        executionId: input.executionId,
+        phase: input.phase,
+        sourceRevision: input.sourceRevision,
+        resultRevision: '<exact git HEAD after commit>',
+        summary: 'bounded implementation summary',
+        tests: [{ command: 'exact command', status: 'PASS|FAIL|SKIP', exitCode: 0, summary: 'bounded result' }],
+      });
   const rules = input.phase === 'REVIEW'
     ? [
         'Perform an independent review of the exact supplied revision.',
         'Do not edit repository files or delegate the review.',
         'The first non-empty line of the final response must be exactly PASS, FAIL, or INVALID.',
         'Use PASS only when the exact revision satisfies every acceptance criterion.',
+        'Before finishing, atomically write one JSON object to ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
       ]
     : [
         'Implement the bounded objective in the supplied isolated workspace.',
         'Do not broaden scope, access credentials, merge, deploy, or modify remotes.',
         'Run focused checks, commit every intended change, and leave the workspace clean.',
         'A no-op or planning-only response is not successful implementation.',
+        'Before finishing, atomically write one JSON object outside the Git repository at ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
       ];
   const text = [
     'Pixel Agent V4 execution phase: ' + input.phase,

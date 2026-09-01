@@ -29,6 +29,18 @@ export class SupervisorActionValidator {
 
   private validatePayload(type: SupervisorActionType, payload: SupervisorDecision['action']['payload'], projection: SupervisorProjection): void {
     if (type === 'NO_ACTION' || type === 'ESCALATE' || type === 'PARK_EXTERNAL_GATE' || type === 'CREATE_CHILD_PLAN') return;
+    if (type === 'CREATE_EXECUTION') {
+      if (payload.type !== type) throw new V4Error('ACTION_PAYLOAD_TYPE_MISMATCH');
+      const item = projection.graph.items.find((candidate) => candidate.workItemId === payload.workItemId);
+      if (!item) throw new V4Error('WORK_ITEM_NOT_FOUND');
+      if (item.status !== 'PENDING' && item.status !== 'READY' && item.status !== 'RUNNING') throw new V4Error('WORK_ITEM_NOT_RUNNABLE');
+      const byKey = new Map(projection.graph.items.map((candidate) => [candidate.itemKey, candidate]));
+      if (!item.dependencies.every((dependency) => byKey.get(dependency)?.status === 'SUCCEEDED')) throw new V4Error('WORK_ITEM_DEPENDENCIES_INCOMPLETE');
+      if (projection.executions.some((execution) => execution.workItemId === item.workItemId && (execution.status === 'QUEUED' || execution.status === 'RUNNING'))) {
+        throw new V4Error('WORK_ITEM_EXECUTION_ACTIVE');
+      }
+      return;
+    }
     if (type === 'PAUSE_FOR_RESOURCE') return;
     if (type === 'REPLAN_REMAINDER') {
       if (payload.type !== type) throw new V4Error('ACTION_PAYLOAD_TYPE_MISMATCH');

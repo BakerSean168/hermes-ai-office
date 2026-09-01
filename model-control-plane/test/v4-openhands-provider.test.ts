@@ -52,6 +52,8 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.deepEqual(implementationBody.agent.tools.map((item: { name: string }) => item.name), ['terminal', 'file_editor', 'task_tracker']);
   assert.deepEqual(reviewBody.agent.tools.map((item: { name: string }) => item.name), ['terminal', 'task_tracker']);
   assert.equal(implementationBody.initial_message.run, true);
+  assert.match(implementationBody.initial_message.content[0].text, /\/workspace\/executions\/exec-1\/evidence\.json/);
+  assert.match(reviewBody.initial_message.content[0].text, /\"phase\":\"REVIEW\"/);
   assert.equal(implementationBody.agent.llm.api_mode, 'chat');
   assert.equal(implementationBody.agent.llm.reasoning_effort, null);
   assert.equal(implementationBody.tags.execution, 'exec1');

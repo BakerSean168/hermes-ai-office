@@ -5,17 +5,21 @@ import type { ActionRepository, DecisionRepository, SupervisorRepository } from 
 import type { SupervisorProjection } from './projection.js';
 import { SupervisorActionValidator } from './validator.js';
 
+export interface SupervisorKernelEffect { code: string; linkedExecutionId?: string; linkedPlanId?: string; pullRequestId?: string; }
+export type SupervisorKernelEffectResult = SupervisorKernelEffect | Promise<SupervisorKernelEffect>;
+
 export interface SupervisorKernelPort {
-  continueExecution?(payload: Extract<SupervisorAction['payload'], { type: 'CONTINUE_EXECUTION' }>): { code: string; linkedExecutionId?: string };
-  retryExecution?(payload: Extract<SupervisorAction['payload'], { type: 'RETRY_EXECUTION' }>): { code: string; linkedExecutionId?: string };
-  switchRoute?(payload: Extract<SupervisorAction['payload'], { type: 'SWITCH_ROUTE' }>): { code: string; linkedExecutionId?: string };
-  requestReview?(payload: Extract<SupervisorAction['payload'], { type: 'REQUEST_REVIEW' }>): { code: string; linkedExecutionId?: string };
-  createRepair?(payload: Extract<SupervisorAction['payload'], { type: 'CREATE_REPAIR' }>): { code: string; linkedExecutionId?: string };
-  replanRemainder?(payload: Extract<SupervisorAction['payload'], { type: 'REPLAN_REMAINDER' }>, planId: string): { code: string; linkedPlanId?: string };
-  createChildPlan?(payload: Extract<SupervisorAction['payload'], { type: 'CREATE_CHILD_PLAN' }>, parentPlanId: string): { code: string; linkedPlanId?: string };
-  pauseForResource?(payload: Extract<SupervisorAction['payload'], { type: 'PAUSE_FOR_RESOURCE' }>, planId: string): { code: string };
-  parkExternalGate?(payload: Extract<SupervisorAction['payload'], { type: 'PARK_EXTERNAL_GATE' }>, planId: string): { code: string };
-  escalate?(payload: Extract<SupervisorAction['payload'], { type: 'ESCALATE' }>, planId: string): { code: string };
+  createExecution?(payload: Extract<SupervisorAction['payload'], { type: 'CREATE_EXECUTION' }>, planId: string): SupervisorKernelEffectResult;
+  continueExecution?(payload: Extract<SupervisorAction['payload'], { type: 'CONTINUE_EXECUTION' }>): SupervisorKernelEffectResult;
+  retryExecution?(payload: Extract<SupervisorAction['payload'], { type: 'RETRY_EXECUTION' }>): SupervisorKernelEffectResult;
+  switchRoute?(payload: Extract<SupervisorAction['payload'], { type: 'SWITCH_ROUTE' }>): SupervisorKernelEffectResult;
+  requestReview?(payload: Extract<SupervisorAction['payload'], { type: 'REQUEST_REVIEW' }>): SupervisorKernelEffectResult;
+  createRepair?(payload: Extract<SupervisorAction['payload'], { type: 'CREATE_REPAIR' }>): SupervisorKernelEffectResult;
+  replanRemainder?(payload: Extract<SupervisorAction['payload'], { type: 'REPLAN_REMAINDER' }>, planId: string): SupervisorKernelEffectResult;
+  createChildPlan?(payload: Extract<SupervisorAction['payload'], { type: 'CREATE_CHILD_PLAN' }>, parentPlanId: string): SupervisorKernelEffectResult;
+  pauseForResource?(payload: Extract<SupervisorAction['payload'], { type: 'PAUSE_FOR_RESOURCE' }>, planId: string): SupervisorKernelEffectResult;
+  parkExternalGate?(payload: Extract<SupervisorAction['payload'], { type: 'PARK_EXTERNAL_GATE' }>, planId: string): SupervisorKernelEffectResult;
+  escalate?(payload: Extract<SupervisorAction['payload'], { type: 'ESCALATE' }>, planId: string): SupervisorKernelEffectResult;
 }
 
 export interface ActionExecutionResult {
@@ -32,7 +36,7 @@ export class SupervisorActionExecutor {
     this.validator = new SupervisorActionValidator(actions, supervisors);
   }
 
-  execute(decision: SupervisorDecision, projection: SupervisorProjection): ActionExecutionResult {
+  async execute(decision: SupervisorDecision, projection: SupervisorProjection): Promise<ActionExecutionResult> {
     const existing = this.actions.findByIdempotencyKey(decision.idempotencyKey);
     if (existing) return { actionId: existing.actionId, status: 'DUPLICATE', code: 'DUPLICATE_ACTION', action: existing };
     const validation = this.validator.validate(decision, projection);
@@ -49,7 +53,7 @@ export class SupervisorActionExecutor {
       return { actionId: action.actionId, status: 'REJECTED', code: advanced.reason ?? 'STALE_OBSERVATION_CURSOR', action: stale.value };
     }
     try {
-      const result = this.dispatch(action);
+      const result = await this.dispatch(action);
       if (result.code === 'KERNEL_PORT_UNAVAILABLE') throw new V4Error(result.code);
       const final = this.actions.recordSuccess(action.actionId, { ...result, completedAt: new Date().toISOString() });
       if (result.linkedExecutionId) this.actions.attachExecution(action.actionId, result.linkedExecutionId);
@@ -63,19 +67,20 @@ export class SupervisorActionExecutor {
     }
   }
 
-  private dispatch(action: SupervisorAction): { code: string; linkedExecutionId?: string; linkedPlanId?: string; pullRequestId?: string } {
+  private async dispatch(action: SupervisorAction): Promise<SupervisorKernelEffect> {
     switch (action.type) {
       case 'NO_ACTION': return { code: 'NO_ACTION' };
-      case 'CONTINUE_EXECUTION': return this.kernel.continueExecution?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CONTINUE_EXECUTION' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'RETRY_EXECUTION': return this.kernel.retryExecution?.(action.payload as Extract<SupervisorAction['payload'], { type: 'RETRY_EXECUTION' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'SWITCH_ROUTE': return this.kernel.switchRoute?.(action.payload as Extract<SupervisorAction['payload'], { type: 'SWITCH_ROUTE' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'REQUEST_REVIEW': return this.kernel.requestReview?.(action.payload as Extract<SupervisorAction['payload'], { type: 'REQUEST_REVIEW' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'CREATE_REPAIR': return this.kernel.createRepair?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CREATE_REPAIR' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'REPLAN_REMAINDER': return this.kernel.replanRemainder?.(action.payload as Extract<SupervisorAction['payload'], { type: 'REPLAN_REMAINDER' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'CREATE_CHILD_PLAN': return this.kernel.createChildPlan?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CREATE_CHILD_PLAN' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'PAUSE_FOR_RESOURCE': return this.kernel.pauseForResource?.(action.payload as Extract<SupervisorAction['payload'], { type: 'PAUSE_FOR_RESOURCE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'PARK_EXTERNAL_GATE': return this.kernel.parkExternalGate?.(action.payload as Extract<SupervisorAction['payload'], { type: 'PARK_EXTERNAL_GATE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
-      case 'ESCALATE': return this.kernel.escalate?.(action.payload as Extract<SupervisorAction['payload'], { type: 'ESCALATE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'CREATE_EXECUTION': return await this.kernel.createExecution?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CREATE_EXECUTION' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'CONTINUE_EXECUTION': return await this.kernel.continueExecution?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CONTINUE_EXECUTION' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'RETRY_EXECUTION': return await this.kernel.retryExecution?.(action.payload as Extract<SupervisorAction['payload'], { type: 'RETRY_EXECUTION' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'SWITCH_ROUTE': return await this.kernel.switchRoute?.(action.payload as Extract<SupervisorAction['payload'], { type: 'SWITCH_ROUTE' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'REQUEST_REVIEW': return await this.kernel.requestReview?.(action.payload as Extract<SupervisorAction['payload'], { type: 'REQUEST_REVIEW' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'CREATE_REPAIR': return await this.kernel.createRepair?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CREATE_REPAIR' }>) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'REPLAN_REMAINDER': return await this.kernel.replanRemainder?.(action.payload as Extract<SupervisorAction['payload'], { type: 'REPLAN_REMAINDER' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'CREATE_CHILD_PLAN': return await this.kernel.createChildPlan?.(action.payload as Extract<SupervisorAction['payload'], { type: 'CREATE_CHILD_PLAN' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'PAUSE_FOR_RESOURCE': return await this.kernel.pauseForResource?.(action.payload as Extract<SupervisorAction['payload'], { type: 'PAUSE_FOR_RESOURCE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'PARK_EXTERNAL_GATE': return await this.kernel.parkExternalGate?.(action.payload as Extract<SupervisorAction['payload'], { type: 'PARK_EXTERNAL_GATE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
+      case 'ESCALATE': return await this.kernel.escalate?.(action.payload as Extract<SupervisorAction['payload'], { type: 'ESCALATE' }>, action.planId) ?? { code: 'KERNEL_PORT_UNAVAILABLE' };
     }
   }
 }

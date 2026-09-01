@@ -114,7 +114,7 @@ test('domain terminal transitions are monotonic and invalid transitions fail clo
   };
   assert.equal(transitionPlan(plan, 'SUCCEEDED', at).status, 'SUCCEEDED');
   assert.throws(() => transitionPlan({ ...plan, status: 'SUCCEEDED' }, 'RUNNING', at), V4Error);
-  const execution = { identity: { executionId: 'e', planId: 'p', attempt: 1, route: 'r' }, idempotencyKey: 'e', objective: 'x', status: 'RUNNING' as const, createdAt: at, updatedAt: at };
+  const execution = { identity: { executionId: 'e', planId: 'p', phase: 'IMPLEMENT' as const, attempt: 1, route: 'r' }, idempotencyKey: 'e', objective: 'x', status: 'RUNNING' as const, createdAt: at, updatedAt: at };
   assert.throws(() => transitionExecution({ ...execution, status: 'SUCCEEDED' }, 'FAILED', at), V4Error);
   const review = { reviewId: 'r', planId: 'p', implementationExecutionId: 'e', sourceRevision: 'sha', reviewedSha: 'sha', status: 'PASSED' as const, createdAt: at, updatedAt: at };
   assert.throws(() => transitionReview(review, 'STALE', at), V4Error);
@@ -132,7 +132,7 @@ test('repositories enforce idempotency, CAS, exact review lineage and leases', (
   assert.equal(repos.plans.compareAndSetStatus(plan.planId, 'DRAFT', 'RUNNING').status, 'rejected');
   assert.equal(repos.plans.compareAndSetStatus(plan.planId, 'READY', 'RUNNING').status, 'updated');
   const execution = repos.executions.create({
-    idempotencyKey: 'exec-1', identity: { executionId: 'exec-1', planId: plan.planId, workItemId: item.workItemId, attempt: 1, route: 'test' }, objective: item.objective,
+    idempotencyKey: 'exec-1', identity: { executionId: 'exec-1', planId: plan.planId, workItemId: item.workItemId, phase: 'IMPLEMENT', attempt: 1, route: 'test' }, objective: item.objective,
   }).value;
   assert.ok(execution);
   repos.executions.updateStatus(execution.identity.executionId, 'RUNNING');
@@ -177,7 +177,7 @@ test('plan kernel accepts graph dependencies in any input order', () => {
   db.close();
 });
 
-test('supervisor protocol, bounded projection, stale decision and duplicate wake are safe', () => {
+test('supervisor protocol, bounded projection, stale decision and duplicate wake are safe', async () => {
   const db = memory();
   const { repos, plan, supervisor } = seedPlan(db, 'supervisor-plan');
   const projection = buildBoundedProjection(db, supervisor.supervisorId, { maxEvents: 3, maxItems: 1 });
@@ -190,10 +190,10 @@ test('supervisor protocol, bounded projection, stale decision and duplicate wake
     action: { type: 'NO_ACTION', payload: { type: 'NO_ACTION', reason: 'wait' } },
   }));
   const executor = new SupervisorActionExecutor(repos.actions, repos.decisions, {});
-  const first = executor.execute(make('wake-1'), projection);
+  const first = await executor.execute(make('wake-1'), projection);
   assert.equal(first.status, 'SUCCEEDED');
-  assert.equal(executor.execute(make('wake-1'), projection).status, 'DUPLICATE');
-  const stale = executor.execute(make('wake-2', Math.max(0, projection.cursor - 1)), projection);
+  assert.equal((await executor.execute(make('wake-1'), projection)).status, 'DUPLICATE');
+  const stale = await executor.execute(make('wake-2', Math.max(0, projection.cursor - 1)), projection);
   assert.equal(stale.status, 'REJECTED');
   assert.equal(repos.decisions.listBySupervisor(supervisor.supervisorId).length, 2);
   assert.throws(() => parseSupervisorDecision('{"version":1,"version":1}'), (error: unknown) => error instanceof V4Error && error.code === 'DECISION_DUPLICATE_KEY');

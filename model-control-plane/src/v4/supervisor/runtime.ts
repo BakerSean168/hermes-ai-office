@@ -22,7 +22,7 @@ export class OpenAICompatibleSupervisorDecisionClient implements SupervisorDecis
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
-          { role: 'system', content: 'Return exactly one JSON object with version numeric 1 (not a string), planId, supervisorId, observationCursor integer, projectionDigest, idempotencyKey, preconditionSnapshot object, and action object. action must contain actionId, version numeric 1, type, planId, supervisorId, observationCursor, projectionDigest, idempotencyKey, preconditionSnapshot, payload, status PROPOSED. For NO_ACTION payload use {type:NO_ACTION,reason:string}. Only choose an action whose required IDs are present in the projection; when no executionId/resourceId/workItemId/baseExecutionId is present, choose NO_ACTION. Do not return conversationId, reason, classification, prose, markdown, shell, workspace, credential, merge, deployment, or autonomous authority.' },
+          { role: 'system', content: 'Return exactly one JSON object with version numeric 1 (not a string), planId, supervisorId, observationCursor integer, projectionDigest, idempotencyKey, preconditionSnapshot object, and action object. action must contain actionId, version numeric 1, type, planId, supervisorId, observationCursor, projectionDigest, idempotencyKey, preconditionSnapshot, payload, status PROPOSED. For NO_ACTION payload use {type:NO_ACTION,reason:string}. Use CREATE_EXECUTION for a dependency-ready PENDING/READY work item with no active execution. Otherwise only choose an action whose required IDs are present in the projection; when no usable workItemId, executionId, resourceId, or baseExecutionId is present, choose NO_ACTION. Do not return conversationId, reason, classification, prose, markdown, shell, workspace, credential, merge, deployment, or autonomous authority.' },
           { role: 'user', content: JSON.stringify({ conversationId: input.conversationId, supervisorId: input.supervisorId, planId: input.planId, projection: input.projection }) },
         ],
       }),
@@ -104,7 +104,7 @@ export class SupervisorRuntime {
       if (!this.client) throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE');
       const raw = await this.client.decide({ conversationId: conversation.conversationId, supervisorId: supervisor.supervisorId, planId: supervisor.planId, projection });
       const decision = parseSupervisorDecision(raw);
-      const result = this.actions.execute(decision, projection);
+      const result = await this.actions.execute(decision, projection);
       if (result.status === 'SUCCEEDED' || result.status === 'DUPLICATE' || result.status === 'REJECTED') {
         this.supervisors.deferWake(supervisor.supervisorId, new Date(Date.now() + 30_000).toISOString());
         const current = this.supervisors.getById(supervisor.supervisorId);

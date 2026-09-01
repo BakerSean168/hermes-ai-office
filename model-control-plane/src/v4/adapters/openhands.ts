@@ -21,7 +21,7 @@ export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient 
       body: JSON.stringify({
         workspace: { kind: 'LocalWorkspace', working_dir: '/tmp/pixel-v4-supervisor' },
         agent: { kind: 'Agent', llm: { model: 'litellm_proxy/gpt-5.6-luna' }, include_default_tools: [] },
-        initial_message: { role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true },
+        initial_message: { role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: false },
         max_iterations: 1,
         autotitle: false,
         tags: { supervisor: input.supervisorId, plan: input.planId, projection: input.projectionDigest },
@@ -35,7 +35,7 @@ export class HttpOpenHandsSupervisorClient implements OpenHandsSupervisorClient 
       method: 'POST',
       headers: this.headers(),
       signal: AbortSignal.timeout(this.timeoutMs),
-      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: true }),
+      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: input.boundedInstruction }], run: false }),
     });
     if (!response.ok) throw new Error('OPENHANDS_SUPERVISOR_HTTP_' + response.status);
     return { conversationId: input.conversationId, replaced: false };

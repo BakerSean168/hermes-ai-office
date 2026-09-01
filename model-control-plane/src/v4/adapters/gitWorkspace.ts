@@ -30,6 +30,8 @@ export interface LocalGitWorkspaceOptions {
   executionRoot: string;
   commandTimeoutMs?: number;
   maxBufferBytes?: number;
+  workspaceUid?: number;
+  workspaceGid?: number;
 }
 
 interface StoredWorkspaceDescriptor extends WorkspaceDescriptor {
@@ -139,6 +141,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
   readonly executionRoot: string;
   readonly commandTimeoutMs: number;
   readonly maxBufferBytes: number;
+  readonly workspaceUid: number;
+  readonly workspaceGid: number;
 
   constructor(options: LocalGitWorkspaceOptions) {
     failClosed(options.allowedRepositoryRoots.length > 0, 'WORKSPACE_ALLOWED_ROOT_REQUIRED');
@@ -147,8 +151,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     this.executionRoot = path.posix.resolve('/', options.executionRoot);
     this.commandTimeoutMs = options.commandTimeoutMs ?? 120_000;
     this.maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
+    this.workspaceUid = options.workspaceUid ?? process.getuid?.() ?? 0;
+    this.workspaceGid = options.workspaceGid ?? process.getgid?.() ?? 0;
     failClosed(this.commandTimeoutMs >= 1_000 && this.commandTimeoutMs <= 15 * 60_000, 'WORKSPACE_GIT_TIMEOUT_INVALID');
     failClosed(this.maxBufferBytes >= 64 * 1024 && this.maxBufferBytes <= 64 * 1024 * 1024, 'WORKSPACE_GIT_BUFFER_INVALID');
+    failClosed(Number.isInteger(this.workspaceUid) && this.workspaceUid >= 0 && Number.isInteger(this.workspaceGid) && this.workspaceGid >= 0, 'WORKSPACE_OWNER_INVALID');
   }
 
   async observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation> {
@@ -238,7 +245,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         sourceRevision: input.sourceRevision,
         createdAt,
       };
-      fs.writeFileSync(path.join(staging, 'workspace.json'), JSON.stringify(descriptor, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+      const descriptorFile = path.join(staging, 'workspace.json');
+      fs.writeFileSync(descriptorFile, JSON.stringify(descriptor, null, 2) + '\n', { mode: 0o400, flag: 'wx' });
+      this.assignWorkspaceOwner(staging, stagingRepo);
+      if (input.phase === 'REVIEW') this.makeTreeReadOnly(stagingRepo);
       fs.renameSync(staging, executionDirectory);
       return descriptor;
     } catch (error) {
@@ -350,6 +360,28 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       if (lock !== undefined) fs.closeSync(lock);
       fs.rmSync(lockPath, { force: true });
     }
+  }
+
+  private assignWorkspaceOwner(executionDirectory: string, repository: string): void {
+    fs.chownSync(executionDirectory, this.workspaceUid, this.workspaceGid);
+    fs.chmodSync(executionDirectory, 0o750);
+    const visit = (entry: string): void => {
+      const stat = fs.lstatSync(entry);
+      if (stat.isSymbolicLink()) return;
+      fs.chownSync(entry, this.workspaceUid, this.workspaceGid);
+      if (stat.isDirectory()) for (const child of fs.readdirSync(entry)) visit(path.join(entry, child));
+    };
+    visit(repository);
+  }
+
+  private makeTreeReadOnly(root: string): void {
+    const visit = (entry: string): void => {
+      const stat = fs.lstatSync(entry);
+      if (stat.isSymbolicLink()) return;
+      fs.chmodSync(entry, stat.mode & ~0o222);
+      if (stat.isDirectory()) for (const child of fs.readdirSync(entry)) visit(path.join(entry, child));
+    };
+    visit(root);
   }
 
   private canonicalDirectory(value: string, code: string): string {

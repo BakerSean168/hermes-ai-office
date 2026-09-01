@@ -16,7 +16,13 @@ export class RecoveryKernel {
     }
     return this.repositories.executions.create({
       idempotencyKey: input.idempotencyKey,
-      identity: { ...current.identity, executionId: 'execution_' + input.idempotencyKey, attempt: current.identity.attempt + 1, route: input.route },
+      identity: {
+        ...current.identity,
+        executionId: 'execution_' + input.idempotencyKey,
+        parentExecutionId: current.identity.phase === 'IMPLEMENT' ? current.identity.executionId : current.identity.parentExecutionId,
+        attempt: current.identity.attempt + 1,
+        route: input.route,
+      },
       objective: current.objective,
     });
   }
