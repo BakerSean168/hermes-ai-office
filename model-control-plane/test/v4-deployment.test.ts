@@ -19,6 +19,8 @@ const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
 const release = fs.readFileSync(releasePath, 'utf8');
 const probe = fs.readFileSync(probePath, 'utf8');
 const openHandsBuild = fs.readFileSync(path.join(root, 'scripts/build-openhands-v3-source.sh'), 'utf8');
+const openHandsCompose = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
+const openHandsTooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -91,6 +93,17 @@ test('OpenHands coding runtime is built and release-gated on Node 24', () => {
   assert.match(openHandsBuild, /--build-arg BASE_IMAGE="\$BASE_IMAGE"/);
   assert.match(release, /process\.versions\.node\.split/);
   assert.match(release, /OpenHands coding runtime must use Node 24/);
+});
+
+test('OpenHands persists and prewarms exact Corepack pnpm versions without prompts', () => {
+  assert.match(openHandsCompose, /COREPACK_HOME: \/openhands-state\/corepack/);
+  assert.match(openHandsCompose, /COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'/);
+  assert.match(openHandsTooling, /COREPACK_PNPM_VERSIONS=.*10\.32\.1 11\.17\.0 11\.20\.0/);
+  assert.match(openHandsTooling, /corepack install -g "pnpm@\$version"/);
+  assert.match(release, /test "\$COREPACK_HOME" = \/openhands-state\/corepack/);
+  for (const version of ['10.32.1', '11.17.0', '11.20.0'])
+    assert.match(release, new RegExp('pnpm/' + version.replace(/\./g, '\\.') + '"'));
+  assert.match(release, /actual_version=.*pnpm --version/);
 });
 
 test('V4 release never rsyncs a build directory onto itself', () => {

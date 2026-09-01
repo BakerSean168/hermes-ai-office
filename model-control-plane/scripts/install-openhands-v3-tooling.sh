@@ -16,6 +16,22 @@ ZCODE_ACP_VERSION="${ZCODE_ACP_VERSION:-0.11.5}"
 CODEGRAPH_VERSION="${CODEGRAPH_VERSION:-1.5.0}"
 MCP_REMOTE_VERSION="${MCP_REMOTE_VERSION:-0.7.0}"
 NX_MCP_VERSION="${NX_MCP_VERSION:-0.25.0}"
+COREPACK_PNPM_VERSIONS="${COREPACK_PNPM_VERSIONS:-10.32.1 11.17.0 11.20.0}"
+
+# Keep package-manager downloads deterministic and persistent across OpenHands
+# container recreation. Each repository still selects its exact checked-in
+# packageManager version; this only pre-populates Corepack's trusted cache.
+docker exec --user 10001:10001 \
+  -e COREPACK_HOME=/openhands-state/corepack \
+  -e COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+  -e COREPACK_PNPM_VERSIONS="$COREPACK_PNPM_VERSIONS" \
+  "$CONTAINER" sh -lc '
+    set -eu
+    mkdir -p "$COREPACK_HOME"
+    for version in $COREPACK_PNPM_VERSIONS; do
+      corepack install -g "pnpm@$version"
+    done
+  '
 
 # Keep coding harness adapters in the persisted OpenHands state volume. The
 # OpenHands image remains upstream-pinned; changing a harness does not rebuild it.

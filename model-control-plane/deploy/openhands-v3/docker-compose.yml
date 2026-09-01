@@ -27,6 +27,8 @@ services:
       OPENCODE_CONFIG: /etc/hermes-ai-office-v3/opencode.json
       PYTHONPATH: /opt/hermes-ai-office-tools
       AI_OFFICE_CONTROL_PLANE_URL: http://127.0.0.1:8320
+      COREPACK_HOME: /openhands-state/corepack
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
     volumes:
       - /opt/data/hermes-ai-office-v3/workspaces:/workspace
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state

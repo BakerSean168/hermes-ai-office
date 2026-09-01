@@ -78,6 +78,25 @@ if [[ "$openhands_node_major" != "24" ]]; then
   echo "OpenHands coding runtime must use Node 24, got major $openhands_node_major" >&2
   exit 1
 fi
+sudo docker exec --user 10001:10001 hermes-openhands-v3 /bin/sh -lc '
+  test "$COREPACK_HOME" = /openhands-state/corepack
+  test "$COREPACK_ENABLE_DOWNLOAD_PROMPT" = 0
+  test -d "$COREPACK_HOME/v1/pnpm/10.32.1"
+  test -d "$COREPACK_HOME/v1/pnpm/11.17.0"
+  test -d "$COREPACK_HOME/v1/pnpm/11.20.0"
+'
+for version in 10.32.1 11.17.0 11.20.0; do
+  manager_probe="/opt/data/hermes-ai-office-v3/workspaces/v4/executions/.pixel-v4-pnpm-$probe_id-$version"
+  sudo install -d -o 10001 -g 10001 -m 0750 "$manager_probe"
+  printf '{"packageManager":"pnpm@%s"}\n' "$version" | sudo tee "$manager_probe/package.json" >/dev/null
+  sudo chown 10001:10001 "$manager_probe/package.json"
+  actual_version="$(sudo docker exec --user 10001:10001 hermes-openhands-v3 /bin/sh -lc 'cd "$1" && pnpm --version' sh "/workspace/v4/executions/.pixel-v4-pnpm-$probe_id-$version")"
+  if [[ "$actual_version" != "$version" ]]; then
+    echo "OpenHands Corepack probe expected pnpm $version, got $actual_version" >&2
+    exit 1
+  fi
+  sudo rm -rf "$manager_probe"
+done
 cleanup_probe
 trap - EXIT
 
