@@ -424,7 +424,21 @@ export class PlanAutomationRuntime {
       return await this.acceptReviewedCandidate(plan, item, candidate, review);
     if (review.status === 'FAILED')
       return this.createRepairOrFail(plan, item, candidate, review, candidates, policy);
-    if (review.status === 'STALE' || review.status === 'CANCELLED')
+    if (review.status === 'STALE') {
+      const attempt = reviews.length + 1;
+      if (attempt > policy.maxReviewAttempts)
+        return this.failPlan(plan, item, 'REVIEW_ATTEMPTS_EXHAUSTED');
+      const created = this.createReview(candidate, item, policy, attempt);
+      return {
+        planId: plan.planId,
+        workItemId: item.workItemId,
+        executionId: created.execution.identity.executionId,
+        reviewId: created.review.reviewId,
+        status: 'RUNNING',
+        code: 'REVIEW_INVALID_RETRY_QUEUED',
+      };
+    }
+    if (review.status === 'CANCELLED')
       return this.failPlan(plan, item, 'REVIEW_INVALID');
 
     if (!review.reviewerExecutionId) {

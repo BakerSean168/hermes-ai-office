@@ -112,7 +112,7 @@ class ScriptedRunner implements ExecutionRunnerPort {
   readonly runCounts = new Map<string, number>();
   readonly implementationRoutes: string[] = [];
   implementationFailures = 0;
-  reviewVerdicts: Array<'PASS' | 'FAIL'> = ['PASS'];
+  reviewVerdicts: Array<'PASS' | 'FAIL' | 'INVALID'> = ['PASS'];
   implementationRevision = 0;
 
   constructor(
@@ -327,6 +327,27 @@ test('plan automation turns review FAIL into a repair execution and independentl
   assert.equal(
     seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
     'result-sha-2',
+  );
+  seeded.db.close();
+});
+
+test('plan automation retries an INVALID review without creating a product repair execution', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  runner.reviewVerdicts = ['INVALID', 'PASS'];
+  const automation = runtime(seeded.repositories, runner, workspace);
+  const results = await drive(automation, seeded.plan.planId);
+  assert.equal(results.at(-1)?.status, 'SUCCEEDED');
+  assert.ok(results.some((result) => result.code === 'REVIEW_INVALID_RETRY_QUEUED'));
+  const executions = seeded.repositories.executions.listByPlan(seeded.plan.planId);
+  assert.equal(
+    executions.filter((execution) => execution.identity.phase === 'IMPLEMENT_FIX').length,
+    0,
+  );
+  assert.deepEqual(
+    seeded.repositories.reviews.listByPlan(seeded.plan.planId).map((review) => review.verdict),
+    ['INVALID', 'PASS'],
   );
   seeded.db.close();
 });

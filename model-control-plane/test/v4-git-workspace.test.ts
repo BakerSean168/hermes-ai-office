@@ -39,6 +39,7 @@ function repository(root: string): {
   execFileSync('git', ['init', '-q', '-b', 'main', repositoryPath]);
   git(repositoryPath, ['config', 'user.name', 'Pixel V4 Test']);
   git(repositoryPath, ['config', 'user.email', 'pixel-v4-test@local']);
+  write(path.join(repositoryPath, '.gitignore'), 'node_modules/\n');
   write(path.join(repositoryPath, 'README.md'), '# Base\n');
   const rootRevision = commit(repositoryPath, 'chore: root');
   write(path.join(repositoryPath, 'base.txt'), 'base\n');
@@ -268,6 +269,8 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
     sourceWorkspace: implementation,
   });
   assert.equal(git(review.hostPath, ['rev-parse', 'HEAD']), reviewedSha);
+  write(path.join(review.hostPath, 'node_modules', '.cache', 'review-probe'), 'runtime\n');
+  assert.equal(git(review.hostPath, ['status', '--porcelain=v1']), '');
   write(review.evidenceHostPath, JSON.stringify(reviewEvidence(review, 'wrong-sha')));
   await assert.rejects(
     () => value.adapter.verifyReview(review, reviewedSha),
@@ -293,8 +296,6 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
   const failed = await value.adapter.verifyReview(review, reviewedSha);
   if (failed.evidence.phase === 'REVIEW') assert.equal(failed.evidence.verdict, 'FAIL');
 
-  assert.throws(() => write(path.join(review.hostPath, 'blocked.txt'), 'blocked\n'));
-  fs.chmodSync(review.hostPath, 0o750);
   write(path.join(review.hostPath, 'dirty.txt'), 'dirty\n');
   await assert.rejects(
     () => value.adapter.verifyReview(review, reviewedSha),

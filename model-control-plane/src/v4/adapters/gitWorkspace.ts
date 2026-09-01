@@ -357,7 +357,9 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         flag: 'wx',
       });
       this.assignWorkspaceOwner(staging, stagingRepo);
-      if (input.phase === 'REVIEW') this.makeTreeReadOnly(stagingRepo);
+      // Review integrity is enforced at completion by exact-HEAD and clean-tree
+      // verification. The checkout itself remains writable so the reviewer can
+      // materialize lockfile-pinned dependencies and ignored tool caches.
       fs.renameSync(staging, executionDirectory);
       return descriptor;
     } catch (error) {
@@ -682,17 +684,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         for (const child of fs.readdirSync(entry)) visit(path.join(entry, child));
     };
     visit(repository);
-  }
-
-  private makeTreeReadOnly(root: string): void {
-    const visit = (entry: string): void => {
-      const stat = fs.lstatSync(entry);
-      if (stat.isSymbolicLink()) return;
-      fs.chmodSync(entry, stat.mode & ~0o222);
-      if (stat.isDirectory())
-        for (const child of fs.readdirSync(entry)) visit(path.join(entry, child));
-    };
-    visit(root);
   }
 
   private canonicalDirectory(value: string, code: string): string {

@@ -153,7 +153,11 @@ function phasePrompt(input: ProviderLaunchInput): string {
   const rules = input.phase === 'REVIEW'
     ? [
         'Perform an independent review of the exact supplied revision.',
-        'Do not edit repository files or delegate the review.',
+        'Do not edit tracked repository files or delegate the review. The workspace is writable only so checks may create ignored dependency and tool-cache artifacts.',
+        'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
+        'If dependencies are missing, bootstrap only from the checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
+        'Leave the exact supplied git HEAD unchanged and leave no tracked or non-ignored workspace changes.',
+        'Use FAIL only for a concrete defect attributable to the exact reviewed revision. Use INVALID when the environment or tooling prevents a conclusive review.',
         'The first non-empty line of the final response must be exactly PASS, FAIL, or INVALID.',
         'Use PASS only when the exact revision satisfies every acceptance criterion.',
         'Before finishing, atomically write one JSON object to ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,

@@ -57,6 +57,9 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.match(implementationBody.initial_message.content[0].text, /immutable\/frozen-lockfile mode/);
   assert.match(implementationBody.initial_message.content[0].text, /never rewrite the lockfile/);
   assert.match(reviewBody.initial_message.content[0].text, /\"phase\":\"REVIEW\"/);
+  assert.match(reviewBody.initial_message.content[0].text, /immutable\/frozen-lockfile mode/);
+  assert.match(reviewBody.initial_message.content[0].text, /Use FAIL only for a concrete defect attributable/);
+  assert.match(reviewBody.initial_message.content[0].text, /Use INVALID when the environment or tooling prevents/);
   assert.equal(implementationBody.agent.llm.api_mode, 'chat');
   assert.equal(implementationBody.agent.llm.reasoning_effort, null);
   assert.equal(implementationBody.tags.execution, 'exec1');
