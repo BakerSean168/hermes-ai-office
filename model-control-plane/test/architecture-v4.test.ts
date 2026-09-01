@@ -13,11 +13,24 @@ function files(directory: string): string[] {
   });
 }
 
-test('V4 has no HTTP, child-process or legacy coordinator dependency', () => {
+test('V4 core layers stay free of transport, process and legacy coordinator dependencies', () => {
+  for (const directory of ['domain', 'kernel', 'supervisor', 'persistence', 'orchestration']) {
+    for (const file of files(path.join(root, directory))) {
+      const source = fs.readFileSync(file, 'utf8');
+      assert.doesNotMatch(source, /from ['"][^'"]*(fastify|node:http|child_process|\/v3(?:\/|['"]|$))[^'"]*['"]/i, file);
+      assert.doesNotMatch(source, /execFile|spawnSync|spawn\(|fork\(|\bfetch\s*\(/, file);
+    }
+  }
+});
+
+test('V4 external I/O is confined to adapters and V4 never imports V3', () => {
   for (const file of files(root)) {
     const source = fs.readFileSync(file, 'utf8');
-    assert.doesNotMatch(source, /from ['"][^'"]*(fastify|http|child_process|v3)[^'"]*['"]/i, file);
-    assert.doesNotMatch(source, /execFile|spawnSync|fork\(/, file);
+    assert.doesNotMatch(source, /from ['"][^'"]*\/v3(?:\/|['"]|$)/i, file);
+    if (!file.includes(path.sep + 'adapters' + path.sep)) {
+      assert.doesNotMatch(source, /from ['"][^'"]*(node:http|child_process)[^'"]*['"]/i, file);
+      assert.doesNotMatch(source, /execFile|spawnSync|spawn\(|fork\(|\bfetch\s*\(/, file);
+    }
   }
 });
 

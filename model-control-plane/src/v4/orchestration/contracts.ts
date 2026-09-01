@@ -118,6 +118,9 @@ export interface ProviderLaunchInput {
 export interface ProviderRecoveryInput {
   executionId: string;
   createdAt: string;
+  projectKey?: string;
+  phase?: ExecutionPhase;
+  expectedWorkspacePath?: string;
 }
 
 export interface WorkspaceCompletionSnapshot {
