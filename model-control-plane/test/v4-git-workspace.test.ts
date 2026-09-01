@@ -351,12 +351,20 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   );
   fs.rmSync(integrationLock);
 
-  const integrated = await value.adapter.integrateAcceptedRevision({
-    repositoryPath: value.repositoryPath,
-    expectedRevision: value.baseRevision,
-    acceptedRevision,
-    candidateWorkspace: candidate,
-  });
+  const previousDifferentOwner = process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+  process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = '1';
+  let integrated;
+  try {
+    integrated = await value.adapter.integrateAcceptedRevision({
+      repositoryPath: value.repositoryPath,
+      expectedRevision: value.baseRevision,
+      acceptedRevision,
+      candidateWorkspace: candidate,
+    });
+  } finally {
+    if (previousDifferentOwner === undefined) delete process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER;
+    else process.env.GIT_TEST_ASSUME_DIFFERENT_OWNER = previousDifferentOwner;
+  }
   assert.equal(integrated.headRevision, acceptedRevision);
   assert.equal(integrated.clean, true);
   assert.equal(git(value.repositoryPath, ['rev-parse', 'HEAD']), acceptedRevision);

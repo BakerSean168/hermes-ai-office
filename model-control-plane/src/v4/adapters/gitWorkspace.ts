@@ -522,16 +522,24 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         error,
       );
     }
+    const transferBundle = path.join(
+      gitDirectory,
+      'pixel-v4-integration-' + randomUUID() + '.bundle',
+    );
     try {
       const current = await this.git(repositoryRoot, ['rev-parse', '--verify', 'HEAD^{commit}']);
       if (current !== input.expectedRevision) throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
       if ((await this.git(repositoryRoot, ['status', '--porcelain=v1', '-z'])).length !== 0)
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
+      // A direct local-path fetch starts git-upload-pack in the worker-owned clone. That
+      // child does not inherit our per-command safe.directory setting. An exact-HEAD
+      // bundle preserves the ownership boundary and gives the controller a passive input.
+      await this.git(candidate.hostPath, ['bundle', 'create', transferBundle, 'HEAD']);
       await this.git(repositoryRoot, [
         'fetch',
         '--no-tags',
         '--',
-        candidate.hostPath,
+        transferBundle,
         input.acceptedRevision,
       ]);
       if (
@@ -560,6 +568,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       return await this.observeRepository(repositoryRoot, input.acceptedRevision);
     } finally {
       if (lock !== undefined) fs.closeSync(lock);
+      fs.rmSync(transferBundle, { force: true });
       fs.rmSync(lockPath, { force: true });
     }
   }
