@@ -566,16 +566,36 @@ export async function buildControlPlane(
   };
 
   app.get('/api/v4/plans', async (request) => {
-    const query = request.query as { limit?: string; status?: string };
+    const query = request.query as { limit?: string; status?: string; view?: string };
     const limit = integerValue(query.limit, 100, 1, 1000, 'PLAN_LIST_LIMIT_INVALID');
     const status = query.status;
     if (status && !(PLAN_STATUSES as readonly string[]).includes(status))
       throw new V4Error('PLAN_STATUS_INVALID');
+    if (query.view && query.view !== 'full' && query.view !== 'summary')
+      throw new V4Error('PLAN_LIST_VIEW_INVALID');
     const plans = repositories.plans.listPlans({
       limit,
       ...(status ? { status: status as PlanStatus } : {}),
     });
-    return { items: plans.map((plan) => planView(plan.planId)), count: plans.length };
+    const items =
+      query.view === 'summary'
+        ? plans.map((plan) => {
+            const graph = repositories.plans.getActiveGraphVersion(plan.planId);
+            return {
+              plan,
+              graph,
+              workItems: graph
+                ? repositories.plans.listWorkItems(plan.planId, graph.graphVersionId)
+                : [],
+              executions: repositories.executions
+                .listByPlan(plan.planId)
+                .filter((execution) =>
+                  ['QUEUED', 'RUNNING', 'BLOCKED'].includes(execution.status),
+                ),
+            };
+          })
+        : plans.map((plan) => planView(plan.planId));
+    return { items, count: items.length };
   });
 
   app.post('/api/v4/plans', async (request, reply) => {

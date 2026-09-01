@@ -54,7 +54,7 @@ class V4ProjectionTest(unittest.TestCase):
                 {"tasks": [], "links": [], "runs": [], "events": []}
             )
 
-        self.assertIn("/api/v4/plans?limit=100", request.call_args.args[0].full_url)
+        self.assertIn("/api/v4/plans?limit=100&view=summary", request.call_args.args[0].full_url)
         self.assertEqual([task["id"] for task in result["tasks"]], [
             "ai-office:plan-1",
             "ai-office:graph-1",

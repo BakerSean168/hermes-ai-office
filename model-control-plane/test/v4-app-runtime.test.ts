@@ -127,6 +127,16 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(plans.json().items[0].workItems[0].itemKey, 'first');
   assert.equal(plans.json().items[0].executions.length, 1);
 
+  const planSummaries = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/plans?view=summary',
+  });
+  assert.equal(planSummaries.statusCode, 200);
+  assert.equal(planSummaries.json().items[0].executions.length, 1);
+  assert.equal(planSummaries.json().items[0].sessions, undefined);
+  assert.equal(planSummaries.json().items[0].reviews, undefined);
+  assert.equal(planSummaries.json().items[0].supervisor, undefined);
+
   const executions = await runtime.app.inject({
     method: 'GET',
     url: '/api/v4/executions?planId=' + planId + '&status=QUEUED&limit=10',

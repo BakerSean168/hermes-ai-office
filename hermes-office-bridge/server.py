@@ -315,7 +315,7 @@ def _merge_ai_office_plans(kanban):
     """Project durable V3 plans into the same read-only graph Pixel Office consumes."""
     try:
         request = urllib.request.Request(
-            AI_OFFICE_CONTROL_PLANE + "/api/v4/plans?limit=100",
+            AI_OFFICE_CONTROL_PLANE + "/api/v4/plans?limit=100&view=summary",
             headers={"Accept": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=2) as response:
