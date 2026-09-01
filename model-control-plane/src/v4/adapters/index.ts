@@ -4,3 +4,4 @@ export * from './github.js';
 export * from './antigravity.js';
 export * from './maintenance.js';
 export * from './openHandsCoding.js';
+export * from './gitWorkspace.js';

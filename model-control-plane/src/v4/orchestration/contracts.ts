@@ -135,12 +135,25 @@ export interface WorkspaceCompletionSnapshot {
   observedAt: string;
 }
 
+export interface WorkspaceProvisionInput {
+  executionId: string;
+  repositoryPath: string;
+  sourceRevision: string;
+  phase?: ExecutionPhase;
+  sourceWorkspace?: WorkspaceDescriptor;
+}
+
 export interface WorkspaceProviderPort {
   observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
-  provision(input: { executionId: string; repositoryPath: string; sourceRevision: string }): Promise<WorkspaceDescriptor>;
+  provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
   verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot>;
   verifyReview(workspace: WorkspaceDescriptor, reviewedSha: string): Promise<WorkspaceCompletionSnapshot>;
-  integrateAcceptedRevision(input: { repositoryPath: string; expectedRevision: string; acceptedRevision: string }): Promise<RepositoryObservation>;
+  integrateAcceptedRevision(input: {
+    repositoryPath: string;
+    expectedRevision: string;
+    acceptedRevision: string;
+    candidateWorkspace: WorkspaceDescriptor;
+  }): Promise<RepositoryObservation>;
 }
 
 export interface ExecutionProviderPort {
