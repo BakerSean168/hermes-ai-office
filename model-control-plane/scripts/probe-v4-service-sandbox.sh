@@ -8,9 +8,10 @@ memo_git_probe="${4:?MemoFlow Git common-dir probe file required}"
 digital_probe="${5:?Digital Biome probe file required}"
 owner_uid="${6:?workspace owner uid required}"
 owner_gid="${7:?workspace owner gid required}"
+repository_probe="${digital_probe}.repository-owner"
 
 cleanup() {
-  rm -rf -- "$probe_dir"
+  rm -rf -- "$probe_dir" "$repository_probe"
   rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe"
 }
 trap cleanup EXIT
@@ -46,7 +47,9 @@ NODE
 
 # Exercise Git itself under the repository identity, then prove a root-owned
 # observation with optional locks disabled cannot replace the owner-written index.
-repository_probe="$probe_dir/repository-owner"
+# The worker-managed workspace root intentionally blocks the source repository
+# owner from traversing it. Exercise identity-dropped Git in the real source-repo
+# boundary instead, where that owner is expected to have access.
 mkdir -- "$repository_probe"
 /usr/bin/git init -q -b main "$repository_probe"
 printf 'probe\n' >"$repository_probe/README.md"
