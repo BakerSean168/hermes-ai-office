@@ -28,6 +28,17 @@ export interface OpenHandsProviderOptions {
   reviewModel?: string;
 }
 
+export interface CodexBusinessReviewOptions {
+  command?: string[];
+  acpServer?: string;
+  authHome?: string;
+  codexBin?: string;
+  workspaceRoot?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  promptTimeoutSeconds?: number;
+  startupTimeoutSeconds?: number;
+}
+
 interface NormalizedOptions {
   baseUrl: string;
   sessionApiKey: string;
@@ -292,6 +303,43 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     return await this.inspect(providerSessionId);
   }
 
+  protected conversationAgent(
+    input: ProviderLaunchInput,
+    tools: Array<{ name: string }>,
+  ): JsonRecord {
+    const model = this.mode === 'REVIEW' ? this.options.reviewModel : this.options.implementationModel;
+    return {
+      kind: 'Agent',
+      llm: {
+        model: 'litellm_proxy/' + model,
+        api_key: this.options.liteLlmApiKey,
+        base_url: this.options.liteLlmBaseUrl,
+        api_mode: 'chat',
+        reasoning_effort: null,
+        num_retries: 1,
+        timeout: this.options.llmTimeoutSeconds,
+        litellm_extra_body: { user: input.executionId },
+      },
+      tools,
+      include_default_tools: ['FinishTool', 'ThinkTool'],
+      agent_context: {
+        load_project_skills: true,
+        load_user_skills: false,
+        load_public_skills: false,
+        system_message_suffix: this.mode === 'REVIEW'
+          ? 'You are an independent read-only reviewer. Never edit files and never ask the user questions.'
+          : 'You are a bounded implementation worker. Never ask the user questions; implement, test, commit, and finish.',
+      },
+    };
+  }
+
+  protected conversationSecrets(_input: ProviderLaunchInput): JsonRecord {
+    return {
+      CI: { kind: 'StaticSecret', value: '1' },
+      NX_TUI: { kind: 'StaticSecret', value: 'false' },
+    };
+  }
+
   private validateLaunchInput(input: ProviderLaunchInput): void {
     this.validatePhase(input.phase);
     failClosed(input.executionId.trim().length > 0, 'EXECUTION_ID_REQUIRED');
@@ -319,33 +367,10 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
           ? 'openhands.tools.file_editor.definition'
           : 'openhands.tools.task_tracker.definition',
     ]));
-    const model = this.mode === 'REVIEW' ? this.options.reviewModel : this.options.implementationModel;
     const payload = {
       workspace: { kind: 'LocalWorkspace', working_dir: input.workspace.executionPath },
       confirmation_policy: { kind: 'NeverConfirm' },
-      agent: {
-        kind: 'Agent',
-        llm: {
-          model: 'litellm_proxy/' + model,
-          api_key: this.options.liteLlmApiKey,
-          base_url: this.options.liteLlmBaseUrl,
-          api_mode: 'chat',
-          reasoning_effort: null,
-          num_retries: 1,
-          timeout: this.options.llmTimeoutSeconds,
-          litellm_extra_body: { user: input.executionId },
-        },
-        tools,
-        include_default_tools: ['FinishTool', 'ThinkTool'],
-        agent_context: {
-          load_project_skills: true,
-          load_user_skills: false,
-          load_public_skills: false,
-          system_message_suffix: this.mode === 'REVIEW'
-            ? 'You are an independent read-only reviewer. Never edit files and never ask the user questions.'
-            : 'You are a bounded implementation worker. Never ask the user questions; implement, test, commit, and finish.',
-        },
-      },
+      agent: this.conversationAgent(input, tools),
       tool_module_qualnames: toolModuleQualnames,
       initial_message: { role: 'user', content: [{ type: 'text', text: initialText }], run: true },
       max_iterations: this.options.maxIterations,
@@ -360,10 +385,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         role: this.mode === 'REVIEW' ? 'independentreview' : 'implementation',
         ...extraTags,
       },
-      secrets: {
-        CI: { kind: 'StaticSecret', value: '1' },
-        NX_TUI: { kind: 'StaticSecret', value: 'false' },
-      },
+      secrets: this.conversationSecrets(input),
       observability_metadata: {
         executionId: input.executionId,
         planId: input.planId,
@@ -542,6 +564,65 @@ export class OpenHandsReviewProvider extends OpenHandsProviderBase implements Re
   readonly provider = 'openhands-independent-review';
   readonly independentReview = true as const;
   protected readonly mode = 'REVIEW' as const;
+}
+
+export class OpenHandsCodexBusinessReviewProvider extends OpenHandsProviderBase implements ReviewProviderPort {
+  readonly provider = 'codex-business-independent-review';
+  readonly independentReview = true as const;
+  protected readonly mode = 'REVIEW' as const;
+  readonly business: Required<CodexBusinessReviewOptions>;
+
+  constructor(options: OpenHandsProviderOptions, business: CodexBusinessReviewOptions = {}) {
+    super(options);
+    const command = business.command ?? [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ];
+    failClosed(command.length > 0 && command.every((item) => item.trim().length > 0), 'CODEX_BUSINESS_COMMAND_REQUIRED');
+    const promptTimeoutSeconds = business.promptTimeoutSeconds ?? 1_200;
+    const startupTimeoutSeconds = business.startupTimeoutSeconds ?? 90;
+    failClosed(Number.isInteger(promptTimeoutSeconds) && promptTimeoutSeconds >= 30 && promptTimeoutSeconds <= 1_800, 'CODEX_BUSINESS_TIMEOUT_INVALID');
+    failClosed(Number.isInteger(startupTimeoutSeconds) && startupTimeoutSeconds >= 10 && startupTimeoutSeconds <= 300, 'CODEX_BUSINESS_STARTUP_TIMEOUT_INVALID');
+    this.business = {
+      command,
+      acpServer: business.acpServer ?? 'custom',
+      authHome: business.authHome ?? '/openhands-state/codex-business',
+      codexBin: business.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+      workspaceRoot: business.workspaceRoot ?? '/workspace',
+      reasoningEffort: business.reasoningEffort ?? 'medium',
+      promptTimeoutSeconds,
+      startupTimeoutSeconds,
+    };
+  }
+
+  protected override conversationAgent(_input: ProviderLaunchInput, _tools: Array<{ name: string }>): JsonRecord {
+    return {
+      kind: 'ACPAgent',
+      acp_command: this.business.command,
+      acp_server: this.business.acpServer,
+      acp_prompt_timeout: this.business.promptTimeoutSeconds,
+      acp_startup_timeout: this.business.startupTimeoutSeconds,
+      acp_model: this.options.reviewModel,
+    };
+  }
+
+  protected override conversationSecrets(input: ProviderLaunchInput): JsonRecord {
+    return {
+      ...super.conversationSecrets(input),
+      AI_OFFICE_HEADLESS_DRIVER: { kind: 'StaticSecret', value: 'codex' },
+      AI_OFFICE_HEADLESS_ROLE: { kind: 'StaticSecret', value: 'review' },
+      AI_OFFICE_HEADLESS_TRANSPORT: { kind: 'StaticSecret', value: 'provider-native' },
+      AI_OFFICE_HEADLESS_MODEL: { kind: 'StaticSecret', value: this.options.reviewModel },
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: { kind: 'StaticSecret', value: this.business.reasoningEffort },
+      AI_OFFICE_CODEX_AUTH_HOME: { kind: 'StaticSecret', value: this.business.authHome },
+      AI_OFFICE_CODEX_BIN: { kind: 'StaticSecret', value: this.business.codexBin },
+      AI_OFFICE_WORKSPACE_ROOT: { kind: 'StaticSecret', value: this.business.workspaceRoot },
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: { kind: 'StaticSecret', value: String(this.business.promptTimeoutSeconds) },
+      PIXEL_V4_REVIEW_EVIDENCE_PATH: { kind: 'StaticSecret', value: input.workspace.evidenceExecutionPath },
+      PIXEL_V4_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
+      PIXEL_V4_REVIEWED_SHA: { kind: 'StaticSecret', value: input.sourceRevision },
+    };
+  }
 }
 
 export function createOpenHandsProviders(options: OpenHandsProviderOptions): {

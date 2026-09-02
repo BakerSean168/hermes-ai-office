@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 
 import { LocalGitWorkspaceAdapter } from './v4/adapters/gitWorkspace.js';
 import {
+  OpenHandsCodexBusinessReviewProvider,
   OpenHandsExecutionProvider,
   OpenHandsReviewProvider,
 } from './v4/adapters/openHandsCoding.js';
@@ -187,6 +188,7 @@ function buildExecutionAutomation(
     'implementation-glm=glm-5.2',
   ]);
   const reviewSpecs = routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, [
+    'codex-business-review=gpt-5.6-sol',
     'gpt-5.6-sol',
     'codex-auto-review',
     'review-glm=glm-5.2',
@@ -231,7 +233,9 @@ function buildExecutionAutomation(
     })),
     ...reviewSpecs.map(({ route, model }) => ({
       route,
-      provider: new OpenHandsReviewProvider({ ...common, reviewModel: model }),
+      provider: route === 'codex-business-review'
+        ? new OpenHandsCodexBusinessReviewProvider({ ...common, reviewModel: model })
+        : new OpenHandsReviewProvider({ ...common, reviewModel: model }),
     })),
   ];
   const workspace = new LocalGitWorkspaceAdapter({

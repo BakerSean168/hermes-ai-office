@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
-import { OpenHandsExecutionProvider, OpenHandsReviewProvider, mapOpenHandsStatus } from '../src/v4/adapters/openHandsCoding.js';
+import { OpenHandsCodexBusinessReviewProvider, OpenHandsExecutionProvider, OpenHandsReviewProvider, mapOpenHandsStatus } from '../src/v4/adapters/openHandsCoding.js';
 import type { ProviderLaunchInput, ProviderSessionReplacementInput } from '../src/v4/orchestration/contracts.js';
 
 const secrets = { sessionApiKey: 'session-secret-value', liteLlmApiKey: 'sk-super-secret-value' };
@@ -68,6 +68,34 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.equal(JSON.stringify(implementationSnapshot).includes(secrets.liteLlmApiKey), false);
   await assert.rejects(() => implementation.launch(launchInput('REVIEW')), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_IMPLEMENTATION_PHASE_REQUIRED');
   await assert.rejects(() => review.launch(launchInput('IMPLEMENT')), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_REVIEW_PHASE_REQUIRED');
+});
+
+test('Business Codex review launches provider-native ACP with persisted ChatGPT auth and V4 evidence metadata', async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    requests.push({ url: String(url), init });
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    return new Response(JSON.stringify({
+      id: 'business-review-session', execution_status: 'running', workspace: body.workspace, tags: body.tags,
+    }), { status: 201, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  const review = new OpenHandsCodexBusinessReviewProvider(options(fake));
+  const snapshot = await review.launch(launchInput('REVIEW'));
+  assert.equal(snapshot.provider, 'codex-business-independent-review');
+  assert.equal(review.independentReview, true);
+  const body = JSON.parse(String(requests[0]!.init.body)) as Record<string, any>;
+  assert.equal(body.agent.kind, 'ACPAgent');
+  assert.deepEqual(body.agent.acp_command, ['/usr/local/bin/node', '/opt/hermes-ai-office-tools/headless_review_acp.mjs']);
+  assert.equal(body.agent.acp_model, 'gpt-5.6-sol');
+  assert.equal(body.agent.llm, undefined);
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value, 'provider-native');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'review');
+  assert.equal(body.secrets.AI_OFFICE_CODEX_AUTH_HOME.value, '/openhands-state/codex-business');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value, 'medium');
+  assert.equal(body.secrets.PIXEL_V4_REVIEW_EVIDENCE_PATH.value, '/workspace/executions/exec-1/evidence.json');
+  assert.equal(body.secrets.PIXEL_V4_EXECUTION_ID.value, 'exec-1');
+  assert.equal(body.secrets.PIXEL_V4_REVIEWED_SHA.value, 'source-sha');
+  assert.equal(JSON.stringify(body).includes(secrets.liteLlmApiKey), false);
 });
 
 test('OpenHands launch explicitly runs an idle initial conversation before returning', async () => {

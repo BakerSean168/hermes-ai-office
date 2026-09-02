@@ -132,7 +132,7 @@ const runtime = payload.executionRuntime ?? {};
 if (payload.status !== 'ok' || payload.apiVersion !== 4) process.exit(1);
 if (runtime.enabled !== true || runtime.autonomousPolling !== true) process.exit(1);
 if (!Array.isArray(runtime.implementationRoutes) || runtime.implementationRoutes[0] !== 'gpt-5.6-luna') process.exit(1);
-if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes[0] !== 'gpt-5.6-sol') process.exit(1);
+if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes[0] !== 'codex-business-review') process.exit(1);
 if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome'])) process.exit(1);
 NODE
     then

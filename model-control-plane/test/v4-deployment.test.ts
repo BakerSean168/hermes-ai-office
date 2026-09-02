@@ -22,6 +22,7 @@ const openHandsBuild = fs.readFileSync(path.join(root, 'scripts/build-openhands-
 const openHandsCompose = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
 const openHandsTooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
 const gitWorkspace = fs.readFileSync(path.join(root, 'src/v4/adapters/gitWorkspace.ts'), 'utf8');
+const headlessReview = fs.readFileSync(path.join(root, 'openhands_tools/headless_review_acp.mjs'), 'utf8');
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -38,7 +39,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.match(
     service,
-    /MODEL_CP_V4_REVIEW_ROUTES=gpt-5\.6-sol,codex-auto-review,review-glm=glm-5\.2/,
+    /MODEL_CP_V4_REVIEW_ROUTES=codex-business-review=gpt-5\.6-sol,gpt-5\.6-sol,codex-auto-review,review-glm=glm-5\.2/,
   );
   assert.match(service, /ProtectSystem=strict/);
   assert.match(service, /ProtectHome=read-only/);
@@ -83,10 +84,20 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /await backup\(db, target\)/);
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.implementationRoutes\[0\] !== 'gpt-5\.6-luna'/);
-  assert.match(release, /runtime\.reviewRoutes\[0\] !== 'gpt-5\.6-sol'/);
+  assert.match(release, /runtime\.reviewRoutes\[0\] !== 'codex-business-review'/);
   assert.match(release, /runtime\.automationProjectKeys/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
+});
+
+test('V4 Business Codex review is provider-native and bridges durable review evidence', () => {
+  assert.match(service, /MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=4/);
+  assert.match(headlessReview, /PIXEL_V4_REVIEW_EVIDENCE_PATH/);
+  assert.match(headlessReview, /PIXEL_V4_EXECUTION_ID/);
+  assert.match(headlessReview, /PIXEL_V4_REVIEWED_SHA/);
+  assert.match(headlessReview, /writePixelV4ReviewEvidence/);
+  assert.match(headlessReview, /HEADLESS_TRANSPORT === 'provider-native'/);
+  assert.match(headlessReview, /delete env\.CODEX_API_KEY/);
 });
 
 test('OpenHands coding runtime is built and release-gated on Node 24', () => {

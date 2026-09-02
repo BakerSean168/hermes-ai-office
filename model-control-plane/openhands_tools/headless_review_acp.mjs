@@ -37,6 +37,9 @@ const OUTPUT_LIMIT = 16 * 1024 * 1024;
 const EVIDENCE_LIMIT = 768 * 1024;
 const UNTRACKED_FILE_LIMIT = 128 * 1024;
 const MAX_UNTRACKED_FILES = 80;
+const PIXEL_V4_REVIEW_EVIDENCE_PATH = process.env.PIXEL_V4_REVIEW_EVIDENCE_PATH ?? '';
+const PIXEL_V4_EXECUTION_ID = process.env.PIXEL_V4_EXECUTION_ID ?? '';
+const PIXEL_V4_REVIEWED_SHA = process.env.PIXEL_V4_REVIEWED_SHA ?? '';
 
 const REVIEW_SCHEMA = {
   type: 'object',
@@ -53,6 +56,20 @@ const REVIEW_SCHEMA = {
           evidence: { type: 'string' },
         },
         required: ['severity', 'title', 'evidence'],
+        additionalProperties: false,
+      },
+    },
+    checks: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          status: { type: 'string', enum: ['PASS', 'FAIL', 'SKIP'] },
+          exitCode: { type: 'integer' },
+          summary: { type: 'string' },
+        },
+        required: ['command', 'status', 'exitCode', 'summary'],
         additionalProperties: false,
       },
     },
@@ -425,6 +442,103 @@ function parseClaudeResult(stdout) {
   throw new Error('CLAUDE_STRUCTURED_REVIEW_MISSING');
 }
 
+function successfulCodexChecks(stdout) {
+  const checks = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const item = event?.item;
+      if (item?.type !== 'command_execution') continue;
+      const command = typeof item.command === 'string' ? item.command.trim() : '';
+      const exitCode = Number(item.exit_code ?? item.exitCode);
+      if (!command || !Number.isInteger(exitCode) || exitCode !== 0) continue;
+      const output = typeof item.aggregated_output === 'string'
+        ? item.aggregated_output
+        : typeof item.output === 'string'
+          ? item.output
+          : '';
+      checks.push({
+        command: command.slice(0, 2_000),
+        status: 'PASS',
+        exitCode,
+        summary: (output.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? 'command exited 0').slice(0, 2_000),
+      });
+      if (checks.length >= 20) break;
+    } catch {
+      // Ignore non-JSON event lines.
+    }
+  }
+  return checks;
+}
+
+function normalizedReviewChecks(value, stdout) {
+  const checks = Array.isArray(value?.checks) ? value.checks : [];
+  const normalized = [];
+  for (const item of checks) {
+    if (!item || typeof item !== 'object') continue;
+    const command = typeof item.command === 'string' ? item.command.trim() : '';
+    const status = ['PASS', 'FAIL', 'SKIP'].includes(item.status) ? item.status : null;
+    const exitCode = Number(item.exitCode);
+    const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
+    if (!command || !status || !Number.isInteger(exitCode)) continue;
+    normalized.push({
+      command: command.slice(0, 2_000),
+      status,
+      exitCode,
+      summary: (summary || `command ${status.toLowerCase()}`).slice(0, 2_000),
+    });
+    if (normalized.length >= 20) break;
+  }
+  return normalized.length ? normalized : successfulCodexChecks(stdout);
+}
+
+function writePixelV4ReviewEvidence(session, value, stdout) {
+  if (!PIXEL_V4_REVIEW_EVIDENCE_PATH) return;
+  if (!PIXEL_V4_EXECUTION_ID || !PIXEL_V4_REVIEWED_SHA) {
+    throw new Error('PIXEL_V4_REVIEW_EVIDENCE_METADATA_MISSING');
+  }
+  const target = path.resolve(PIXEL_V4_REVIEW_EVIDENCE_PATH);
+  const executionRoot = path.dirname(session.cwd);
+  if (
+    path.dirname(target) !== executionRoot ||
+    path.basename(target) !== 'completion-evidence.json'
+  ) {
+    throw new Error('PIXEL_V4_REVIEW_EVIDENCE_PATH_INVALID');
+  }
+  const checks = normalizedReviewChecks(value, stdout);
+  if (value?.verdict === 'PASS' && (!checks.some((item) => item.status === 'PASS') || checks.some((item) => item.status === 'FAIL'))) {
+    throw new Error('PIXEL_V4_REVIEW_CHECK_EVIDENCE_INVALID');
+  }
+  const findings = Array.isArray(value?.findings)
+    ? value.findings
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => {
+          const severity = ['P0', 'P1', 'P2', 'P3'].includes(item.severity) ? item.severity : 'P2';
+          const title = typeof item.title === 'string' ? item.title.trim() : 'Finding';
+          const evidence = typeof item.evidence === 'string' ? item.evidence.trim() : '';
+          return `[${severity}] ${title}${evidence ? ` — ${evidence}` : ''}`.slice(0, 4_000);
+        })
+    : [];
+  const evidence = {
+    version: 1,
+    executionId: PIXEL_V4_EXECUTION_ID,
+    phase: 'REVIEW',
+    reviewedSha: PIXEL_V4_REVIEWED_SHA,
+    verdict: value.verdict,
+    findings,
+    checks,
+    summary: (typeof value?.summary === 'string' && value.summary.trim()
+      ? value.summary.trim()
+      : value?.verdict === 'PASS'
+        ? 'No blocking findings.'
+        : 'Blocking findings exist.').slice(0, 8_000),
+  };
+  const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  fs.writeFileSync(temporary, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, target);
+}
+
 function codexIndependentActivity(stdout) {
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -552,7 +666,7 @@ function codexCommand(session, prompt, evidence) {
   const schemaPath = path.join(sessionDir, 'review-schema.json');
   fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
-  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
+  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. When the output schema exposes a checks field, record the exact focused verification commands you ran, their real exit codes, and concise results. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. The snapshot is physically read-only; if verification needs writes, copy it to a fresh directory under /tmp and test that disposable copy. Do not modify the snapshot.`;
   return {
     command: CODEX_BIN,
     args: [
@@ -869,9 +983,11 @@ class HeadlessReviewAgent {
         return { stopReason: 'end_turn' };
       }
 
+      const parsed = spec.parse(result.stdout);
+      if (!IS_WORKER && !IS_PLANNER) writePixelV4ReviewEvidence(session, parsed, result.stdout);
       const canonical = IS_WORKER || IS_PLANNER
-        ? String(spec.parse(result.stdout)).trim()
-        : canonicalReview(spec.parse(result.stdout));
+        ? String(parsed).trim()
+        : canonicalReview(parsed);
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,
         update: {

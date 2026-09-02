@@ -26,9 +26,9 @@ Environment=MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT=/workspace
 Environment=MODEL_CP_V4_WORKSPACE_UID=10001
 Environment=MODEL_CP_V4_WORKSPACE_GID=10001
 Environment=MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5.6-luna,implementation-efficient,implementation-glm=glm-5.2
-Environment=MODEL_CP_V4_REVIEW_ROUTES=gpt-5.6-sol,codex-auto-review,review-glm=glm-5.2
+Environment=MODEL_CP_V4_REVIEW_ROUTES=codex-business-review=gpt-5.6-sol,gpt-5.6-sol,codex-auto-review,review-glm=glm-5.2
 Environment=MODEL_CP_V4_MAX_IMPLEMENTATION_ATTEMPTS=3
-Environment=MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=3
+Environment=MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=4
 Environment=MODEL_CP_V4_MAX_REPAIR_CYCLES=3
 EnvironmentFile=/srv/hermes-personal/secrets/model-control-plane-v3.env
 EnvironmentFile=/srv/hermes-personal/secrets/openhands-v3.env

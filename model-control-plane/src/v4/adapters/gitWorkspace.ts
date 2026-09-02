@@ -755,7 +755,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     const lexical = this.canonicalDirectory(repositoryPath, 'WORKSPACE_REPOSITORY_INVALID');
     if (!this.allowedRoots.some((root) => inside(lexical, root)))
       throw new V4Error('WORKSPACE_REPOSITORY_NOT_ALLOWED');
-    const root = path.resolve(await this.git(lexical, ['rev-parse', '--show-toplevel']));
+    const repositoryIdentity = this.repositoryIdentity(lexical);
+    const root = path.resolve(
+      await this.git(lexical, ['rev-parse', '--show-toplevel'], repositoryIdentity),
+    );
     const real = this.canonicalDirectory(root, 'WORKSPACE_REPOSITORY_INVALID');
     if (!this.allowedRoots.some((allowed) => inside(real, allowed)))
       throw new V4Error('WORKSPACE_REPOSITORY_NOT_ALLOWED');
