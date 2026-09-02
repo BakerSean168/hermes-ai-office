@@ -131,7 +131,7 @@ export function mapOpenHandsStatus(value: unknown): ProviderSessionStatus {
 }
 
 function retryableFailure(code: string, detail: string): boolean {
-  return /(?:timeout|connection|rate.?limit|service.?unavailable|internal.?server|http[_ ]?(?:429|5\d\d)|\b429\b|\b5\d\d\b)/i.test(code + ' ' + detail);
+  return /(?:timeout|connection|rate.?limit|service.?unavailable|internal.?server|authentication|invalid api key|unauthorized|forbidden|no deployments available|http[_ ]?(?:401|403|429|5\d\d)|\b(?:401|403|429|5\d\d)\b)/i.test(code + ' ' + detail);
 }
 
 function phasePrompt(input: ProviderLaunchInput): string {

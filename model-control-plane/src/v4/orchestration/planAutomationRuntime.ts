@@ -94,6 +94,11 @@ const FINALIZATION_RECOVERY_CODES = new Set([
 ]);
 const REVIEW_RECOVERY_EVIDENCE_NAME = 'operator-review-recovery';
 
+function routeUnavailableFailure(execution: Execution): boolean {
+  const detail = execution.errorCode ?? '';
+  return /(?:authentication|invalid api key|unauthorized|forbidden|http[_ ]?(?:401|403)|\b401\b|\b403\b|no deployments available|deployment unavailable)/i.test(detail);
+}
+
 export class StaticPlanAutomationPolicyResolver implements PlanAutomationPolicyResolver {
   readonly overrides: ReadonlyMap<string, PlanAutomationPolicy>;
   readonly allowedProjectKeys?: ReadonlySet<string>;
@@ -287,7 +292,7 @@ export class PlanAutomationRuntime {
       throw new V4Error('PLAN_RECOVERY_EXECUTION_INVALID');
     const finalizationRecovery =
       Boolean(candidate.errorCode && FINALIZATION_RECOVERY_CODES.has(candidate.errorCode));
-    if (!candidate.retryable && !finalizationRecovery)
+    if (!candidate.retryable && !finalizationRecovery && !routeUnavailableFailure(candidate))
       return {
         planId,
         workItemId: item.workItemId,
@@ -633,7 +638,7 @@ export class PlanAutomationRuntime {
     candidates: Execution[],
     policy: NormalizedPolicy,
   ): PlanAutomationResult {
-    if (!candidate.retryable) return this.failPlan(plan, item, 'IMPLEMENTATION_NOT_RETRYABLE');
+    if (!candidate.retryable && !routeUnavailableFailure(candidate)) return this.failPlan(plan, item, 'IMPLEMENTATION_NOT_RETRYABLE');
     if (candidate.identity.phase === 'IMPLEMENT') {
       const attempts = candidates.filter(
         (execution) => execution.identity.phase === 'IMPLEMENT',

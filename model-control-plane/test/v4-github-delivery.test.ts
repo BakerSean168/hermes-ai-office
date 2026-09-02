@@ -186,3 +186,30 @@ test('GitHub delivery publishes exact-head Hermes governance before satisfying a
   assert.ok(publish!.args.includes('target_url=https://github.com/acme/repo/pull/10'));
   fs.rmSync(value.root, { recursive: true, force: true });
 });
+
+
+test('GitHub delivery waits when GitHub still reports the PR blocked after configured checks pass', async () => {
+  const value = fixture();
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const spawn = ((command: string, args: readonly string[]) => {
+    const argv = [...args];
+    calls.push({ command, args: argv });
+    if (command === '/usr/bin/getent') return result(`dev:x:${fs.statSync(value.root).uid}:${fs.statSync(value.root).gid}:dev:/tmp:/bin/bash\n`);
+    if (command === '/usr/bin/git') {
+      if (argv.includes('rev-parse')) return result('head-sha\n');
+      if (argv.includes('status')) return result('');
+      if (argv.includes('check-ref-format')) return result('');
+      if (argv.includes('remote') && argv.includes('get-url')) return result('https://github.com/acme/repo.git\n');
+      if (argv.includes('ls-remote')) return result('head-sha\trefs/heads/pixel/exact-delivery\n');
+    }
+    if (command === '/usr/bin/gh' && argv[0] === 'pr' && argv[1] === 'list') {
+      return result(JSON.stringify([{ number: 11, state: 'OPEN', url: 'https://github.com/acme/repo/pull/11', headRefOid: 'head-sha', mergeStateStatus: 'BLOCKED', statusCheckRollup: [{ name: 'CI', status: 'COMPLETED', conclusion: 'SUCCESS' }] }]));
+    }
+    return result('', 'unexpected command: ' + command + ' ' + argv.join(' '), 1);
+  }) as any;
+  const adapter = new GitHubCliDeliveryAdapter({ allowedRepositoryRoots: [value.root], spawn });
+  const observed = await adapter.advance(value.plan, value.delivery);
+  assert.equal(observed.status, 'CHECKS_PENDING');
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/gh' && call.args[1] === 'merge'));
+  fs.rmSync(value.root, { recursive: true, force: true });
+});

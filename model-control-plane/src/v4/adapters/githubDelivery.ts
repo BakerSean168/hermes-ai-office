@@ -111,7 +111,10 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     const checkState = this.checkState(checks, delivery.requiredChecks);
     if (checkState === 'FAILED') throw new V4Error('DELIVERY_REQUIRED_CHECK_FAILED');
     if (checkState === 'PENDING') return { status: 'CHECKS_PENDING', ...base };
-    if (String(pullRequest.mergeStateStatus ?? '').toUpperCase() === 'BEHIND') throw new V4Error('DELIVERY_TARGET_BRANCH_ADVANCED');
+    const mergeState = String(pullRequest.mergeStateStatus ?? '').toUpperCase();
+    if (mergeState === 'BEHIND') throw new V4Error('DELIVERY_TARGET_BRANCH_ADVANCED');
+    if (mergeState === 'DIRTY') throw new V4Error('DELIVERY_PR_CONFLICT');
+    if (mergeState === 'BLOCKED' || mergeState === 'UNKNOWN') return { status: 'CHECKS_PENDING', ...base };
     if (!delivery.autoMerge) return { status: 'PR_OPEN', ...base };
 
     const mergeFlag = delivery.mergeMethod === 'squash' ? '--squash' : delivery.mergeMethod === 'rebase' ? '--rebase' : '--merge';

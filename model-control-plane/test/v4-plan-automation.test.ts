@@ -623,6 +623,36 @@ test('plan reconcile recovers after a crash that durably queued the retry before
   seeded.db.close();
 });
 
+test('plan reconcile switches routes for a historical provider authentication failure even when legacy evidence marked it non-retryable', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const passiveRunner: ExecutionRunnerPort = {
+    runExecution: async (executionId) => ({ executionId, status: 'RUNNING', code: 'RUNNING' }),
+  };
+  const automation = runtime(seeded.repositories, passiveRunner, workspace);
+  const queued = await automation.runPlan(seeded.plan.planId);
+  const executionId = queued.executionId!;
+  const item = seeded.repositories.plans.getWorkItem(queued.workItemId!);
+  seeded.repositories.executions.updateStatus(executionId, 'RUNNING');
+  seeded.repositories.executions.recordResult(executionId, {
+    status: 'FAILED',
+    errorCode: 'LLMAuthenticationError: Invalid API key (HTTP 401)',
+    retryable: false,
+  });
+  seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
+  seeded.repositories.plans.updateStatus(seeded.plan.planId, 'FAILED');
+
+  const result = await automation.reconcilePlan(seeded.plan.planId, 'auto');
+  assert.equal(result.status, 'RUNNING');
+  assert.equal(result.code, 'IMPLEMENTATION_RECOVERY_QUEUED');
+  assert.notEqual(result.executionId, executionId);
+  const recovery = seeded.repositories.executions.get(result.executionId!);
+  assert.equal(recovery.identity.route, 'implementation-efficient');
+  assert.equal(recovery.identity.sourceRevision, 'base-sha');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'RUNNING');
+  seeded.db.close();
+});
+
 test('plan reconcile refuses unrelated non-retryable failures and preserves the failed plan', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();
