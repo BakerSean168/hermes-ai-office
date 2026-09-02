@@ -18,11 +18,23 @@ const releasePath = path.join(root, 'scripts/release-v4-gcp.sh');
 const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
 const release = fs.readFileSync(releasePath, 'utf8');
 const probe = fs.readFileSync(probePath, 'utf8');
-const openHandsBuild = fs.readFileSync(path.join(root, 'scripts/build-openhands-v3-source.sh'), 'utf8');
-const openHandsCompose = fs.readFileSync(path.join(root, 'deploy/openhands-v3/docker-compose.yml'), 'utf8');
-const openHandsTooling = fs.readFileSync(path.join(root, 'scripts/install-openhands-v3-tooling.sh'), 'utf8');
+const openHandsBuild = fs.readFileSync(
+  path.join(root, 'scripts/build-openhands-v3-source.sh'),
+  'utf8',
+);
+const openHandsCompose = fs.readFileSync(
+  path.join(root, 'deploy/openhands-v3/docker-compose.yml'),
+  'utf8',
+);
+const openHandsTooling = fs.readFileSync(
+  path.join(root, 'scripts/install-openhands-v3-tooling.sh'),
+  'utf8',
+);
 const gitWorkspace = fs.readFileSync(path.join(root, 'src/v4/adapters/gitWorkspace.ts'), 'utf8');
-const headlessReview = fs.readFileSync(path.join(root, 'openhands_tools/headless_review_acp.mjs'), 'utf8');
+const headlessReview = fs.readFileSync(
+  path.join(root, 'openhands_tools/headless_review_acp.mjs'),
+  'utf8',
+);
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -32,7 +44,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
-  assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome/);
+  assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
   assert.match(
     service,
     /MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5\.6-luna,implementation-efficient,implementation-glm=glm-5\.2/,
@@ -55,8 +67,14 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
       new RegExp('ReadWritePaths=' + writable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
     );
   assert.doesNotMatch(service, /ReadWritePaths=\/home\/dev\/projects\s*$/m);
-  assert.match(service, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
-  assert.match(service, /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
+  assert.match(
+    service,
+    /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/,
+  );
+  assert.match(
+    service,
+    /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/,
+  );
   assert.doesNotMatch(service, /(?:SESSION_API_KEY|LITELLM_V3_KEY|OH_SECRET_KEY)=\S+/);
 });
 
@@ -102,12 +120,18 @@ test('V4 Business Codex review is provider-native and bridges durable review evi
   assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
   assert.match(headlessReview, /HEADLESS_TRANSPORT === 'provider-native'/);
   assert.match(headlessReview, /HEADLESS_ROLE === 'review' \? 'openhands-review' : 'openhands'/);
-  assert.match(headlessReview, /Verification may create ignored dependency or tool-cache artifacts/);
+  assert.match(
+    headlessReview,
+    /Verification may create ignored dependency or tool-cache artifacts/,
+  );
   assert.match(headlessReview, /delete env\.CODEX_API_KEY/);
 });
 
 test('OpenHands coding runtime is built and release-gated on Node 24', () => {
-  assert.match(openHandsBuild, /OPENHANDS_BASE_IMAGE:-nikolaik\/python-nodejs:python3\.13-nodejs24-slim/);
+  assert.match(
+    openHandsBuild,
+    /OPENHANDS_BASE_IMAGE:-nikolaik\/python-nodejs:python3\.13-nodejs24-slim/,
+  );
   assert.match(openHandsBuild, /--build-arg BASE_IMAGE="\$BASE_IMAGE"/);
   assert.match(release, /process\.versions\.node\.split/);
   assert.match(release, /OpenHands coding runtime must use Node 24/);
@@ -141,7 +165,10 @@ test('V4 release never rsyncs a build directory onto itself', () => {
 
 test('V4 release proves the exact service sandbox can read, chown and write only approved paths', () => {
   assert.match(release, /systemd-run --wait --pipe --collect/);
-  assert.match(release, /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/);
+  assert.match(
+    release,
+    /CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/,
+  );
   assert.match(release, /probe-v4-service-sandbox\.sh/);
   assert.match(probe, /test -r "\$entry_file"/);
   assert.match(probe, /chown -R "\$owner_uid:\$owner_gid"/);

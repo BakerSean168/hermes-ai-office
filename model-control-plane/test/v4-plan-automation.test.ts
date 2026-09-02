@@ -23,7 +23,10 @@ function now(offset = 0): string {
   return new Date(Date.now() + offset).toISOString();
 }
 
-function seed(items: Array<{ itemKey: string; dependencies?: string[] }> = [{ itemKey: 'first' }], delivery?: PlanDeliveryConfig) {
+function seed(
+  items: Array<{ itemKey: string; dependencies?: string[] }> = [{ itemKey: 'first' }],
+  delivery?: PlanDeliveryConfig,
+) {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const repositories = createRepositories(db);
   const plan = repositories.plans.createPlan({
@@ -100,7 +103,8 @@ class AutomationWorkspace implements WorkspaceProviderPort {
     candidateWorkspace: WorkspaceDescriptor;
   }) {
     assert.ok(
-      this.repositoryHead === input.expectedRevision || this.repositoryHead === input.acceptedRevision,
+      this.repositoryHead === input.expectedRevision ||
+        this.repositoryHead === input.acceptedRevision,
     );
     this.integrateCalls += 1;
     this.repositoryHead = input.acceptedRevision;
@@ -226,15 +230,19 @@ class ScriptedDelivery implements DeliveryAutomationPort {
   readonly calls: string[] = [];
   observations: DeliveryObservation[] = [];
 
-  async advance(plan: Parameters<DeliveryAutomationPort['advance']>[0]): Promise<DeliveryObservation> {
+  async advance(
+    plan: Parameters<DeliveryAutomationPort['advance']>[0],
+  ): Promise<DeliveryObservation> {
     this.calls.push(plan.currentRevision);
-    return this.observations.shift() ?? {
-      status: 'VERIFIED',
-      headSha: plan.currentRevision,
-      pullRequestNumber: 42,
-      pullRequestUrl: 'https://example.test/pull/42',
-      mergeSha: 'merge-sha',
-    };
+    return (
+      this.observations.shift() ?? {
+        status: 'VERIFIED',
+        headSha: plan.currentRevision,
+        pullRequestNumber: 42,
+        pullRequestUrl: 'https://example.test/pull/42',
+        mergeSha: 'merge-sha',
+      }
+    );
   }
 }
 
@@ -322,18 +330,36 @@ test('plan automation requiring delivery never reports success when delivery is 
 
 test('plan automation persists delivery progress and succeeds only after remote verification', async () => {
   const config: PlanDeliveryConfig = {
-    remote: 'origin', branch: 'pixel/test-delivery', targetBranch: 'main', autoMerge: true,
-    mergeMethod: 'merge', requiredChecks: ['CI'],
+    remote: 'origin',
+    branch: 'pixel/test-delivery',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
   };
   const seeded = seed([{ itemKey: 'first' }], config);
   const workspace = new AutomationWorkspace();
   const runner = new ScriptedRunner(seeded.repositories, workspace);
   const delivery = new ScriptedDelivery();
   delivery.observations = [
-    { status: 'CHECKS_PENDING', headSha: 'result-sha-1', pullRequestNumber: 42, pullRequestUrl: 'https://example.test/pull/42' },
-    { status: 'VERIFIED', headSha: 'result-sha-1', pullRequestNumber: 42, pullRequestUrl: 'https://example.test/pull/42', mergeSha: 'merge-sha' },
+    {
+      status: 'CHECKS_PENDING',
+      headSha: 'result-sha-1',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+    },
+    {
+      status: 'VERIFIED',
+      headSha: 'result-sha-1',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+      mergeSha: 'merge-sha',
+    },
   ];
-  const automation = runtime(seeded.repositories, runner, workspace, { requireDelivery: true, delivery });
+  const automation = runtime(seeded.repositories, runner, workspace, {
+    requireDelivery: true,
+    delivery,
+  });
   const results = await drive(automation, seeded.plan.planId, 20);
   assert.ok(results.some((result) => result.code === 'DELIVERY_CHECKS_PENDING'));
   assert.equal(results.at(-1)?.code, 'PLAN_DELIVERED');
@@ -346,11 +372,14 @@ test('plan automation persists delivery progress and succeeds only after remote 
   seeded.db.close();
 });
 
-
 test('verified FOLLOW_UP child supersedes a stale parent delivery without another GitHub delivery attempt', async () => {
   const config: PlanDeliveryConfig = {
-    remote: 'origin', branch: 'pixel/shared-delivery', targetBranch: 'main', autoMerge: true,
-    mergeMethod: 'merge', requiredChecks: ['CI'],
+    remote: 'origin',
+    branch: 'pixel/shared-delivery',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
   };
   const seeded = seed();
   const workspace = new AutomationWorkspace();
@@ -379,7 +408,12 @@ test('verified FOLLOW_UP child supersedes a stale parent delivery without anothe
   seeded.repositories.plans.attachDelivery(childId, config);
   seeded.repositories.plans.updateStatus(childId, 'READY');
   seeded.repositories.plans.updateStatus(childId, 'RUNNING');
-  seeded.repositories.plans.advanceAcceptedRevision(childId, parent.currentRevision, 'child-sha', 'test-follow-up-accepted');
+  seeded.repositories.plans.advanceAcceptedRevision(
+    childId,
+    parent.currentRevision,
+    'child-sha',
+    'test-follow-up-accepted',
+  );
   seeded.repositories.plans.recordDeliveryObservation(childId, {
     status: 'VERIFIED',
     headSha: 'child-sha',
@@ -390,7 +424,10 @@ test('verified FOLLOW_UP child supersedes a stale parent delivery without anothe
   seeded.repositories.plans.updateStatus(childId, 'SUCCEEDED');
 
   const delivery = new ScriptedDelivery();
-  const automation = runtime(seeded.repositories, runner, workspace, { requireDelivery: true, delivery });
+  const automation = runtime(seeded.repositories, runner, workspace, {
+    requireDelivery: true,
+    delivery,
+  });
   const result = await automation.runPlan(parent.planId);
   assert.equal(result.status, 'SUCCEEDED');
   assert.equal(result.code, 'PLAN_DELIVERY_SUPERSEDED');
@@ -407,8 +444,12 @@ test('verified FOLLOW_UP child supersedes a stale parent delivery without anothe
 
 test('delivery supersession fails closed when the verified child does not share the parent delivery contract', async () => {
   const parentConfig: PlanDeliveryConfig = {
-    remote: 'origin', branch: 'pixel/parent', targetBranch: 'main', autoMerge: true,
-    mergeMethod: 'merge', requiredChecks: ['CI'],
+    remote: 'origin',
+    branch: 'pixel/parent',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
   };
   const childConfig: PlanDeliveryConfig = { ...parentConfig, branch: 'pixel/unrelated-child' };
   const seeded = seed([], parentConfig);
@@ -424,15 +465,24 @@ test('delivery supersession fails closed when the verified child does not share 
   seeded.repositories.plans.attachDelivery(childId, childConfig);
   seeded.repositories.plans.updateStatus(childId, 'READY');
   seeded.repositories.plans.updateStatus(childId, 'RUNNING');
-  seeded.repositories.plans.advanceAcceptedRevision(childId, parent.currentRevision, 'child-sha', 'test-child');
+  seeded.repositories.plans.advanceAcceptedRevision(
+    childId,
+    parent.currentRevision,
+    'child-sha',
+    'test-child',
+  );
   seeded.repositories.plans.recordDeliveryObservation(childId, {
-    status: 'VERIFIED', headSha: 'child-sha', pullRequestNumber: 99,
-    pullRequestUrl: 'https://example.test/pull/99', mergeSha: 'child-merge',
+    status: 'VERIFIED',
+    headSha: 'child-sha',
+    pullRequestNumber: 99,
+    pullRequestUrl: 'https://example.test/pull/99',
+    mergeSha: 'child-merge',
   });
   seeded.repositories.plans.updateStatus(childId, 'SUCCEEDED');
   assert.throws(
     () => seeded.repositories.plans.supersedeDelivery(parent.planId, childId),
-    (error: unknown) => error instanceof V4Error && error.code === 'DELIVERY_SUPERSEDING_CHILD_CONFIG_MISMATCH',
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'DELIVERY_SUPERSEDING_CHILD_CONFIG_MISMATCH',
   );
   assert.equal(seeded.repositories.plans.getPlan(parent.planId).delivery?.status, 'PENDING');
   seeded.db.close();
@@ -608,7 +658,6 @@ test('plan automation replays a completed Git fast-forward after a crash without
   seeded.db.close();
 });
 
-
 test('plan automation replays accepted-head integration dirt caused by a crash before durable revision CAS', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();
@@ -621,7 +670,9 @@ test('plan automation replays accepted-head integration dirt caused by a crash b
   await runner.runExecution(reviewQueued.executionId!);
   const candidate = seeded.repositories.executions
     .listByPlan(seeded.plan.planId)
-    .find((execution) => execution.identity.phase === 'IMPLEMENT' && execution.status === 'SUCCEEDED')!;
+    .find(
+      (execution) => execution.identity.phase === 'IMPLEMENT' && execution.status === 'SUCCEEDED',
+    )!;
   assert.ok(candidate.resultRevision);
 
   workspace.repositoryHead = candidate.resultRevision!;
@@ -631,7 +682,10 @@ test('plan automation replays accepted-head integration dirt caused by a crash b
   assert.equal(recovered.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   assert.equal(workspace.integrateCalls, 1);
   assert.equal(workspace.repositoryClean, true);
-  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision, candidate.resultRevision);
+  assert.equal(
+    seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision,
+    candidate.resultRevision,
+  );
   assert.equal(
     seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
     candidate.resultRevision,
@@ -824,7 +878,7 @@ test('plan automation project allowlist prevents stale plans from becoming write
       reviewRoutes: ['gpt-5.6-sol'],
     },
     {},
-    ['memoflow', 'digital-biome'],
+    ['memoflow', 'digital-biome', 'bodysense'],
   );
   const automation = new PlanAutomationRuntime(seeded.repositories, runner, workspace, resolver);
   const result = await automation.runPlan(seeded.plan.planId);
@@ -834,7 +888,6 @@ test('plan automation project allowlist prevents stale plans from becoming write
   assert.equal(seeded.repositories.executions.listByPlan(seeded.plan.planId).length, 0);
   seeded.db.close();
 });
-
 
 test('automation polling isolates one plan infrastructure exception and continues later plans', async () => {
   const seeded = seed();
@@ -889,7 +942,6 @@ test('automation polling isolates one plan infrastructure exception and continue
   seeded.db.close();
 });
 
-
 test('plan reconcile reuses the latest PASS reviewed candidate after an integration-era plan failure', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();
@@ -917,7 +969,13 @@ test('plan reconcile reuses the latest PASS reviewed candidate after an integrat
   assert.equal(recovered.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   assert.equal(workspace.repositoryHead, candidate.resultRevision);
   assert.equal(workspace.integrateCalls, 1);
-  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision, candidate.resultRevision);
-  assert.equal(seeded.repositories.plans.getWorkItem(item.workItemId).exactAcceptedRevision, candidate.resultRevision);
+  assert.equal(
+    seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision,
+    candidate.resultRevision,
+  );
+  assert.equal(
+    seeded.repositories.plans.getWorkItem(item.workItemId).exactAcceptedRevision,
+    candidate.resultRevision,
+  );
   seeded.db.close();
 });

@@ -137,7 +137,7 @@ if (runtime.enabled !== true || runtime.autonomousPolling !== true) process.exit
 if (!Array.isArray(runtime.implementationRoutes) || runtime.implementationRoutes[0] !== 'gpt-5.6-luna') process.exit(1);
 if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes[0] !== 'codex-business-review') process.exit(1);
 if (runtime.requireDelivery !== true) process.exit(1);
-if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome'])) process.exit(1);
+if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense'])) process.exit(1);
 NODE
     then
       openhands="$(curl -fsS --max-time 2 http://127.0.0.1:18000/health)"
