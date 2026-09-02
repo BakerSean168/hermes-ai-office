@@ -39,11 +39,13 @@ def _v4_execution(
         raise RuntimeError("control-plane V4 execution identity is incomplete")
     created_at = str(raw.get("createdAt") or "") or None
     updated_at = str(raw.get("updatedAt") or "") or None
-    route_identity = {
-        "deploymentId": route,
-        "providerKey": "openhands",
-        "model": route,
-    }
+    telemetry = raw.get("telemetry") if isinstance(raw.get("telemetry"), Mapping) else {}
+    usage = telemetry.get("usage") if isinstance(telemetry.get("usage"), Mapping) else {}
+    route_identity = telemetry.get("route") if isinstance(telemetry.get("route"), Mapping) else None
+    route_usage = [
+        item for item in telemetry.get("routeUsage", [])
+        if isinstance(item, Mapping)
+    ] if isinstance(telemetry.get("routeUsage"), list) else []
     return {
         "executionId": execution_id,
         "projectKey": project_keys.get(plan_id, plan_id),
@@ -59,11 +61,11 @@ def _v4_execution(
             "startedAt": created_at,
             "endedAt": updated_at if status in _V4_TERMINAL_STATUSES else None,
         },
-        "usage": {},
+        "usage": usage,
         "refs": {
             "upstream": {
                 "route": route_identity,
-                "routeUsage": [route_identity],
+                "routeUsage": route_usage,
             }
         },
         "previousExecutionId": identity.get("parentExecutionId"),
@@ -183,7 +185,7 @@ def _health_views(health: Mapping[str, Any]) -> tuple[Dict[str, Any], Dict[str, 
 def fetch_all_executions(max_items: int, fetch_json: FetchJson) -> list[Mapping[str, Any]]:
     limit = min(1000, max_items) if max_items > 0 else 1000
     payload = fetch_json(
-        "/api/v4/executions?" + urllib.parse.urlencode({"limit": limit}),
+        "/api/v4/executions?" + urllib.parse.urlencode({"limit": limit, "view": "dashboard"}),
         timeout=12.0,
     )
     return [

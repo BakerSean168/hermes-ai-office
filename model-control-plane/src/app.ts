@@ -3,6 +3,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { LocalGitWorkspaceAdapter } from './v4/adapters/gitWorkspace.js';
+import { LiteLlmExecutionTelemetry } from './v4/adapters/liteLlmTelemetry.js';
 import { GitHubCliDeliveryAdapter } from './v4/adapters/githubDelivery.js';
 import {
   OpenHandsCodexBusinessReviewProvider,
@@ -15,10 +16,7 @@ import {
 } from './v4/adapters/openhands.js';
 import type { PlanDeliveryConfig } from './v4/domain/delivery.js';
 import { V4Error } from './v4/domain/errors.js';
-import {
-  EXECUTION_STATUSES,
-  type ExecutionStatus,
-} from './v4/domain/execution.js';
+import { EXECUTION_STATUSES, type ExecutionStatus } from './v4/domain/execution.js';
 import { PLAN_STATUSES, type PlanStatus } from './v4/domain/plan.js';
 import {
   DeliveryKernel,
@@ -63,6 +61,7 @@ export interface ExecutionAutomationRuntime {
   reviewRoutes: string[];
   automationProjectKeys: string[];
   requireDelivery: boolean;
+  routeModels: Record<string, string>;
 }
 
 export interface ControlPlaneRuntime {
@@ -105,12 +104,16 @@ function planDeliveryConfig(value: unknown): PlanDeliveryConfig | undefined {
   const body = bodyRecord(value);
   if (typeof body.autoMerge !== 'boolean') throw new V4Error('DELIVERY_AUTO_MERGE_INVALID');
   const mergeMethod = requiredText(body.mergeMethod ?? 'merge', 'DELIVERY_MERGE_METHOD_INVALID');
-  if (mergeMethod !== 'merge' && mergeMethod !== 'squash' && mergeMethod !== 'rebase') throw new V4Error('DELIVERY_MERGE_METHOD_INVALID');
-  const requiredChecks = body.requiredChecks === undefined
-    ? []
-    : Array.isArray(body.requiredChecks)
-      ? body.requiredChecks.map((item) => requiredText(item, 'DELIVERY_REQUIRED_CHECKS_INVALID'))
-      : (() => { throw new V4Error('DELIVERY_REQUIRED_CHECKS_INVALID'); })();
+  if (mergeMethod !== 'merge' && mergeMethod !== 'squash' && mergeMethod !== 'rebase')
+    throw new V4Error('DELIVERY_MERGE_METHOD_INVALID');
+  const requiredChecks =
+    body.requiredChecks === undefined
+      ? []
+      : Array.isArray(body.requiredChecks)
+        ? body.requiredChecks.map((item) => requiredText(item, 'DELIVERY_REQUIRED_CHECKS_INVALID'))
+        : (() => {
+            throw new V4Error('DELIVERY_REQUIRED_CHECKS_INVALID');
+          })();
   return {
     remote: requiredText(body.remote ?? 'origin', 'DELIVERY_REMOTE_REQUIRED'),
     branch: requiredText(body.branch, 'DELIVERY_BRANCH_REQUIRED'),
@@ -257,9 +260,10 @@ function buildExecutionAutomation(
     })),
     ...reviewSpecs.map(({ route, model }) => ({
       route,
-      provider: route === 'codex-business-review'
-        ? new OpenHandsCodexBusinessReviewProvider({ ...common, reviewModel: model })
-        : new OpenHandsReviewProvider({ ...common, reviewModel: model }),
+      provider:
+        route === 'codex-business-review'
+          ? new OpenHandsCodexBusinessReviewProvider({ ...common, reviewModel: model })
+          : new OpenHandsReviewProvider({ ...common, reviewModel: model }),
     })),
   ];
   const workspace = new LocalGitWorkspaceAdapter({
@@ -370,6 +374,9 @@ function buildExecutionAutomation(
     reviewRoutes,
     automationProjectKeys,
     requireDelivery: defaultPolicy.requireDelivery === true,
+    routeModels: Object.fromEntries(
+      [...implementationSpecs, ...reviewSpecs].map(({ route, model }) => [route, model]),
+    ),
   };
 }
 
@@ -385,6 +392,24 @@ export async function buildControlPlane(
   });
   const db = boot.db;
   const repositories = createRepositories(db);
+  const executionTelemetry = new LiteLlmExecutionTelemetry({
+    baseUrl: requiredText(
+      env.MODEL_CP_V3_LITELLM_URL ??
+        env.LITELLM_V3_BASE_URL ??
+        'https://oracle.taile92a8e.ts.net:10446',
+      'LITELLM_TELEMETRY_URL_REQUIRED',
+    ),
+    envFile: env.MODEL_CP_LITELLM_ADMIN_ENV_FILE ?? '/srv/hermes-personal/secrets/litellm.env',
+    keyName: env.MODEL_CP_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+    fetchImpl: options.fetchImpl ?? fetch,
+    requestTimeoutMs: integerValue(
+      env.MODEL_CP_LITELLM_TELEMETRY_TIMEOUT_MS,
+      10_000,
+      1_000,
+      60_000,
+      'LITELLM_TELEMETRY_TIMEOUT_INVALID',
+    ),
+  });
   const kernels = {
     plan: new PlanKernel(repositories),
     graph: new WorkGraphKernel(repositories),
@@ -639,9 +664,7 @@ export async function buildControlPlane(
                 : [],
               executions: repositories.executions
                 .listByPlan(plan.planId)
-                .filter((execution) =>
-                  ['QUEUED', 'RUNNING', 'BLOCKED'].includes(execution.status),
-                ),
+                .filter((execution) => ['QUEUED', 'RUNNING', 'BLOCKED'].includes(execution.status)),
             };
           })
         : plans.map((plan) => planView(plan.planId));
@@ -708,22 +731,40 @@ export async function buildControlPlane(
   });
 
   app.post('/api/v4/plans/:planId/children', async (request, reply) => {
-    const parentPlanId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    const parentPlanId = requiredText(
+      (request.params as { planId?: string }).planId,
+      'PLAN_ID_REQUIRED',
+    );
     const body = bodyRecord(request.body);
     const relation = requiredText(body.relation ?? 'FOLLOW_UP', 'CHILD_RELATION_INVALID');
-    if (relation !== 'SYSTEM_REPAIR' && relation !== 'INFRASTRUCTURE_REPAIR' && relation !== 'FOLLOW_UP')
+    if (
+      relation !== 'SYSTEM_REPAIR' &&
+      relation !== 'INFRASTRUCTURE_REPAIR' &&
+      relation !== 'FOLLOW_UP'
+    )
       throw new V4Error('CHILD_RELATION_INVALID');
     const parent = repositories.plans.getPlan(parentPlanId);
     const child = kernels.plan.createChildPlan({
       parentPlanId,
       childPlanId: requiredText(body.childPlanId, 'CHILD_PLAN_ID_REQUIRED'),
-      repositoryPath: requiredText(body.repositoryPath ?? parent.repositoryPath, 'CHILD_REPOSITORY_REQUIRED'),
+      repositoryPath: requiredText(
+        body.repositoryPath ?? parent.repositoryPath,
+        'CHILD_REPOSITORY_REQUIRED',
+      ),
       objective: requiredText(body.objective, 'CHILD_OBJECTIVE_REQUIRED'),
       relation,
     });
     const rawItems = Array.isArray(body.workItems)
       ? body.workItems
-      : [{ itemKey: 'objective', title: 'Complete child objective', objective: child.plan.objective, dependencies: [], acceptanceCriteria: [] }];
+      : [
+          {
+            itemKey: 'objective',
+            title: 'Complete child objective',
+            objective: child.plan.objective,
+            dependencies: [],
+            acceptanceCriteria: [],
+          },
+        ];
     const graph = kernels.plan.ensureReadyGraph(
       child.plan.planId,
       rawItems.map((item) => {
@@ -736,7 +777,9 @@ export async function buildControlPlane(
             ? value.dependencies.map((entry) => requiredText(entry, 'GRAPH_DEPENDENCY_INVALID'))
             : [],
           acceptanceCriteria: Array.isArray(value.acceptanceCriteria)
-            ? value.acceptanceCriteria.map((entry) => requiredText(entry, 'GRAPH_ACCEPTANCE_INVALID'))
+            ? value.acceptanceCriteria.map((entry) =>
+                requiredText(entry, 'GRAPH_ACCEPTANCE_INVALID'),
+              )
             : [],
         };
       }),
@@ -747,7 +790,8 @@ export async function buildControlPlane(
     if (!supervisor) {
       supervisor = repositories.supervisors.create({ planId: child.plan.planId }).value;
       if (!supervisor) throw new V4Error('SUPERVISOR_CREATE_FAILED');
-      if (supervisor.status === 'CREATED') repositories.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
+      if (supervisor.status === 'CREATED')
+        repositories.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
     }
     reply.code(201);
     return {
@@ -765,7 +809,11 @@ export async function buildControlPlane(
     if (!config) throw new V4Error('PLAN_DELIVERY_REQUIRED');
     const result = repositories.plans.attachDelivery(planId, config);
     reply.code(result.status === 'created' ? 201 : 200);
-    return { planId, delivery: result.value, statusUrl: '/api/v4/plans/' + encodeURIComponent(planId) };
+    return {
+      planId,
+      delivery: result.value,
+      statusUrl: '/api/v4/plans/' + encodeURIComponent(planId),
+    };
   });
 
   app.get('/api/v4/plans/:planId', async (request) => {
@@ -781,24 +829,66 @@ export async function buildControlPlane(
   app.post('/api/v4/plans/:planId/reconcile', async (request, reply) => {
     const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
     const body = request.body === undefined ? {} : bodyRecord(request.body);
-    const mode = body.mode === undefined ? 'auto' : requiredText(body.mode, 'PLAN_RECONCILE_MODE_INVALID');
+    const mode =
+      body.mode === undefined ? 'auto' : requiredText(body.mode, 'PLAN_RECONCILE_MODE_INVALID');
     const result = await requireAutomation().plans.reconcilePlan(planId, mode);
     reply.code(202);
     return { ...result, statusUrl: '/api/v4/plans/' + encodeURIComponent(planId) };
   });
 
   app.get('/api/v4/executions', async (request) => {
-    const query = request.query as { limit?: string; planId?: string; status?: string };
+    const query = request.query as {
+      limit?: string;
+      planId?: string;
+      status?: string;
+      view?: string;
+    };
     const limit = integerValue(query.limit, 100, 1, 1000, 'EXECUTION_LIST_LIMIT_INVALID');
     const status = query.status;
     if (status && !(EXECUTION_STATUSES as readonly string[]).includes(status))
       throw new V4Error('EXECUTION_STATUS_INVALID');
+    if (query.view && query.view !== 'dashboard') throw new V4Error('EXECUTION_LIST_VIEW_INVALID');
     const items = repositories.executions.list({
       limit,
       ...(query.planId ? { planId: requiredText(query.planId, 'EXECUTION_PLAN_REQUIRED') } : {}),
       ...(status ? { status: status as ExecutionStatus } : {}),
     });
-    return { items, count: items.length };
+    if (query.view !== 'dashboard') return { items, count: items.length };
+
+    const enriched = new Array(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(8, items.length) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor++;
+        const execution = items[index]!;
+        const telemetry = await executionTelemetry.project({
+          executionId: execution.identity.executionId,
+          status: execution.status,
+          createdAt: execution.createdAt,
+          updatedAt: execution.updatedAt,
+        });
+        const providerNativeRoute =
+          execution.identity.route === 'codex-business-review' && automation
+            ? {
+                deploymentId: 'provider-native:openai-business',
+                providerKey: 'openai-business',
+                model: automation.routeModels[execution.identity.route] ?? execution.identity.route,
+                modelGroup: execution.identity.route,
+                commercialType: 'SUBSCRIPTION',
+                supplyOrigin: 'OFFICIAL',
+              }
+            : undefined;
+        enriched[index] = {
+          ...execution,
+          telemetry:
+            telemetry.usage || telemetry.route || telemetry.routeUsage.length > 0
+              ? telemetry
+              : { ...telemetry, ...(providerNativeRoute ? { route: providerNativeRoute } : {}) },
+        };
+      }
+    });
+    await Promise.all(workers);
+    return { items: enriched, count: enriched.length };
   });
 
   app.get('/api/v4/executions/:executionId', async (request) => {
@@ -855,9 +945,7 @@ export async function buildControlPlane(
         ? body.instruction.trim()
         : undefined;
     const reason =
-      typeof body.reason === 'string' && body.reason.trim()
-        ? body.reason.trim()
-        : undefined;
+      typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : undefined;
     return await requireAutomation().worker.replaceStalledProviderSession(
       executionId,
       idempotencyKey,
@@ -893,12 +981,10 @@ export async function buildControlPlane(
       void reply.code(statusFor(error)).send({ error: error.code, message: error.message });
       return;
     }
-    void reply
-      .code(500)
-      .send({
-        error: 'INTERNAL_ERROR',
-        message: error instanceof Error ? error.message : String(error),
-      });
+    void reply.code(500).send({
+      error: 'INTERNAL_ERROR',
+      message: error instanceof Error ? error.message : String(error),
+    });
   });
 
   const supervisorInterval =

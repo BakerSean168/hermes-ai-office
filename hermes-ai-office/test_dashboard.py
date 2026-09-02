@@ -180,6 +180,48 @@ class DashboardTest(unittest.TestCase):
         self.assertIsNone(providers["paid"]["successRate"])
         self.assertEqual(result["logicalModels"][0]["totalTokens"], 330)
 
+    def test_v4_execution_uses_control_plane_telemetry_instead_of_agent_identity(self) -> None:
+        raw = api._assembly._v4_execution(
+            {
+                "identity": {
+                    "executionId": "execution-telemetry",
+                    "planId": "plan-1",
+                    "phase": "IMPLEMENT",
+                    "route": "implementation-efficient",
+                },
+                "status": "SUCCEEDED",
+                "objective": "Implement telemetry projection",
+                "createdAt": "2026-09-02T00:00:00Z",
+                "updatedAt": "2026-09-02T00:01:00Z",
+                "telemetry": {
+                    "usage": {"input": 100, "output": 20, "calls": 2, "costUsd": 0},
+                    "route": {
+                        "deploymentId": "deployment-1",
+                        "providerKey": "wechat-miniapp-free",
+                        "model": "openai/Deepseek-v4-flash",
+                        "modelGroup": "implementation-efficient",
+                    },
+                    "routeUsage": [
+                        {
+                            "deploymentId": "deployment-1",
+                            "providerKey": "wechat-miniapp-free",
+                            "model": "openai/Deepseek-v4-flash",
+                            "modelGroup": "implementation-efficient",
+                            "input": 100,
+                            "output": 20,
+                            "calls": 2,
+                            "costUsd": 0,
+                        }
+                    ],
+                },
+            },
+            {"plan-1": "memoflow"},
+        )
+        self.assertEqual(raw["usage"]["input"], 100)
+        self.assertEqual(raw["refs"]["upstream"]["route"]["providerKey"], "wechat-miniapp-free")
+        self.assertNotEqual(raw["refs"]["upstream"]["route"]["providerKey"], "openhands")
+        self.assertEqual(raw["refs"]["upstream"]["routeUsage"][0]["output"], 20)
+
     def test_fetch_all_executions_uses_bounded_v4_list(self) -> None:
         paths: list[str] = []
 

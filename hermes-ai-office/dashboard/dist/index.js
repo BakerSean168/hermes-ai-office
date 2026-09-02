@@ -406,9 +406,18 @@
   }
 
   // dashboard/src/components.js
+  function measuredTokens(item, locale, suffix) {
+    const usage = item && item.usage;
+    if (!usage || Number(usage.calls || 0) <= 0) return "—";
+    return compact(item.totalTokens || 0, locale) + (suffix || "");
+  }
   function Badge(props) {
     const value = String(props.value || "UNKNOWN").toUpperCase();
-    return h("span", { className: "hao-badge hao-badge-" + value.toLowerCase().replace(/_/g, "-") }, value);
+    return h(
+      "span",
+      { className: "hao-badge hao-badge-" + value.toLowerCase().replace(/_/g, "-") },
+      value
+    );
   }
   function Metric(props) {
     return h(
@@ -423,7 +432,17 @@
     return h(
       "section",
       { className: "hao-panel " + (props.className || "") },
-      props.title ? h("header", { className: "hao-panel-head" }, h("div", null, h("h2", null, props.title), props.subtitle ? h("p", null, props.subtitle) : null), props.action || null) : null,
+      props.title ? h(
+        "header",
+        { className: "hao-panel-head" },
+        h(
+          "div",
+          null,
+          h("h2", null, props.title),
+          props.subtitle ? h("p", null, props.subtitle) : null
+        ),
+        props.action || null
+      ) : null,
       props.children
     );
   }
@@ -471,7 +490,7 @@
               h("td", null, h("span", { className: "hao-route" }, routeLabel(item))),
               h("td", { className: "hao-muted" }, dateTime(item.startedAt, locale)),
               h("td", { className: "hao-mono" }, duration(runningElapsed(item, now))),
-              h("td", { className: "hao-right hao-mono" }, compact(item.totalTokens || 0, locale)),
+              h("td", { className: "hao-right hao-mono" }, measuredTokens(item, locale, "")),
               h("td", { className: "hao-right hao-mono" }, money(item.usage && item.usage.costUsd))
             );
           })
@@ -489,10 +508,21 @@
         return h(
           "article",
           { className: "hao-running-card", key: item.executionId },
-          h("div", { className: "hao-running-top" }, h(Badge, { value: item.status }), h("span", { className: "hao-phase" }, item.phase)),
+          h(
+            "div",
+            { className: "hao-running-top" },
+            h(Badge, { value: item.status }),
+            h("span", { className: "hao-phase" }, item.phase)
+          ),
           h("h3", null, item.objective || item.projectKey),
           h("div", { className: "hao-running-project" }, item.projectKey),
-          h("div", { className: "hao-running-route" }, item.logicalModel, h("span", null, "→"), routeLabel(item)),
+          h(
+            "div",
+            { className: "hao-running-route" },
+            item.logicalModel,
+            h("span", null, "→"),
+            routeLabel(item)
+          ),
           h(
             "div",
             { className: "hao-running-foot" },
@@ -502,7 +532,7 @@
           h(
             "div",
             { className: "hao-running-usage" },
-            h("span", null, compact(item.totalTokens || 0, props.locale) + " tok"),
+            h("span", null, measuredTokens(item, props.locale, " tok")),
             h("span", null, money(item.usage && item.usage.costUsd))
           )
         );

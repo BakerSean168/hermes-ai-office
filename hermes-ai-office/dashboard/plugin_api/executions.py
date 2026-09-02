@@ -31,11 +31,11 @@ def _enrich_route(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any
         "deploymentId": deployment_id,
         "providerKey": provider_key,
         "physicalModel": physical_model,
-        "modelGroup": str(deployment.get("group") or "") or None,
-        "credential": str(deployment.get("credential") or "") or None,
-        "commercialType": str(deployment.get("commercialType") or "") or None,
-        "supplyOrigin": str(deployment.get("supplyOrigin") or "") or None,
-        "order": deployment.get("order"),
+        "modelGroup": str(raw.get("modelGroup") or deployment.get("group") or "") or None,
+        "credential": str(raw.get("credential") or deployment.get("credential") or "") or None,
+        "commercialType": str(raw.get("commercialType") or deployment.get("commercialType") or "") or None,
+        "supplyOrigin": str(raw.get("supplyOrigin") or deployment.get("supplyOrigin") or "") or None,
+        "order": raw.get("order") if raw.get("order") is not None else deployment.get("order"),
     }
 
 
