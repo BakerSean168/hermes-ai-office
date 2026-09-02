@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS plans (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plan_deliveries (
+  plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id),
+  remote TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  target_branch TEXT NOT NULL,
+  auto_merge INTEGER NOT NULL,
+  merge_method TEXT NOT NULL,
+  required_checks TEXT NOT NULL,
+  status TEXT NOT NULL,
+  head_sha TEXT,
+  pull_request_number INTEGER,
+  pull_request_url TEXT,
+  merge_sha TEXT,
+  error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS graph_versions (
   graph_version_id TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL REFERENCES plans(plan_id),
@@ -237,4 +254,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 3, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 4, CAST(strftime('%s','now') AS INTEGER));

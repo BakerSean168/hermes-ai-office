@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { DeliveryObservation, PlanDeliveryConfig } from '../src/v4/domain/delivery.js';
 import { V4Error } from '../src/v4/domain/errors.js';
 import type { Execution } from '../src/v4/domain/execution.js';
 import {
@@ -10,6 +11,7 @@ import {
 } from '../src/v4/orchestration/planAutomationRuntime.js';
 import type { ExecutionWorkerResult } from '../src/v4/orchestration/executionWorker.js';
 import type {
+  DeliveryAutomationPort,
   WorkspaceDescriptor,
   WorkspaceProviderPort,
   WorkspaceProvisionInput,
@@ -21,7 +23,7 @@ function now(offset = 0): string {
   return new Date(Date.now() + offset).toISOString();
 }
 
-function seed(items: Array<{ itemKey: string; dependencies?: string[] }> = [{ itemKey: 'first' }]) {
+function seed(items: Array<{ itemKey: string; dependencies?: string[] }> = [{ itemKey: 'first' }], delivery?: PlanDeliveryConfig) {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const repositories = createRepositories(db);
   const plan = repositories.plans.createPlan({
@@ -30,6 +32,7 @@ function seed(items: Array<{ itemKey: string; dependencies?: string[] }> = [{ it
     objective: 'complete the autonomous plan',
     repositoryPath: '/repositories/automation-project',
     baseRevision: 'base-sha',
+    ...(delivery ? { delivery } : {}),
   }).value!;
   const graph = repositories.plans.createGraphVersion({
     planId: plan.planId,
@@ -215,10 +218,27 @@ class ScriptedRunner implements ExecutionRunnerPort {
   }
 }
 
+class ScriptedDelivery implements DeliveryAutomationPort {
+  readonly calls: string[] = [];
+  observations: DeliveryObservation[] = [];
+
+  async advance(plan: Parameters<DeliveryAutomationPort['advance']>[0]): Promise<DeliveryObservation> {
+    this.calls.push(plan.currentRevision);
+    return this.observations.shift() ?? {
+      status: 'VERIFIED',
+      headSha: plan.currentRevision,
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+      mergeSha: 'merge-sha',
+    };
+  }
+}
+
 function runtime(
   repositories: V4Repositories,
   runner: ExecutionRunnerPort,
   workspace: WorkspaceProviderPort,
+  options: { requireDelivery?: boolean; delivery?: DeliveryAutomationPort } = {},
 ) {
   return new PlanAutomationRuntime(
     repositories,
@@ -230,7 +250,9 @@ function runtime(
       maxImplementationAttempts: 3,
       maxReviewAttempts: 2,
       maxRepairCycles: 3,
+      requireDelivery: options.requireDelivery ?? false,
     }),
+    options.delivery,
   );
 }
 
@@ -260,7 +282,7 @@ test('plan automation creates one stable first execution and completes only afte
   assert.equal(seeded.repositories.executions.listByPlan(seeded.plan.planId).length, 1);
 
   const results = await drive(automation, seeded.plan.planId);
-  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED');
+  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'SUCCEEDED');
   assert.equal(
     seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
@@ -274,6 +296,49 @@ test('plan automation creates one stable first execution and completes only afte
     ['IMPLEMENT', 'REVIEW'],
   );
   assert.equal(seeded.repositories.reviews.listByPlan(seeded.plan.planId)[0]?.status, 'PASSED');
+  seeded.db.close();
+});
+
+test('plan automation requiring delivery never reports success when delivery is missing', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = runtime(seeded.repositories, runner, workspace, { requireDelivery: true });
+  let result;
+  for (let index = 0; index < 10; index += 1) {
+    result = await automation.runPlan(seeded.plan.planId);
+    if (result.code === 'PLAN_DELIVERY_REQUIRED') break;
+  }
+  assert.equal(result?.code, 'PLAN_DELIVERY_REQUIRED');
+  assert.equal(result?.status, 'WAITING');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'RUNNING');
+  assert.equal(seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.status, 'SUCCEEDED');
+  seeded.db.close();
+});
+
+test('plan automation persists delivery progress and succeeds only after remote verification', async () => {
+  const config: PlanDeliveryConfig = {
+    remote: 'origin', branch: 'pixel/test-delivery', targetBranch: 'main', autoMerge: true,
+    mergeMethod: 'merge', requiredChecks: ['CI'],
+  };
+  const seeded = seed([{ itemKey: 'first' }], config);
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const delivery = new ScriptedDelivery();
+  delivery.observations = [
+    { status: 'CHECKS_PENDING', headSha: 'result-sha-1', pullRequestNumber: 42, pullRequestUrl: 'https://example.test/pull/42' },
+    { status: 'VERIFIED', headSha: 'result-sha-1', pullRequestNumber: 42, pullRequestUrl: 'https://example.test/pull/42', mergeSha: 'merge-sha' },
+  ];
+  const automation = runtime(seeded.repositories, runner, workspace, { requireDelivery: true, delivery });
+  const results = await drive(automation, seeded.plan.planId, 20);
+  assert.ok(results.some((result) => result.code === 'DELIVERY_CHECKS_PENDING'));
+  assert.equal(results.at(-1)?.code, 'PLAN_DELIVERED');
+  const plan = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  assert.equal(plan.status, 'SUCCEEDED');
+  assert.equal(plan.delivery?.status, 'VERIFIED');
+  assert.equal(plan.delivery?.pullRequestNumber, 42);
+  assert.equal(plan.delivery?.mergeSha, 'merge-sha');
+  assert.deepEqual(delivery.calls, ['result-sha-1', 'result-sha-1']);
   seeded.db.close();
 });
 
@@ -367,7 +432,7 @@ test('explicit review reconciliation revives an exhausted INVALID review at the 
   const recovered = await automation.reconcilePlan(seeded.plan.planId, 'retry-review');
   assert.equal(recovered.code, 'REVIEW_RECOVERY_QUEUED');
   const results = await drive(automation, seeded.plan.planId);
-  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED');
+  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   const executions = seeded.repositories.executions.listByPlan(seeded.plan.planId);
   assert.equal(
     executions.filter((execution) => execution.identity.phase === 'IMPLEMENT_FIX').length,
@@ -422,7 +487,7 @@ test('plan automation replays a completed Git fast-forward after a crash without
   await automation.runPlan(seeded.plan.planId);
   await automation.runPlan(seeded.plan.planId);
   const reviewResult = await automation.runPlan(seeded.plan.planId);
-  assert.equal(reviewResult.code, 'PLAN_SUCCEEDED');
+  assert.equal(reviewResult.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   assert.equal(workspace.integrateCalls, 1);
 
   // Reconstruct the pre-DB-write crash state in a second plan: Git already points to the accepted SHA.
@@ -692,7 +757,7 @@ test('plan reconcile reuses the latest PASS reviewed candidate after an integrat
 
   const recovered = await automation.reconcilePlan(seeded.plan.planId, 'auto');
   assert.equal(recovered.status, 'SUCCEEDED');
-  assert.equal(recovered.code, 'PLAN_SUCCEEDED');
+  assert.equal(recovered.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
   assert.equal(workspace.repositoryHead, candidate.resultRevision);
   assert.equal(workspace.integrateCalls, 1);
   assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision, candidate.resultRevision);

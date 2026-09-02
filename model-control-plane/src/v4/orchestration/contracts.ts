@@ -1,4 +1,6 @@
+import type { DeliveryObservation, PlanDelivery } from '../domain/delivery.js';
 import type { ExecutionPhase as DomainExecutionPhase } from '../domain/execution.js';
+import type { Plan } from '../domain/plan.js';
 
 export { EXECUTION_PHASES } from '../domain/execution.js';
 export type ExecutionPhase = DomainExecutionPhase;
@@ -178,4 +180,8 @@ export interface ExecutionProviderPort {
 
 export interface ReviewProviderPort extends ExecutionProviderPort {
   readonly independentReview: true;
+}
+
+export interface DeliveryAutomationPort {
+  advance(plan: Plan, delivery: PlanDelivery): Promise<DeliveryObservation>;
 }

@@ -79,6 +79,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
     implementationRoutes: ['gpt-5.6-luna', 'implementation-efficient'],
     reviewRoutes: ['codex-business-review', 'gpt-5.6-sol', 'review-glm'],
     automationProjectKeys: ['app-runtime-project'],
+    requireDelivery: true,
   });
   const created = await runtime.app.inject({
     method: 'POST',
@@ -102,6 +103,23 @@ test('V4 app creates a durable first execution through the public plan runtime A
   });
   assert.equal(created.statusCode, 201);
   const planId = created.json().plan.planId as string;
+  const delivery = {
+    remote: 'origin',
+    branch: 'pixel/app-runtime-plan',
+    targetBranch: 'main',
+    autoMerge: false,
+    mergeMethod: 'merge',
+    requiredChecks: [],
+  };
+  const attached = await runtime.app.inject({
+    method: 'POST', url: '/api/v4/plans/' + planId + '/delivery', payload: delivery,
+  });
+  assert.equal(attached.statusCode, 201);
+  assert.equal(attached.json().delivery.status, 'PENDING');
+  const attachedAgain = await runtime.app.inject({
+    method: 'POST', url: '/api/v4/plans/' + planId + '/delivery', payload: delivery,
+  });
+  assert.equal(attachedAgain.statusCode, 200);
   const run = await runtime.app.inject({ method: 'POST', url: '/api/v4/plans/' + planId + '/run' });
   assert.equal(run.statusCode, 200);
   assert.equal(run.json().code, 'IMPLEMENTATION_QUEUED');
@@ -110,6 +128,8 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(state.statusCode, 200);
   const body = state.json();
   assert.equal(body.plan.status, 'RUNNING');
+  assert.equal(body.delivery.status, 'PENDING');
+  assert.equal(body.plan.delivery.status, 'PENDING');
   assert.equal(body.workItems[0].status, 'RUNNING');
   assert.equal(body.executions.length, 1);
   assert.equal(body.executions[0].identity.phase, 'IMPLEMENT');

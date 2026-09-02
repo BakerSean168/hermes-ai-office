@@ -7,7 +7,7 @@ import type { Review } from '../domain/review.js';
 import type { WorkItem } from '../domain/workGraph.js';
 import type { V4Repositories } from '../persistence/repositories.js';
 import type { ExecutionWorkerResult } from './executionWorker.js';
-import type { WorkspaceProviderPort } from './contracts.js';
+import type { DeliveryAutomationPort, WorkspaceProviderPort } from './contracts.js';
 
 export interface ExecutionRunnerPort {
   runExecution(executionId: string): Promise<ExecutionWorkerResult>;
@@ -19,6 +19,7 @@ export interface PlanAutomationPolicy {
   maxImplementationAttempts?: number;
   maxReviewAttempts?: number;
   maxRepairCycles?: number;
+  requireDelivery?: boolean;
 }
 
 export interface PlanAutomationPolicyResolver {
@@ -41,6 +42,7 @@ interface NormalizedPolicy {
   maxImplementationAttempts: number;
   maxReviewAttempts: number;
   maxRepairCycles: number;
+  requireDelivery: boolean;
 }
 
 function normalizePolicy(policy: PlanAutomationPolicy): NormalizedPolicy {
@@ -54,6 +56,7 @@ function normalizePolicy(policy: PlanAutomationPolicy): NormalizedPolicy {
     policy.maxImplementationAttempts ?? Math.max(implementationRoutes.length, 3);
   const maxReviewAttempts = policy.maxReviewAttempts ?? Math.max(reviewRoutes.length, 2);
   const maxRepairCycles = policy.maxRepairCycles ?? 3;
+  const requireDelivery = policy.requireDelivery ?? false;
   for (const [name, value] of Object.entries({
     maxImplementationAttempts,
     maxReviewAttempts,
@@ -68,6 +71,7 @@ function normalizePolicy(policy: PlanAutomationPolicy): NormalizedPolicy {
     maxImplementationAttempts,
     maxReviewAttempts,
     maxRepairCycles,
+    requireDelivery,
   };
 }
 
@@ -116,12 +120,14 @@ export class PlanAutomationRuntime {
     readonly runner: ExecutionRunnerPort,
     readonly workspace: WorkspaceProviderPort,
     readonly policies: PlanAutomationPolicyResolver,
+    readonly delivery?: DeliveryAutomationPort,
   ) {}
 
   async runOnce(limit = 20): Promise<PlanAutomationResult[]> {
     const plans = [
       ...this.repositories.plans.listPlans({ status: 'READY', limit }),
       ...this.repositories.plans.listPlans({ status: 'RUNNING', limit }),
+      ...this.repositories.plans.listPlans({ status: 'SUCCEEDED', limit: 1000 }).filter((plan) => plan.delivery && plan.delivery.status !== 'VERIFIED').slice(0, limit),
     ];
     const unique = new Map(plans.map((plan) => [plan.planId, plan]));
     const results: PlanAutomationResult[] = [];
@@ -141,7 +147,8 @@ export class PlanAutomationRuntime {
 
   async runPlan(planId: string): Promise<PlanAutomationResult> {
     let plan = this.repositories.plans.getPlan(planId);
-    if (plan.status !== 'READY' && plan.status !== 'RUNNING') {
+    const legacyDeliveryPending = plan.status === 'SUCCEEDED' && plan.delivery && plan.delivery.status !== 'VERIFIED';
+    if (plan.status !== 'READY' && plan.status !== 'RUNNING' && !legacyDeliveryPending) {
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_AUTOMATABLE' };
     }
     const rawPolicy = this.policies.resolve(plan.projectKey);
@@ -178,14 +185,7 @@ export class PlanAutomationRuntime {
     const items = this.repositories.plans.listWorkItems(planId, graph.graphVersionId);
     if (items.length === 0) return this.failPlan(plan, undefined, 'PLAN_GRAPH_EMPTY');
     if (items.every((item) => item.status === 'SUCCEEDED')) {
-      if (plan.status === 'RUNNING')
-        this.repositories.plans.compareAndSetStatus(planId, 'RUNNING', 'SUCCEEDED');
-      return {
-        planId,
-        status: 'SUCCEEDED',
-        code: 'PLAN_SUCCEEDED',
-        revision: this.repositories.plans.getPlan(planId).currentRevision,
-      };
+      return await this.completePlan(plan, policy);
     }
 
     const running = items.find((item) => item.status === 'RUNNING');
@@ -213,10 +213,11 @@ export class PlanAutomationRuntime {
   }
 
   async reconcilePlan(planId: string, mode = 'auto'): Promise<PlanAutomationResult> {
-    if (mode === 'retry-review') return this.reconcileFailedReview(planId);
+    if (mode === 'retry-review' || mode === 'retry_review') return this.reconcileFailedReview(planId);
+    if (mode === 'retry-delivery' || mode === 'retry_delivery') return await this.runPlan(planId);
     if (mode !== 'auto') throw new V4Error('PLAN_RECONCILE_MODE_INVALID');
     let plan = this.repositories.plans.getPlan(planId);
-    if (plan.status === 'READY' || plan.status === 'RUNNING') return await this.runPlan(planId);
+    if (plan.status === 'READY' || plan.status === 'RUNNING' || (plan.status === 'SUCCEEDED' && plan.delivery && plan.delivery.status !== 'VERIFIED')) return await this.runPlan(planId);
     if (plan.status !== 'FAILED')
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
 
@@ -882,15 +883,10 @@ export class PlanAutomationRuntime {
       };
     const all = this.repositories.plans.listWorkItems(plan.planId);
     if (all.every((workItem) => workItem.status === 'SUCCEEDED')) {
-      this.repositories.plans.compareAndSetStatus(plan.planId, 'RUNNING', 'SUCCEEDED');
-      return {
-        planId: plan.planId,
+      return await this.completePlan(this.repositories.plans.getPlan(plan.planId), normalizePolicy(this.requirePolicy(plan.projectKey)), {
         workItemId: item.workItemId,
         reviewId: review.reviewId,
-        revision: candidate.resultRevision,
-        status: 'SUCCEEDED',
-        code: 'PLAN_SUCCEEDED',
-      };
+      });
     }
     return {
       planId: plan.planId,
@@ -899,6 +895,52 @@ export class PlanAutomationRuntime {
       revision: candidate.resultRevision,
       status: 'RUNNING',
       code: 'WORK_ITEM_ACCEPTED',
+    };
+  }
+
+  private async completePlan(
+    plan: Plan,
+    policy: NormalizedPolicy,
+    context: { workItemId?: string; reviewId?: string } = {},
+  ): Promise<PlanAutomationResult> {
+    let current = this.repositories.plans.getPlan(plan.planId);
+    if (policy.requireDelivery && !current.delivery) {
+      return { planId: current.planId, ...context, status: 'WAITING', code: 'PLAN_DELIVERY_REQUIRED', revision: current.currentRevision };
+    }
+    if (current.delivery && current.delivery.status !== 'VERIFIED') {
+      if (!this.delivery) {
+        return { planId: current.planId, ...context, status: 'WAITING', code: 'DELIVERY_RUNTIME_UNAVAILABLE', revision: current.currentRevision };
+      }
+      try {
+        const observation = await this.delivery.advance(current, current.delivery);
+        const durable = this.repositories.plans.recordDeliveryObservation(current.planId, observation).value;
+        if (!durable) throw new V4Error('DELIVERY_OBSERVATION_PERSIST_FAILED');
+        current = this.repositories.plans.getPlan(current.planId);
+        if (durable.status !== 'VERIFIED') {
+          const code = durable.status === 'CHECKS_PENDING'
+            ? 'DELIVERY_CHECKS_PENDING'
+            : durable.status === 'PR_OPEN' && !durable.autoMerge
+              ? 'DELIVERY_PR_OPEN_EXTERNAL_MERGE_REQUIRED'
+              : 'DELIVERY_' + durable.status;
+          return { planId: current.planId, ...context, status: 'WAITING', code, revision: current.currentRevision };
+        }
+      } catch (error) {
+        const code = error instanceof V4Error ? error.code : 'DELIVERY_AUTOMATION_FAILED';
+        this.repositories.plans.recordDeliveryError(current.planId, code);
+        return { planId: current.planId, ...context, status: 'WAITING', code, revision: current.currentRevision };
+      }
+    }
+    if (current.status === 'RUNNING') {
+      const completed = this.repositories.plans.compareAndSetStatus(current.planId, 'RUNNING', 'SUCCEEDED');
+      if (completed.status === 'rejected') return { planId: current.planId, ...context, status: 'WAITING', code: completed.reason ?? 'STALE_PLAN_STATUS' };
+      current = this.repositories.plans.getPlan(current.planId);
+    }
+    return {
+      planId: current.planId,
+      ...context,
+      status: 'SUCCEEDED',
+      code: current.delivery ? 'PLAN_DELIVERED' : 'PLAN_SUCCEEDED_LOCAL_ONLY',
+      revision: current.currentRevision,
     };
   }
 

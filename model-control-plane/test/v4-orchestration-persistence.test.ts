@@ -163,7 +163,7 @@ test('adapters require the centralized current V4 schema and never create privat
   raw.close();
 });
 
-test('schema v1 migrates in place through v3 and preserves durable production state across restart', () => {
+test('schema v1 migrates in place through v4 and preserves durable production state across restart', () => {
   const file = tempDatabase('pixel-v4-migrate-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'migration-plan');
@@ -184,6 +184,7 @@ test('schema v1 migrates in place through v3 and preserves durable production st
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_sessions'").get());
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_evidence'").get());
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='v4_jules_sessions'").get());
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='plan_deliveries'").get());
   assert.ok((db.prepare('PRAGMA table_info(improvement_candidates)').all() as unknown as Array<{ name: string }>).some((column) => column.name === 'risk'));
   assert.deepEqual(migrated.plans.getPlan(before.plan.planId), before.plan);
   assert.deepEqual(migrated.plans.getActiveGraphVersion(before.plan.planId), before.graph);
@@ -200,7 +201,7 @@ test('schema v1 migrates in place through v3 and preserves durable production st
   db.close();
 });
 
-test('schema v2 migrates execution phase lineage to v3 without losing queued work', () => {
+test('schema v2 migrates execution phase lineage through v4 without losing queued work', () => {
   const file = tempDatabase('pixel-v4-v2-to-v3-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'v2-execution-plan');
@@ -226,7 +227,7 @@ test('schema v2 migrates execution phase lineage to v3 without losing queued wor
   db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const repositories = createRepositories(db);
   const recovered = repositories.executions.get(execution.identity.executionId);
-  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, 3);
+  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
   assert.equal(recovered.identity.phase, 'IMPLEMENT');
   assert.equal(recovered.identity.parentExecutionId, undefined);
   assert.equal(recovered.status, 'QUEUED');

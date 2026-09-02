@@ -1,3 +1,4 @@
+import type { PlanDelivery, PlanDeliveryConfig } from './delivery.js';
 import { InvalidTransitionError, failClosed } from './errors.js';
 
 export const PLAN_STATUSES = [
@@ -18,6 +19,7 @@ export interface Plan {
   activeGraphVersionId?: string;
   parentPlanId?: string;
   childPlanIds: string[];
+  delivery?: PlanDelivery;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,6 +32,7 @@ export interface CreatePlanInput {
   repositoryPath: string;
   baseRevision: string;
   parentPlanId?: string;
+  delivery?: PlanDeliveryConfig;
 }
 
 const PLAN_TRANSITIONS: Record<PlanStatus, readonly PlanStatus[]> = {

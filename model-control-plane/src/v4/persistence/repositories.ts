@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { validatePlanDeliveryConfig, type DeliveryObservation, type DeliveryStatus, type PlanDelivery, type PlanDeliveryConfig } from '../domain/delivery.js';
 import { DuplicateKeyError, StaleStateError, V4Error, failClosed } from '../domain/errors.js';
 import { assertSafeEventPayload, type EventEnvelope } from '../domain/events.js';
 import { transitionExecution, validateExecutionIdentity, type Execution, type ExecutionIdentity, type ExecutionPhase, type ExecutionStatus } from '../domain/execution.js';
@@ -62,6 +63,41 @@ function planFrom(row: PlanRow, children: string[] = []): Plan {
     childPlanIds: children, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
+interface DeliveryRow {
+  plan_id: string; remote: string; branch: string; target_branch: string; auto_merge: number; merge_method: PlanDeliveryConfig['mergeMethod'];
+  required_checks: string; status: DeliveryStatus; head_sha: string | null; pull_request_number: number | null;
+  pull_request_url: string | null; merge_sha: string | null; error_code: string | null; created_at: string; updated_at: string;
+}
+function deliveryFrom(row: DeliveryRow): PlanDelivery {
+  return {
+    planId: row.plan_id,
+    remote: row.remote,
+    branch: row.branch,
+    targetBranch: row.target_branch,
+    autoMerge: Boolean(row.auto_merge),
+    mergeMethod: row.merge_method,
+    requiredChecks: decode<string[]>(row.required_checks),
+    status: row.status,
+    headSha: row.head_sha ?? undefined,
+    pullRequestNumber: row.pull_request_number ?? undefined,
+    pullRequestUrl: row.pull_request_url ?? undefined,
+    mergeSha: row.merge_sha ?? undefined,
+    errorCode: row.error_code ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const DELIVERY_STAGE: Record<DeliveryStatus, number> = {
+  PENDING: 0,
+  PUSHED: 1,
+  PR_OPEN: 2,
+  CHECKS_PENDING: 2,
+  READY_TO_MERGE: 3,
+  MERGED: 4,
+  VERIFIED: 5,
+};
+
 interface GraphRow {
   graph_version_id: string; plan_id: string; version: number; parent_graph_version_id: string | null;
   reason: string; triggering_observation_cursor: number | null; status: GraphVersion['status']; created_at: string;
@@ -89,17 +125,23 @@ export class PlanRepository {
 
   createPlan(input: CreatePlanInput): MutationResult<Plan> {
     validatePlanInput(input);
+    if (input.delivery) validatePlanDeliveryConfig(input.delivery);
     return withTransaction(this.db, () => {
       const existing = this.db.prepare('SELECT * FROM plans WHERE idempotency_key=?').get(input.idempotencyKey) as PlanRow | undefined;
       if (existing) {
         if (existing.project_key !== input.projectKey || existing.objective !== input.objective || existing.repository_path !== input.repositoryPath || existing.base_revision !== input.baseRevision) throw new DuplicateKeyError(input.idempotencyKey);
+        const existingDelivery = this.getDelivery(existing.plan_id);
+        const requestedDelivery = input.delivery;
+        if (Boolean(existingDelivery) !== Boolean(requestedDelivery)) throw new DuplicateKeyError(input.idempotencyKey);
+        if (existingDelivery && requestedDelivery && !this.deliveryConfigEqual(existingDelivery, requestedDelivery)) throw new DuplicateKeyError(input.idempotencyKey);
         return { status: 'existing', value: this.getPlan(existing.plan_id) };
       }
       const planId = input.planId ?? id('plan');
       const createdAt = iso();
       this.db.prepare('INSERT INTO plans(plan_id,idempotency_key,project_key,objective,repository_path,base_revision,current_revision,status,parent_plan_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(
         planId, input.idempotencyKey, input.projectKey, input.objective, input.repositoryPath, input.baseRevision, input.baseRevision, 'DRAFT', input.parentPlanId ?? null, createdAt, createdAt);
-      this.events.appendInTransaction(makeEvent(planId, 'PLAN', 'PLAN_CREATED', { planId, projectKey: input.projectKey, objective: input.objective, repositoryPath: input.repositoryPath, baseRevision: input.baseRevision }, input.idempotencyKey));
+      if (input.delivery) this.insertDelivery(planId, input.delivery, createdAt);
+      this.events.appendInTransaction(makeEvent(planId, 'PLAN', 'PLAN_CREATED', { planId, projectKey: input.projectKey, objective: input.objective, repositoryPath: input.repositoryPath, baseRevision: input.baseRevision, deliveryRequired: Boolean(input.delivery) }, input.idempotencyKey));
       return { status: 'created', value: this.getPlan(planId) };
     });
   }
@@ -172,7 +214,81 @@ export class PlanRepository {
     const row = this.db.prepare('SELECT * FROM plans WHERE plan_id=?').get(planId) as PlanRow | undefined;
     if (!row) throw new V4Error('PLAN_NOT_FOUND', 'Plan not found: ' + planId);
     const children = this.db.prepare('SELECT child_plan_id FROM plan_relationships WHERE parent_plan_id=? ORDER BY created_at').all(planId) as unknown as Array<{ child_plan_id: string }>;
-    return planFrom(row, children.map((child) => child.child_plan_id));
+    const delivery = this.getDelivery(planId);
+    return { ...planFrom(row, children.map((child) => child.child_plan_id)), ...(delivery ? { delivery } : {}) };
+  }
+
+  getDelivery(planId: string): PlanDelivery | undefined {
+    const row = this.db.prepare('SELECT * FROM plan_deliveries WHERE plan_id=?').get(planId) as DeliveryRow | undefined;
+    return row ? deliveryFrom(row) : undefined;
+  }
+
+  attachDelivery(planId: string, config: PlanDeliveryConfig): MutationResult<PlanDelivery> {
+    validatePlanDeliveryConfig(config);
+    return withTransaction(this.db, () => {
+      this.getPlan(planId);
+      const existing = this.getDelivery(planId);
+      if (existing) {
+        if (!this.deliveryConfigEqual(existing, config)) throw new V4Error('PLAN_DELIVERY_CONFLICT');
+        return { status: 'existing', value: existing };
+      }
+      const createdAt = iso();
+      this.insertDelivery(planId, config, createdAt);
+      this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_ATTACHED', {
+        remote: config.remote, branch: config.branch, targetBranch: config.targetBranch,
+        autoMerge: config.autoMerge, mergeMethod: config.mergeMethod, requiredChecks: config.requiredChecks,
+      }));
+      return { status: 'created', value: this.getDelivery(planId)! };
+    });
+  }
+
+  recordDeliveryObservation(planId: string, observation: DeliveryObservation): MutationResult<PlanDelivery> {
+    return withTransaction(this.db, () => {
+      const current = this.getDelivery(planId);
+      if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+      if (DELIVERY_STAGE[observation.status] < DELIVERY_STAGE[current.status]) throw new V4Error('DELIVERY_STATUS_REGRESSION');
+      const immutable = <T>(previous: T | undefined, next: T | undefined, code: string): T | undefined => {
+        if (previous !== undefined && next !== undefined && previous !== next) throw new V4Error(code);
+        return next ?? previous;
+      };
+      const headSha = immutable(current.headSha, observation.headSha, 'DELIVERY_HEAD_SHA_CONFLICT');
+      const pullRequestNumber = immutable(current.pullRequestNumber, observation.pullRequestNumber, 'DELIVERY_PR_CONFLICT');
+      const pullRequestUrl = immutable(current.pullRequestUrl, observation.pullRequestUrl, 'DELIVERY_PR_CONFLICT');
+      const mergeSha = immutable(current.mergeSha, observation.mergeSha, 'DELIVERY_MERGE_SHA_CONFLICT');
+      const updatedAt = iso();
+      this.db.prepare('UPDATE plan_deliveries SET status=?,head_sha=?,pull_request_number=?,pull_request_url=?,merge_sha=?,error_code=?,updated_at=? WHERE plan_id=?').run(
+        observation.status, headSha ?? null, pullRequestNumber ?? null, pullRequestUrl ?? null, mergeSha ?? null,
+        observation.errorCode ?? null, updatedAt, planId);
+      this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_OBSERVED', {
+        status: observation.status, headSha: headSha ?? null, pullRequestNumber: pullRequestNumber ?? null,
+        mergeSha: mergeSha ?? null, errorCode: observation.errorCode ?? null,
+      }));
+      return { status: 'updated', value: this.getDelivery(planId)! };
+    });
+  }
+
+  recordDeliveryError(planId: string, errorCode: string): MutationResult<PlanDelivery> {
+    failClosed(errorCode.trim().length > 0 && errorCode.length <= 500, 'DELIVERY_ERROR_CODE_INVALID');
+    return withTransaction(this.db, () => {
+      const current = this.getDelivery(planId);
+      if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+      const updatedAt = iso();
+      this.db.prepare('UPDATE plan_deliveries SET error_code=?,updated_at=? WHERE plan_id=?').run(errorCode, updatedAt, planId);
+      this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_ERROR_RECORDED', { status: current.status, errorCode }));
+      return { status: 'updated', value: this.getDelivery(planId)! };
+    });
+  }
+
+  private insertDelivery(planId: string, config: PlanDeliveryConfig, createdAt: string): void {
+    this.db.prepare('INSERT INTO plan_deliveries(plan_id,remote,branch,target_branch,auto_merge,merge_method,required_checks,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(
+      planId, config.remote, config.branch, config.targetBranch, config.autoMerge ? 1 : 0, config.mergeMethod,
+      encode(config.requiredChecks), 'PENDING', createdAt, createdAt);
+  }
+
+  private deliveryConfigEqual(left: PlanDelivery, right: PlanDeliveryConfig): boolean {
+    return left.remote === right.remote && left.branch === right.branch && left.targetBranch === right.targetBranch
+      && left.autoMerge === right.autoMerge && left.mergeMethod === right.mergeMethod
+      && JSON.stringify(left.requiredChecks) === JSON.stringify(right.requiredChecks);
   }
 
   getPlanByIdempotencyKey(key: string): Plan | undefined {

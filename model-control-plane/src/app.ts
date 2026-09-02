@@ -3,6 +3,7 @@ import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 
 import { LocalGitWorkspaceAdapter } from './v4/adapters/gitWorkspace.js';
+import { GitHubCliDeliveryAdapter } from './v4/adapters/githubDelivery.js';
 import {
   OpenHandsCodexBusinessReviewProvider,
   OpenHandsExecutionProvider,
@@ -12,6 +13,7 @@ import {
   HttpOpenHandsSupervisorClient,
   OpenHandsSupervisorAdapter,
 } from './v4/adapters/openhands.js';
+import type { PlanDeliveryConfig } from './v4/domain/delivery.js';
 import { V4Error } from './v4/domain/errors.js';
 import {
   EXECUTION_STATUSES,
@@ -60,6 +62,7 @@ export interface ExecutionAutomationRuntime {
   implementationRoutes: string[];
   reviewRoutes: string[];
   automationProjectKeys: string[];
+  requireDelivery: boolean;
 }
 
 export interface ControlPlaneRuntime {
@@ -95,6 +98,27 @@ function bodyRecord(value: unknown): Record<string, unknown> {
 function requiredText(value: unknown, code: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) throw new V4Error(code);
   return value.trim();
+}
+
+function planDeliveryConfig(value: unknown): PlanDeliveryConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  const body = bodyRecord(value);
+  if (typeof body.autoMerge !== 'boolean') throw new V4Error('DELIVERY_AUTO_MERGE_INVALID');
+  const mergeMethod = requiredText(body.mergeMethod ?? 'merge', 'DELIVERY_MERGE_METHOD_INVALID');
+  if (mergeMethod !== 'merge' && mergeMethod !== 'squash' && mergeMethod !== 'rebase') throw new V4Error('DELIVERY_MERGE_METHOD_INVALID');
+  const requiredChecks = body.requiredChecks === undefined
+    ? []
+    : Array.isArray(body.requiredChecks)
+      ? body.requiredChecks.map((item) => requiredText(item, 'DELIVERY_REQUIRED_CHECKS_INVALID'))
+      : (() => { throw new V4Error('DELIVERY_REQUIRED_CHECKS_INVALID'); })();
+  return {
+    remote: requiredText(body.remote ?? 'origin', 'DELIVERY_REMOTE_REQUIRED'),
+    branch: requiredText(body.branch, 'DELIVERY_BRANCH_REQUIRED'),
+    targetBranch: requiredText(body.targetBranch ?? 'main', 'DELIVERY_TARGET_BRANCH_REQUIRED'),
+    autoMerge: body.autoMerge,
+    mergeMethod,
+    requiredChecks,
+  };
 }
 
 interface RouteSpec {
@@ -290,6 +314,7 @@ function buildExecutionAutomation(
   const defaultPolicy: PlanAutomationPolicy = {
     implementationRoutes,
     reviewRoutes,
+    requireDelivery: env.MODEL_CP_V4_REQUIRE_DELIVERY !== 'false',
     maxImplementationAttempts: integerValue(
       env.MODEL_CP_V4_MAX_IMPLEMENTATION_ATTEMPTS,
       3,
@@ -318,7 +343,24 @@ function buildExecutionAutomation(
     {},
     automationProjectKeys.length > 0 ? automationProjectKeys : undefined,
   );
-  const plans = new PlanAutomationRuntime(repositories, worker, workspace, policy);
+  const delivery = new GitHubCliDeliveryAdapter({
+    allowedRepositoryRoots,
+    commandTimeoutMs: integerValue(
+      env.MODEL_CP_V4_DELIVERY_TIMEOUT_MS,
+      120_000,
+      1_000,
+      15 * 60_000,
+      'DELIVERY_TIMEOUT_INVALID',
+    ),
+    maxBufferBytes: integerValue(
+      env.MODEL_CP_V4_DELIVERY_MAX_BUFFER_BYTES,
+      8 * 1024 * 1024,
+      64 * 1024,
+      64 * 1024 * 1024,
+      'DELIVERY_BUFFER_INVALID',
+    ),
+  });
+  const plans = new PlanAutomationRuntime(repositories, worker, workspace, policy, delivery);
   return {
     workspace,
     worker,
@@ -327,6 +369,7 @@ function buildExecutionAutomation(
     implementationRoutes,
     reviewRoutes,
     automationProjectKeys,
+    requireDelivery: defaultPolicy.requireDelivery === true,
   };
 }
 
@@ -552,6 +595,7 @@ export async function buildControlPlane(
       implementationRoutes: automation?.implementationRoutes ?? [],
       reviewRoutes: automation?.reviewRoutes ?? [],
       automationProjectKeys: automation?.automationProjectKeys ?? [],
+      requireDelivery: automation?.requireDelivery ?? false,
     },
   }));
 
@@ -560,6 +604,7 @@ export async function buildControlPlane(
     const graph = repositories.plans.getActiveGraphVersion(planId);
     return {
       plan,
+      delivery: plan.delivery ?? null,
       graph,
       workItems: graph ? repositories.plans.listWorkItems(planId, graph.graphVersionId) : [],
       executions: repositories.executions.listByPlan(planId),
@@ -587,6 +632,7 @@ export async function buildControlPlane(
             const graph = repositories.plans.getActiveGraphVersion(plan.planId);
             return {
               plan,
+              delivery: plan.delivery ?? null,
               graph,
               workItems: graph
                 ? repositories.plans.listWorkItems(plan.planId, graph.graphVersionId)
@@ -608,12 +654,14 @@ export async function buildControlPlane(
       request.headers['idempotency-key'] ?? body.idempotencyKey,
       'PLAN_IDEMPOTENCY_REQUIRED',
     );
+    const delivery = planDeliveryConfig(body.delivery);
     const planResult = kernels.plan.createPlan({
       idempotencyKey,
       projectKey: requiredText(body.projectKey, 'PLAN_PROJECT_REQUIRED'),
       objective: requiredText(body.objective, 'PLAN_OBJECTIVE_REQUIRED'),
       repositoryPath: requiredText(body.repositoryPath, 'PLAN_REPOSITORY_REQUIRED'),
       baseRevision: requiredText(body.baseRevision, 'PLAN_BASE_REVISION_REQUIRED'),
+      ...(delivery ? { delivery } : {}),
     });
     const plan = planResult.value;
     if (!plan) throw new V4Error('PLAN_CREATE_FAILED');
@@ -657,6 +705,15 @@ export async function buildControlPlane(
       graph,
       supervisor: repositories.supervisors.getById(supervisor.supervisorId),
     };
+  });
+
+  app.post('/api/v4/plans/:planId/delivery', async (request, reply) => {
+    const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    const config = planDeliveryConfig(request.body);
+    if (!config) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+    const result = repositories.plans.attachDelivery(planId, config);
+    reply.code(result.status === 'created' ? 201 : 200);
+    return { planId, delivery: result.value, statusUrl: '/api/v4/plans/' + encodeURIComponent(planId) };
   });
 
   app.get('/api/v4/plans/:planId', async (request) => {
