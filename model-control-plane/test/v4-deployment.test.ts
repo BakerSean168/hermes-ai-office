@@ -144,6 +144,7 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(release, /probe-v4-service-sandbox\.sh/);
   assert.match(probe, /test -r "\$entry_file"/);
   assert.match(probe, /chown -R "\$owner_uid:\$owner_gid"/);
+  assert.match(probe, /chmod 0711 "\$probe_dir"/);
   assert.match(probe, /spawnSync\('\/usr\/bin\/id', \['-u'\], \{ encoding: 'utf8', uid, gid \}\)/);
   assert.match(release, /install -d -o root -g root -m 0711/);
   assert.match(release, /docker exec --user 10001:10001 hermes-openhands-v3/);

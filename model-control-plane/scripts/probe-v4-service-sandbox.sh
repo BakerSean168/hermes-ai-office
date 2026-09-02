@@ -19,6 +19,9 @@ test -r "$entry_file"
 mkdir -- "$probe_dir"
 touch -- "$probe_dir/file"
 chown -R "$owner_uid:$owner_gid" "$probe_dir"
+# The probe later drops to the repository owner (for example dev), which must be
+# able to traverse this worker-owned parent without gaining read/list access.
+chmod 0711 "$probe_dir"
 test "$(stat -c %u "$probe_dir")" = "$owner_uid"
 test "$(stat -c %g "$probe_dir")" = "$owner_gid"
 touch -- "$memo_probe" "$memo_git_probe" "$digital_probe"
