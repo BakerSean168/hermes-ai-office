@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { isDeliveryComplete } from '../domain/delivery.js';
 import { V4Error } from '../domain/errors.js';
 import type { Execution, ExecutionPhase } from '../domain/execution.js';
 import type { Plan } from '../domain/plan.js';
@@ -132,7 +133,7 @@ export class PlanAutomationRuntime {
     const plans = [
       ...this.repositories.plans.listPlans({ status: 'READY', limit }),
       ...this.repositories.plans.listPlans({ status: 'RUNNING', limit }),
-      ...this.repositories.plans.listPlans({ status: 'SUCCEEDED', limit: 1000 }).filter((plan) => plan.delivery && plan.delivery.status !== 'VERIFIED').slice(0, limit),
+      ...this.repositories.plans.listPlans({ status: 'SUCCEEDED', limit: 1000 }).filter((plan) => plan.delivery && !isDeliveryComplete(plan.delivery)).slice(0, limit),
     ];
     const unique = new Map(plans.map((plan) => [plan.planId, plan]));
     const results: PlanAutomationResult[] = [];
@@ -152,7 +153,7 @@ export class PlanAutomationRuntime {
 
   async runPlan(planId: string): Promise<PlanAutomationResult> {
     let plan = this.repositories.plans.getPlan(planId);
-    const legacyDeliveryPending = plan.status === 'SUCCEEDED' && plan.delivery && plan.delivery.status !== 'VERIFIED';
+    const legacyDeliveryPending = plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery);
     if (plan.status !== 'READY' && plan.status !== 'RUNNING' && !legacyDeliveryPending) {
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_AUTOMATABLE' };
     }
@@ -222,7 +223,7 @@ export class PlanAutomationRuntime {
     if (mode === 'retry-delivery' || mode === 'retry_delivery') return await this.runPlan(planId);
     if (mode !== 'auto') throw new V4Error('PLAN_RECONCILE_MODE_INVALID');
     let plan = this.repositories.plans.getPlan(planId);
-    if (plan.status === 'READY' || plan.status === 'RUNNING' || (plan.status === 'SUCCEEDED' && plan.delivery && plan.delivery.status !== 'VERIFIED')) return await this.runPlan(planId);
+    if (plan.status === 'READY' || plan.status === 'RUNNING' || (plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery))) return await this.runPlan(planId);
     if (plan.status !== 'FAILED')
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
 
@@ -918,10 +919,11 @@ export class PlanAutomationRuntime {
     context: { workItemId?: string; reviewId?: string } = {},
   ): Promise<PlanAutomationResult> {
     let current = this.repositories.plans.getPlan(plan.planId);
+    current = this.supersedeDeliveryFromVerifiedChild(current);
     if (policy.requireDelivery && !current.delivery) {
       return { planId: current.planId, ...context, status: 'WAITING', code: 'PLAN_DELIVERY_REQUIRED', revision: current.currentRevision };
     }
-    if (current.delivery && current.delivery.status !== 'VERIFIED') {
+    if (current.delivery && !isDeliveryComplete(current.delivery)) {
       if (!this.delivery) {
         return { planId: current.planId, ...context, status: 'WAITING', code: 'DELIVERY_RUNTIME_UNAVAILABLE', revision: current.currentRevision };
       }
@@ -953,9 +955,32 @@ export class PlanAutomationRuntime {
       planId: current.planId,
       ...context,
       status: 'SUCCEEDED',
-      code: current.delivery ? 'PLAN_DELIVERED' : 'PLAN_SUCCEEDED_LOCAL_ONLY',
+      code: current.delivery?.status === 'SUPERSEDED'
+        ? 'PLAN_DELIVERY_SUPERSEDED'
+        : current.delivery
+          ? 'PLAN_DELIVERED'
+          : 'PLAN_SUCCEEDED_LOCAL_ONLY',
       revision: current.currentRevision,
     };
+  }
+
+  private supersedeDeliveryFromVerifiedChild(plan: Plan): Plan {
+    if (!plan.delivery || isDeliveryComplete(plan.delivery) || plan.childPlanIds.length === 0) return plan;
+    const candidates = plan.childPlanIds
+      .map((childPlanId) => this.repositories.plans.getPlan(childPlanId))
+      .filter((child) =>
+        child.parentPlanId === plan.planId &&
+        child.baseRevision === plan.currentRevision &&
+        child.status === 'SUCCEEDED' &&
+        child.delivery?.status === 'VERIFIED' &&
+        child.delivery.remote === plan.delivery!.remote &&
+        child.delivery.branch === plan.delivery!.branch &&
+        child.delivery.targetBranch === plan.delivery!.targetBranch,
+      );
+    if (candidates.length === 0) return plan;
+    if (candidates.length > 1) throw new V4Error('DELIVERY_SUPERSEDING_CHILD_AMBIGUOUS');
+    this.repositories.plans.supersedeDelivery(plan.planId, candidates[0]!.planId);
+    return this.repositories.plans.getPlan(plan.planId);
   }
 
   private failPlan(plan: Plan, item: WorkItem | undefined, code: string): PlanAutomationResult {

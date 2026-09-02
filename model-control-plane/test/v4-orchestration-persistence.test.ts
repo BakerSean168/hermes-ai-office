@@ -52,6 +52,44 @@ function downgradeExecutionsToV2(file: string): void {
   raw.close();
 }
 
+function downgradeDeliveryToV4(file: string): void {
+  const raw = new DatabaseSync(file);
+  raw.exec(`
+    PRAGMA foreign_keys = OFF;
+    PRAGMA legacy_alter_table = ON;
+    ALTER TABLE plan_deliveries RENAME TO plan_deliveries_v5;
+    CREATE TABLE plan_deliveries (
+      plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id),
+      remote TEXT NOT NULL,
+      branch TEXT NOT NULL,
+      target_branch TEXT NOT NULL,
+      auto_merge INTEGER NOT NULL,
+      merge_method TEXT NOT NULL,
+      required_checks TEXT NOT NULL,
+      status TEXT NOT NULL,
+      head_sha TEXT,
+      pull_request_number INTEGER,
+      pull_request_url TEXT,
+      merge_sha TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO plan_deliveries(
+      plan_id,remote,branch,target_branch,auto_merge,merge_method,required_checks,status,
+      head_sha,pull_request_number,pull_request_url,merge_sha,error_code,created_at,updated_at
+    ) SELECT
+      plan_id,remote,branch,target_branch,auto_merge,merge_method,required_checks,status,
+      head_sha,pull_request_number,pull_request_url,merge_sha,error_code,created_at,updated_at
+      FROM plan_deliveries_v5;
+    DROP TABLE plan_deliveries_v5;
+    UPDATE schema_meta SET schema_version=4 WHERE schema_id='pixel-v4';
+    PRAGMA legacy_alter_table = OFF;
+    PRAGMA foreign_keys = ON;
+  `);
+  raw.close();
+}
+
 function seed(db: DatabaseSync, key = 'orchestration-seed') {
   const repositories = createRepositories(db);
   const plan = repositories.plans.createPlan({
@@ -163,7 +201,7 @@ test('adapters require the centralized current V4 schema and never create privat
   raw.close();
 });
 
-test('schema v1 migrates in place through v4 and preserves durable production state across restart', () => {
+test('schema v1 migrates in place through v5 and preserves durable production state across restart', () => {
   const file = tempDatabase('pixel-v4-migrate-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'migration-plan');
@@ -201,7 +239,7 @@ test('schema v1 migrates in place through v4 and preserves durable production st
   db.close();
 });
 
-test('schema v2 migrates execution phase lineage through v4 without losing queued work', () => {
+test('schema v2 migrates execution phase lineage through v5 without losing queued work', () => {
   const file = tempDatabase('pixel-v4-v2-to-v3-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'v2-execution-plan');
@@ -251,6 +289,31 @@ test('schema v2 migrates execution phase lineage through v4 without losing queue
   assert.equal(untouched.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, 2);
   assert.equal(untouched.prepare('SELECT count(*) AS count FROM plans').get()?.count, 1);
   untouched.close();
+});
+
+test('schema v4 migrates delivery supersession metadata to v5 without losing existing PR state', () => {
+  const file = tempDatabase('pixel-v4-to-v5-delivery-');
+  let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
+  const seeded = seed(db, 'v4-delivery-plan');
+  const config = {
+    remote: 'origin', branch: 'pixel/existing', targetBranch: 'main', autoMerge: true,
+    mergeMethod: 'merge' as const, requiredChecks: ['CI'],
+  };
+  seeded.repositories.plans.attachDelivery(seeded.plan.planId, config);
+  seeded.repositories.plans.recordDeliveryObservation(seeded.plan.planId, {
+    status: 'CHECKS_PENDING', headSha: 'base-sha', pullRequestNumber: 77,
+    pullRequestUrl: 'https://example.test/pull/77',
+  });
+  const before = seeded.repositories.plans.getPlan(seeded.plan.planId).delivery;
+  db.close();
+
+  downgradeDeliveryToV4(file);
+  db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
+  const repositories = createRepositories(db);
+  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
+  assert.ok((db.prepare('PRAGMA table_info(plan_deliveries)').all() as unknown as Array<{ name: string }>).some((column) => column.name === 'superseded_by_plan_id'));
+  assert.deepEqual(repositories.plans.getPlan(seeded.plan.planId).delivery, before);
+  db.close();
 });
 
 test('unknown newer and incomplete V4 schemas fail closed without resetting durable rows', () => {

@@ -66,7 +66,7 @@ function planFrom(row: PlanRow, children: string[] = []): Plan {
 interface DeliveryRow {
   plan_id: string; remote: string; branch: string; target_branch: string; auto_merge: number; merge_method: PlanDeliveryConfig['mergeMethod'];
   required_checks: string; status: DeliveryStatus; head_sha: string | null; pull_request_number: number | null;
-  pull_request_url: string | null; merge_sha: string | null; error_code: string | null; created_at: string; updated_at: string;
+  pull_request_url: string | null; merge_sha: string | null; error_code: string | null; superseded_by_plan_id: string | null; created_at: string; updated_at: string;
 }
 function deliveryFrom(row: DeliveryRow): PlanDelivery {
   return {
@@ -83,6 +83,7 @@ function deliveryFrom(row: DeliveryRow): PlanDelivery {
     pullRequestUrl: row.pull_request_url ?? undefined,
     mergeSha: row.merge_sha ?? undefined,
     errorCode: row.error_code ?? undefined,
+    supersededByPlanId: row.superseded_by_plan_id ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -96,6 +97,7 @@ const DELIVERY_STAGE: Record<DeliveryStatus, number> = {
   READY_TO_MERGE: 3,
   MERGED: 4,
   VERIFIED: 5,
+  SUPERSEDED: 6,
 };
 
 interface GraphRow {
@@ -262,6 +264,51 @@ export class PlanRepository {
       this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_OBSERVED', {
         status: observation.status, headSha: headSha ?? null, pullRequestNumber: pullRequestNumber ?? null,
         mergeSha: mergeSha ?? null, errorCode: observation.errorCode ?? null,
+      }));
+      return { status: 'updated', value: this.getDelivery(planId)! };
+    });
+  }
+
+  supersedeDelivery(planId: string, childPlanId: string): MutationResult<PlanDelivery> {
+    return withTransaction(this.db, () => {
+      const parent = this.getPlan(planId);
+      const current = this.getDelivery(planId);
+      if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+      if (current.status === 'VERIFIED') throw new V4Error('DELIVERY_ALREADY_VERIFIED');
+      if (current.status === 'SUPERSEDED') {
+        if (current.supersededByPlanId !== childPlanId) throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
+        return { status: 'existing', value: current };
+      }
+      const child = this.getPlan(childPlanId);
+      const relation = this.db.prepare(
+        'SELECT kind FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?',
+      ).get(planId, childPlanId) as { kind: string } | undefined;
+      if (!relation || relation.kind !== 'FOLLOW_UP') throw new V4Error('DELIVERY_SUPERSEDING_CHILD_RELATION_REQUIRED');
+      if (child.parentPlanId !== planId) throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PARENT_MISMATCH');
+      if (child.baseRevision !== parent.currentRevision)
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_BASE_MISMATCH');
+      if (child.status !== 'SUCCEEDED' || child.delivery?.status !== 'VERIFIED')
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_NOT_VERIFIED');
+      const childDelivery = child.delivery;
+      if (childDelivery.headSha !== child.currentRevision || !childDelivery.mergeSha)
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_EXACT_REVISION_REQUIRED');
+      if (!this.deliveryConfigEqual(current, childDelivery))
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_CONFIG_MISMATCH');
+      if (
+        current.pullRequestNumber !== undefined &&
+        childDelivery.pullRequestNumber !== undefined &&
+        current.pullRequestNumber !== childDelivery.pullRequestNumber
+      )
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PR_MISMATCH');
+      const updatedAt = iso();
+      this.db.prepare(
+        'UPDATE plan_deliveries SET status=?,superseded_by_plan_id=?,merge_sha=?,error_code=NULL,updated_at=? WHERE plan_id=?',
+      ).run('SUPERSEDED', childPlanId, childDelivery.mergeSha ?? current.mergeSha ?? null, updatedAt, planId);
+      this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_SUPERSEDED', {
+        childPlanId,
+        childHeadSha: childDelivery.headSha ?? null,
+        mergeSha: childDelivery.mergeSha ?? null,
+        pullRequestNumber: childDelivery.pullRequestNumber ?? null,
       }));
       return { status: 'updated', value: this.getDelivery(planId)! };
     });

@@ -8,6 +8,7 @@ export const DELIVERY_STATUSES = [
   'READY_TO_MERGE',
   'MERGED',
   'VERIFIED',
+  'SUPERSEDED',
 ] as const;
 export type DeliveryStatus = (typeof DELIVERY_STATUSES)[number];
 export type DeliveryMergeMethod = 'merge' | 'squash' | 'rebase';
@@ -29,6 +30,7 @@ export interface PlanDelivery extends PlanDeliveryConfig {
   pullRequestUrl?: string;
   mergeSha?: string;
   errorCode?: string;
+  supersededByPlanId?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -55,7 +57,7 @@ export function validatePlanDeliveryConfig(config: PlanDeliveryConfig): void {
 }
 
 export function isDeliveryComplete(delivery: PlanDelivery | undefined): boolean {
-  return delivery?.status === 'VERIFIED';
+  return delivery?.status === 'VERIFIED' || delivery?.status === 'SUPERSEDED';
 }
 
 // Legacy low-level delivery policy kept for the kernel/governance surface. Plan delivery

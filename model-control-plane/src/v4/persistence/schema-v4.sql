@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS plan_deliveries (
   pull_request_url TEXT,
   merge_sha TEXT,
   error_code TEXT,
+  superseded_by_plan_id TEXT REFERENCES plans(plan_id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -254,4 +255,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 4, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 5, CAST(strftime('%s','now') AS INTEGER));

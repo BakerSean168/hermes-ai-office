@@ -10,7 +10,7 @@ import { EventStore } from './eventStore.js';
 export interface BoundedSupervisorProjection {
   projectionVersion: 1;
   plan: { planId: string; projectKey: string; objective: string; repositoryPath: string; baseRevision: string; currentRevision: string; status: PlanStatus };
-  delivery?: { status: string; branch: string; targetBranch: string; autoMerge: boolean; pullRequestNumber?: number; mergeSha?: string; errorCode?: string };
+  delivery?: { status: string; branch: string; targetBranch: string; autoMerge: boolean; pullRequestNumber?: number; mergeSha?: string; errorCode?: string; supersededByPlanId?: string };
   graph: { graphVersionId?: string; version?: number; items: Array<{ workItemId: string; itemKey: string; title: string; objective: string; status: string; dependencies: string[]; acceptedRevision?: string }> };
   executions: Array<{ executionId: string; workItemId?: string; phase: string; parentExecutionId?: string; attempt: number; route: string; status: string; resultRevision?: string; errorCode?: string; retryable?: boolean }>;
   reviews: Array<{ reviewId: string; implementationExecutionId: string; sourceRevision: string; reviewedSha: string; status: string; verdict?: string }>;
@@ -38,7 +38,7 @@ export function buildSupervisorProjection(db: DatabaseSync, supervisorId: string
     plan_id: string; project_key: string; objective: string; repository_path: string; base_revision: string; current_revision: string; status: PlanStatus; active_graph_version_id: string | null;
   } | undefined;
   if (!plan) throw new V4Error('PLAN_NOT_FOUND');
-  const delivery = db.prepare('SELECT * FROM plan_deliveries WHERE plan_id=?').get(plan.plan_id) as { status: string; branch: string; target_branch: string; auto_merge: number; pull_request_number: number | null; merge_sha: string | null; error_code: string | null } | undefined;
+  const delivery = db.prepare('SELECT * FROM plan_deliveries WHERE plan_id=?').get(plan.plan_id) as { status: string; branch: string; target_branch: string; auto_merge: number; pull_request_number: number | null; merge_sha: string | null; error_code: string | null; superseded_by_plan_id: string | null } | undefined;
   const graph = plan.active_graph_version_id ? db.prepare('SELECT graph_version_id,version FROM graph_versions WHERE graph_version_id=?').get(plan.active_graph_version_id) as { graph_version_id: string; version: number } | undefined : undefined;
   const items = graph ? db.prepare('SELECT * FROM work_items WHERE graph_version_id=? ORDER BY item_key LIMIT ?').all(graph.graph_version_id, maxItems) as unknown as Array<{ work_item_id: string; item_key: string; title: string; objective: string; status: string; dependencies: string; exact_accepted_revision: string | null }> : [];
   const executions = db.prepare('SELECT * FROM executions WHERE plan_id=? ORDER BY updated_at DESC LIMIT ?').all(plan.plan_id, maxItems) as unknown as Array<{ execution_id: string; work_item_id: string | null; phase: string; parent_execution_id: string | null; attempt: number; route: string; status: string; result_revision: string | null; error_code: string | null; retryable: number | null }>;
@@ -48,7 +48,7 @@ export function buildSupervisorProjection(db: DatabaseSync, supervisorId: string
   const base = {
     projectionVersion: 1 as const,
     plan: { planId: plan.plan_id, projectKey: plan.project_key, objective: shorten(plan.objective, 4000), repositoryPath: shorten(plan.repository_path, 500), baseRevision: plan.base_revision, currentRevision: plan.current_revision, status: plan.status },
-    ...(delivery ? { delivery: { status: delivery.status, branch: delivery.branch, targetBranch: delivery.target_branch, autoMerge: Boolean(delivery.auto_merge), pullRequestNumber: delivery.pull_request_number ?? undefined, mergeSha: delivery.merge_sha ?? undefined, errorCode: delivery.error_code ?? undefined } } : {}),
+    ...(delivery ? { delivery: { status: delivery.status, branch: delivery.branch, targetBranch: delivery.target_branch, autoMerge: Boolean(delivery.auto_merge), pullRequestNumber: delivery.pull_request_number ?? undefined, mergeSha: delivery.merge_sha ?? undefined, errorCode: delivery.error_code ?? undefined, supersededByPlanId: delivery.superseded_by_plan_id ?? undefined } } : {}),
     graph: { graphVersionId: graph?.graph_version_id, version: graph?.version, items: items.map((item) => ({ workItemId: item.work_item_id, itemKey: item.item_key, title: shorten(item.title, 500), objective: shorten(item.objective, 2000), status: item.status, dependencies: decodeJson<string[]>(item.dependencies, 'CORRUPTED_PROJECTION_DATA'), acceptedRevision: item.exact_accepted_revision ?? undefined })) },
     executions: executions.map((item) => ({ executionId: item.execution_id, workItemId: item.work_item_id ?? undefined, phase: item.phase, parentExecutionId: item.parent_execution_id ?? undefined, attempt: item.attempt, route: item.route, status: item.status, resultRevision: item.result_revision ?? undefined, errorCode: item.error_code ?? undefined, retryable: item.retryable === null ? undefined : Boolean(item.retryable) })),
     reviews: reviews.map((item) => ({ reviewId: item.review_id, implementationExecutionId: item.implementation_execution_id, sourceRevision: item.source_revision, reviewedSha: item.reviewed_sha, status: item.status, verdict: item.verdict ?? undefined })),

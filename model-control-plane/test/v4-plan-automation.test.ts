@@ -346,6 +346,98 @@ test('plan automation persists delivery progress and succeeds only after remote 
   seeded.db.close();
 });
 
+
+test('verified FOLLOW_UP child supersedes a stale parent delivery without another GitHub delivery attempt', async () => {
+  const config: PlanDeliveryConfig = {
+    remote: 'origin', branch: 'pixel/shared-delivery', targetBranch: 'main', autoMerge: true,
+    mergeMethod: 'merge', requiredChecks: ['CI'],
+  };
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const localAutomation = runtime(seeded.repositories, runner, workspace);
+  const localResults = await drive(localAutomation, seeded.plan.planId);
+  assert.equal(localResults.at(-1)?.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
+  const parent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  assert.equal(parent.currentRevision, 'result-sha-1');
+
+  seeded.repositories.plans.attachDelivery(parent.planId, config);
+  seeded.repositories.plans.recordDeliveryObservation(parent.planId, {
+    status: 'CHECKS_PENDING',
+    headSha: parent.currentRevision,
+    pullRequestNumber: 42,
+    pullRequestUrl: 'https://example.test/pull/42',
+  });
+  const childId = 'plan-delivery-follow-up';
+  seeded.repositories.plans.createChildPlan({
+    parentPlanId: parent.planId,
+    childPlanId: childId,
+    repositoryPath: parent.repositoryPath,
+    objective: 'repair delivery base and finish the same pull request',
+    relation: 'FOLLOW_UP',
+  });
+  seeded.repositories.plans.attachDelivery(childId, config);
+  seeded.repositories.plans.updateStatus(childId, 'READY');
+  seeded.repositories.plans.updateStatus(childId, 'RUNNING');
+  seeded.repositories.plans.advanceAcceptedRevision(childId, parent.currentRevision, 'child-sha', 'test-follow-up-accepted');
+  seeded.repositories.plans.recordDeliveryObservation(childId, {
+    status: 'VERIFIED',
+    headSha: 'child-sha',
+    pullRequestNumber: 42,
+    pullRequestUrl: 'https://example.test/pull/42',
+    mergeSha: 'child-merge-sha',
+  });
+  seeded.repositories.plans.updateStatus(childId, 'SUCCEEDED');
+
+  const delivery = new ScriptedDelivery();
+  const automation = runtime(seeded.repositories, runner, workspace, { requireDelivery: true, delivery });
+  const result = await automation.runPlan(parent.planId);
+  assert.equal(result.status, 'SUCCEEDED');
+  assert.equal(result.code, 'PLAN_DELIVERY_SUPERSEDED');
+  assert.deepEqual(delivery.calls, []);
+  const durable = seeded.repositories.plans.getPlan(parent.planId);
+  assert.equal(durable.delivery?.status, 'SUPERSEDED');
+  assert.equal(durable.delivery?.supersededByPlanId, childId);
+  assert.equal(durable.delivery?.headSha, 'result-sha-1');
+  assert.equal(durable.delivery?.mergeSha, 'child-merge-sha');
+  assert.equal(durable.delivery?.errorCode, undefined);
+  assert.deepEqual(await automation.runOnce(), []);
+  seeded.db.close();
+});
+
+test('delivery supersession fails closed when the verified child does not share the parent delivery contract', async () => {
+  const parentConfig: PlanDeliveryConfig = {
+    remote: 'origin', branch: 'pixel/parent', targetBranch: 'main', autoMerge: true,
+    mergeMethod: 'merge', requiredChecks: ['CI'],
+  };
+  const childConfig: PlanDeliveryConfig = { ...parentConfig, branch: 'pixel/unrelated-child' };
+  const seeded = seed([], parentConfig);
+  const parent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  const childId = 'plan-unrelated-follow-up';
+  seeded.repositories.plans.createChildPlan({
+    parentPlanId: parent.planId,
+    childPlanId: childId,
+    repositoryPath: parent.repositoryPath,
+    objective: 'unrelated follow-up',
+    relation: 'FOLLOW_UP',
+  });
+  seeded.repositories.plans.attachDelivery(childId, childConfig);
+  seeded.repositories.plans.updateStatus(childId, 'READY');
+  seeded.repositories.plans.updateStatus(childId, 'RUNNING');
+  seeded.repositories.plans.advanceAcceptedRevision(childId, parent.currentRevision, 'child-sha', 'test-child');
+  seeded.repositories.plans.recordDeliveryObservation(childId, {
+    status: 'VERIFIED', headSha: 'child-sha', pullRequestNumber: 99,
+    pullRequestUrl: 'https://example.test/pull/99', mergeSha: 'child-merge',
+  });
+  seeded.repositories.plans.updateStatus(childId, 'SUCCEEDED');
+  assert.throws(
+    () => seeded.repositories.plans.supersedeDelivery(parent.planId, childId),
+    (error: unknown) => error instanceof V4Error && error.code === 'DELIVERY_SUPERSEDING_CHILD_CONFIG_MISMATCH',
+  );
+  assert.equal(seeded.repositories.plans.getPlan(parent.planId).delivery?.status, 'PENDING');
+  seeded.db.close();
+});
+
 test('plan automation switches from unavailable Luna to the next implementation route without duplicate work', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();
