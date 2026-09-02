@@ -557,6 +557,96 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   );
 });
 
+
+test('LocalGitWorkspace integration aligns initialized submodules and replays a post-fast-forward submodule checkout crash safely', async () => {
+  const value = fixture();
+  const childRoot = path.join(value.allowedRoot, 'integration-child-source');
+  fs.mkdirSync(childRoot, { recursive: true });
+  const child = repository(childRoot);
+  git(value.repositoryPath, [
+    '-c',
+    'protocol.file.allow=always',
+    'submodule',
+    'add',
+    '--',
+    child.repositoryPath,
+    'vendor/child',
+  ]);
+  const parentRevision = commit(value.repositoryPath, 'feat: add integration child');
+  const canonicalChild = path.join(value.repositoryPath, 'vendor/child');
+  assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), child.baseRevision);
+
+  const candidate = await value.adapter.provision({
+    executionId: 'exec-integrate-submodule',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: parentRevision,
+    phase: 'IMPLEMENT',
+  });
+  const candidateChild = path.join(candidate.hostPath, 'vendor/child');
+  configureWriter({ ...candidate, hostPath: candidateChild });
+  write(path.join(candidateChild, 'next.txt'), 'next\n');
+  const nextChildRevision = commit(candidateChild, 'feat: advance child');
+  git(canonicalChild, [
+    '-c',
+    'protocol.file.allow=always',
+    'fetch',
+    '--no-tags',
+    '--',
+    candidateChild,
+    nextChildRevision,
+  ]);
+  assert.equal(git(canonicalChild, ['cat-file', '-t', nextChildRevision]), 'commit');
+  assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), child.baseRevision);
+
+  configureWriter(candidate);
+  git(candidate.hostPath, ['add', 'vendor/child']);
+  git(candidate.hostPath, ['commit', '-m', 'chore: advance child gitlink']);
+  const acceptedRevision = git(candidate.hostPath, ['rev-parse', 'HEAD']);
+  assert.equal(git(value.repositoryPath, ['status', '--porcelain=v1']), '');
+
+  const integrated = await value.adapter.integrateAcceptedRevision({
+    repositoryPath: value.repositoryPath,
+    expectedRevision: parentRevision,
+    acceptedRevision,
+    candidateWorkspace: candidate,
+  });
+  assert.equal(integrated.headRevision, acceptedRevision);
+  assert.equal(integrated.clean, true);
+  assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), nextChildRevision);
+  assert.equal(git(value.repositoryPath, ['status', '--porcelain=v1']), '');
+
+  // Reconstruct the real crash window: superproject HEAD already moved, durable state did
+  // not, and an initialized submodule checkout was left on the prior gitlink.
+  git(canonicalChild, ['checkout', '--detach', child.baseRevision]);
+  assert.equal(git(value.repositoryPath, ['status', '--porcelain=v1']), 'M vendor/child');
+  const replayed = await value.adapter.integrateAcceptedRevision({
+    repositoryPath: value.repositoryPath,
+    expectedRevision: parentRevision,
+    acceptedRevision,
+    candidateWorkspace: candidate,
+  });
+  assert.equal(replayed.headRevision, acceptedRevision);
+  assert.equal(replayed.clean, true);
+  assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), nextChildRevision);
+  assert.equal(git(value.repositoryPath, ['status', '--porcelain=v1']), '');
+
+  // Uncommitted content inside an initialized submodule must never be overwritten by replay.
+  git(canonicalChild, ['checkout', '--detach', child.baseRevision]);
+  write(path.join(canonicalChild, 'operator-local.txt'), 'keep me\n');
+  await assert.rejects(
+    () =>
+      value.adapter.integrateAcceptedRevision({
+        repositoryPath: value.repositoryPath,
+        expectedRevision: parentRevision,
+        acceptedRevision,
+        candidateWorkspace: candidate,
+      }),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_INTEGRATION_SUBMODULE_DIRTY',
+  );
+  assert.ok(fs.existsSync(path.join(canonicalChild, 'operator-local.txt')));
+});
+
 test('LocalGitWorkspace provisions from a linked worktree under forced different ownership', async () => {
   const value = fixture();
   const linked = path.join(value.allowedRoot, 'linked-worktree');

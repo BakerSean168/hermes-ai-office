@@ -848,16 +848,25 @@ export class PlanAutomationRuntime {
       plan.repositoryPath,
       candidate.resultRevision,
     );
-    if (!observation.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
     if (observation.headRevision === plan.currentRevision) {
+      if (!observation.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
       await this.workspace.integrateAcceptedRevision({
         repositoryPath: plan.repositoryPath,
         expectedRevision: plan.currentRevision,
         acceptedRevision: candidate.resultRevision,
         candidateWorkspace: session.workspace,
       });
-    } else if (observation.headRevision !== candidate.resultRevision) {
-      return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIVERGED');
+    } else if (observation.headRevision === candidate.resultRevision) {
+      if (!observation.clean) {
+        await this.workspace.integrateAcceptedRevision({
+          repositoryPath: plan.repositoryPath,
+          expectedRevision: plan.currentRevision,
+          acceptedRevision: candidate.resultRevision,
+          candidateWorkspace: session.workspace,
+        });
+      }
+    } else {
+      return this.failPlan(plan, item, observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY');
     }
     const current = this.repositories.plans.getPlan(plan.planId);
     if (current.currentRevision !== candidate.resultRevision) {

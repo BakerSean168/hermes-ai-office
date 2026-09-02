@@ -596,50 +596,82 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         ['rev-parse', '--verify', 'HEAD^{commit}'],
         repositoryIdentity,
       );
-      if (current !== input.expectedRevision) throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
-      if (
-        (await this.git(
-          repositoryRoot,
-          ['status', '--porcelain=v1', '-z'],
-          repositoryIdentity,
-        )).length !== 0
-      )
-        throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
-      // A direct local-path fetch starts git-upload-pack in the worker-owned clone. That
-      // child does not inherit our per-command safe.directory setting. An exact-HEAD
-      // bundle preserves the ownership boundary and gives the controller a passive input.
-      await this.git(candidate.hostPath, ['bundle', 'create', transferBundle, 'HEAD']);
-      await this.git(
-        repositoryRoot,
-        ['fetch', '--no-tags', '--', transferBundle, input.acceptedRevision],
-        repositoryIdentity,
-      );
-      if (
-        !(await this.gitSucceeds(
-          repositoryRoot,
-          [
-            'merge-base',
-            '--is-ancestor',
-            input.expectedRevision,
-            input.acceptedRevision,
-          ],
-          repositoryIdentity,
-        ))
-      ) {
-        throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
-      }
-      const beforeMerge = await this.git(
-        repositoryRoot,
-        ['rev-parse', '--verify', 'HEAD^{commit}'],
-        repositoryIdentity,
-      );
-      if (beforeMerge !== input.expectedRevision)
+      if (current !== input.expectedRevision && current !== input.acceptedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
-      await this.git(
+
+      const repositoryStatus = await this.git(
         repositoryRoot,
-        ['merge', '--ff-only', input.acceptedRevision],
+        ['status', '--porcelain=v1', '-z'],
         repositoryIdentity,
       );
+      if (current === input.expectedRevision && repositoryStatus.length !== 0)
+        throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
+      if (current === input.acceptedRevision && repositoryStatus.length !== 0)
+        await this.assertReplayDirtinessRepairable(
+          repositoryRoot,
+          input.acceptedRevision,
+          repositoryStatus,
+          repositoryIdentity,
+        );
+
+      if (current === input.expectedRevision) {
+        // A direct local-path fetch starts git-upload-pack in the worker-owned clone. That
+        // child does not inherit our per-command safe.directory setting. An exact-HEAD
+        // bundle preserves the ownership boundary and gives the controller a passive input.
+        await this.git(candidate.hostPath, ['bundle', 'create', transferBundle, 'HEAD']);
+        await this.git(
+          repositoryRoot,
+          ['fetch', '--no-tags', '--', transferBundle, input.acceptedRevision],
+          repositoryIdentity,
+        );
+        if (
+          !(await this.gitSucceeds(
+            repositoryRoot,
+            [
+              'merge-base',
+              '--is-ancestor',
+              input.expectedRevision,
+              input.acceptedRevision,
+            ],
+            repositoryIdentity,
+          ))
+        ) {
+          throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
+        }
+        await this.preflightInitializedSubmodules(repositoryRoot, input.acceptedRevision);
+        const beforeMerge = await this.git(
+          repositoryRoot,
+          ['rev-parse', '--verify', 'HEAD^{commit}'],
+          repositoryIdentity,
+        );
+        if (beforeMerge !== input.expectedRevision)
+          throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
+        await this.git(
+          repositoryRoot,
+          ['merge', '--ff-only', input.acceptedRevision],
+          repositoryIdentity,
+        );
+      } else {
+        // Crash replay: Git may already be at the independently reviewed SHA while
+        // durable plan state is still on expectedRevision. Only submodule checkout
+        // drift is repairable here; unrelated source-tree dirt remains fail-closed.
+        if (
+          !(await this.gitSucceeds(
+            repositoryRoot,
+            [
+              'merge-base',
+              '--is-ancestor',
+              input.expectedRevision,
+              input.acceptedRevision,
+            ],
+            repositoryIdentity,
+          ))
+        )
+          throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
+        await this.preflightInitializedSubmodules(repositoryRoot, input.acceptedRevision);
+      }
+
+      await this.alignInitializedSubmodules(repositoryRoot, input.acceptedRevision);
       const after = await this.git(
         repositoryRoot,
         ['rev-parse', '--verify', 'HEAD^{commit}'],
@@ -661,6 +693,126 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       fs.rmSync(transferBundle, { force: true });
       fs.rmSync(lockPath, { force: true });
     }
+  }
+
+
+  private gitlinkEntries(tree: string): Array<{ revision: string; relativePath: string }> {
+    return tree
+      .split('\0')
+      .filter(Boolean)
+      .flatMap((entry) => {
+        const match = /^160000 commit ([0-9a-f]{40,64})\t(.+)$/.exec(entry);
+        return match ? [{ revision: match[1]!, relativePath: match[2]! }] : [];
+      });
+  }
+
+  private safeSubmodulePath(repositoryRoot: string, relativePath: string): string {
+    const normalized = relativePath.replace(/\\/g, '/');
+    if (
+      !normalized ||
+      normalized.startsWith('/') ||
+      path.posix.normalize(normalized) !== normalized ||
+      normalized.split('/').some((part) => !part || part === '.' || part === '..')
+    )
+      throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
+    const targetPath = path.resolve(repositoryRoot, normalized);
+    if (!inside(targetPath, repositoryRoot)) throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
+    return targetPath;
+  }
+
+  private async initializedSubmoduleState(
+    repositoryRoot: string,
+    relativePath: string,
+  ): Promise<{ path: string; identity: { uid: number; gid: number } } | undefined> {
+    const targetPath = this.safeSubmodulePath(repositoryRoot, relativePath);
+    const stat = fs.lstatSync(targetPath, { throwIfNoEntry: false });
+    if (!stat) return undefined;
+    if (!stat.isDirectory() || stat.isSymbolicLink())
+      throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_INVALID');
+    if (fs.readdirSync(targetPath).length === 0) return undefined;
+    const identity = this.repositoryIdentity(targetPath);
+    const gitDirectory = await this.gitOptional(targetPath, ['rev-parse', '--git-dir'], identity);
+    if (!gitDirectory) throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_INVALID');
+    return { path: targetPath, identity };
+  }
+
+  private async preflightInitializedSubmodules(
+    repositoryRoot: string,
+    revision: string,
+    depth = 0,
+    state: { count: number } = { count: 0 },
+  ): Promise<void> {
+    if (depth > MAX_SUBMODULE_DEPTH) throw new V4Error('WORKSPACE_SUBMODULE_DEPTH_EXCEEDED');
+    const identity = this.repositoryIdentity(repositoryRoot);
+    const tree = await this.git(repositoryRoot, ['ls-tree', '-r', '-z', revision], identity);
+    for (const entry of this.gitlinkEntries(tree)) {
+      if (state.count >= MAX_SUBMODULES) throw new V4Error('WORKSPACE_SUBMODULE_LIMIT_EXCEEDED');
+      state.count += 1;
+      const initialized = await this.initializedSubmoduleState(repositoryRoot, entry.relativePath);
+      if (!initialized) continue;
+      const status = await this.git(initialized.path, ['status', '--porcelain=v1', '-z'], initialized.identity);
+      if (status.length !== 0) throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_DIRTY');
+      if (!(await this.gitSucceeds(initialized.path, ['cat-file', '-e', entry.revision + '^{commit}'], initialized.identity)))
+        throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_REVISION_MISSING');
+      await this.preflightInitializedSubmodules(initialized.path, entry.revision, depth + 1, state);
+    }
+  }
+
+  private async alignInitializedSubmodules(
+    repositoryRoot: string,
+    revision: string,
+    depth = 0,
+    state: { count: number } = { count: 0 },
+  ): Promise<void> {
+    if (depth > MAX_SUBMODULE_DEPTH) throw new V4Error('WORKSPACE_SUBMODULE_DEPTH_EXCEEDED');
+    const identity = this.repositoryIdentity(repositoryRoot);
+    const tree = await this.git(repositoryRoot, ['ls-tree', '-r', '-z', revision], identity);
+    for (const entry of this.gitlinkEntries(tree)) {
+      if (state.count >= MAX_SUBMODULES) throw new V4Error('WORKSPACE_SUBMODULE_LIMIT_EXCEEDED');
+      state.count += 1;
+      const initialized = await this.initializedSubmoduleState(repositoryRoot, entry.relativePath);
+      if (!initialized) continue;
+      await this.git(initialized.path, ['checkout', '--detach', entry.revision], initialized.identity);
+      await this.alignInitializedSubmodules(initialized.path, entry.revision, depth + 1, state);
+    }
+  }
+
+  private async assertReplayDirtinessRepairable(
+    repositoryRoot: string,
+    acceptedRevision: string,
+    status: string,
+    identity: { uid: number; gid: number },
+  ): Promise<void> {
+    if (status.length === 0) return;
+    const tree = await this.git(repositoryRoot, ['ls-tree', '-r', '-z', acceptedRevision], identity);
+    const gitlinks = new Set(this.gitlinkEntries(tree).map((entry) => entry.relativePath));
+
+    // Replay is allowed only for worktree-only submodule HEAD drift after the
+    // superproject already reached the independently reviewed commit. Never
+    // accept staged changes or untracked files as a recoverable crash artifact.
+    const staged = await this.git(
+      repositoryRoot,
+      ['diff', '--cached', '--name-only', '-z', 'HEAD'],
+      identity,
+    );
+    if (staged.length !== 0) throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
+    const untracked = await this.git(
+      repositoryRoot,
+      ['ls-files', '--others', '--exclude-standard', '-z'],
+      identity,
+    );
+    if (untracked.length !== 0) throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
+    const changed = (
+      await this.git(
+        repositoryRoot,
+        ['diff', '--name-only', '-z', '--ignore-submodules=none', 'HEAD'],
+        identity,
+      )
+    )
+      .split('\0')
+      .filter(Boolean);
+    if (changed.length === 0 || changed.some((relativePath) => !gitlinks.has(relativePath)))
+      throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
   }
 
   private async materializeSubmodules(

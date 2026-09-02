@@ -54,6 +54,7 @@ function seed(items: Array<{ itemKey: string; dependencies?: string[] }> = [{ it
 
 class AutomationWorkspace implements WorkspaceProviderPort {
   repositoryHead = 'base-sha';
+  repositoryClean = true;
   integrateCalls = 0;
   readonly workspaces = new Map<string, WorkspaceDescriptor>();
 
@@ -62,7 +63,7 @@ class AutomationWorkspace implements WorkspaceProviderPort {
       repositoryPath,
       rootPath: repositoryPath,
       headRevision: this.repositoryHead,
-      clean: true,
+      clean: this.repositoryClean,
       commitExists: this.repositoryHead === revision,
       observedAt: now(),
     };
@@ -98,9 +99,12 @@ class AutomationWorkspace implements WorkspaceProviderPort {
     acceptedRevision: string;
     candidateWorkspace: WorkspaceDescriptor;
   }) {
-    assert.equal(this.repositoryHead, input.expectedRevision);
+    assert.ok(
+      this.repositoryHead === input.expectedRevision || this.repositoryHead === input.acceptedRevision,
+    );
     this.integrateCalls += 1;
     this.repositoryHead = input.acceptedRevision;
+    this.repositoryClean = true;
     return {
       repositoryPath: input.repositoryPath,
       rootPath: input.repositoryPath,
@@ -509,6 +513,37 @@ test('plan automation replays a completed Git fast-forward after a crash without
     candidate.resultRevision,
   );
   replay.db.close();
+  seeded.db.close();
+});
+
+
+test('plan automation replays accepted-head integration dirt caused by a crash before durable revision CAS', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = runtime(seeded.repositories, runner, workspace);
+
+  const queued = await automation.runPlan(seeded.plan.planId);
+  await runner.runExecution(queued.executionId!);
+  const reviewQueued = await automation.runPlan(seeded.plan.planId);
+  await runner.runExecution(reviewQueued.executionId!);
+  const candidate = seeded.repositories.executions
+    .listByPlan(seeded.plan.planId)
+    .find((execution) => execution.identity.phase === 'IMPLEMENT' && execution.status === 'SUCCEEDED')!;
+  assert.ok(candidate.resultRevision);
+
+  workspace.repositoryHead = candidate.resultRevision!;
+  workspace.repositoryClean = false;
+  const recovered = await automation.runPlan(seeded.plan.planId);
+  assert.equal(recovered.status, 'SUCCEEDED');
+  assert.equal(recovered.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
+  assert.equal(workspace.integrateCalls, 1);
+  assert.equal(workspace.repositoryClean, true);
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision, candidate.resultRevision);
+  assert.equal(
+    seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
+    candidate.resultRevision,
+  );
   seeded.db.close();
 });
 
