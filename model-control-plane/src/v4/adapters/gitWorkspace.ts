@@ -748,7 +748,16 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       const bundle = path.join(bundleRoot, '.pixel-v4-submodule-' + state.count + '-' + randomUUID() + '.bundle');
       try {
         await this.git(objectSource, ['bundle', 'create', bundle, bundleRef]);
-        await this.runGit(['clone', '--no-hardlinks', '--no-checkout', '--', bundle, targetPath]);
+        fs.mkdirSync(targetPath, { recursive: true });
+        await this.runGit(['init', '-q', '--', targetPath]);
+        await this.git(targetPath, [
+          'fetch',
+          '--no-tags',
+          '--no-write-fetch-head',
+          '--',
+          bundle,
+          bundleRef,
+        ]);
         await this.git(targetPath, ['checkout', '--detach', expectedRevision]);
       } finally {
         fs.rmSync(bundle, { force: true });

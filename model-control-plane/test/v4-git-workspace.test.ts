@@ -247,8 +247,13 @@ test('LocalGitWorkspace review provisioning recovers an exact submodule from the
   // The exact gitlink object remains in the trusted local object database even though
   // the canonical submodule checkout is intentionally on a different commit.
   git(canonicalChild, ['checkout', '--detach', child.rootRevision]);
+  git(canonicalChild, ['branch', '-D', 'main']);
   assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), child.rootRevision);
   assert.equal(git(canonicalChild, ['cat-file', '-t', child.baseRevision]), 'commit');
+  assert.equal(
+    git(canonicalChild, ['for-each-ref', '--contains', child.baseRevision, '--format=%(refname)']),
+    'refs/remotes/origin/HEAD\nrefs/remotes/origin/main',
+  );
 
   const implementation = await value.adapter.provision({
     executionId: 'exec-submodule-fallback-implementation',
