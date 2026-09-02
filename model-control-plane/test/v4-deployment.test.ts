@@ -147,6 +147,16 @@ test('V4 release reconciles OpenHands Agent runtimes from the shared Harness loc
   assert.match(release, /codex login status/);
 });
 
+test('OpenHands persists and gates the exact BodySense Go toolchain', () => {
+  assert.match(openHandsCompose, /PATH: \/openhands-state\/toolchains\/go-1\.26\.0\/bin:/);
+  assert.match(openHandsCompose, /GOTOOLCHAIN: local/);
+  assert.match(openHandsTooling, /OPENHANDS_GO_TOOLCHAIN_VERSION:-1\.26\.0/);
+  assert.match(openHandsTooling, /golang:\$\{GO_TOOLCHAIN_VERSION\}-bookworm/);
+  assert.match(openHandsTooling, /--volumes-from "\$CONTAINER"/);
+  assert.match(openHandsTooling, /"\$GO_TOOLCHAIN_ROOT\/bin\/go" version/);
+  assert.match(openHandsTooling, /test -x "\$GO_TOOLCHAIN_ROOT\/bin\/gofmt"/);
+});
+
 test('OpenHands persists and prewarms exact Corepack pnpm versions without prompts', () => {
   assert.match(openHandsCompose, /COREPACK_HOME: \/openhands-state\/corepack/);
   assert.match(openHandsCompose, /COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'/);

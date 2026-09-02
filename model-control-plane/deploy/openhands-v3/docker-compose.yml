@@ -29,6 +29,10 @@ services:
       AI_OFFICE_CONTROL_PLANE_URL: http://127.0.0.1:8320
       COREPACK_HOME: /openhands-state/corepack
       COREPACK_ENABLE_DOWNLOAD_PROMPT: '0'
+      # Project toolchains live in the persisted OpenHands state volume so the
+      # upstream Agent image can remain source-pinned and immutable.
+      PATH: /openhands-state/toolchains/go-1.26.0/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games
+      GOTOOLCHAIN: local
     volumes:
       - /opt/data/hermes-ai-office-v3/workspaces:/workspace
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state

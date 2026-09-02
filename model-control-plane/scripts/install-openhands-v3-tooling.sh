@@ -29,6 +29,36 @@ CODEGRAPH_VERSION="${CODEGRAPH_VERSION:-1.5.0}"
 MCP_REMOTE_VERSION="${MCP_REMOTE_VERSION:-0.7.0}"
 NX_MCP_VERSION="${NX_MCP_VERSION:-0.25.0}"
 COREPACK_PNPM_VERSIONS="${COREPACK_PNPM_VERSIONS:-10.32.1 11.17.0 11.20.0}"
+GO_TOOLCHAIN_VERSION="${OPENHANDS_GO_TOOLCHAIN_VERSION:-1.26.0}"
+GO_TOOLCHAIN_ROOT="${OPENHANDS_GO_TOOLCHAIN_ROOT:-/openhands-state/toolchains/go-${GO_TOOLCHAIN_VERSION}}"
+GO_TOOLCHAIN_IMAGE="${OPENHANDS_GO_TOOLCHAIN_IMAGE:-golang:${GO_TOOLCHAIN_VERSION}-bookworm}"
+
+# Persist the exact Go toolchain needed by BodySense inside the existing
+# OpenHands state volume instead of mutating the upstream-pinned Agent image.
+# The source image is version-pinned and the installed binary self-reports the
+# expected version before the installer succeeds.
+current_go="$(docker exec --user 10001:10001 "$CONTAINER"   "$GO_TOOLCHAIN_ROOT/bin/go" version 2>/dev/null || true)"
+if [[ "$current_go" != "go version go${GO_TOOLCHAIN_VERSION} "* ]]; then
+  docker run --rm -i --volumes-from "$CONTAINER" "$GO_TOOLCHAIN_IMAGE" \
+    sh -s -- "$GO_TOOLCHAIN_ROOT" <<'SH'
+set -eu
+target="$1"
+tmp="${target}.tmp.$$"
+rm -rf "$tmp"
+mkdir -p "$tmp"
+cp -a /usr/local/go/. "$tmp/"
+chmod -R a+rX "$tmp"
+rm -rf "$target"
+mv "$tmp" "$target"
+SH
+fi
+actual_go="$(docker exec --user 10001:10001 "$CONTAINER" "$GO_TOOLCHAIN_ROOT/bin/go" version)"
+case "$actual_go" in
+  "go version go${GO_TOOLCHAIN_VERSION} "*) ;;
+  *) echo "OpenHands Go toolchain expected go${GO_TOOLCHAIN_VERSION}, got: $actual_go" >&2; exit 1 ;;
+esac
+docker exec --user 10001:10001 "$CONTAINER" test -x "$GO_TOOLCHAIN_ROOT/bin/gofmt"
+printf '%-20s%s\n' "go" "$actual_go"
 
 # Keep package-manager downloads deterministic and persistent across OpenHands
 # container recreation. Each repository still selects its exact checked-in
