@@ -449,6 +449,11 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
     } catch (error) {
       if (!(error instanceof V4Error) || error.code !== 'OPENHANDS_HTTP_409') throw error;
+      const concurrent = await this.inspect(providerSessionId);
+      if (concurrent.status === 'RUNNING' || concurrent.status === 'WAITING_FOR_CONFIRMATION' || TERMINAL_STATUSES.has(concurrent.status)) {
+        return concurrent;
+      }
+      if (concurrent.status !== 'PAUSED') throw error;
       await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
       await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
     }

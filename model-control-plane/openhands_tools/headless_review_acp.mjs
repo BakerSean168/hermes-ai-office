@@ -45,7 +45,7 @@ const PIXEL_V4_REVIEWED_SHA = process.env.PIXEL_V4_REVIEWED_SHA ?? '';
 const REVIEW_SCHEMA = {
   type: 'object',
   properties: {
-    verdict: { type: 'string', enum: ['PASS', 'FAIL'] },
+    verdict: { type: 'string', enum: ['PASS', 'FAIL', 'INVALID'] },
     summary: { type: 'string' },
     findings: {
       type: 'array',
@@ -286,7 +286,7 @@ function collectEvidence(cwd) {
 
   const combined = sections.join('\n\n');
   if (combined.length <= EVIDENCE_LIMIT) return combined;
-  return `${combined.slice(0, EVIDENCE_LIMIT)}\n\n[EVIDENCE TRUNCATED AT ${EVIDENCE_LIMIT} CHARACTERS; inspect the physically read-only snapshot for additional context.]`;
+  return `${combined.slice(0, EVIDENCE_LIMIT)}\n\n[EVIDENCE TRUNCATED AT ${EVIDENCE_LIMIT} CHARACTERS; inspect the supplied snapshot for additional context.]`;
 }
 
 function promptText(blocks) {
@@ -303,14 +303,14 @@ function canonicalReview(value) {
     throw new Error('HEADLESS_REVIEW_RESULT_INVALID');
   }
   const verdict = value.verdict;
-  if (verdict !== 'PASS' && verdict !== 'FAIL') {
+  if (verdict !== 'PASS' && verdict !== 'FAIL' && verdict !== 'INVALID') {
     throw new Error('HEADLESS_REVIEW_VERDICT_INVALID');
   }
   const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
   const findings = Array.isArray(value.findings) ? value.findings : [];
   const lines = [
     verdict,
-    summary || (verdict === 'PASS' ? 'No blocking findings.' : 'Blocking findings exist.'),
+    summary || (verdict === 'PASS' ? 'No blocking findings.' : verdict === 'INVALID' ? 'Review environment invalid.' : 'Blocking findings exist.'),
   ];
   if (findings.length) {
     lines.push('', 'Findings:');
@@ -667,7 +667,10 @@ function codexCommand(session, prompt, evidence) {
   const schemaPath = path.join(sessionDir, 'review-schema.json');
   fs.writeFileSync(schemaPath, JSON.stringify(REVIEW_SCHEMA), { mode: 0o600 });
   const lastMessage = path.join(sessionDir, 'codex-last-message.json');
-  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. When the output schema exposes a checks field, record the exact focused verification commands you ran, their real exit codes, and concise results. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. Keep tracked repository files unchanged. Verification may create ignored dependency or tool-cache artifacts in the supplied workspace when the sandbox permits it; only use a disposable /tmp copy if a required check truly cannot run without tracked writes. Do not modify tracked snapshot content.`;
+  const pixelV4EvidenceNote = PIXEL_V4_REVIEW_EVIDENCE_PATH
+    ? `\n\nPixel V4 controller note: the outer headless adapter, not this Codex sandbox, persists ${PIXEL_V4_REVIEW_EVIDENCE_PATH} from your structured response. Do NOT attempt to write that controller-owned evidence path yourself, and do not treat inability to write it as a finding or environment failure. This note overrides any earlier instruction asking you to write the V4 completion-evidence file directly.`
+    : '';
+  const reviewPrompt = `${prompt}\n\nFrozen Git evidence captured by AI Office before the reviewer starts:\n\n${evidence}\n\nBefore returning a verdict, you MUST independently inspect repository files and execute at least one focused verification command using terminal tools. When the output schema exposes a checks field, record the exact focused verification commands you ran, their real exit codes, and concise results. Do not return FAIL merely because verification has not yet been attempted. The frozen evidence is a starting point, not a substitute for independent inspection. Keep tracked repository files unchanged. Verification may create ignored dependency or tool-cache artifacts in the supplied workspace when the sandbox permits it; only use a disposable /tmp copy if a required check truly cannot run without tracked writes. Do not modify tracked snapshot content.${pixelV4EvidenceNote}`;
   return {
     command: CODEX_BIN,
     args: [

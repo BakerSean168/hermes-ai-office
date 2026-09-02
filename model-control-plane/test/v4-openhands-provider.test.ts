@@ -127,6 +127,36 @@ test('OpenHands launch explicitly runs an idle initial conversation before retur
   ]);
 });
 
+test('OpenHands launch never interrupts an initial turn that is already running', async () => {
+  const calls: Array<{ url: string; method: string }> = [];
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    calls.push({ url: value, method: String(init.method ?? 'GET') });
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(JSON.stringify({ id: 'race-session', execution_status: 'idle', workspace: body.workspace, tags: body.tags }), { status: 201 });
+    }
+    if (value.endsWith('/api/conversations/race-session/run') && init.method === 'POST') {
+      return new Response(JSON.stringify({ detail: 'Conversation already running.' }), { status: 409 });
+    }
+    if (value.endsWith('/api/conversations/race-session')) {
+      return new Response(JSON.stringify({ id: 'race-session', execution_status: 'running' }), { status: 200 });
+    }
+    if (value.endsWith('/api/conversations/race-session/interrupt')) {
+      throw new Error('initial active turn must not be interrupted');
+    }
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsExecutionProvider(options(fake));
+  const snapshot = await provider.launch(launchInput('IMPLEMENT'));
+  assert.equal(snapshot.status, 'RUNNING');
+  assert.deepEqual(calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]), [
+    ['POST', '/api/conversations'],
+    ['POST', '/api/conversations/race-session/run'],
+    ['GET', '/api/conversations/race-session'],
+  ]);
+});
+
 test('OpenHands recovery is paginated, provenance checked and duplicate-safe', async () => {
   let mode: 'single' | 'duplicate' | 'mismatch' = 'single';
   const fake = (async (url: string | URL | Request) => {
