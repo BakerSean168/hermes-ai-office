@@ -150,6 +150,8 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(release, /install -d -o root -g root -m 0711/);
   assert.match(release, /docker exec --user 10001:10001 hermes-openhands-v3/);
   assert.match(probe, /trap - EXIT/);
+  assert.match(probe, /Source-repository probes must never escape/);
+  assert.match(release, /\$\{digital_probe\}\.repository-owner/);
   assert.doesNotMatch(probe, /\ncleanup\ntrap - EXIT/);
   assert.match(probe, /repository_probe=\"\$\{digital_probe\}\.repository-owner\"/);
   assert.match(probe, /repository-owner Git probe failed/);

@@ -38,7 +38,7 @@ memo_git_probe="/home/dev/projects/memoflow/.git/pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
 probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
 cleanup_probe() {
-  sudo rm -rf "$probe_dir"
+  sudo rm -rf "$probe_dir" "${digital_probe}.repository-owner"
   sudo rm -f "$memo_probe" "$memo_git_probe" "$digital_probe"
 }
 trap cleanup_probe EXIT

@@ -92,4 +92,8 @@ GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_OPTIONAL_LOCKS=0 \
 test "$(stat -c %u "$repository_probe/.git/index")" = "$repo_uid"
 test "$(stat -c %g "$repository_probe/.git/index")" = "$repo_gid"
 
+# Preserve only the worker probe directory for the subsequent container-write gate.
+# Source-repository probes must never escape a successful sandbox probe.
+rm -rf -- "$repository_probe"
+rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe"
 trap - EXIT
