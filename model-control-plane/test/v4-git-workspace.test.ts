@@ -222,6 +222,63 @@ test('LocalGitWorkspace materializes exact initialized submodules without using 
   assert.ok(fs.statSync(path.join(childWorkspace, '.git')).isDirectory());
 });
 
+
+test('LocalGitWorkspace review provisioning recovers an exact submodule from the canonical local object store when the implementation submodule is deinitialized', async () => {
+  const value = fixture();
+  const childRoot = path.join(value.allowedRoot, 'child-fallback-source');
+  fs.mkdirSync(childRoot, { recursive: true });
+  const child = repository(childRoot);
+  git(value.repositoryPath, [
+    '-c',
+    'protocol.file.allow=always',
+    'submodule',
+    'add',
+    '--',
+    child.repositoryPath,
+    'vendor/child',
+  ]);
+  const gitmodules = path.join(value.repositoryPath, '.gitmodules');
+  write(
+    gitmodules,
+    fs.readFileSync(gitmodules, 'utf8').replace(child.repositoryPath, 'https://invalid.example/child.git'),
+  );
+  const parentRevision = commit(value.repositoryPath, 'feat: add fallback child submodule');
+  const canonicalChild = path.join(value.repositoryPath, 'vendor/child');
+  // The exact gitlink object remains in the trusted local object database even though
+  // the canonical submodule checkout is intentionally on a different commit.
+  git(canonicalChild, ['checkout', '--detach', child.rootRevision]);
+  assert.equal(git(canonicalChild, ['rev-parse', 'HEAD']), child.rootRevision);
+  assert.equal(git(canonicalChild, ['cat-file', '-t', child.baseRevision]), 'commit');
+
+  const implementation = await value.adapter.provision({
+    executionId: 'exec-submodule-fallback-implementation',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: parentRevision,
+    phase: 'IMPLEMENT',
+  });
+  const implementationChild = path.join(implementation.hostPath, 'vendor/child');
+  assert.equal(git(implementationChild, ['rev-parse', 'HEAD']), child.baseRevision);
+
+  // Simulate the real delivery-repair case: the implementation leaves the superproject
+  // clean with the submodule uninitialized, so the review workspace cannot copy it from
+  // the mutable implementation checkout and must use the canonical local object store.
+  fs.rmSync(implementationChild, { recursive: true, force: true });
+  fs.mkdirSync(implementationChild, { recursive: true });
+  assert.equal(git(implementation.hostPath, ['status', '--porcelain=v1']), '');
+
+  const review = await value.adapter.provision({
+    executionId: 'exec-submodule-fallback-review',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: parentRevision,
+    phase: 'REVIEW',
+    sourceWorkspace: implementation,
+  });
+  const reviewChild = path.join(review.hostPath, 'vendor/child');
+  assert.equal(git(reviewChild, ['rev-parse', 'HEAD']), child.baseRevision);
+  assert.equal(git(review.hostPath, ['status', '--porcelain=v1']), '');
+  assert.ok(fs.statSync(path.join(reviewChild, '.git')).isDirectory());
+});
+
 test('LocalGitWorkspace implementation verification rejects no-op, dirty and mismatched evidence then accepts exact committed work', async () => {
   const value = fixture();
   const workspace = await value.adapter.provision({

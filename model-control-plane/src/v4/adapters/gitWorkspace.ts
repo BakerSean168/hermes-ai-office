@@ -373,7 +373,15 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
           input.sourceRevision,
         ]);
       }
-      await this.materializeSubmodules(cloneSource, stagingRepo, input.sourceRevision, staging);
+      await this.materializeSubmodules(
+        cloneSource,
+        stagingRepo,
+        input.sourceRevision,
+        staging,
+        0,
+        { count: 0 },
+        cloneSource === repositoryRoot ? undefined : repositoryRoot,
+      );
       const createdAt = new Date().toISOString();
       const descriptor: StoredWorkspaceDescriptor = {
         version: 1,
@@ -662,6 +670,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     bundleRoot: string,
     depth = 0,
     state: { count: number } = { count: 0 },
+    fallbackRepository?: string,
   ): Promise<void> {
     if (depth > MAX_SUBMODULE_DEPTH) throw new V4Error('WORKSPACE_SUBMODULE_DEPTH_EXCEEDED');
     const tree = await this.git(sourceRepository, ['ls-tree', '-r', '-z', revision]);
@@ -686,15 +695,35 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       const targetPath = path.resolve(targetRepository, normalized);
       if (!inside(sourcePath, sourceRepository) || !inside(targetPath, targetRepository))
         throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
-      const sourceStat = fs.lstatSync(sourcePath, { throwIfNoEntry: false });
-      if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink())
-        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_MISSING');
-      const sourceReal = fs.realpathSync(sourcePath);
-      if (!inside(sourceReal, fs.realpathSync(sourceRepository)))
-        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_INVALID');
-      const sourceHead = await this.git(sourcePath, ['rev-parse', '--verify', 'HEAD^{commit}']);
-      if (sourceHead !== expectedRevision)
-        throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_REVISION_MISMATCH');
+      const fallbackPath = fallbackRepository
+        ? path.resolve(fallbackRepository, normalized)
+        : undefined;
+      if (fallbackPath && !inside(fallbackPath, fallbackRepository!))
+        throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
+
+      const candidatePaths = [sourcePath, ...(fallbackPath && fallbackPath !== sourcePath ? [fallbackPath] : [])];
+      let objectSource: string | undefined;
+      for (const candidatePath of candidatePaths) {
+        const candidateRoot = candidatePath === sourcePath ? sourceRepository : fallbackRepository!;
+        const sourceStat = fs.lstatSync(candidatePath, { throwIfNoEntry: false });
+        if (!sourceStat) continue;
+        if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink())
+          throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_INVALID');
+        const sourceReal = fs.realpathSync(candidatePath);
+        if (!inside(sourceReal, fs.realpathSync(candidateRoot)))
+          throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_INVALID');
+        if (
+          await this.gitSucceeds(candidatePath, [
+            'cat-file',
+            '-e',
+            expectedRevision + '^{commit}',
+          ])
+        ) {
+          objectSource = candidatePath;
+          break;
+        }
+      }
+      if (!objectSource) throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_REVISION_MISMATCH');
 
       const existing = fs.lstatSync(targetPath, { throwIfNoEntry: false });
       if (existing) {
@@ -703,21 +732,37 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         fs.rmSync(targetPath, { recursive: true, force: true });
       }
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      const containingRefs = (
+        await this.git(objectSource, [
+          'for-each-ref',
+          '--contains',
+          expectedRevision,
+          '--format=%(refname)',
+        ])
+      )
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const bundleRef = containingRefs[0];
+      if (!bundleRef) throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_REVISION_MISMATCH');
       const bundle = path.join(bundleRoot, '.pixel-v4-submodule-' + state.count + '-' + randomUUID() + '.bundle');
       try {
-        await this.git(sourcePath, ['bundle', 'create', bundle, 'HEAD']);
+        await this.git(objectSource, ['bundle', 'create', bundle, bundleRef]);
         await this.runGit(['clone', '--no-hardlinks', '--no-checkout', '--', bundle, targetPath]);
         await this.git(targetPath, ['checkout', '--detach', expectedRevision]);
       } finally {
         fs.rmSync(bundle, { force: true });
       }
+      const nestedFallback =
+        fallbackPath && fallbackPath !== objectSource ? fallbackPath : undefined;
       await this.materializeSubmodules(
-        sourcePath,
+        objectSource,
         targetPath,
         expectedRevision,
         bundleRoot,
         depth + 1,
         state,
+        nestedFallback,
       );
     }
   }
