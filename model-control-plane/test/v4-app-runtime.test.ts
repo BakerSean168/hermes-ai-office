@@ -120,6 +120,32 @@ test('V4 app creates a durable first execution through the public plan runtime A
     method: 'POST', url: '/api/v4/plans/' + planId + '/delivery', payload: delivery,
   });
   assert.equal(attachedAgain.statusCode, 200);
+  const child = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/plans/' + planId + '/children',
+    payload: {
+      childPlanId: 'app-runtime-child',
+      objective: 'repair a delivery base drift',
+      relation: 'FOLLOW_UP',
+      repositoryPath: value.repository,
+      delivery: {
+        remote: 'origin', branch: 'pixel/app-runtime-child', targetBranch: 'main',
+        autoMerge: false, mergeMethod: 'merge', requiredChecks: [],
+      },
+      workItems: [{
+        itemKey: 'repair', title: 'Repair delivery base', objective: 'merge the target base safely',
+        dependencies: [], acceptanceCriteria: ['preserve parent behavior'],
+      }],
+    },
+  });
+  assert.equal(child.statusCode, 201);
+  assert.equal(child.json().plan.parentPlanId, planId);
+  assert.equal(child.json().plan.status, 'READY');
+  assert.equal(child.json().plan.delivery.status, 'PENDING');
+  assert.equal(child.json().graph.items[0].itemKey, 'repair');
+  const parentAfterChild = await runtime.app.inject({ method: 'GET', url: '/api/v4/plans/' + planId });
+  assert.ok(parentAfterChild.json().plan.childPlanIds.includes('app-runtime-child'));
+
   const run = await runtime.app.inject({ method: 'POST', url: '/api/v4/plans/' + planId + '/run' });
   assert.equal(run.statusCode, 200);
   assert.equal(run.json().code, 'IMPLEMENTATION_QUEUED');

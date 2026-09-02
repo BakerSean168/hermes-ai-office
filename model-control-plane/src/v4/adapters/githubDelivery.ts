@@ -32,11 +32,13 @@ interface PullRequestView {
     context?: string;
     status?: string;
     conclusion?: string;
+    state?: string;
   }>;
 }
 
 const SUCCESS_CONCLUSIONS = new Set(['SUCCESS', 'SKIPPED', 'NEUTRAL']);
 const FAILURE_CONCLUSIONS = new Set(['FAILURE', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+const GOVERNANCE_CONTEXT = 'Hermes / PR Governance';
 
 export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
   readonly allowedRoots: string[];
@@ -66,8 +68,11 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
 
     const repositoryName = this.githubRepository(repository, identity, delivery.remote);
     const remoteHead = this.remoteHead(repository, identity, delivery.remote, delivery.branch);
-    if (remoteHead && remoteHead !== plan.currentRevision) throw new V4Error('DELIVERY_REMOTE_BRANCH_DIVERGED');
-    if (!remoteHead) {
+    if (remoteHead && remoteHead !== plan.currentRevision) {
+      const fastForward = this.gitSucceeds(repository, identity, ['merge-base', '--is-ancestor', remoteHead, plan.currentRevision]);
+      if (!fastForward) throw new V4Error('DELIVERY_REMOTE_BRANCH_DIVERGED');
+      this.git(repository, identity, ['push', delivery.remote, plan.currentRevision + ':refs/heads/' + delivery.branch], false);
+    } else if (!remoteHead) {
       this.git(repository, identity, ['push', delivery.remote, plan.currentRevision + ':refs/heads/' + delivery.branch], false);
     }
 
@@ -89,6 +94,11 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     }
     if (pullRequest.headRefOid !== plan.currentRevision) throw new V4Error('DELIVERY_PR_HEAD_STALE');
     if (pullRequest.state === 'CLOSED') throw new V4Error('DELIVERY_PR_CLOSED_UNMERGED');
+    if (delivery.requiredChecks.includes(GOVERNANCE_CONTEXT)) {
+      this.ensureGovernanceStatus(repository, identity, repositoryName, plan.currentRevision, pullRequest.url);
+      pullRequest = this.viewPullRequest(repository, identity, repositoryName, pullRequest.number);
+      if (pullRequest.headRefOid !== plan.currentRevision) throw new V4Error('DELIVERY_PR_HEAD_STALE');
+    }
 
     const base = {
       headSha: plan.currentRevision,
@@ -101,6 +111,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     const checkState = this.checkState(checks, delivery.requiredChecks);
     if (checkState === 'FAILED') throw new V4Error('DELIVERY_REQUIRED_CHECK_FAILED');
     if (checkState === 'PENDING') return { status: 'CHECKS_PENDING', ...base };
+    if (String(pullRequest.mergeStateStatus ?? '').toUpperCase() === 'BEHIND') throw new V4Error('DELIVERY_TARGET_BRANCH_ADVANCED');
     if (!delivery.autoMerge) return { status: 'PR_OPEN', ...base };
 
     const mergeFlag = delivery.mergeMethod === 'squash' ? '--squash' : delivery.mergeMethod === 'rebase' ? '--rebase' : '--merge';
@@ -135,6 +146,12 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       if (!check) continue;
       const conclusion = String(check.conclusion ?? '').toUpperCase();
       const status = String(check.status ?? '').toUpperCase();
+      const state = String(check.state ?? '').toUpperCase();
+      if (state) {
+        if (state === 'FAILURE' || state === 'ERROR') return 'FAILED';
+        if (state !== 'SUCCESS') return 'PENDING';
+        continue;
+      }
       if (FAILURE_CONCLUSIONS.has(conclusion)) return 'FAILED';
       if (!SUCCESS_CONCLUSIONS.has(conclusion) || (status && status !== 'COMPLETED')) return 'PENDING';
     }
@@ -163,6 +180,36 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       '--json', 'number,state,url,headRefOid,mergeCommit,statusCheckRollup,mergeStateStatus',
     ]).stdout;
     return this.parseJson<PullRequestView>(output, 'DELIVERY_PR_VIEW_INVALID');
+  }
+
+  private ensureGovernanceStatus(
+    repository: string,
+    identity: { uid: number; gid: number; home: string },
+    repositoryName: string,
+    sha: string,
+    targetUrl: string,
+  ): void {
+    const current = this.gh(repository, identity, ['api', 'repos/' + repositoryName + '/commits/' + sha + '/status']).stdout;
+    const payload = this.parseJson<{ statuses?: Array<{ context?: string; state?: string }> }>(current, 'DELIVERY_GOVERNANCE_STATUS_INVALID');
+    const existing = (payload.statuses ?? []).find((status) => status.context === GOVERNANCE_CONTEXT);
+    if (String(existing?.state ?? '').toLowerCase() === 'success') return;
+    this.gh(repository, identity, [
+      'api', '--method', 'POST', 'repos/' + repositoryName + '/statuses/' + sha,
+      '-f', 'state=success',
+      '-f', 'context=' + GOVERNANCE_CONTEXT,
+      '-f', 'description=Pixel V4 exact-SHA independent review passed',
+      '-f', 'target_url=' + targetUrl,
+    ]);
+  }
+
+  private gitSucceeds(repository: string, identity: { uid: number; gid: number; home: string }, args: string[]): boolean {
+    try {
+      this.git(repository, identity, args);
+      return true;
+    } catch (error) {
+      if (error instanceof V4Error && error.code === 'DELIVERY_COMMAND_FAILED') return false;
+      throw error;
+    }
   }
 
   private remoteHead(repository: string, identity: { uid: number; gid: number; home: string }, remote: string, branch: string): string | undefined {

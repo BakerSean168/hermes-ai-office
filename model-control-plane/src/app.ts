@@ -707,6 +707,58 @@ export async function buildControlPlane(
     };
   });
 
+  app.post('/api/v4/plans/:planId/children', async (request, reply) => {
+    const parentPlanId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    const body = bodyRecord(request.body);
+    const relation = requiredText(body.relation ?? 'FOLLOW_UP', 'CHILD_RELATION_INVALID');
+    if (relation !== 'SYSTEM_REPAIR' && relation !== 'INFRASTRUCTURE_REPAIR' && relation !== 'FOLLOW_UP')
+      throw new V4Error('CHILD_RELATION_INVALID');
+    const parent = repositories.plans.getPlan(parentPlanId);
+    const child = kernels.plan.createChildPlan({
+      parentPlanId,
+      childPlanId: requiredText(body.childPlanId, 'CHILD_PLAN_ID_REQUIRED'),
+      repositoryPath: requiredText(body.repositoryPath ?? parent.repositoryPath, 'CHILD_REPOSITORY_REQUIRED'),
+      objective: requiredText(body.objective, 'CHILD_OBJECTIVE_REQUIRED'),
+      relation,
+    });
+    const rawItems = Array.isArray(body.workItems)
+      ? body.workItems
+      : [{ itemKey: 'objective', title: 'Complete child objective', objective: child.plan.objective, dependencies: [], acceptanceCriteria: [] }];
+    const graph = kernels.plan.ensureReadyGraph(
+      child.plan.planId,
+      rawItems.map((item) => {
+        const value = bodyRecord(item);
+        return {
+          itemKey: requiredText(value.itemKey, 'GRAPH_ITEM_KEY_REQUIRED'),
+          title: requiredText(value.title, 'GRAPH_TITLE_REQUIRED'),
+          objective: requiredText(value.objective, 'GRAPH_ITEM_OBJECTIVE_REQUIRED'),
+          dependencies: Array.isArray(value.dependencies)
+            ? value.dependencies.map((entry) => requiredText(entry, 'GRAPH_DEPENDENCY_INVALID'))
+            : [],
+          acceptanceCriteria: Array.isArray(value.acceptanceCriteria)
+            ? value.acceptanceCriteria.map((entry) => requiredText(entry, 'GRAPH_ACCEPTANCE_INVALID'))
+            : [],
+        };
+      }),
+    );
+    const delivery = planDeliveryConfig(body.delivery);
+    if (delivery) repositories.plans.attachDelivery(child.plan.planId, delivery);
+    let supervisor = repositories.supervisors.getByPlanId(child.plan.planId);
+    if (!supervisor) {
+      supervisor = repositories.supervisors.create({ planId: child.plan.planId }).value;
+      if (!supervisor) throw new V4Error('SUPERVISOR_CREATE_FAILED');
+      if (supervisor.status === 'CREATED') repositories.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
+    }
+    reply.code(201);
+    return {
+      plan: repositories.plans.getPlan(child.plan.planId),
+      graph,
+      relationshipId: child.relationshipId,
+      supervisor: repositories.supervisors.getByPlanId(child.plan.planId),
+      statusUrl: '/api/v4/plans/' + encodeURIComponent(child.plan.planId),
+    };
+  });
+
   app.post('/api/v4/plans/:planId/delivery', async (request, reply) => {
     const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
     const config = planDeliveryConfig(request.body);
