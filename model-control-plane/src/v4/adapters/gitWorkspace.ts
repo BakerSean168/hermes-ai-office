@@ -51,6 +51,14 @@ function canonicalTimestamp(value: string, code: string): void {
   failClosed(Number.isFinite(parsed) && new Date(parsed).toISOString() === value, code);
 }
 
+function repositoryNameFromRemote(value: string): string | undefined {
+  const text = value.trim().replace(/[?#].*$/, '').replace(/\\/g, '/').replace(/\/$/, '');
+  if (!text) return undefined;
+  const tail = text.split('/').at(-1)?.split(':').at(-1)?.replace(/\.git$/, '') ?? '';
+  if (!/^[A-Za-z0-9._-]{1,200}$/.test(tail) || tail === '.' || tail === '..') return undefined;
+  return tail;
+}
+
 function executionComponent(value: string): string {
   const component = value.trim();
   if (
@@ -345,6 +353,15 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         sourceBundle,
         stagingRepo,
       ]);
+      const sourceIdentity = await this.sourceRepositoryIdentity(repositoryRoot);
+      if (sourceIdentity) {
+        await this.git(stagingRepo, [
+          'remote',
+          'set-url',
+          'origin',
+          'https://pixel.invalid/source/' + sourceIdentity + '.git',
+        ]);
+      }
       fs.rmSync(sourceBundle, { force: true });
       if (input.phase === 'REVIEW') {
         await this.git(stagingRepo, ['checkout', '--detach', input.sourceRevision]);
@@ -908,6 +925,12 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     } catch {
       return false;
     }
+  }
+
+  private async sourceRepositoryIdentity(repositoryRoot: string): Promise<string | undefined> {
+    const identity = this.repositoryIdentity(repositoryRoot);
+    const remote = await this.gitOptional(repositoryRoot, ['remote', 'get-url', 'origin'], identity);
+    return remote ? repositoryNameFromRemote(remote) : undefined;
   }
 
   private repositoryIdentity(repositoryRoot: string): { uid: number; gid: number } {

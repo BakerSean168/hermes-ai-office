@@ -167,6 +167,29 @@ test('LocalGitWorkspace provisions an exact revision idempotently with durable p
   );
 });
 
+test('LocalGitWorkspace preserves only a non-secret source repository identity for isolated harness matching', async () => {
+  const value = fixture();
+  git(value.repositoryPath, [
+    'remote',
+    'add',
+    'origin',
+    'https://oauth-user:super-secret@example.invalid/owner/memoflow.git?token=also-secret',
+  ]);
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-source-identity',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'REVIEW',
+  });
+  assert.equal(
+    git(workspace.hostPath, ['remote', 'get-url', 'origin']),
+    'https://pixel.invalid/source/memoflow.git',
+  );
+  const config = fs.readFileSync(path.join(workspace.hostPath, '.git', 'config'), 'utf8');
+  assert.equal(config.includes('super-secret'), false);
+  assert.equal(config.includes('also-secret'), false);
+});
+
 test('LocalGitWorkspace materializes exact initialized submodules without using remote URLs', async () => {
   const value = fixture();
   const childRoot = path.join(value.allowedRoot, 'child-source');
