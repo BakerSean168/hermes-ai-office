@@ -18,7 +18,8 @@ const HEADLESS_REASONING_EFFORT =
   process.env.AI_OFFICE_HEADLESS_REASONING_EFFORT ?? (IS_WORKER ? 'xhigh' : 'medium');
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
-const HARNESS_PROFILE = process.env.AI_OFFICE_HARNESS_PROFILE ?? 'openhands';
+const HARNESS_PROFILE =
+  process.env.AI_OFFICE_HARNESS_PROFILE ?? (HEADLESS_ROLE === 'review' ? 'openhands-review' : 'openhands');
 const CODEX_BIN =
   process.env.AI_OFFICE_CODEX_BIN ?? '/openhands-state/tooling/node_modules/.bin/codex';
 const CLAUDE_BIN =

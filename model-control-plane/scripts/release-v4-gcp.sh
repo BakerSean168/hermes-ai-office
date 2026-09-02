@@ -21,6 +21,9 @@ if [[ "$source_sha" != "$target_sha" ]]; then
 fi
 
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
+sudo "$repo_root/model-control-plane/scripts/install-openhands-v3-tooling.sh"
+sudo docker exec --user 10001:10001 -e CODEX_HOME=/openhands-state/codex-business hermes-openhands-v3 \
+  /openhands-state/tooling/node_modules/.bin/codex login status >/dev/null
 artifact_sha="$(find "$repo_root/model-control-plane/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
 sudo install -d -o root -g root -m 0711 \

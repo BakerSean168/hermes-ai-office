@@ -4,13 +4,25 @@ set -euo pipefail
 CONTAINER="${OPENHANDS_V3_CONTAINER:-hermes-openhands-v3}"
 TOOL_ROOT="${OPENHANDS_TOOL_ROOT:-/openhands-state/tooling}"
 DSH_ROOT="${OPENHANDS_DSH_ROOT:-/openhands-state/dsh-cli}"
-OPENCODE_VERSION="${OPENCODE_VERSION:-1.18.18}"
+HARNESS_RUNTIME_LOCK="${HARNESS_RUNTIME_LOCK:-/opt/agent-harness/runtime.lock.json}"
+runtime_lock_version() {
+  local name="$1"
+  docker exec "$CONTAINER" node -e '
+    const fs = require("node:fs");
+    const [file, name] = process.argv.slice(1);
+    const lock = JSON.parse(fs.readFileSync(file, "utf8"));
+    const version = lock?.runtimes?.[name]?.version;
+    if (!version || typeof version !== "string") process.exit(1);
+    process.stdout.write(version);
+  ' "$HARNESS_RUNTIME_LOCK" "$name"
+}
+OPENCODE_VERSION="${OPENCODE_VERSION:-$(runtime_lock_version opencode)}"
 CODEX_ACP_VERSION="${CODEX_ACP_VERSION:-1.6.2}"
 CLAUDE_ACP_VERSION="${CLAUDE_ACP_VERSION:-0.70.0}"
 ACP_SDK_VERSION="${ACP_SDK_VERSION:-1.4.0}"
-CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-0.148.0}"
-CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-2.1.237}"
-DSH_VERSION="${DSH_VERSION:-0.1.1-rc.2}"
+CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-$(runtime_lock_version codex)}"
+CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-$(runtime_lock_version claude)}"
+DSH_VERSION="${DSH_VERSION:-$(runtime_lock_version dsh)}"
 DSH_ACP_VERSION="${DSH_ACP_VERSION:-0.10.0}"
 ZCODE_ACP_VERSION="${ZCODE_ACP_VERSION:-0.11.5}"
 CODEGRAPH_VERSION="${CODEGRAPH_VERSION:-1.5.0}"

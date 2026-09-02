@@ -97,6 +97,7 @@ test('V4 Business Codex review is provider-native and bridges durable review evi
   assert.match(headlessReview, /PIXEL_V4_REVIEWED_SHA/);
   assert.match(headlessReview, /writePixelV4ReviewEvidence/);
   assert.match(headlessReview, /HEADLESS_TRANSPORT === 'provider-native'/);
+  assert.match(headlessReview, /HEADLESS_ROLE === 'review' \? 'openhands-review' : 'openhands'/);
   assert.match(headlessReview, /delete env\.CODEX_API_KEY/);
 });
 
@@ -105,6 +106,16 @@ test('OpenHands coding runtime is built and release-gated on Node 24', () => {
   assert.match(openHandsBuild, /--build-arg BASE_IMAGE="\$BASE_IMAGE"/);
   assert.match(release, /process\.versions\.node\.split/);
   assert.match(release, /OpenHands coding runtime must use Node 24/);
+});
+
+test('V4 release reconciles OpenHands Agent runtimes from the shared Harness lock and verifies Business Codex auth', () => {
+  assert.match(openHandsTooling, /HARNESS_RUNTIME_LOCK=.*agent-harness\/runtime\.lock\.json/);
+  assert.match(openHandsTooling, /runtime_lock_version codex/);
+  assert.match(openHandsTooling, /runtime_lock_version opencode/);
+  assert.match(openHandsTooling, /runtime_lock_version claude/);
+  assert.match(release, /install-openhands-v3-tooling\.sh/);
+  assert.match(release, /CODEX_HOME=\/openhands-state\/codex-business/);
+  assert.match(release, /codex login status/);
 });
 
 test('OpenHands persists and prewarms exact Corepack pnpm versions without prompts', () => {
