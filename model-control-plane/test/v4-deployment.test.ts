@@ -96,6 +96,7 @@ test('V4 Business Codex review is provider-native and bridges durable review evi
   assert.match(headlessReview, /PIXEL_V4_EXECUTION_ID/);
   assert.match(headlessReview, /PIXEL_V4_REVIEWED_SHA/);
   assert.match(headlessReview, /writePixelV4ReviewEvidence/);
+  assert.match(headlessReview, /required: \['verdict', 'summary', 'findings', 'checks'\]/);
   assert.match(headlessReview, /HEADLESS_TRANSPORT === 'provider-native'/);
   assert.match(headlessReview, /HEADLESS_ROLE === 'review' \? 'openhands-review' : 'openhands'/);
   assert.match(headlessReview, /delete env\.CODEX_API_KEY/);

@@ -75,7 +75,7 @@ const REVIEW_SCHEMA = {
       },
     },
   },
-  required: ['verdict', 'summary', 'findings'],
+  required: ['verdict', 'summary', 'findings', 'checks'],
   additionalProperties: false,
 };
 
