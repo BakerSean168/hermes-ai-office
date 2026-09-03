@@ -3,10 +3,16 @@ import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
 import {
+  OpenHandsClaudeReviewProvider,
   OpenHandsCodexBusinessReviewProvider,
+  OpenHandsCodexBusinessExecutionProvider,
   OpenHandsCodexManagedExecutionProvider,
+  OpenHandsCodexManagedReviewProvider,
+  OpenHandsDshExecutionProvider,
   OpenHandsExecutionProvider,
   OpenHandsReviewProvider,
+  OpenHandsZCodeExecutionProvider,
+  createOpenHandsProviderForSelection,
   mapOpenHandsStatus,
 } from '../src/v4/adapters/openHandsCoding.js';
 import type {
@@ -222,6 +228,189 @@ test('Business Codex review launches provider-native ACP with persisted ChatGPT 
   assert.equal(body.secrets.PIXEL_V4_EXECUTION_ID.value, 'exec-1');
   assert.equal(body.secrets.PIXEL_V4_REVIEWED_SHA.value, 'source-sha');
   assert.equal(JSON.stringify(body).includes(secrets.liteLlmApiKey), false);
+});
+
+test('model-native factory resolves selected backend, model and transport without model-name routing', async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  let nextId = 0;
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    requests.push({ url: String(url), init });
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    return new Response(
+      JSON.stringify({
+        id: `selected-session-${nextId++}`,
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  const common = options(fake);
+  const cases = [
+    {
+      selection: {
+        backend: 'codex-acp',
+        model: 'gpt-5.6-luna',
+        role: 'IMPLEMENTATION',
+        transport: 'LITELLM_MANAGED',
+      },
+      phase: 'IMPLEMENT',
+      expectedProvider: 'codex-managed-coding',
+      expectedCommand: [
+        '/usr/local/bin/node',
+        '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+      ],
+      expectedSecrets: {
+        AI_OFFICE_HEADLESS_DRIVER: 'codex',
+        AI_OFFICE_HEADLESS_TRANSPORT: 'litellm-managed',
+        AI_OFFICE_LITELLM_API_KEY: secrets.liteLlmApiKey,
+        AI_OFFICE_AGENT_MODEL: 'gpt-5.6-luna',
+      },
+    },
+    {
+      selection: {
+        backend: 'codex-acp',
+        model: 'gpt-5.6-sol',
+        role: 'REVIEW',
+        transport: 'LITELLM_MANAGED',
+      },
+      phase: 'REVIEW',
+      expectedProvider: 'codex-managed-independent-review',
+      expectedCommand: [
+        '/usr/local/bin/node',
+        '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+      ],
+      expectedSecrets: {
+        AI_OFFICE_HEADLESS_ROLE: 'review',
+        AI_OFFICE_HEADLESS_MODEL: 'gpt-5.6-sol',
+      },
+    },
+    {
+      selection: {
+        backend: 'codex-acp',
+        model: 'gpt-5.6-luna',
+        role: 'IMPLEMENTATION',
+        transport: 'PROVIDER_NATIVE',
+      },
+      phase: 'IMPLEMENT',
+      expectedProvider: 'codex-business-coding',
+      expectedCommand: [
+        '/usr/local/bin/node',
+        '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+      ],
+      expectedSecrets: {
+        AI_OFFICE_HEADLESS_TRANSPORT: 'provider-native',
+        AI_OFFICE_CODEX_AUTH_HOME: '/openhands-state/codex-business',
+      },
+    },
+    {
+      selection: {
+        backend: 'dsh-acp',
+        model: 'deepseek-v4-flash',
+        role: 'IMPLEMENTATION',
+        transport: 'LITELLM_MANAGED',
+      },
+      phase: 'IMPLEMENT',
+      expectedProvider: 'dsh-managed-coding',
+      expectedCommand: ['/opt/hermes-ai-office-tools/harness_agent_launcher.sh', 'dsh-acp'],
+      expectedSecrets: {
+        DSH_ACP_MODEL: 'deepseek-v4-flash',
+        DEEPSEEK_API_KEY: secrets.liteLlmApiKey,
+        DEEPSEEK_BASE_URL: 'http://litellm.test/v1',
+        HERMES_V3_EXECUTION_ID: 'exec-1',
+        HERMES_V3_WORKSPACE_REF: '/workspace/executions/exec-1/repo',
+      },
+    },
+    {
+      selection: {
+        backend: 'zcode-acp',
+        model: 'glm-5.2',
+        role: 'IMPLEMENTATION',
+        transport: 'LITELLM_MANAGED',
+      },
+      phase: 'IMPLEMENT',
+      expectedProvider: 'zcode-managed-coding',
+      expectedCommand: ['/opt/hermes-ai-office-tools/harness_agent_launcher.sh', 'zcode-acp'],
+      expectedSecrets: {
+        ZCODE_MODEL: 'glm-5.2',
+        ZCODE_API_KEY: secrets.liteLlmApiKey,
+        ZCODE_BASE_URL: 'http://litellm.test/v1',
+      },
+    },
+    {
+      selection: {
+        backend: 'claude-code-acp',
+        model: 'claude-opus-5',
+        role: 'REVIEW',
+        transport: 'LITELLM_MANAGED',
+      },
+      phase: 'REVIEW',
+      expectedProvider: 'claude-code-independent-review',
+      expectedCommand: [
+        '/usr/local/bin/node',
+        '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+      ],
+      expectedSecrets: {
+        AI_OFFICE_HEADLESS_DRIVER: 'claude',
+        AI_OFFICE_HEADLESS_MODEL: 'claude-opus-5',
+        AI_OFFICE_LITELLM_API_KEY: secrets.liteLlmApiKey,
+      },
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const provider = createOpenHandsProviderForSelection(common, item.selection);
+    const snapshot = await provider.launch(launchInput(item.phase));
+    const body = JSON.parse(String(requests.at(-1)!.init.body)) as Record<string, any>;
+    assert.equal(snapshot.provider, item.expectedProvider);
+    assert.equal(body.agent.kind, 'ACPAgent');
+    assert.deepEqual(body.agent.acp_command, item.expectedCommand);
+    assert.equal(body.agent.acp_model, item.selection.model);
+    for (const [name, value] of Object.entries(item.expectedSecrets))
+      assert.equal(body.secrets[name].value, value);
+    assert.equal(JSON.stringify(snapshot).includes(secrets.liteLlmApiKey), false);
+    assert.equal(JSON.stringify(snapshot).includes(secrets.sessionApiKey), false);
+  }
+});
+
+test('provider-native Codex does not require LiteLLM credentials and builtin fallback is explicit', async () => {
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    return new Response(
+      JSON.stringify({ id: 'native-no-key', execution_status: 'running', workspace: body.workspace, tags: body.tags }),
+      { status: 201 },
+    );
+  }) as typeof fetch;
+  const provider = createOpenHandsProviderForSelection(
+    { baseUrl: 'http://openhands.test', sessionApiKey: secrets.sessionApiKey, fetchImpl: fake },
+    {
+      backend: 'codex-acp',
+      model: 'gpt-5.6-sol',
+      role: 'REVIEW',
+      transport: 'PROVIDER_NATIVE',
+    },
+  );
+  assert.equal(provider instanceof OpenHandsCodexBusinessReviewProvider, true);
+  await provider.launch(launchInput('REVIEW'));
+
+  const fallback = createOpenHandsProviderForSelection(options(fake), {
+    backend: 'openhands-builtin',
+    model: 'unlisted-experimental-model',
+    role: 'IMPLEMENTATION',
+    transport: 'LITELLM_MANAGED',
+  });
+  assert.equal(fallback instanceof OpenHandsExecutionProvider, true);
+  assert.throws(
+    () =>
+      createOpenHandsProviderForSelection(options(fake), {
+        backend: 'dsh-acp',
+        model: 'deepseek-v4-flash',
+        role: 'REVIEW',
+        transport: 'LITELLM_MANAGED',
+      }),
+    (error: unknown) => error instanceof V4Error && error.code === 'DSH_REVIEW_UNSUPPORTED',
+  );
 });
 
 test('OpenHands launch explicitly runs an idle initial conversation before returning', async () => {
@@ -477,6 +666,30 @@ test('OpenHands inspect, continue and cancel sanitize terminal provider evidence
   assert.equal(cancelled.status, 'PAUSED');
   assert.ok(calls.some((call) => call.url.endsWith('/events') && call.method === 'POST'));
   assert.ok(calls.some((call) => call.url.endsWith('/pause') && call.method === 'POST'));
+});
+
+test('OpenHands maps finished ACP transport errors to retryable provider failures', async () => {
+  const fake = (async (url: string | URL | Request) => {
+    const value = String(url);
+    if (value.endsWith('/agent_final_response')) {
+      return new Response(JSON.stringify({
+        response: 'ACP error: api_key=sk-transport-secret\nworker finalization completed without repository command or file-change activity',
+      }), { status: 200 });
+    }
+    if (value.endsWith('/api/conversations/session-transport-error')) {
+      return new Response(JSON.stringify({
+        id: 'session-transport-error', execution_status: 'finished',
+      }), { status: 200 });
+    }
+    if (value.includes('/events/search')) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsCodexManagedExecutionProvider(options(fake));
+  const snapshot = await provider.inspect('session-transport-error');
+  assert.equal(snapshot.status, 'FAILED');
+  assert.equal(snapshot.errorCode, 'ACP error: api_key=[REDACTED]');
+  assert.equal(snapshot.retryable, true);
+  assert.equal(JSON.stringify(snapshot).includes('sk-transport-secret'), false);
 });
 
 test('OpenHands paused continuation explicitly runs and recovers a stale in-flight task with interrupt', async () => {

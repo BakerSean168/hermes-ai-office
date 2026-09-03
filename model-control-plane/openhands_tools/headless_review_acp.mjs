@@ -86,7 +86,27 @@ const REVIEW_SCHEMA = {
 
 function redact(value) {
   let text = String(value ?? '');
-  if (LITELLM_API_KEY) text = text.split(LITELLM_API_KEY).join('<secret-hidden>');
+  for (const secret of [
+    LITELLM_API_KEY,
+    process.env.AI_OFFICE_LITELLM_API_KEY,
+    process.env.DEEPSEEK_API_KEY,
+    process.env.ZCODE_API_KEY,
+    process.env.SESSION_API_KEY,
+    process.env.OPENHANDS_SESSION_API_KEY,
+    process.env.CODEX_API_KEY,
+    process.env.OPENAI_API_KEY,
+    process.env.ANTHROPIC_API_KEY,
+  ]) {
+    if (secret) text = text.split(secret).join('<secret-hidden>');
+  }
+  text = text
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s'",}]+/gi, '$1<secret-hidden>')
+    .replace(
+      /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      '$1<secret-hidden>',
+    )
+    .replace(/\b(?:sk|sess|key|token)-[A-Za-z0-9_.:/_-]{8,}\b/g, '<secret-hidden>')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer <secret-hidden>');
   return text.slice(0, 12_000);
 }
 
@@ -315,7 +335,7 @@ function canonicalReview(value) {
   const findings = Array.isArray(value.findings) ? value.findings : [];
   const lines = [
     verdict,
-    summary ||
+    redact(summary) ||
       (verdict === 'PASS'
         ? 'No blocking findings.'
         : verdict === 'INVALID'
@@ -329,8 +349,10 @@ function canonicalReview(value) {
       const severity = ['P0', 'P1', 'P2', 'P3'].includes(finding.severity)
         ? finding.severity
         : 'P2';
-      const title = typeof finding.title === 'string' ? finding.title.trim() : 'Finding';
-      const evidence = typeof finding.evidence === 'string' ? finding.evidence.trim() : '';
+      const title =
+        typeof finding.title === 'string' ? redact(finding.title.trim()) : 'Finding';
+      const evidence =
+        typeof finding.evidence === 'string' ? redact(finding.evidence.trim()) : '';
       lines.push(`- [${severity}] ${title}`);
       if (evidence) lines.push(`  Evidence: ${evidence}`);
     }
@@ -471,13 +493,12 @@ function successfulCodexChecks(stdout) {
             ? item.output
             : '';
       checks.push({
-        command: command.slice(0, 2_000),
+        command: redact(command).slice(0, 2_000),
         status: 'PASS',
         exitCode,
-        summary: (output.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? 'command exited 0').slice(
-          0,
-          2_000,
-        ),
+        summary: redact(
+          output.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? 'command exited 0',
+        ).slice(0, 2_000),
       });
       if (checks.length >= 20) break;
     } catch {
@@ -498,10 +519,10 @@ function normalizedReviewChecks(value, stdout) {
     const summary = typeof item.summary === 'string' ? item.summary.trim() : '';
     if (!command || !status || !Number.isInteger(exitCode)) continue;
     normalized.push({
-      command: command.slice(0, 2_000),
+      command: redact(command).slice(0, 2_000),
       status,
       exitCode,
-      summary: (summary || `command ${status.toLowerCase()}`).slice(0, 2_000),
+      summary: redact(summary || `command ${status.toLowerCase()}`).slice(0, 2_000),
     });
     if (normalized.length >= 20) break;
   }
@@ -530,24 +551,33 @@ function writePixelV4ImplementationEvidence(session, summary, stdout) {
   const status = git(session.cwd, ['status', '--porcelain=v1', '-z']);
   if (status.length > 0) throw new Error('PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY');
   const resultRevision = git(session.cwd, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+  if (!/^[0-9a-f]{7,64}$/i.test(PIXEL_V4_SOURCE_SHA))
+    throw new Error('PIXEL_V4_IMPLEMENTATION_SOURCE_SHA_INVALID');
+  const sourceRevision = git(session.cwd, [
+    'rev-parse',
+    '--verify',
+    `${PIXEL_V4_SOURCE_SHA}^{commit}`,
+  ]).trim();
+  if (resultRevision !== sourceRevision)
+    git(session.cwd, ['merge-base', '--is-ancestor', sourceRevision, resultRevision]);
   const tests = successfulCodexChecks(stdout);
   if (!tests.some((item) => item.status === 'PASS')) {
     throw new Error('PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING');
   }
-  const outcome = resultRevision === PIXEL_V4_SOURCE_SHA ? 'SATISFIED' : 'CHANGED';
+  const outcome = resultRevision === sourceRevision ? 'SATISFIED' : 'CHANGED';
   const evidence = {
     version: 1,
     executionId: PIXEL_V4_EXECUTION_ID,
     phase: PIXEL_V4_IMPLEMENTATION_PHASE,
-    sourceRevision: PIXEL_V4_SOURCE_SHA,
+    sourceRevision,
     resultRevision,
     outcome,
-    summary: String(
+    summary: redact(String(
       summary ||
         (outcome === 'CHANGED'
           ? 'Implementation completed.'
           : 'Source revision already satisfies the objective.'),
-    )
+    ))
       .trim()
       .slice(0, 8_000),
     tests,
@@ -593,7 +623,7 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
           const severity = ['P0', 'P1', 'P2', 'P3'].includes(item.severity) ? item.severity : 'P2';
           const title = typeof item.title === 'string' ? item.title.trim() : 'Finding';
           const evidence = typeof item.evidence === 'string' ? item.evidence.trim() : '';
-          return `[${severity}] ${title}${evidence ? ` — ${evidence}` : ''}`.slice(0, 4_000);
+          return redact(`[${severity}] ${title}${evidence ? ` — ${evidence}` : ''}`).slice(0, 4_000);
         })
     : [];
   const evidence = {
@@ -604,12 +634,11 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
     verdict: value.verdict,
     findings,
     checks,
-    summary: (typeof value?.summary === 'string' && value.summary.trim()
+    summary: redact(typeof value?.summary === 'string' && value.summary.trim()
       ? value.summary.trim()
       : value?.verdict === 'PASS'
         ? 'No blocking findings.'
-        : 'Blocking findings exist.'
-    ).slice(0, 8_000),
+        : 'Blocking findings exist.').slice(0, 8_000),
   };
   const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
   fs.writeFileSync(temporary, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
@@ -668,6 +697,7 @@ function codexCommand(session, prompt, evidence) {
         '[model_providers.hermes-litellm.env_http_headers]',
         '"X-LiteLLM-End-User-ID" = "HERMES_V3_EXECUTION_ID"',
         '[features]',
+        'unified_exec = false',
         'multi_agent = false',
         '',
         harnessConfig.trim(),
@@ -1118,7 +1148,9 @@ class HeadlessReviewAgent {
       } else if (!IS_PLANNER) {
         writePixelV4ReviewEvidence(session, parsed, result.stdout);
       }
-      const canonical = IS_WORKER || IS_PLANNER ? String(parsed).trim() : canonicalReview(parsed);
+      const canonical = IS_WORKER || IS_PLANNER
+        ? redact(String(parsed).trim())
+        : canonicalReview(parsed);
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,
         update: {

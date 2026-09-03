@@ -3,7 +3,7 @@ set -euo pipefail
 
 mode="${1:-}"
 if [[ -z "$mode" ]]; then
-  echo "usage: harness_agent_launcher.sh <opencode|codex-acp|claude-acp|dsh-acp> [agent args...]" >&2
+  echo "usage: harness_agent_launcher.sh <opencode|codex-acp|claude-acp|dsh-acp|zcode-acp> [agent args...]" >&2
   exit 2
 fi
 shift
@@ -17,13 +17,11 @@ case "$execution_id" in
 esac
 
 workspace_repo="${HERMES_V3_WORKSPACE_REF:-}"
-case "$workspace_repo" in
-  /workspace/executions/*/repo) ;;
-  *)
-    echo "agent-harness launch requires a bounded HERMES_V3_WORKSPACE_REF" >&2
-    exit 2
-    ;;
-esac
+expected_workspace_repo="/workspace/executions/$execution_id/repo"
+if [[ "$workspace_repo" != "$expected_workspace_repo" ]]; then
+  echo "agent-harness launch requires the execution-scoped HERMES_V3_WORKSPACE_REF" >&2
+  exit 2
+fi
 if [[ ! -d "$workspace_repo" ]]; then
   echo "agent-harness execution workspace is missing: $workspace_repo" >&2
   exit 2
@@ -96,6 +94,60 @@ case "$mode" in
     fi
     exec /openhands-state/tooling/node_modules/.bin/dsh-acp-server \
       --patch "$root/dsh/capabilities.patch.yml" "$@"
+    ;;
+  zcode-acp)
+    # ZCode has no provider-native role in this path. Start it with a fresh,
+    # execution-scoped home and an OpenAI-compatible LiteLLM configuration.
+    # Deliberately discard inherited OAuth/session variables: this mode must
+    # never discover or reuse a developer's ZCode credential store.
+    zcode_root="$root/zcode"
+    zcode_home="$zcode_root/home"
+    zcode_config_home="$zcode_root/config"
+    zcode_config="$zcode_config_home/config.json"
+    mkdir -p "$zcode_home" "$zcode_config_home"
+    chmod 0700 "$zcode_root" "$zcode_home" "$zcode_config_home"
+    zcode_key="${AI_OFFICE_LITELLM_API_KEY:-${ZCODE_API_KEY:-}}"
+    zcode_base="${AI_OFFICE_LITELLM_BASE_URL:-${ZCODE_BASE_URL:-}}"
+    zcode_model="${AI_OFFICE_AGENT_MODEL:-${ZCODE_MODEL:-}}"
+    if [[ -z "$zcode_key" || -z "$zcode_base" || -z "$zcode_model" ]]; then
+      echo "zcode-acp launch requires LiteLLM key, base URL and model" >&2
+      exit 2
+    fi
+    case "$zcode_base" in
+      http://*|https://*) ;;
+      *) echo "zcode-acp launch requires an HTTP(S) LiteLLM base URL" >&2; exit 2 ;;
+    esac
+    case "$zcode_model" in
+      *[!a-zA-Z0-9._:/-]*) echo "zcode-acp launch received an invalid model" >&2; exit 2 ;;
+    esac
+    unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE
+    export HOME="$zcode_home"
+    export XDG_CONFIG_HOME="$zcode_config_home"
+    export ZCODE_HOME="$zcode_home"
+    export ZCODE_CONFIG="$zcode_config"
+    export ZCODE_CONFIG_PATH="$zcode_config"
+    export ZCODE_API_KEY="$zcode_key"
+    export ZCODE_BASE_URL="$zcode_base"
+    export ZCODE_MODEL="$zcode_model"
+    export OPENAI_API_KEY="$zcode_key"
+    export OPENAI_BASE_URL="$zcode_base"
+    /usr/local/bin/python3 - "$zcode_config" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+target.write_text(json.dumps({
+    "provider": "openai-compatible",
+    "baseUrl": os.environ["ZCODE_BASE_URL"],
+    "apiKey": os.environ["ZCODE_API_KEY"],
+    "model": os.environ["ZCODE_MODEL"],
+}) + "\n")
+target.chmod(0o600)
+PY
+    exec /openhands-state/tooling/node_modules/.bin/zcode-acp-server "$@"
     ;;
   *)
     echo "unsupported Agent Harness launch mode: $mode" >&2

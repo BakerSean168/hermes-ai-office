@@ -112,11 +112,17 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
 
 test('V4 Luna implementation uses managed Codex Responses and bridges durable implementation evidence', () => {
   assert.match(headlessReview, /wire_api = \"responses\"/);
+  assert.match(headlessReview, /unified_exec = false/);
+  assert.doesNotMatch(headlessReview, /managedCodexModelCatalog|model_catalog_json|use_responses_lite/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH/);
   assert.match(headlessReview, /PIXEL_V4_SOURCE_SHA/);
   assert.match(headlessReview, /writePixelV4ImplementationEvidence/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING/);
+  assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_SOURCE_SHA_INVALID/);
+  assert.match(headlessReview, /merge-base.*is-ancestor/);
+  assert.match(headlessReview, /outcome/);
+  assert.doesNotMatch(headlessReview, /PIXEL_V4_IMPLEMENTATION_NO_COMMIT/);
   assert.match(headlessReview, /Pixel V4 controller finalization retry/);
   assert.match(headlessReview, /isPixelV4ImplementationFinalizationError/);
   assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
@@ -139,6 +145,24 @@ test('V4 Business Codex review is provider-native and bridges durable review evi
     /Verification may create ignored dependency or tool-cache artifacts/,
   );
   assert.match(headlessReview, /delete env\.CODEX_API_KEY/);
+});
+
+test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped ZCode config', () => {
+  const launcher = fs.readFileSync(
+    path.join(root, 'openhands_tools/harness_agent_launcher.sh'),
+    'utf8',
+  );
+  assert.match(launcher, /dsh-acp\|zcode-acp/);
+  assert.match(launcher, /expected_workspace_repo="\/workspace\/executions\/\$execution_id\/repo"/);
+  assert.match(launcher, /zcode_root="\$root\/zcode"/);
+  assert.match(launcher, /zcode_key="\$\{AI_OFFICE_LITELLM_API_KEY:-\$\{ZCODE_API_KEY:-\}\}"/);
+  assert.match(launcher, /zcode_base="\$\{AI_OFFICE_LITELLM_BASE_URL:-\$\{ZCODE_BASE_URL:-\}\}"/);
+  assert.match(launcher, /zcode_model="\$\{AI_OFFICE_AGENT_MODEL:-\$\{ZCODE_MODEL:-\}\}"/);
+  assert.match(launcher, /unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN/);
+  assert.match(launcher, /exec \/openhands-state\/tooling\/node_modules\/\.bin\/zcode-acp-server/);
+  assert.match(launcher, /target\.chmod\(0o600\)/);
+  assert.doesNotMatch(launcher, /\.config\/zcode|\.zcode/);
+  execFileSync('bash', ['-n', path.join(root, 'openhands_tools/harness_agent_launcher.sh')]);
 });
 
 test('OpenHands coding runtime is built and release-gated on Node 24', () => {

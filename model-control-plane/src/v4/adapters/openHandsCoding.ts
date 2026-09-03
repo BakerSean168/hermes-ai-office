@@ -18,8 +18,8 @@ interface JsonRecord {
 export interface OpenHandsProviderOptions {
   baseUrl: string;
   sessionApiKey: string;
-  liteLlmApiKey: string;
-  liteLlmBaseUrl: string;
+  liteLlmApiKey?: string;
+  liteLlmBaseUrl?: string;
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
   llmTimeoutSeconds?: number;
@@ -47,6 +47,59 @@ export interface CodexBusinessReviewOptions {
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
   promptTimeoutSeconds?: number;
   startupTimeoutSeconds?: number;
+}
+
+export interface AcpBackendOptions {
+  command?: string[];
+  acpServer?: string;
+  workspaceRoot?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  promptTimeoutSeconds?: number;
+  startupTimeoutSeconds?: number;
+}
+
+export interface ClaudeReviewOptions extends AcpBackendOptions {
+  claudeBin?: string;
+}
+
+export const OPENHANDS_AGENT_BACKENDS = [
+  'codex-acp',
+  'dsh-acp',
+  'zcode-acp',
+  'claude-code-acp',
+  'openhands-builtin',
+] as const;
+export type OpenHandsAgentBackend = (typeof OPENHANDS_AGENT_BACKENDS)[number];
+
+export const OPENHANDS_PROVIDER_TRANSPORTS = ['LITELLM_MANAGED', 'PROVIDER_NATIVE'] as const;
+export type OpenHandsProviderTransport = (typeof OPENHANDS_PROVIDER_TRANSPORTS)[number];
+
+export type OpenHandsProviderRole = 'IMPLEMENTATION' | 'REVIEW';
+export type OpenHandsProviderCapability = 'IMPLEMENTATION' | 'REASONING';
+
+/**
+ * This is deliberately a complete selected profile, not a model-name hint.
+ * Callers can hydrate it from durable routing data without making this adapter
+ * infer an agent from a model string.
+ */
+export interface OpenHandsProviderSelection {
+  backend: OpenHandsAgentBackend;
+  model: string;
+  transport: OpenHandsProviderTransport;
+  /** Persisted selections may carry role, phase, or capability depending on schema version. */
+  role?: OpenHandsProviderRole;
+  phase?: ExecutionPhase;
+  capability?: OpenHandsProviderCapability;
+  resourceId?: string;
+}
+
+export interface OpenHandsProviderFactoryOptions extends OpenHandsProviderOptions {
+  codex?: CodexManagedExecutionOptions;
+  businessCodex?: CodexBusinessReviewOptions;
+  business?: CodexBusinessReviewOptions;
+  dsh?: AcpBackendOptions;
+  zcode?: AcpBackendOptions;
+  claude?: ClaudeReviewOptions;
 }
 
 interface NormalizedOptions {
@@ -79,11 +132,27 @@ function record(value: unknown): JsonRecord {
     : {};
 }
 
-function normalizeOptions(options: OpenHandsProviderOptions): NormalizedOptions {
+function modelName(value: string, code = 'OPENHANDS_MODEL_INVALID'): string {
+  const model = value.trim();
+  failClosed(
+    model.length > 0 && model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model),
+    code,
+  );
+  return model;
+}
+
+function normalizeOptions(
+  options: OpenHandsProviderOptions,
+  requiresLiteLlm = true,
+): NormalizedOptions {
   failClosed(options.baseUrl.trim().length > 0, 'OPENHANDS_BASE_URL_REQUIRED');
   failClosed(options.sessionApiKey.length > 0, 'OPENHANDS_SESSION_KEY_REQUIRED');
-  failClosed(options.liteLlmApiKey.length > 0, 'OPENHANDS_LITELLM_KEY_REQUIRED');
-  failClosed(options.liteLlmBaseUrl.trim().length > 0, 'OPENHANDS_LITELLM_URL_REQUIRED');
+  const liteLlmApiKey = options.liteLlmApiKey ?? '';
+  const liteLlmBaseUrl = options.liteLlmBaseUrl ?? '';
+  if (requiresLiteLlm) {
+    failClosed(liteLlmApiKey.length > 0, 'OPENHANDS_LITELLM_KEY_REQUIRED');
+    failClosed(liteLlmBaseUrl.trim().length > 0, 'OPENHANDS_LITELLM_URL_REQUIRED');
+  }
   const requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   const llmTimeoutSeconds = options.llmTimeoutSeconds ?? 600;
   const maxIterations = options.maxIterations ?? 500;
@@ -99,14 +168,16 @@ function normalizeOptions(options: OpenHandsProviderOptions): NormalizedOptions 
     Number.isInteger(maxIterations) && maxIterations >= 1 && maxIterations <= 1_000,
     'OPENHANDS_ITERATION_LIMIT_INVALID',
   );
-  const implementationModel = (options.implementationModel ?? 'gpt-5.6-luna').trim();
-  const reviewModel = (options.reviewModel ?? 'gpt-5.6-sol').trim();
-  failClosed(implementationModel.length > 0 && reviewModel.length > 0, 'OPENHANDS_MODEL_REQUIRED');
+  const implementationModel = modelName(
+    options.implementationModel ?? 'gpt-5.6-luna',
+    'OPENHANDS_MODEL_REQUIRED',
+  );
+  const reviewModel = modelName(options.reviewModel ?? 'gpt-5.6-sol', 'OPENHANDS_MODEL_REQUIRED');
   return {
     baseUrl: options.baseUrl.replace(/\/$/, ''),
     sessionApiKey: options.sessionApiKey,
-    liteLlmApiKey: options.liteLlmApiKey,
-    liteLlmBaseUrl: options.liteLlmBaseUrl.replace(/\/$/, ''),
+    liteLlmApiKey,
+    liteLlmBaseUrl: liteLlmBaseUrl.replace(/\/$/, ''),
     fetchImpl: options.fetchImpl ?? fetch,
     requestTimeoutMs,
     llmTimeoutSeconds,
@@ -167,6 +238,15 @@ export function mapOpenHandsStatus(value: unknown): ProviderSessionStatus {
     default:
       return 'UNKNOWN';
   }
+}
+
+/** OpenHands can report a failed ACP child as a superficially successful turn. */
+export function isOpenHandsTransportFailure(value: unknown): boolean {
+  if (typeof value !== 'string') return false;
+  const text = value.trimStart();
+  return /^(?:(?:IMPLEMENT|IMPLEMENT_FIX|REVIEW|PLAN)_TRANSPORT_ERROR\b|TRANSPORT_ERROR\b|ACP(?:[_ -](?:ERROR|FAILURE))?\b|AGENT[_ -]?CLIENT[_ -]?PROTOCOL(?:[_ -](?:ERROR|FAILURE))?\b)/i.test(
+    text,
+  );
 }
 
 function retryableFailure(code: string, detail: string): boolean {
@@ -276,8 +356,8 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   protected abstract readonly mode: 'IMPLEMENTATION' | 'REVIEW';
   readonly options: NormalizedOptions;
 
-  constructor(options: OpenHandsProviderOptions) {
-    this.options = normalizeOptions(options);
+  constructor(options: OpenHandsProviderOptions, requiresLiteLlm = true) {
+    this.options = normalizeOptions(options, requiresLiteLlm);
   }
 
   async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
@@ -607,7 +687,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     payload: JsonRecord,
     conversationId: string,
   ): Promise<ProviderSessionSnapshot> {
-    const status = mapOpenHandsStatus(payload.execution_status);
+    let status = mapOpenHandsStatus(payload.execution_status);
     let finalResponse: string | undefined;
     let errorCode: string | undefined;
     let retryable: boolean | undefined;
@@ -617,6 +697,16 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
           '/api/conversations/' + encodeURIComponent(conversationId) + '/agent_final_response',
         );
         finalResponse = this.sanitize(boundedText(result.response, MAX_FINAL_TEXT), MAX_FINAL_TEXT);
+        if (
+          status === 'SUCCEEDED' &&
+          finalResponse !== undefined &&
+          isOpenHandsTransportFailure(finalResponse)
+        ) {
+          status = 'FAILED';
+          const firstLine = finalResponse.split(/\r?\n/, 1)[0] ?? 'ACP_TRANSPORT_ERROR';
+          errorCode = this.sanitize(firstLine, 200) ?? 'ACP_TRANSPORT_ERROR';
+          retryable = true;
+        }
       } catch (error) {
         if (!(error instanceof V4Error) || !error.code.startsWith('OPENHANDS_HTTP_')) throw error;
       }
@@ -637,7 +727,9 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
             ),
           );
         if (raw) {
-          const code = boundedText(raw.code ?? raw.kind, 200) ?? 'OPENHANDS_PROVIDER_FAILURE';
+          const code =
+            this.sanitize(boundedText(raw.code ?? raw.kind, 200), 200) ??
+            'OPENHANDS_PROVIDER_FAILURE';
           const detail =
             this.sanitize(boundedText(raw.detail ?? raw.error, MAX_ERROR_TEXT), MAX_ERROR_TEXT) ??
             '';
@@ -667,7 +759,12 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     }
     return sanitized
       .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s'",}]+/gi, '$1[REDACTED]')
-      .replace(/\b(?:sk|sess)-[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+      .replace(
+        /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+        '$1[REDACTED]',
+      )
+      .replace(/\b(?:sk|sess|key|token)-[A-Za-z0-9_.:/_-]{8,}\b/g, '[REDACTED]')
+      .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
       .slice(0, maximum);
   }
 
@@ -676,8 +773,8 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     let payload: unknown;
     try {
       payload = await response.json();
-    } catch (error) {
-      throw new V4Error('OPENHANDS_RESPONSE_INVALID', 'OpenHands returned invalid JSON.', error);
+    } catch {
+      throw new V4Error('OPENHANDS_RESPONSE_INVALID', 'OpenHands returned invalid JSON.');
     }
     if (payload === null || typeof payload !== 'object' || Array.isArray(payload))
       throw new V4Error('OPENHANDS_RESPONSE_INVALID');
@@ -702,7 +799,9 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         );
       return response;
     } catch (error) {
-      if (error instanceof V4Error) throw error;
+      if (error instanceof V4Error) {
+        throw new V4Error(error.code, this.sanitize(error.message, MAX_ERROR_TEXT) ?? error.code);
+      }
       if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
         throw new V4Error('OPENHANDS_TIMEOUT');
       throw new V4Error('OPENHANDS_UNAVAILABLE', 'OpenHands request failed.');
@@ -715,44 +814,114 @@ export class OpenHandsExecutionProvider extends OpenHandsProviderBase {
   protected readonly mode = 'IMPLEMENTATION' as const;
 }
 
-export class OpenHandsCodexManagedExecutionProvider extends OpenHandsProviderBase {
-  readonly provider = 'codex-managed-coding';
-  protected readonly mode = 'IMPLEMENTATION' as const;
-  readonly codex: Required<CodexManagedExecutionOptions>;
+interface ResolvedAcpBackendOptions {
+  command: string[];
+  acpServer: string;
+  workspaceRoot: string;
+  reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh';
+  promptTimeoutSeconds: number;
+  startupTimeoutSeconds: number;
+}
 
-  constructor(options: OpenHandsProviderOptions, codex: CodexManagedExecutionOptions = {}) {
-    super(options);
-    const command = codex.command ?? [
-      '/usr/local/bin/node',
-      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
-    ];
-    failClosed(
-      command.length > 0 && command.every((item) => item.trim().length > 0),
-      'CODEX_MANAGED_COMMAND_REQUIRED',
-    );
-    const promptTimeoutSeconds = codex.promptTimeoutSeconds ?? 1_800;
-    const startupTimeoutSeconds = codex.startupTimeoutSeconds ?? 90;
-    failClosed(
-      Number.isInteger(promptTimeoutSeconds) &&
-        promptTimeoutSeconds >= 30 &&
-        promptTimeoutSeconds <= 1_800,
-      'CODEX_MANAGED_TIMEOUT_INVALID',
-    );
-    failClosed(
-      Number.isInteger(startupTimeoutSeconds) &&
-        startupTimeoutSeconds >= 10 &&
-        startupTimeoutSeconds <= 300,
-      'CODEX_MANAGED_STARTUP_TIMEOUT_INVALID',
-    );
-    this.codex = {
-      command,
-      acpServer: codex.acpServer ?? 'custom',
-      codexBin: codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
-      workspaceRoot: codex.workspaceRoot ?? '/workspace',
-      reasoningEffort: codex.reasoningEffort ?? 'xhigh',
-      promptTimeoutSeconds,
-      startupTimeoutSeconds,
-    };
+function resolveAcpBackendOptions(
+  input: AcpBackendOptions,
+  defaults: {
+    command: string[];
+    reasoningEffort: ResolvedAcpBackendOptions['reasoningEffort'];
+    promptTimeoutSeconds: number;
+  },
+  codePrefix: string,
+): ResolvedAcpBackendOptions {
+  const command = input.command ?? defaults.command;
+  failClosed(
+    command.length > 0 &&
+      command.every((item) => item.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(item)),
+    codePrefix + '_COMMAND_REQUIRED',
+  );
+  const promptTimeoutSeconds = input.promptTimeoutSeconds ?? defaults.promptTimeoutSeconds;
+  const startupTimeoutSeconds = input.startupTimeoutSeconds ?? 90;
+  failClosed(
+    Number.isInteger(promptTimeoutSeconds) &&
+      promptTimeoutSeconds >= 30 &&
+      promptTimeoutSeconds <= 1_800,
+    codePrefix + '_TIMEOUT_INVALID',
+  );
+  failClosed(
+    Number.isInteger(startupTimeoutSeconds) &&
+      startupTimeoutSeconds >= 10 &&
+      startupTimeoutSeconds <= 300,
+    codePrefix + '_STARTUP_TIMEOUT_INVALID',
+  );
+  const workspaceRoot = input.workspaceRoot ?? '/workspace';
+  failClosed(
+    workspaceRoot.trim().length > 0 &&
+      pathIsAbsolute(workspaceRoot) &&
+      !/[\u0000-\u001f\u007f]/.test(workspaceRoot),
+    codePrefix + '_WORKSPACE_ROOT_INVALID',
+  );
+  return {
+    command,
+    acpServer: input.acpServer ?? 'custom',
+    workspaceRoot,
+    reasoningEffort: input.reasoningEffort ?? defaults.reasoningEffort,
+    promptTimeoutSeconds,
+    startupTimeoutSeconds,
+  };
+}
+
+function authHome(value: string | undefined, code: string): string {
+  const home = (value ?? '/openhands-state/codex-business').trim();
+  failClosed(home.length > 0 && pathIsAbsolute(home) && !/[\u0000-\u001f\u007f]/.test(home), code);
+  return home;
+}
+
+function pathIsAbsolute(value: string): boolean {
+  return value.startsWith('/');
+}
+
+function executablePath(value: string, code: string): string {
+  const executable = value.trim();
+  failClosed(
+    executable.length > 0 && pathIsAbsolute(executable) && !/[\u0000-\u001f\u007f]/.test(executable),
+    code,
+  );
+  return executable;
+}
+
+type AcpDriver = 'codex' | 'dsh' | 'zcode' | 'claude';
+type AcpTransport = 'litellm-managed' | 'provider-native';
+
+interface ModelNativeAcpConfig {
+  provider: string;
+  mode: 'IMPLEMENTATION' | 'REVIEW';
+  model: string;
+  driver: AcpDriver;
+  transport: AcpTransport;
+  acp: ResolvedAcpBackendOptions;
+  authHome?: string;
+  binary?: string;
+}
+
+class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
+  readonly provider: string;
+  protected readonly mode: 'IMPLEMENTATION' | 'REVIEW';
+  readonly selectedModel: string;
+  readonly transport: AcpTransport;
+  readonly acp: ResolvedAcpBackendOptions;
+  readonly driver: AcpDriver;
+  readonly authHome?: string;
+  readonly binary?: string;
+
+  constructor(options: OpenHandsProviderOptions, config: ModelNativeAcpConfig) {
+    super(options, config.transport !== 'provider-native');
+    this.provider = config.provider;
+    this.mode = config.mode;
+    this.selectedModel = modelName(config.model);
+    this.transport = config.transport;
+    this.acp = config.acp;
+    this.driver = config.driver;
+    this.authHome = config.authHome;
+    this.binary = config.binary;
   }
 
   protected override conversationAgent(
@@ -761,42 +930,128 @@ export class OpenHandsCodexManagedExecutionProvider extends OpenHandsProviderBas
   ): JsonRecord {
     return {
       kind: 'ACPAgent',
-      acp_command: this.codex.command,
-      acp_server: this.codex.acpServer,
-      acp_prompt_timeout: this.codex.promptTimeoutSeconds,
-      acp_startup_timeout: this.codex.startupTimeoutSeconds,
-      acp_model: this.options.implementationModel,
+      acp_command: this.acp.command,
+      acp_server: this.acp.acpServer,
+      acp_prompt_timeout: this.acp.promptTimeoutSeconds,
+      acp_startup_timeout: this.acp.startupTimeoutSeconds,
+      acp_model: this.selectedModel,
     };
   }
 
   protected override conversationSecrets(input: ProviderLaunchInput): JsonRecord {
-    return {
+    const secrets: JsonRecord = {
       ...super.conversationSecrets(input),
-      AI_OFFICE_HEADLESS_DRIVER: { kind: 'StaticSecret', value: 'codex' },
-      AI_OFFICE_HEADLESS_ROLE: { kind: 'StaticSecret', value: 'worker' },
-      AI_OFFICE_HEADLESS_TRANSPORT: { kind: 'StaticSecret', value: 'litellm-managed' },
-      AI_OFFICE_HEADLESS_MODEL: { kind: 'StaticSecret', value: this.options.implementationModel },
-      AI_OFFICE_HEADLESS_REASONING_EFFORT: {
+      AI_OFFICE_AGENT_BACKEND: { kind: 'StaticSecret', value: this.driver + '-acp' },
+      AI_OFFICE_AGENT_TRANSPORT: { kind: 'StaticSecret', value: this.transport },
+      AI_OFFICE_AGENT_MODEL: { kind: 'StaticSecret', value: this.selectedModel },
+      AI_OFFICE_WORKSPACE_ROOT: {
         kind: 'StaticSecret',
-        value: this.codex.reasoningEffort,
-      },
-      AI_OFFICE_LITELLM_BASE_URL: { kind: 'StaticSecret', value: this.options.liteLlmBaseUrl },
-      AI_OFFICE_LITELLM_API_KEY: { kind: 'StaticSecret', value: this.options.liteLlmApiKey },
-      AI_OFFICE_CODEX_BIN: { kind: 'StaticSecret', value: this.codex.codexBin },
-      AI_OFFICE_WORKSPACE_ROOT: { kind: 'StaticSecret', value: this.codex.workspaceRoot },
-      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: {
-        kind: 'StaticSecret',
-        value: String(this.codex.promptTimeoutSeconds),
+        value: this.acp.workspaceRoot,
       },
       HERMES_V3_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
-      PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH: {
+      HERMES_V3_WORKSPACE_REF: {
+        kind: 'StaticSecret',
+        value: input.workspace.executionPath,
+      },
+    };
+
+    if (this.driver === 'codex' || this.driver === 'claude') {
+      secrets.AI_OFFICE_HEADLESS_DRIVER = { kind: 'StaticSecret', value: this.driver };
+      secrets.AI_OFFICE_HEADLESS_ROLE = {
+        kind: 'StaticSecret',
+        value: this.mode === 'IMPLEMENTATION' ? 'worker' : 'review',
+      };
+      secrets.AI_OFFICE_HEADLESS_TRANSPORT = {
+        kind: 'StaticSecret',
+        value: this.transport,
+      };
+      secrets.AI_OFFICE_HEADLESS_MODEL = {
+        kind: 'StaticSecret',
+        value: this.selectedModel,
+      };
+      secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT = {
+        kind: 'StaticSecret',
+        value: this.acp.reasoningEffort,
+      };
+      secrets.AI_OFFICE_HEADLESS_TIMEOUT_SECONDS = {
+        kind: 'StaticSecret',
+        value: String(this.acp.promptTimeoutSeconds),
+      };
+      if (this.binary) {
+        secrets[this.driver === 'codex' ? 'AI_OFFICE_CODEX_BIN' : 'AI_OFFICE_CLAUDE_BIN'] = {
+          kind: 'StaticSecret',
+          value: this.binary,
+        };
+      }
+    }
+
+    if (this.transport === 'litellm-managed') {
+      secrets.LITELLM_V3_KEY = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmApiKey,
+      };
+      secrets.LITELLM_V3_BASE_URL = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmBaseUrl,
+      };
+      secrets.AI_OFFICE_LITELLM_BASE_URL = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmBaseUrl,
+      };
+      secrets.AI_OFFICE_LITELLM_API_KEY = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmApiKey,
+      };
+    } else if (this.authHome) {
+      secrets.AI_OFFICE_CODEX_AUTH_HOME = {
+        kind: 'StaticSecret',
+        value: this.authHome,
+      };
+    }
+
+    if (this.driver === 'dsh') {
+      secrets.DEEPSEEK_API_KEY = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmApiKey,
+      };
+      secrets.DEEPSEEK_BASE_URL = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmBaseUrl,
+      };
+      secrets.DSH_ACP_MODEL = { kind: 'StaticSecret', value: this.selectedModel };
+      secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT = {
+        kind: 'StaticSecret',
+        value: this.acp.reasoningEffort,
+      };
+    }
+    if (this.driver === 'zcode') {
+      secrets.ZCODE_API_KEY = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmApiKey,
+      };
+      secrets.ZCODE_BASE_URL = {
+        kind: 'StaticSecret',
+        value: this.options.liteLlmBaseUrl,
+      };
+      secrets.ZCODE_MODEL = { kind: 'StaticSecret', value: this.selectedModel };
+    }
+
+    if (this.mode === 'IMPLEMENTATION') {
+      secrets.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH = {
         kind: 'StaticSecret',
         value: input.workspace.evidenceExecutionPath,
-      },
-      PIXEL_V4_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
-      PIXEL_V4_SOURCE_SHA: { kind: 'StaticSecret', value: input.sourceRevision },
-      PIXEL_V4_IMPLEMENTATION_PHASE: { kind: 'StaticSecret', value: input.phase },
-    };
+      };
+      secrets.PIXEL_V4_SOURCE_SHA = { kind: 'StaticSecret', value: input.sourceRevision };
+      secrets.PIXEL_V4_IMPLEMENTATION_PHASE = { kind: 'StaticSecret', value: input.phase };
+    } else {
+      secrets.PIXEL_V4_REVIEW_EVIDENCE_PATH = {
+        kind: 'StaticSecret',
+        value: input.workspace.evidenceExecutionPath,
+      };
+      secrets.PIXEL_V4_REVIEWED_SHA = { kind: 'StaticSecret', value: input.sourceRevision };
+    }
+    secrets.PIXEL_V4_EXECUTION_ID = { kind: 'StaticSecret', value: input.executionId };
+    return secrets;
   }
 }
 
@@ -806,97 +1061,332 @@ export class OpenHandsReviewProvider extends OpenHandsProviderBase implements Re
   protected readonly mode = 'REVIEW' as const;
 }
 
-export class OpenHandsCodexBusinessReviewProvider
-  extends OpenHandsProviderBase
-  implements ReviewProviderPort
-{
-  readonly provider = 'codex-business-independent-review';
-  readonly independentReview = true as const;
-  protected readonly mode = 'REVIEW' as const;
-  readonly business: Required<CodexBusinessReviewOptions>;
+const HEADLESS_COMMAND = [
+  '/usr/local/bin/node',
+  '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+];
+const HARNESS_LAUNCHER = '/opt/hermes-ai-office-tools/harness_agent_launcher.sh';
 
-  constructor(options: OpenHandsProviderOptions, business: CodexBusinessReviewOptions = {}) {
-    super(options);
-    const command = business.command ?? [
-      '/usr/local/bin/node',
-      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
-    ];
-    failClosed(
-      command.length > 0 && command.every((item) => item.trim().length > 0),
-      'CODEX_BUSINESS_COMMAND_REQUIRED',
-    );
-    const promptTimeoutSeconds = business.promptTimeoutSeconds ?? 1_200;
-    const startupTimeoutSeconds = business.startupTimeoutSeconds ?? 90;
-    failClosed(
-      Number.isInteger(promptTimeoutSeconds) &&
-        promptTimeoutSeconds >= 30 &&
-        promptTimeoutSeconds <= 1_800,
-      'CODEX_BUSINESS_TIMEOUT_INVALID',
-    );
-    failClosed(
-      Number.isInteger(startupTimeoutSeconds) &&
-        startupTimeoutSeconds >= 10 &&
-        startupTimeoutSeconds <= 300,
-      'CODEX_BUSINESS_STARTUP_TIMEOUT_INVALID',
-    );
-    this.business = {
-      command,
-      acpServer: business.acpServer ?? 'custom',
-      authHome: business.authHome ?? '/openhands-state/codex-business',
-      codexBin: business.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
-      workspaceRoot: business.workspaceRoot ?? '/workspace',
-      reasoningEffort: business.reasoningEffort ?? 'medium',
-      promptTimeoutSeconds,
-      startupTimeoutSeconds,
-    };
-  }
+function modelForRole(options: OpenHandsProviderOptions, role: OpenHandsProviderRole): string {
+  return role === 'IMPLEMENTATION'
+    ? options.implementationModel ?? 'gpt-5.6-luna'
+    : options.reviewModel ?? 'gpt-5.6-sol';
+}
 
-  protected override conversationAgent(
-    _input: ProviderLaunchInput,
-    _tools: Array<{ name: string }>,
-  ): JsonRecord {
-    return {
-      kind: 'ACPAgent',
-      acp_command: this.business.command,
-      acp_server: this.business.acpServer,
-      acp_prompt_timeout: this.business.promptTimeoutSeconds,
-      acp_startup_timeout: this.business.startupTimeoutSeconds,
-      acp_model: this.options.reviewModel,
-    };
-  }
+function codexConfig(
+  input: CodexManagedExecutionOptions | CodexBusinessReviewOptions,
+  role: OpenHandsProviderRole,
+  prefix: string,
+): ResolvedAcpBackendOptions {
+  return resolveAcpBackendOptions(
+    input,
+    {
+      command: HEADLESS_COMMAND,
+      reasoningEffort: role === 'IMPLEMENTATION' ? 'xhigh' : 'medium',
+      promptTimeoutSeconds: role === 'IMPLEMENTATION' ? 1_800 : 1_200,
+    },
+    prefix,
+  );
+}
 
-  protected override conversationSecrets(input: ProviderLaunchInput): JsonRecord {
-    return {
-      ...super.conversationSecrets(input),
-      AI_OFFICE_HEADLESS_DRIVER: { kind: 'StaticSecret', value: 'codex' },
-      AI_OFFICE_HEADLESS_ROLE: { kind: 'StaticSecret', value: 'review' },
-      AI_OFFICE_HEADLESS_TRANSPORT: { kind: 'StaticSecret', value: 'provider-native' },
-      AI_OFFICE_HEADLESS_MODEL: { kind: 'StaticSecret', value: this.options.reviewModel },
-      AI_OFFICE_HEADLESS_REASONING_EFFORT: {
-        kind: 'StaticSecret',
-        value: this.business.reasoningEffort,
-      },
-      AI_OFFICE_CODEX_AUTH_HOME: { kind: 'StaticSecret', value: this.business.authHome },
-      AI_OFFICE_CODEX_BIN: { kind: 'StaticSecret', value: this.business.codexBin },
-      AI_OFFICE_WORKSPACE_ROOT: { kind: 'StaticSecret', value: this.business.workspaceRoot },
-      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: {
-        kind: 'StaticSecret',
-        value: String(this.business.promptTimeoutSeconds),
-      },
-      PIXEL_V4_REVIEW_EVIDENCE_PATH: {
-        kind: 'StaticSecret',
-        value: input.workspace.evidenceExecutionPath,
-      },
-      PIXEL_V4_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
-      PIXEL_V4_REVIEWED_SHA: { kind: 'StaticSecret', value: input.sourceRevision },
+export class OpenHandsCodexManagedExecutionProvider extends OpenHandsModelNativeAcpProvider {
+  readonly codex: Required<CodexManagedExecutionOptions>;
+
+  constructor(options: OpenHandsProviderOptions, codex: CodexManagedExecutionOptions = {}) {
+    const resolved = codexConfig(codex, 'IMPLEMENTATION', 'CODEX_MANAGED');
+    super(options, {
+      provider: 'codex-managed-coding',
+      mode: 'IMPLEMENTATION',
+      model: modelForRole(options, 'IMPLEMENTATION'),
+      driver: 'codex',
+      transport: 'litellm-managed',
+      acp: resolved,
+      binary: executablePath(
+        codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+        'CODEX_MANAGED_CODEX_BIN_INVALID',
+      ),
+    });
+    this.codex = {
+      ...resolved,
+      codexBin: executablePath(
+        codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+        'CODEX_MANAGED_CODEX_BIN_INVALID',
+      ),
     };
   }
 }
+
+export class OpenHandsCodexManagedReviewProvider
+  extends OpenHandsModelNativeAcpProvider
+  implements ReviewProviderPort
+{
+  readonly independentReview = true as const;
+  readonly codex: Required<CodexManagedExecutionOptions>;
+
+  constructor(options: OpenHandsProviderOptions, codex: CodexManagedExecutionOptions = {}) {
+    const resolved = codexConfig(codex, 'REVIEW', 'CODEX_MANAGED');
+    super(options, {
+      provider: 'codex-managed-independent-review',
+      mode: 'REVIEW',
+      model: modelForRole(options, 'REVIEW'),
+      driver: 'codex',
+      transport: 'litellm-managed',
+      acp: resolved,
+      binary: executablePath(
+        codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+        'CODEX_MANAGED_CODEX_BIN_INVALID',
+      ),
+    });
+    this.codex = {
+      ...resolved,
+      codexBin: executablePath(
+        codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+        'CODEX_MANAGED_CODEX_BIN_INVALID',
+      ),
+    };
+  }
+}
+
+function businessConfig(
+  input: CodexBusinessReviewOptions,
+  role: OpenHandsProviderRole,
+): { acp: ResolvedAcpBackendOptions; authHome: string; codexBin: string } {
+  return {
+    acp: codexConfig(input, role, 'CODEX_BUSINESS'),
+    authHome: authHome(input.authHome, 'CODEX_BUSINESS_AUTH_HOME_INVALID'),
+    codexBin: executablePath(
+      input.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+      'CODEX_BUSINESS_CODEX_BIN_INVALID',
+    ),
+  };
+}
+
+export class OpenHandsCodexBusinessExecutionProvider extends OpenHandsModelNativeAcpProvider {
+  readonly business: Required<CodexBusinessReviewOptions>;
+
+  constructor(options: OpenHandsProviderOptions, business: CodexBusinessReviewOptions = {}) {
+    const resolved = businessConfig(business, 'IMPLEMENTATION');
+    super(options, {
+      provider: 'codex-business-coding',
+      mode: 'IMPLEMENTATION',
+      model: modelForRole(options, 'IMPLEMENTATION'),
+      driver: 'codex',
+      transport: 'provider-native',
+      acp: resolved.acp,
+      authHome: resolved.authHome,
+      binary: resolved.codexBin,
+    });
+    this.business = { ...resolved.acp, authHome: resolved.authHome, codexBin: resolved.codexBin };
+  }
+}
+
+export class OpenHandsCodexBusinessReviewProvider
+  extends OpenHandsModelNativeAcpProvider
+  implements ReviewProviderPort
+{
+  readonly independentReview = true as const;
+  readonly business: Required<CodexBusinessReviewOptions>;
+
+  constructor(options: OpenHandsProviderOptions, business: CodexBusinessReviewOptions = {}) {
+    const resolved = businessConfig(business, 'REVIEW');
+    super(options, {
+      provider: 'codex-business-independent-review',
+      mode: 'REVIEW',
+      model: modelForRole(options, 'REVIEW'),
+      driver: 'codex',
+      transport: 'provider-native',
+      acp: resolved.acp,
+      authHome: resolved.authHome,
+      binary: resolved.codexBin,
+    });
+    this.business = { ...resolved.acp, authHome: resolved.authHome, codexBin: resolved.codexBin };
+  }
+}
+
+export class OpenHandsDshExecutionProvider extends OpenHandsModelNativeAcpProvider {
+  constructor(options: OpenHandsProviderOptions, dsh: AcpBackendOptions = {}) {
+    super(options, {
+      provider: 'dsh-managed-coding',
+      mode: 'IMPLEMENTATION',
+      model: modelForRole(options, 'IMPLEMENTATION'),
+      driver: 'dsh',
+      transport: 'litellm-managed',
+      acp: resolveAcpBackendOptions(
+        dsh,
+        {
+          command: [HARNESS_LAUNCHER, 'dsh-acp'],
+          reasoningEffort: 'xhigh',
+          promptTimeoutSeconds: 1_800,
+        },
+        'DSH_ACP',
+      ),
+    });
+  }
+}
+
+export const OpenHandsDSHExecutionProvider = OpenHandsDshExecutionProvider;
+
+export class OpenHandsZCodeExecutionProvider extends OpenHandsModelNativeAcpProvider {
+  constructor(options: OpenHandsProviderOptions, zcode: AcpBackendOptions = {}) {
+    super(options, {
+      provider: 'zcode-managed-coding',
+      mode: 'IMPLEMENTATION',
+      model: modelForRole(options, 'IMPLEMENTATION'),
+      driver: 'zcode',
+      transport: 'litellm-managed',
+      acp: resolveAcpBackendOptions(
+        zcode,
+        {
+          command: [HARNESS_LAUNCHER, 'zcode-acp'],
+          reasoningEffort: 'high',
+          promptTimeoutSeconds: 1_800,
+        },
+        'ZCODE_ACP',
+      ),
+    });
+  }
+}
+
+export const OpenHandsZCODEExecutionProvider = OpenHandsZCodeExecutionProvider;
+
+export class OpenHandsClaudeReviewProvider
+  extends OpenHandsModelNativeAcpProvider
+  implements ReviewProviderPort
+{
+  readonly independentReview = true as const;
+  readonly claude: Required<ClaudeReviewOptions>;
+
+  constructor(options: OpenHandsProviderOptions, claude: ClaudeReviewOptions = {}) {
+    const resolved = resolveAcpBackendOptions(
+      claude,
+      { command: HEADLESS_COMMAND, reasoningEffort: 'high', promptTimeoutSeconds: 1_200 },
+      'CLAUDE_REVIEW',
+    );
+    const claudeBin = executablePath(
+      claude.claudeBin ?? '/openhands-state/tooling/node_modules/.bin/claude',
+      'CLAUDE_REVIEW_CLAUDE_BIN_INVALID',
+    );
+    super(options, {
+      provider: 'claude-code-independent-review',
+      mode: 'REVIEW',
+      model: modelForRole(options, 'REVIEW'),
+      driver: 'claude',
+      transport: 'litellm-managed',
+      acp: resolved,
+      binary: claudeBin,
+    });
+    this.claude = {
+      ...resolved,
+      claudeBin,
+    };
+  }
+}
+
+function selectionRole(selection: OpenHandsProviderSelection): OpenHandsProviderRole {
+  if (selection.role !== undefined)
+    failClosed(
+      selection.role === 'IMPLEMENTATION' || selection.role === 'REVIEW',
+      'OPENHANDS_SELECTION_ROLE_INVALID',
+    );
+  if (selection.phase !== undefined)
+    failClosed(
+      selection.phase === 'IMPLEMENT' ||
+        selection.phase === 'IMPLEMENT_FIX' ||
+        selection.phase === 'REVIEW',
+      'OPENHANDS_SELECTION_PHASE_INVALID',
+    );
+  if (selection.capability !== undefined)
+    failClosed(
+      selection.capability === 'IMPLEMENTATION' || selection.capability === 'REASONING',
+      'OPENHANDS_SELECTION_CAPABILITY_INVALID',
+    );
+  const candidates = [
+    selection.role,
+    selection.phase === undefined
+      ? undefined
+      : selection.phase === 'REVIEW'
+        ? ('REVIEW' as const)
+        : ('IMPLEMENTATION' as const),
+    selection.capability === undefined
+      ? undefined
+      : selection.capability === 'REASONING'
+        ? ('REVIEW' as const)
+        : ('IMPLEMENTATION' as const),
+  ].filter((value): value is OpenHandsProviderRole => value !== undefined);
+  failClosed(candidates.length > 0, 'OPENHANDS_SELECTION_ROLE_REQUIRED');
+  const role = candidates[0]!;
+  failClosed(candidates.every((candidate) => candidate === role), 'OPENHANDS_SELECTION_ROLE_CONFLICT');
+  return role;
+}
+
+export function createOpenHandsProviderForSelection(
+  options: OpenHandsProviderFactoryOptions,
+  selection: OpenHandsProviderSelection,
+): ExecutionProviderPort {
+  const model = modelName(selection.model, 'OPENHANDS_SELECTION_MODEL_INVALID');
+  const role = selectionRole(selection);
+  failClosed(
+    selection.transport === 'LITELLM_MANAGED' || selection.transport === 'PROVIDER_NATIVE',
+    'OPENHANDS_SELECTION_TRANSPORT_INVALID',
+  );
+  const providerOptions: OpenHandsProviderOptions = {
+    ...options,
+    ...(role === 'IMPLEMENTATION'
+      ? { implementationModel: model }
+      : { reviewModel: model }),
+  };
+  switch (selection.backend) {
+    case 'codex-acp':
+      if (selection.transport === 'LITELLM_MANAGED') {
+        return role === 'IMPLEMENTATION'
+          ? new OpenHandsCodexManagedExecutionProvider(providerOptions, options.codex)
+          : new OpenHandsCodexManagedReviewProvider(providerOptions, options.codex);
+      }
+      return role === 'IMPLEMENTATION'
+        ? new OpenHandsCodexBusinessExecutionProvider(
+            providerOptions,
+            options.businessCodex ?? options.business,
+          )
+        : new OpenHandsCodexBusinessReviewProvider(providerOptions, options.businessCodex ?? options.business);
+    case 'dsh-acp':
+      failClosed(selection.transport === 'LITELLM_MANAGED', 'DSH_PROVIDER_NATIVE_UNSUPPORTED');
+      failClosed(role === 'IMPLEMENTATION', 'DSH_REVIEW_UNSUPPORTED');
+      return new OpenHandsDshExecutionProvider(providerOptions, options.dsh);
+    case 'zcode-acp':
+      failClosed(selection.transport === 'LITELLM_MANAGED', 'ZCODE_PROVIDER_NATIVE_UNSUPPORTED');
+      failClosed(role === 'IMPLEMENTATION', 'ZCODE_REVIEW_UNSUPPORTED');
+      return new OpenHandsZCodeExecutionProvider(providerOptions, options.zcode);
+    case 'claude-code-acp':
+      failClosed(selection.transport === 'LITELLM_MANAGED', 'CLAUDE_PROVIDER_NATIVE_UNSUPPORTED');
+      failClosed(role === 'REVIEW', 'CLAUDE_IMPLEMENTATION_UNSUPPORTED');
+      return new OpenHandsClaudeReviewProvider(providerOptions, options.claude);
+    case 'openhands-builtin':
+      failClosed(
+        selection.transport === 'LITELLM_MANAGED',
+        'OPENHANDS_BUILTIN_PROVIDER_NATIVE_UNSUPPORTED',
+      );
+      return role === 'IMPLEMENTATION'
+        ? new OpenHandsExecutionProvider(providerOptions)
+        : new OpenHandsReviewProvider(providerOptions);
+    default:
+      throw new V4Error('OPENHANDS_BACKEND_UNSUPPORTED');
+  }
+}
+
+export function createOpenHandsProviderFactory(
+  options: OpenHandsProviderFactoryOptions,
+): (selection: OpenHandsProviderSelection) => ExecutionProviderPort {
+  return (selection) => createOpenHandsProviderForSelection(options, selection);
+}
+
+export const createOpenHandsProvider = createOpenHandsProviderForSelection;
 
 export function createOpenHandsProviders(options: OpenHandsProviderOptions): {
   execution: OpenHandsExecutionProvider;
   review: OpenHandsReviewProvider;
 } {
+  // Compatibility-only pair. New callers must use createOpenHandsProviderForSelection
+  // so a known model affinity cannot silently fall back to OpenHands' generic Agent.
   return {
     execution: new OpenHandsExecutionProvider(options),
     review: new OpenHandsReviewProvider(options),
