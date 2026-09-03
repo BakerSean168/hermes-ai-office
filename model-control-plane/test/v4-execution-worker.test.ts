@@ -499,6 +499,62 @@ test('execution worker refuses operator workspace adoption while the provider is
   seeded.db.close();
 });
 
+test('execution worker can abort a paused stalled provider attempt without fabricating provider completion', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-paused-provider-abort',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-paused-provider-abort' },
+  );
+  await worker.runExecution(execution.identity.executionId);
+  provider.inspectSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'PAUSED',
+    observedAt: now(200),
+  };
+
+  const aborted = await worker.abortPausedProviderAttempt(
+    execution.identity.executionId,
+    'paused-provider-abort-1',
+    'provider remained inert after bounded recovery attempts',
+  );
+  assert.equal(aborted.status, 'FAILED');
+  assert.equal(aborted.code, 'PROVIDER_STALLED_OPERATOR_ABORT');
+  const stored = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(stored.status, 'FAILED');
+  assert.equal(stored.retryable, true);
+  assert.equal(stored.errorCode, 'PROVIDER_STALLED_OPERATOR_ABORT');
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'PAUSED',
+  );
+  const evidence = seeded.repositories.evidence.listByExecution(execution.identity.executionId);
+  assert.ok(
+    evidence.some(
+      (item) =>
+        item.kind === 'RECOVERY' &&
+        item.payload.mode === 'operator-abort-paused-provider-attempt' &&
+        item.payload.providerStatus === 'PAUSED',
+    ),
+  );
+  assert.equal(
+    evidence.some(
+      (item) => item.kind === 'PROVIDER_OUTPUT' && item.name === 'terminal-provider-snapshot',
+    ),
+    false,
+  );
+  seeded.db.close();
+});
+
 test('execution worker resumes the same terminal implementation session once to finalize a dirty workspace', async () => {
   const seeded = seed();
   const execution = createExecution(seeded.repositories, {

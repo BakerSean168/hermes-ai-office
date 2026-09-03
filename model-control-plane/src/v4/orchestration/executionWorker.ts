@@ -430,6 +430,79 @@ export class ExecutionWorker {
     }
   }
 
+  async abortPausedProviderAttempt(
+    executionId: string,
+    idempotencyKey: string,
+    reason: string,
+  ): Promise<ExecutionWorkerResult> {
+    const claim = this.repositories.executions.claimLease(
+      executionId,
+      this.ownerId,
+      this.leaseTtlMs,
+    );
+    if (!claim.value || claim.status === 'rejected')
+      return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
+    try {
+      const execution = this.repositories.executions.get(executionId);
+      if (execution.status !== 'RUNNING')
+        return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_ABORTABLE' };
+      if (!idempotencyKey.trim() || idempotencyKey.length > 1_000)
+        throw new V4Error('PROVIDER_ABORT_IDEMPOTENCY_REQUIRED');
+      if (!reason.trim() || reason.length > 2_000)
+        throw new V4Error('PROVIDER_ABORT_REASON_INVALID');
+      const provider = this.routes.get(execution.identity.route);
+      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const session = this.repositories.sessions.get(executionId);
+      if (!session.providerSessionId)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
+      const observed = await provider.inspect(session.providerSessionId);
+      if (observed.status !== 'PAUSED') {
+        if (!TERMINAL_PROVIDER_STATUSES.has(observed.status))
+          this.recordActiveProviderStatus(executionId, session, observed);
+        return {
+          executionId,
+          status: 'WAITING',
+          code: 'PROVIDER_ABORT_REQUIRES_PAUSED',
+          providerSessionId: session.providerSessionId,
+        };
+      }
+      this.recordActiveProviderStatus(executionId, session, observed);
+      const evidenceName =
+        'paused-provider-abort-' +
+        createHash('sha256').update(idempotencyKey.trim()).digest('hex').slice(0, 40);
+      this.repositories.evidence.append({
+        executionId,
+        kind: 'RECOVERY',
+        name: evidenceName,
+        sourceRevision: execution.identity.sourceRevision,
+        payload: {
+          mode: 'operator-abort-paused-provider-attempt',
+          reason: reason.trim(),
+          provider: observed.provider,
+          providerSessionId: observed.providerSessionId,
+          providerStatus: observed.status,
+          observedAt: observed.observedAt,
+        },
+      });
+      this.repositories.executions.recordResult(executionId, {
+        status: 'FAILED',
+        errorCode: 'PROVIDER_STALLED_OPERATOR_ABORT',
+        retryable: true,
+        resultSummary: bounded(reason.trim(), MAX_RESULT_SUMMARY),
+      });
+      return {
+        executionId,
+        status: 'FAILED',
+        code: 'PROVIDER_STALLED_OPERATOR_ABORT',
+        providerSessionId: observed.providerSessionId,
+      };
+    } catch (error) {
+      return { executionId, status: 'FAILED', code: errorCode(error) };
+    } finally {
+      this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
+    }
+  }
+
   async runExecution(executionId: string): Promise<ExecutionWorkerResult> {
     const claim = this.repositories.executions.claimLease(
       executionId,
