@@ -93,6 +93,69 @@ Before V4 autonomous effects are enabled, the current result/review provenance r
 
 V4 action validation depends on these invariants.
 
+### 9. V4 model-agent affinity is only partially migrated
+
+The older development policy already declares DSH, ZCode, Codex ACP, Claude Code ACP, OpenCode ACP, and OpenHands backends. The current V4 automation path does not yet use that backend selector as its source of truth.
+
+Current V4 behavior is still partly route-name driven:
+
+```text
+gpt-5.6-luna -> managed Codex path (being hardened)
+implementation-efficient -> generic OpenHands builtin path
+glm route -> generic OpenHands builtin path
+```
+
+The intended architecture is model-native:
+
+```text
+DeepSeek V4 Flash -> DSH
+GLM current       -> ZCode
+GPT-5.6 Luna/Sol  -> Codex
+Claude Opus       -> Claude Code
+```
+
+OpenHands should host the ACP/session/workspace lifecycle, not silently replace the model-native coding harness.
+
+### 10. V4 retries still encode model names instead of resource policy
+
+The current automation indexes into configured implementation/review route arrays. Review attempts can therefore progress through a fixed ladder such as Business Sol, managed Sol, `codex-auto-review`, and GLM regardless of the current resource directory.
+
+Recent `codex-auto-review` evidence demonstrates why this is brittle: its only active WorldClaw deployment has historical successes but also recent rate-limit, cooldown, and upstream `unknown provider` failures. Attempt number is not a valid resource selector.
+
+ADR-003 replaces attempt-indexed model selection with a deterministic selector over:
+
+```text
+capability
++ model-agent affinity
++ resource tier
++ immutable resource sequence
++ current resource state/readiness
+```
+
+### 11. LiteLLM provider ordering is too coarse for stable cache locality
+
+Provider tooling currently derives coarse economic orders such as promotional/free/subscription/metered. Multiple providers in one economic class can therefore share the same LiteLLM order, leaving same-tier selection free to shuffle.
+
+The target policy assigns an immutable resource sequence and encodes unique same-tier order. Earlier configured resources remain preferred until unavailable, which makes provider use predictable and improves prompt-cache locality.
+
+### 12. Provider discovery currently over-activates model catalogs
+
+The current provider importer can select all advertised GPT text models for a provider family. This creates active deployments for old or unused GPT generations even when Pixel has no approved execution role for them.
+
+Provider discovery must be separated from runtime activation. The automatic runtime should keep only the small approved set defined by ADR-003, while older/other advertised models remain discoverable or manually activatable.
+
+### 13. Resource-wide exhaustion is not yet a durable routing fact
+
+Promotional expiry can already block deployments, and LiteLLM provides transient cooldowns, but explicit quota/balance/usage exhaustion is not yet normalized into one durable provider-resource state that immediately removes all bindings sharing the exhausted credential/account.
+
+The target lifecycle is deliberately simple:
+
+```text
+explicit quota/auth failure -> DISABLED
+community transient failure -> SUSPENDED 24h -> one probe -> ACTIVE or manual-only DISABLED
+subscription/metered transient failure -> bounded short cooldown
+```
+
 ## Target delta
 
 V4 does not discard current components. It adds the missing plan/program intelligence layer:
@@ -108,7 +171,11 @@ V4:
   durable event-driven supervisor
   -> typed proposals
   -> deterministic validator/kernel
-  -> existing workers/review/integration/delivery
+  -> IMPLEMENTATION / REASONING capability
+  -> static model-agent affinity
+  -> ordered LiteLLM/provider-native resource selection
+  -> OpenHands/provider-native execution host
+  -> exact review/integration/delivery
   -> graph revision or child repair for novel recoverable failures
   -> explicit resource/external/safety waiting states
 ```

@@ -5,13 +5,16 @@
 - Repository: `pixel-agents`
 - Target: additive V4 supervisor/program layer over the V3 deterministic execution kernel
 - Primary canary: Digital Biome autonomous maintenance
-- Related decision: `docs/adr/ADR-001-durable-ai-supervisor-and-deterministic-kernel.md`
+- Related decisions: `docs/adr/ADR-001-durable-ai-supervisor-and-deterministic-kernel.md`, `docs/adr/ADR-003-static-model-agent-resource-routing.md`
 - Architecture:
   - `docs/architecture/pixel-v4-current-gap-analysis.md`
   - `docs/architecture/pixel-v4-durable-supervisor-runtime.md`
   - `docs/architecture/pixel-v4-supervisor-action-protocol.md`
   - `docs/architecture/autonomous-improvement-programs-and-external-pr-governance.md`
   - `docs/architecture/pixel-v4-resource-policy-and-safety-budgets.md`
+  - `docs/architecture/pixel-v4-model-agent-resource-routing.md`
+  - `docs/architecture/pixel-v4-provider-catalog-and-resource-lifecycle.md`
+- Companion routing/provider implementation plan: `docs/plan/active/2026-09-03-pixel-v4-routing-and-provider-governance.md`
 
 ## 1. North-star outcome
 
@@ -461,7 +464,7 @@ No production self-repair deployment until the complete child-plan/canary/rollba
 
 **Depends on:** PV4-1103
 
-**Objective:** Make declared Anti-Gravity backends genuinely selectable only when enabled, authenticated, ready, and within policy/quota.
+**Objective:** Make declared Anti-Gravity backends genuinely selectable only when enabled, authenticated, ready, and within policy/quota. This ticket owns the Digital Biome-specific Anti-Gravity admission behavior; the companion routing/provider plan owns the global `ResourceDirectory`, resource sequence, and normal model-agent-resource selector.
 
 **Requirements:**
 

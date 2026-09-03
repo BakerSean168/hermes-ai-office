@@ -89,18 +89,22 @@ The kernel chooses the next attempt number and enforces retry budgets.
 
 ### `SWITCH_ROUTE`
 
-Retry using an allowed backend/model capability.
+ADR-003 changes the meaning of route switching: the supervisor may classify why the current resource is unusable, but it does not choose the next concrete model, agent, or provider. The deterministic resource selector chooses the next executable profile.
+
+Target shape:
 
 ```json
 {
   "workItemId": "work_...",
   "phase": "IMPLEMENT",
-  "backend": "codex-acp",
-  "modelClass": "implementation-efficient"
+  "failedExecutionId": "exec_...",
+  "reasonClass": "QUOTA_EXHAUSTED"
 }
 ```
 
-The supervisor never provides credentials or physical provider keys.
+The kernel/resource state adapter applies the normalized failure to the failed resource, then re-runs selection over the allowed `IMPLEMENTATION` or `REASONING` capability. The supervisor never provides credentials, physical provider keys, resource sequence, or an arbitrary backend/model override.
+
+The pre-ADR-003 compatibility form containing `backend` and `modelClass` may remain accepted during migration, but it must be translated into/validated against the new selector and cannot remain the routing authority after the companion routing plan completes.
 
 ### `REQUEST_REVIEW`
 

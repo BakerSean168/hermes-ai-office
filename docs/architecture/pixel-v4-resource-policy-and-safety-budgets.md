@@ -1,12 +1,14 @@
 # Pixel V4 Resource Policy and Safety Budgets
 
+> Routing update (2026-09-03): ADR-003 is the governing decision for normal model/agent/provider selection. Normal task routing now has only two capability classes, `IMPLEMENTATION` and `REASONING`, uses a small curated model-agent affinity set, and selects resources by static `(tier, model rank, resource sequence)` order. The resource/budget concepts below remain applicable for project-specific restrictions, scarce provider-native resources, safety holds, and autonomous-maintenance programs. They must not be interpreted as permission to reintroduce dynamic cost/quality scoring or attempt-indexed model fallback.
+
 ## Why resource policy is a first-class contract
 
 Provider/model choice is not merely routing. Some programs are valuable only when a particular prepaid, promotional, shared, or time-limited resource is available. Silently falling back to an ordinary paid route can violate the user's intent even when it would technically complete the task.
 
 Pixel V4 therefore separates:
 
-- **capability policy** — which worker/reviewer is suitable;
+- **capability policy** — whether the work requires `IMPLEMENTATION` or `REASONING`, plus phase-specific backend/trust constraints;
 - **resource policy** — which pools may be consumed and under what budget;
 - **availability evidence** — whether an authorized pool is currently usable;
 - **fallback policy** — whether another pool may be selected;
@@ -182,13 +184,21 @@ These are policy defaults, not hard-coded constants.
 
 ## Model role separation
 
-Planning, implementation, and review remain distinct capabilities.
+Normal model selection has two capabilities:
 
-- a cheap implementation model may not act as the only reviewer;
+```text
+IMPLEMENTATION
+REASONING
+```
+
+Planning and review both use `REASONING`; they remain separate execution phases because their permissions and provenance differ. Review must still be independent, read-only, and bound to the exact implementation revision.
+
 - an implementation worker may not approve its own exact revision;
 - a supervisor may reason about findings but may not substitute for the required independent review execution;
+- the approved model-agent affinity registry determines which coding/reasoning harness may serve each model family;
 - provider-native Business credentials remain unavailable to untrusted external-change implementations unless policy explicitly allows a safe review-only path;
-- model fallback stays inside the phase's capability and resource constraints.
+- project-specific policies such as Digital Biome's Antigravity-only implementation may restrict the globally eligible resource set;
+- normal routing uses static resource tier/model rank/resource sequence order rather than a dynamic quality or cost score.
 
 ## Self-repair safety budget
 
