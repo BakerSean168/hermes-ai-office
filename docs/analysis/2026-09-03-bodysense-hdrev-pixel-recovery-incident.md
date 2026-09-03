@@ -1,6 +1,6 @@
 # BodySense HDREV Pixel V4 Recovery Incident — 2026-09-03
 
-Status: OPEN. BodySense closure was switched to direct operator development on 2026-09-03 after repeated Pixel execution/delivery reliability failures; Pixel remains the subject of this incident, not the execution mechanism for the remaining BodySense closure.
+Status: OPEN (Pixel reliability). BodySense containment is CLOSED: direct operator development completed PR #165 and merged it to `main` as `a82da464f109c407e66328d9f9aff94a01589629` after all required CI checks passed. Pixel remains the subject of this incident; its P0/P1 reliability backlog is not closed by the BodySense merge.
 
 ## Scope
 
@@ -174,7 +174,7 @@ Closure status as of the direct-operator handoff:
 1. HDREV-002 conclusive independent review at exact candidate SHA: **DONE / PASS**.
 2. HDREV-002 integration: **DONE** at `7d250eb667080b5f4c46284ddd9dca588969b08a`.
 3. HDREV-003 implementation, blocking bbox repair, independent re-review and integration: **DONE** at `4d69acd05d3e242d90164e418e38b0c234e0dfb6`.
-4. BodySense delivery PR #165: **DIRECT OPERATOR OWNED** after Pixel was removed from the remaining closure loop. The direct follow-up `a53052129a95ab017be3bd8b427ab4cc0b95d028` aligns the stale Assessment-v5 E2E/current docs and is subject to the repository's normal CI/merge gates.
+4. BodySense delivery PR #165: **DONE**. Direct follow-up `a53052129a95ab017be3bd8b427ab4cc0b95d028` aligned the stale Assessment-v5 E2E/current docs; all required GitHub checks passed and PR #165 merged to `main` as `a82da464f109c407e66328d9f9aff94a01589629`.
 5. This Pixel incident remains **OPEN** until the P0 reliability items above are converted into implementation work and verified independently of BodySense delivery.
 
 ## Additional failures discovered during final HDREV-003 and delivery closure
@@ -338,4 +338,6 @@ In addition to the earlier entries:
 
 ## Operator decision on 2026-09-03
 
-After the failures above, BodySense PR #165 closure was intentionally removed from Pixel execution. The remaining stale Assessment-v5 E2E contract and documentation reconciliation are being completed directly on GCP Dev. This is an operational containment decision: already accepted/reviewed BodySense product revisions are preserved, and Pixel's defects are recorded here rather than being allowed to keep consuming the product delivery loop.
+After the failures above, BodySense PR #165 closure was intentionally removed from Pixel execution. The stale Assessment-v5 E2E contract and current architecture documentation were completed directly on GCP Dev in `a53052129a95ab017be3bd8b427ab4cc0b95d028`. Local validation included Web typecheck/lint/build, 212/212 Web unit tests, targeted production-shaped Assessment Playwright 2/2 PASS, and full PR-range commitlint. GitHub CI then passed every required lane, including the 10-test Browser longitudinal health E2E child, Experience Oracle, Quality Oracle, Database Oracle, Governance Oracle, Delivery Observation and commit-lint. PR #165 merged as `a82da464f109c407e66328d9f9aff94a01589629`.
+
+This is an operational containment decision: accepted/reviewed BodySense product revisions were preserved, while Pixel's defects remain open here instead of being allowed to keep consuming the product delivery loop.
