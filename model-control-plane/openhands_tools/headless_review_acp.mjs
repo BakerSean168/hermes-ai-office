@@ -557,6 +557,14 @@ function writePixelV4ImplementationEvidence(session, summary, stdout) {
   fs.renameSync(temporary, target);
 }
 
+function isPixelV4ImplementationFinalizationError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  return (
+    message === 'PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY' ||
+    message === 'PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING'
+  );
+}
+
 function writePixelV4ReviewEvidence(session, value, stdout) {
   if (!PIXEL_V4_REVIEW_EVIDENCE_PATH) return;
   if (!PIXEL_V4_EXECUTION_ID || !PIXEL_V4_REVIEWED_SHA) {
@@ -1060,9 +1068,56 @@ class HeadlessReviewAgent {
         return { stopReason: 'end_turn' };
       }
 
-      const parsed = spec.parse(result.stdout);
-      if (IS_WORKER) writePixelV4ImplementationEvidence(session, parsed, result.stdout);
-      else if (!IS_PLANNER) writePixelV4ReviewEvidence(session, parsed, result.stdout);
+      let parsed = spec.parse(result.stdout);
+      let evidenceStdout = result.stdout;
+      if (IS_WORKER) {
+        try {
+          writePixelV4ImplementationEvidence(session, parsed, evidenceStdout);
+        } catch (error) {
+          if (!isPixelV4ImplementationFinalizationError(error)) throw error;
+          const finalizationPrompt = [
+            prompt,
+            '',
+            'Pixel V4 controller finalization retry:',
+            '- The first implementation turn returned before deterministic completion verification passed.',
+            '- Preserve the intended current workspace changes; do not reset or discard them.',
+            '- Inspect the current diff, run the focused checks for the original objective, commit every intended tracked change, and verify git status is clean.',
+            '- Do not write completion-evidence.json yourself; the outer adapter will validate the clean committed HEAD and persist it.',
+            '- Finish only after the repository is committed and clean.',
+          ].join('\n');
+          const finalizationSpec = buildCommand(session, finalizationPrompt, '');
+          const finalizationResult = await runChild(session, finalizationSpec);
+          if (
+            finalizationResult.cancelled ||
+            finalizationResult.timedOut ||
+            finalizationResult.outputOverflow ||
+            finalizationResult.code !== 0
+          ) {
+            const reason = finalizationResult.cancelled
+              ? 'worker finalization cancelled'
+              : finalizationResult.timedOut
+                ? `worker finalization timed out after ${Math.round(TIMEOUT_MS / 1000)}s`
+                : finalizationResult.outputOverflow
+                  ? 'worker finalization output exceeded safety limit'
+                  : `worker finalization exited with code ${finalizationResult.code ?? 'unknown'} (${finalizationResult.signal ?? 'no-signal'})`;
+            const detail = redact(finalizationResult.stderr).trim();
+            throw new Error(`${reason}${detail ? `: ${detail}` : ''}`);
+          }
+          if (
+            typeof finalizationSpec.hasIndependentActivity === 'function' &&
+            !finalizationSpec.hasIndependentActivity(finalizationResult.stdout)
+          ) {
+            throw new Error(
+              'worker finalization completed without repository command or file-change activity',
+            );
+          }
+          parsed = finalizationSpec.parse(finalizationResult.stdout);
+          evidenceStdout = `${evidenceStdout}\n${finalizationResult.stdout}`;
+          writePixelV4ImplementationEvidence(session, parsed, evidenceStdout);
+        }
+      } else if (!IS_PLANNER) {
+        writePixelV4ReviewEvidence(session, parsed, result.stdout);
+      }
       const canonical = IS_WORKER || IS_PLANNER ? String(parsed).trim() : canonicalReview(parsed);
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,

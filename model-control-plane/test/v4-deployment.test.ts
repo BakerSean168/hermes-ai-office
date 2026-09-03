@@ -117,6 +117,8 @@ test('V4 Luna implementation uses managed Codex Responses and bridges durable im
   assert.match(headlessReview, /writePixelV4ImplementationEvidence/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING/);
+  assert.match(headlessReview, /Pixel V4 controller finalization retry/);
+  assert.match(headlessReview, /isPixelV4ImplementationFinalizationError/);
   assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
   assert.match(headlessReview, /HEADLESS_ROLE === 'worker'/);
 });
