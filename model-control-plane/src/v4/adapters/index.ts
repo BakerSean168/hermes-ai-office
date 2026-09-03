@@ -6,3 +6,4 @@ export * from './maintenance.js';
 export * from './openHandsCoding.js';
 export * from './gitWorkspace.js';
 export * from './githubDelivery.js';
+export * from './resourceDirectory.js';
