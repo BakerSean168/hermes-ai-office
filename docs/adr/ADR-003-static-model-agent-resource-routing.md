@@ -85,10 +85,13 @@ GLM current       -> ZCode
 GPT-5.6 Luna      -> Codex
 GPT-5.6 Sol       -> Codex
 Claude Opus       -> Claude Code
-Gemini native     -> Antigravity when explicitly allowed by project policy
+Gemini 3.8 Flash -> Antigravity when explicitly allowed by project policy
+Gemini 3.7 Flash -> Antigravity compatibility fallback
 ```
 
 OpenHands builtin remains a generic compatibility/fallback harness. It is not the preferred implementation harness for model families with an approved native agent.
+
+Antigravity is a provider-native exception rather than a LiteLLM model family. On the current authenticated GCP runtime, `agy` 1.1.22 advertises and successfully smokes `gemini-3.8-flash-high`; V4 therefore treats 3.8 Flash High as the preferred Antigravity implementation model and `gemini-3.7-flash-high` as its compatibility fallback. These models do not enter the LiteLLM automatic allow-list merely because Antigravity can use them.
 
 ### 4. Static resource tiers
 
@@ -151,8 +154,9 @@ Examples:
 ```text
 gpt-5.6-luna + Codex + ChatGPT Business + PROVIDER_NATIVE
 gpt-5.6-sol  + Codex + ChatGPT Business + PROVIDER_NATIVE
-Gemini Flash + Antigravity + provider-native Google subscription
-Gemini Pro   + Antigravity + provider-native Google subscription
+Gemini 3.8 Flash + Antigravity + provider-native Google subscription
+Gemini 3.7 Flash + Antigravity + provider-native Google subscription (compatibility fallback)
+Gemini Pro + Antigravity + provider-native Google subscription
 ```
 
 The selector sees the same economic class, lifecycle, sequence, availability, model capability, and backend affinity regardless of transport.

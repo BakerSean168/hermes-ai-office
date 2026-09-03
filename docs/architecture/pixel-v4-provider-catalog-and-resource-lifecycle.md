@@ -310,6 +310,15 @@ Example registry entries:
   resourceLifecycle: RECURRING
   resourceSequence: 121
   transport: PROVIDER_NATIVE
+  bindings:
+    - modelFamily: gemini-3.8-flash-high
+      backend: antigravity-worker
+      role: IMPLEMENTATION
+      rank: 10
+    - modelFamily: gemini-3.7-flash-high
+      backend: antigravity-worker
+      role: IMPLEMENTATION
+      rank: 20
 ```
 
 Secrets remain in their existing authenticated homes. The resource directory stores only non-secret routing facts and readiness state.

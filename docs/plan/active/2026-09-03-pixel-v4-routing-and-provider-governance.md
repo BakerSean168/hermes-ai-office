@@ -334,6 +334,17 @@ No Business OAuth/session secret enters LiteLLM or durable resource records.
 
 Project approved Antigravity backends into the same directory with provider-native transport and existing trust restrictions.
 
+Implementation model policy:
+
+```text
+gemini-3.8-flash-high  primary
+gemini-3.7-flash-high  compatibility fallback
+```
+
+Current runtime evidence on 2026-09-03: GCP has authenticated `agy` 1.1.22, its model catalog exposes both 3.8 and 3.7 Flash variants, and a live `gemini-3.8-flash-high` print-mode smoke completed successfully. The existing V4 `AntiGravityReadinessAdapter` only gates readiness; implementation must still add the provider-native execution binding that launches the isolated Antigravity runner, captures durable execution evidence, and maps its terminal result into the normal V4 worker contract.
+
+Headless permissions are part of acceptance. A smoke without an explicit permission policy can finish with no response after a command permission is auto-denied; the execution adapter must provide a bounded trusted-worker permission profile rather than depend on interactive approval.
+
 Antigravity remains opt-in where current security policy requires trusted input. Normal model routing must not bypass those trust constraints just because the resource ranks highly.
 
 ## PVR-4103 — Cross-transport selection tests

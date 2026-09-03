@@ -81,7 +81,7 @@ OpenCode Go account #2 / gpt-5.6-luna
 community relay A / deepseek-v4-flash
 ORCAI / gpt-5.6-sol
 ChatGPT Business / gpt-5.6-sol
-Antigravity subscription / Gemini Pro
+Antigravity subscription / Gemini 3.8 Flash
 ```
 
 A provider with one shared API key can expose several model-resource bindings while sharing one provider-level quota/auth state.
@@ -138,6 +138,19 @@ capabilities:
 ```
 
 Provider-native profiles may override the transport/backend while preserving the same model-family rank. Example: `gpt-5.6-sol + ChatGPT Business` uses Codex provider-native auth rather than the LiteLLM-managed Codex profile.
+
+Antigravity is modeled separately from the LiteLLM family list because its authenticated consumer subscription is provider-native. The approved implementation binding is:
+
+```yaml
+antigravityImplementation:
+  primaryModel: gemini-3.8-flash-high
+  fallbackModels:
+    - gemini-3.7-flash-high
+  backend: antigravity-worker
+  transport: PROVIDER_NATIVE
+```
+
+The primary model is not speculative: `agy` 1.1.22 on the GCP execution host advertised `gemini-3.8-flash-high` and completed a live authenticated print-mode smoke on 2026-09-03. The existing trust boundary still applies: Antigravity is only eligible for project policies that explicitly permit provider-native trusted-input execution.
 
 ## 4. Resource taxonomy
 
