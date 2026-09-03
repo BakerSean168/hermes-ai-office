@@ -76,6 +76,10 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.deepEqual(health.json().executionRuntime, {
     enabled: true,
     autonomousPolling: false,
+    resourceSelectorEnabled: false,
+    resourceCount: 2,
+    compatibilityImplementationRoutes: ['gpt-5.6-luna', 'implementation-efficient'],
+    compatibilityReviewRoutes: ['codex-business-review', 'gpt-5.6-sol', 'review-glm'],
     implementationRoutes: ['gpt-5.6-luna', 'implementation-efficient'],
     reviewRoutes: ['codex-business-review', 'gpt-5.6-sol', 'review-glm'],
     automationProjectKeys: ['app-runtime-project'],
@@ -112,12 +116,16 @@ test('V4 app creates a durable first execution through the public plan runtime A
     requiredChecks: [],
   };
   const attached = await runtime.app.inject({
-    method: 'POST', url: '/api/v4/plans/' + planId + '/delivery', payload: delivery,
+    method: 'POST',
+    url: '/api/v4/plans/' + planId + '/delivery',
+    payload: delivery,
   });
   assert.equal(attached.statusCode, 201);
   assert.equal(attached.json().delivery.status, 'PENDING');
   const attachedAgain = await runtime.app.inject({
-    method: 'POST', url: '/api/v4/plans/' + planId + '/delivery', payload: delivery,
+    method: 'POST',
+    url: '/api/v4/plans/' + planId + '/delivery',
+    payload: delivery,
   });
   assert.equal(attachedAgain.statusCode, 200);
   const child = await runtime.app.inject({
@@ -129,13 +137,22 @@ test('V4 app creates a durable first execution through the public plan runtime A
       relation: 'FOLLOW_UP',
       repositoryPath: value.repository,
       delivery: {
-        remote: 'origin', branch: 'pixel/app-runtime-child', targetBranch: 'main',
-        autoMerge: false, mergeMethod: 'merge', requiredChecks: [],
+        remote: 'origin',
+        branch: 'pixel/app-runtime-child',
+        targetBranch: 'main',
+        autoMerge: false,
+        mergeMethod: 'merge',
+        requiredChecks: [],
       },
-      workItems: [{
-        itemKey: 'repair', title: 'Repair delivery base', objective: 'merge the target base safely',
-        dependencies: [], acceptanceCriteria: ['preserve parent behavior'],
-      }],
+      workItems: [
+        {
+          itemKey: 'repair',
+          title: 'Repair delivery base',
+          objective: 'merge the target base safely',
+          dependencies: [],
+          acceptanceCriteria: ['preserve parent behavior'],
+        },
+      ],
     },
   });
   assert.equal(child.statusCode, 201);
@@ -143,7 +160,10 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(child.json().plan.status, 'READY');
   assert.equal(child.json().plan.delivery.status, 'PENDING');
   assert.equal(child.json().graph.items[0].itemKey, 'repair');
-  const parentAfterChild = await runtime.app.inject({ method: 'GET', url: '/api/v4/plans/' + planId });
+  const parentAfterChild = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/plans/' + planId,
+  });
   assert.ok(parentAfterChild.json().plan.childPlanIds.includes('app-runtime-child'));
 
   const run = await runtime.app.inject({ method: 'POST', url: '/api/v4/plans/' + planId + '/run' });
@@ -251,5 +271,165 @@ test('V4 app creates a durable first execution through the public plan runtime A
   assert.equal(recovered.json().executions[1].status, 'QUEUED');
   assert.equal(recovered.json().executions[1].identity.parentExecutionId, executionId);
   assert.equal(recovered.json().executions[1].identity.route, 'gpt-5.6-luna');
+  await runtime.app.close();
+});
+
+test('V4 resource selector creates immutable execution provenance and resource controls gate later plans', async () => {
+  const value = fixture();
+  const adminEnv = path.join(value.root, 'litellm.env');
+  fs.writeFileSync(adminEnv, 'LITELLM_MASTER_KEY=test-master-key\n');
+  let providerCalled = false;
+  let statePatchCalls = 0;
+  let deploymentBlocked = false;
+  const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input);
+    if (url.endsWith('/model/info')) {
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              model_name: 'route-free-deepseek-v4-flash',
+              litellm_params: { litellm_credential_name: 'free-provider' },
+              model_info: {
+                id: 'deployment-free-deepseek',
+                blocked: deploymentBlocked,
+                metadata: {
+                  automatic_core: true,
+                  resource_id: 'free-provider',
+                  resource_sequence: 101,
+                  model_family: 'deepseek-v4-flash',
+                  route_model: 'route-free-deepseek-v4-flash',
+                  protocol: 'openai-chat-completions',
+                  commercial_type: 'FREE',
+                  supply_origin: 'COMMUNITY_RELAY',
+                  resource_lifecycle: 'RECURRING',
+                },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    if (url.includes('/model/deployment-free-deepseek/update') && init.method === 'PATCH') {
+      statePatchCalls += 1;
+      const body = JSON.parse(String(init.body));
+      assert.equal(typeof body.blocked, 'boolean');
+      deploymentBlocked = body.blocked;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    providerCalled = true;
+    throw new Error('provider should not launch while only creating an execution');
+  }) as typeof fetch;
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    environment: 'test',
+    logger: false,
+    fetchImpl: fakeFetch,
+    env: {
+      NODE_ENV: 'test',
+      MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
+      MODEL_CP_AUTOMATION_RUNTIME_ENABLED: 'false',
+      MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED: 'true',
+      MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED: 'false',
+      MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
+      SESSION_API_KEY: 'test-session-key',
+      LITELLM_V3_KEY: 'test-litellm-key',
+      LITELLM_V3_BASE_URL: 'http://litellm.test/v1',
+      MODEL_CP_V4_LITELLM_ADMIN_BASE_URL: 'http://litellm.test',
+      MODEL_CP_LITELLM_ADMIN_ENV_FILE: adminEnv,
+      MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS: value.allowed,
+      MODEL_CP_V4_WORKSPACE_HOST_ROOT: value.managed,
+      MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
+      MODEL_CP_V4_AUTOMATION_PROJECTS: 'app-runtime-project',
+      MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 0),
+      MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
+    },
+  });
+
+  const resources = await runtime.app.inject({ method: 'GET', url: '/api/v4/resources' });
+  assert.equal(resources.statusCode, 200);
+  assert.equal(resources.json().count, 3);
+  const free = resources.json().items.find((item: any) => item.resourceId === 'free-provider');
+  assert.equal(free.resourceTier, 'FREE');
+  assert.equal(free.resourceSequence, 101);
+  assert.equal(free.modelBindings[0].agentBackend, 'dsh-acp');
+
+  const createPlan = async (key: string) => {
+    const created = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v4/plans',
+      headers: { 'idempotency-key': key },
+      payload: {
+        projectKey: 'app-runtime-project',
+        objective: 'exercise resource routing',
+        repositoryPath: value.repository,
+        baseRevision: value.revision,
+        workItems: [
+          {
+            itemKey: 'first',
+            title: 'First',
+            objective: 'Implement first item',
+            dependencies: [],
+            acceptanceCriteria: ['commit the change'],
+          },
+        ],
+      },
+    });
+    assert.equal(created.statusCode, 201);
+    return created.json().plan.planId as string;
+  };
+
+  const planId = await createPlan('selector-plan');
+  const run = await runtime.app.inject({ method: 'POST', url: `/api/v4/plans/${planId}/run` });
+  assert.equal(run.statusCode, 200);
+  assert.equal(run.json().code, 'IMPLEMENTATION_QUEUED');
+  assert.equal(providerCalled, false);
+  const state = await runtime.app.inject({ method: 'GET', url: `/api/v4/plans/${planId}` });
+  const execution = state.json().executions[0];
+  assert.match(execution.identity.route, /^resource:free-provider:/);
+  assert.equal(execution.resourceSelection.resourceId, 'free-provider');
+  assert.equal(execution.resourceSelection.modelFamily, 'deepseek-v4-flash');
+  assert.equal(execution.resourceSelection.agentBackend, 'dsh-acp');
+  assert.equal(execution.resourceSelection.routeModel, 'route-free-deepseek-v4-flash');
+
+  const bindingDisabled = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/resources/free-provider/bindings/deployment-free-deepseek/state',
+    payload: { state: 'DISABLED' },
+  });
+  assert.equal(bindingDisabled.statusCode, 200);
+  assert.equal(bindingDisabled.json().resource.modelBindings[0].enabled, false);
+  const bindingEnabled = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/resources/free-provider/bindings/deployment-free-deepseek/state',
+    payload: { state: 'ACTIVE' },
+  });
+  assert.equal(bindingEnabled.statusCode, 200);
+  assert.equal(bindingEnabled.json().resource.modelBindings[0].enabled, true);
+
+  const disabled = await runtime.app.inject({
+    method: 'POST',
+    url: '/api/v4/resources/free-provider/state',
+    payload: { state: 'DISABLED', reason: 'operator test', expectedVersion: 0 },
+  });
+  assert.equal(disabled.statusCode, 200);
+  assert.equal(disabled.json().resource.state, 'DISABLED');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(statePatchCalls, 3);
+  assert.equal(deploymentBlocked, true);
+
+  const waitingPlanId = await createPlan('selector-waiting-plan');
+  const waiting = await runtime.app.inject({
+    method: 'POST',
+    url: `/api/v4/plans/${waitingPlanId}/run`,
+  });
+  assert.equal(waiting.statusCode, 200);
+  assert.equal(waiting.json().code, 'WAITING_FOR_RESOURCE');
+  const waitingState = await runtime.app.inject({
+    method: 'GET',
+    url: `/api/v4/plans/${waitingPlanId}`,
+  });
+  assert.equal(waitingState.json().plan.status, 'WAITING_FOR_RESOURCE');
   await runtime.app.close();
 });

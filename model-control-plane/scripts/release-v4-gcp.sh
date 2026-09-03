@@ -22,6 +22,22 @@ fi
 
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
 sudo "$repo_root/model-control-plane/scripts/install-openhands-v3-tooling.sh"
+sudo install -d -m 0755 /usr/local/libexec
+sudo install -m 0755 \
+  "$repo_root/model-control-plane/scripts/run-antigravity-v4-unit.mjs" \
+  /usr/local/libexec/hermes-antigravity-v4-unit.mjs
+sudo install -m 0644 \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-antigravity-v4@.service" \
+  /etc/systemd/system/hermes-antigravity-v4@.service
+sudo install -d -o root -g root -m 0700 \
+  /srv/hermes-personal/data/model-control-plane/antigravity-v4
+sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/hermes-antigravity-v4@.service
+sudo test -s /home/dev/.gemini/antigravity-cli/antigravity-oauth-token
+sudo -u dev env HOME=/home/dev /home/dev/.local/bin/agy models \
+  | grep -q '^gemini-3.8-flash-high'
+sudo -u dev env HOME=/home/dev /home/dev/.local/bin/agy models \
+  | grep -q '^gemini-3.1-pro-high'
 sudo docker exec --user 10001:10001 -e CODEX_HOME=/openhands-state/codex-business hermes-openhands-v3 \
   /openhands-state/tooling/node_modules/.bin/codex login status >/dev/null
 artifact_sha="$(find "$repo_root/model-control-plane/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
@@ -139,16 +155,31 @@ const payload = JSON.parse(process.env.HEALTH_JSON ?? '{}');
 const runtime = payload.executionRuntime ?? {};
 if (payload.status !== 'ok' || payload.apiVersion !== 4) process.exit(1);
 if (runtime.enabled !== true || runtime.autonomousPolling !== true) process.exit(1);
-if (!Array.isArray(runtime.implementationRoutes) || runtime.implementationRoutes[0] !== 'gpt-5.6-luna') process.exit(1);
-if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes[0] !== 'codex-business-review') process.exit(1);
+if (runtime.resourceSelectorEnabled !== true || Number(runtime.resourceCount) < 1) process.exit(1);
+if (Array.isArray(runtime.compatibilityReviewRoutes) && runtime.compatibilityReviewRoutes.includes('codex-auto-review')) process.exit(1);
+if (Array.isArray(runtime.reviewRoutes) && runtime.reviewRoutes.includes('codex-auto-review')) process.exit(1);
 if (runtime.requireDelivery !== true) process.exit(1);
 if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense'])) process.exit(1);
 NODE
     then
       openhands="$(curl -fsS --max-time 2 http://127.0.0.1:18000/health)"
+      resources="$(curl -fsS --max-time 10 http://127.0.0.1:8320/api/v4/resources)"
+      if ! RESOURCES_JSON="$resources" /usr/bin/node - <<'NODE'
+const payload = JSON.parse(process.env.RESOURCES_JSON ?? '{}');
+if (!Array.isArray(payload.items) || payload.items.length < 1) process.exit(1);
+const antigravity = payload.items.find((item) => item.resourceId === 'antigravity-primary');
+if (!antigravity || antigravity.state !== 'ACTIVE') process.exit(1);
+if (!Array.isArray(antigravity.modelBindings)) process.exit(1);
+if (!antigravity.modelBindings.some((item) => item.modelFamily === 'gemini-3.8-flash-high' && item.enabled === true)) process.exit(1);
+if (payload.items.some((item) => item.modelBindings?.some((binding) => binding.modelFamily === 'codex-auto-review'))) process.exit(1);
+NODE
+      then
+        sleep 1
+        continue
+      fi
       probe_status="$(curl -sS -o /tmp/pixel-v4-release-probe.json -w '%{http_code}' --max-time 2 http://127.0.0.1:8320/api/v4/plans/__release_probe__)"
       if [[ "$probe_status" == "404" ]] && grep -q 'PLAN_NOT_FOUND' /tmp/pixel-v4-release-probe.json; then
-        printf 'V4 release healthy; source_sha=%s artifact_sha=%s\n%s\n%s\n' "$source_sha" "$artifact_sha" "$health" "$openhands"
+        printf 'V4 release healthy; source_sha=%s artifact_sha=%s\n%s\n%s\n%s\n' "$source_sha" "$artifact_sha" "$health" "$openhands" "$resources"
         exit 0
       fi
     fi

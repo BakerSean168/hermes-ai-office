@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   CompositeResourceDirectory,
   LiteLlmResourceDirectory,
+  LiteLlmResourceStateEffect,
   ResourceLifecycleManager,
   ResourceStateService,
   StaticResourceDirectory,
@@ -135,6 +136,9 @@ test('provider-native resources reserve Business and Antigravity identities', ()
     resources[0]?.bindings.some((item) => item.modelFamily === 'gpt-5.6-sol'),
     true,
   );
+  assert.equal(resources[0]?.requiresPolicy, undefined);
+  assert.equal(resources[0]?.bindings[0]?.agentBackend, 'codex-acp');
+  assert.equal(resources[1]?.requiresPolicy, 'provider-native-trusted-input');
   assert.equal(
     resources[1]?.bindings.some((item) => item.modelFamily === 'gemini-3.8-flash-high'),
     true,
@@ -175,6 +179,7 @@ function freeResource(): ExecutionResource {
     bindings: [
       {
         bindingId: 'deployment-1',
+        deploymentId: 'deployment-1',
         modelFamily: 'deepseek-v4-flash',
         transport: 'LITELLM_MANAGED',
         enabled: true,
@@ -193,6 +198,52 @@ test('state service disables quota exhaustion and suspends free transient failur
   assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'SUSPENDED');
   service.failure(selection(), new Error('monthly usage limit reached'));
   assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'DISABLED');
+  db.close();
+});
+
+test('LiteLLM resource state effect blocks every selected-resource deployment', async () => {
+  const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
+  const repositories = createRepositories(db);
+  const base = freeResource();
+  const resource: ExecutionResource = {
+    ...base,
+    bindings: [
+      base.bindings[0]!,
+      {
+        bindingId: 'deployment-2',
+        deploymentId: 'deployment-2',
+        modelFamily: 'glm-current',
+        transport: 'LITELLM_MANAGED',
+        enabled: true,
+        ready: true,
+      },
+    ],
+  };
+  const calls: Array<{ url: string; body: unknown }> = [];
+  const effect = new LiteLlmResourceStateEffect({
+    baseUrl: 'http://litellm.test',
+    envFile: envFile(),
+    fetchImpl: (async (input: string | URL | Request, init: RequestInit = {}) => {
+      calls.push({ url: String(input), body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch,
+  });
+  const service = new ResourceStateService(
+    new StaticResourceDirectory([resource]),
+    repositories.resourceStateOverrides,
+    3,
+    effect,
+  );
+  const result = service.manual('free-provider', 'DISABLED', { expectedVersion: 0 });
+  assert.equal(result.status, 'created');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    calls.map((call) => [call.url, call.body]),
+    [
+      ['http://litellm.test/model/deployment-1/update', { blocked: true }],
+      ['http://litellm.test/model/deployment-2/update', { blocked: true }],
+    ],
+  );
   db.close();
 });
 

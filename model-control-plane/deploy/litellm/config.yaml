@@ -5,27 +5,13 @@
 model_list: []
 
 router_settings:
+  # Every automatic binding has its own route-<resource>-<model> group. Pixel
+  # selects that exact group before launching the model-native agent, so LiteLLM
+  # never changes model family or economic tier behind the durable execution.
   routing_strategy: simple-shuffle
   num_retries: 1
-  max_fallbacks: 2
   allowed_fails: 1
   cooldown_time: 30
-
-  # Stable development-capability names used by Hermes/OpenHands. Physical provider
-  # choice and economics-aware order live entirely in LiteLLM DB deployments.
-  model_group_alias:
-    planning-premium: gpt-5.6-sol
-    review-premium: gpt-5.6-sol
-    implementation-efficient: deepseek-v4-flash
-
-  # Gateway-level fallback stays inside one declared capability tier. Premium
-  # aliases intentionally have no cross-quality fallback here. Durable review
-  # orchestration may explicitly authorize a bounded retry on another audited
-  # review model class; that decision is persisted as plan execution evidence
-  # instead of being hidden inside provider routing.
-  fallbacks:
-    - implementation-efficient: [glm-5.2]
-    - deepseek-v4-flash: [glm-5.2]
 
 litellm_settings:
   drop_params: true

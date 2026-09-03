@@ -392,6 +392,23 @@ test('fault classification and pure resource state policy follow the V4 lifecycl
     'QUOTA_EXHAUSTED',
   );
   assert.equal(
+    normalizeResourceFailure({
+      status: 403,
+      message: 'Unable to reserve quota. Remaining balance: $0.003; required amount: $0.11',
+    }).failureClass,
+    'QUOTA_EXHAUSTED',
+  );
+  assert.equal(
+    normalizeResourceFailure({ status: 403, message: '预扣费额度失败, 用户剩余额度不足' })
+      .failureClass,
+    'QUOTA_EXHAUSTED',
+  );
+  assert.equal(
+    normalizeResourceFailure({ status: 400, message: 'unknown provider for model review' })
+      .failureClass,
+    'ROUTE_MISCONFIGURED',
+  );
+  assert.equal(
     normalizeResourceFailure({ status: 429, message: 'too many requests' }).failureClass,
     'RATE_LIMITED',
   );

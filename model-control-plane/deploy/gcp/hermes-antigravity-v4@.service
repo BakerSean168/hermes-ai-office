@@ -1,0 +1,44 @@
+[Unit]
+Description=Hermes Pixel V4 Antigravity execution %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/dev/projects/pixel-agents
+Environment=MODEL_CP_V4_ANTIGRAVITY_STATE_ROOT=/srv/hermes-personal/data/model-control-plane/antigravity-v4
+Environment=MODEL_CP_V4_WORKSPACE_HOST_ROOT=/opt/data/hermes-ai-office-v3/workspaces
+Environment=MODEL_CP_V4_ANTIGRAVITY_HOME=/home/dev
+Environment=MODEL_CP_V4_ANTIGRAVITY_BIN=/home/dev/.local/bin/agy
+Environment=MODEL_CP_V4_ANTIGRAVITY_SANDBOX_WRAPPER=/home/dev/projects/pixel-agents/model-control-plane/scripts/run-antigravity-sandbox.sh
+Environment=MODEL_CP_V4_ANTIGRAVITY_UID=1001
+Environment=MODEL_CP_V4_ANTIGRAVITY_GID=1002
+Environment=MODEL_CP_V4_WORKSPACE_GID=10001
+Environment=MODEL_CP_V4_ANTIGRAVITY_USER=dev
+ExecStart=/usr/bin/node /usr/local/libexec/hermes-antigravity-v4-unit.mjs %i
+KillMode=control-group
+Restart=no
+TimeoutStartSec=30
+TimeoutStopSec=15
+RuntimeMaxSec=35min
+NoNewPrivileges=false
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictSUIDSGID=true
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+AmbientCapabilities=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+ReadWritePaths=/srv/hermes-personal/data/model-control-plane/antigravity-v4
+ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces
+
+[Install]
+WantedBy=multi-user.target

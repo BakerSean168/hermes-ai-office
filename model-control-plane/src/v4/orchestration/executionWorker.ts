@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 
 import { V4Error } from '../domain/errors.js';
 import type { Execution } from '../domain/execution.js';
+import type { ExecutionResourceSelection } from '../domain/resourceRouting.js';
 import type { Review } from '../domain/review.js';
 import type { V4Repositories } from '../persistence/repositories.js';
 import type {
@@ -21,10 +22,22 @@ export interface ExecutionWorkerRoute {
   provider: ExecutionProviderPort;
 }
 
+export interface ExecutionProviderFactory {
+  (selection: ExecutionResourceSelection): ExecutionProviderPort;
+}
+
+export interface ExecutionResourceFeedbackPort {
+  success(selection: ExecutionResourceSelection): void;
+  failure(selection: ExecutionResourceSelection, error: unknown): void;
+}
+
 export interface ExecutionWorkerOptions {
   ownerId?: string;
   leaseTtlMs?: number;
   maxExecutionsPerCycle?: number;
+  providerFactory?: ExecutionProviderFactory;
+  resourceFeedback?: ExecutionResourceFeedbackPort;
+  requireResourceSelection?: boolean;
 }
 
 export interface ExecutionWorkerResult {
@@ -80,6 +93,9 @@ export class ExecutionWorker {
   readonly leaseTtlMs: number;
   readonly maxExecutionsPerCycle: number;
   readonly routes: ReadonlyMap<string, ExecutionProviderPort>;
+  readonly providerFactory?: ExecutionProviderFactory;
+  readonly resourceFeedback?: ExecutionResourceFeedbackPort;
+  readonly requireResourceSelection: boolean;
 
   constructor(
     readonly repositories: V4Repositories,
@@ -94,6 +110,9 @@ export class ExecutionWorker {
       mapped.set(entry.route, entry.provider);
     }
     this.routes = mapped;
+    this.providerFactory = options.providerFactory;
+    this.resourceFeedback = options.resourceFeedback;
+    this.requireResourceSelection = options.requireResourceSelection === true;
     this.ownerId = options.ownerId ?? 'execution-worker-' + randomUUID();
     this.leaseTtlMs = options.leaseTtlMs ?? 30_000;
     this.maxExecutionsPerCycle = options.maxExecutionsPerCycle ?? 20;
@@ -106,6 +125,51 @@ export class ExecutionWorker {
     ) {
       throw new V4Error('EXECUTION_CYCLE_LIMIT_INVALID');
     }
+    if (this.requireResourceSelection && !this.providerFactory)
+      throw new V4Error('EXECUTION_PROVIDER_FACTORY_REQUIRED');
+  }
+
+  private resolveProvider(
+    execution: Execution,
+  ): { provider: ExecutionProviderPort; selection?: ExecutionResourceSelection } | undefined {
+    const selection = this.repositories.resourceSelections.get(execution.identity.executionId);
+    if (selection) {
+      if (selection.phase !== execution.identity.phase)
+        throw new V4Error('EXECUTION_RESOURCE_SELECTION_PHASE_MISMATCH');
+      if (!this.providerFactory) throw new V4Error('EXECUTION_PROVIDER_FACTORY_REQUIRED');
+      return { provider: this.providerFactory(selection), selection };
+    }
+    if (this.requireResourceSelection) return undefined;
+    const provider = this.routes.get(execution.identity.route);
+    return provider ? { provider } : undefined;
+  }
+
+  private reportResourceFailure(
+    selection: ExecutionResourceSelection | undefined,
+    error: unknown,
+  ): void {
+    if (!selection || !this.resourceFeedback) return;
+    try {
+      this.resourceFeedback.failure(selection, error);
+    } catch {
+      // Resource feedback is advisory to the current execution result. A stale
+      // CAS or directory refresh must never rewrite the already-observed worker fact.
+    }
+  }
+
+  private reportResourceSuccess(selection: ExecutionResourceSelection | undefined): void {
+    if (!selection || !this.resourceFeedback) return;
+    try {
+      this.resourceFeedback.success(selection);
+    } catch {
+      // The successful execution remains authoritative even if feedback races.
+    }
+  }
+
+  private providerFailureEligible(code: string): boolean {
+    return /^(?:OPENHANDS|PROVIDER|LLM|ANTIGRAVITY|CODEX|CLAUDE|DSH|ZCODE|RESOURCE_NOT_READY|RESOURCE_UNAVAILABLE)/.test(
+      code,
+    );
   }
 
   async runOnce(): Promise<ExecutionWorkerResult[]> {
@@ -135,8 +199,10 @@ export class ExecutionWorker {
       const execution = this.repositories.executions.get(executionId);
       if (execution.status !== 'RUNNING')
         return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_RESUMABLE' };
-      const provider = this.routes.get(execution.identity.route);
-      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const resolved = this.resolveProvider(execution);
+      if (!resolved)
+        return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
+      const { provider } = resolved;
       if (!provider.continue)
         return { executionId, status: 'WAITING', code: 'PROVIDER_CONTINUE_UNAVAILABLE' };
       let session = this.repositories.sessions.get(executionId);
@@ -201,8 +267,10 @@ export class ExecutionWorker {
         throw new V4Error('PROVIDER_REPLACEMENT_INSTRUCTION_INVALID');
       if (!reason.trim() || reason.length > 2_000)
         throw new V4Error('PROVIDER_SESSION_REPLACEMENT_INVALID');
-      const provider = this.routes.get(execution.identity.route);
-      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const resolved = this.resolveProvider(execution);
+      if (!resolved)
+        return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
+      const { provider } = resolved;
       if (!provider.replace)
         return { executionId, status: 'WAITING', code: 'PROVIDER_REPLACE_UNAVAILABLE' };
       if (!provider.interrupt)
@@ -388,8 +456,10 @@ export class ExecutionWorker {
         throw new V4Error('OPERATOR_ADOPTION_IDEMPOTENCY_REQUIRED');
       if (!reason.trim() || reason.length > 2_000)
         throw new V4Error('OPERATOR_ADOPTION_REASON_INVALID');
-      const provider = this.routes.get(execution.identity.route);
-      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const resolved = this.resolveProvider(execution);
+      if (!resolved)
+        return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
+      const { provider } = resolved;
       this.assertProviderPhase(provider, execution);
       const session = this.repositories.sessions.get(executionId);
       if (!session.providerSessionId)
@@ -450,8 +520,10 @@ export class ExecutionWorker {
         throw new V4Error('PROVIDER_ABORT_IDEMPOTENCY_REQUIRED');
       if (!reason.trim() || reason.length > 2_000)
         throw new V4Error('PROVIDER_ABORT_REASON_INVALID');
-      const provider = this.routes.get(execution.identity.route);
-      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const resolved = this.resolveProvider(execution);
+      if (!resolved)
+        return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
+      const { provider } = resolved;
       const session = this.repositories.sessions.get(executionId);
       if (!session.providerSessionId)
         return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
@@ -512,13 +584,17 @@ export class ExecutionWorker {
     if (!claim.value || claim.status === 'rejected') {
       return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     }
+    let selectedResource: ExecutionResourceSelection | undefined;
     try {
       const execution = this.repositories.executions.get(executionId);
       if (execution.status !== 'QUEUED' && execution.status !== 'RUNNING') {
         return { executionId, status: 'SKIPPED', code: 'EXECUTION_TERMINAL' };
       }
-      const provider = this.routes.get(execution.identity.route);
-      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      const resolved = this.resolveProvider(execution);
+      if (!resolved)
+        return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
+      const { provider, selection } = resolved;
+      selectedResource = selection;
       this.assertProviderPhase(provider, execution);
       const plan = this.repositories.plans.getPlan(execution.identity.planId);
       const workItem = execution.identity.workItemId
@@ -670,6 +746,10 @@ export class ExecutionWorker {
         const code =
           bounded(snapshot.errorCode, MAX_ERROR_CODE) ??
           (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
+        this.reportResourceFailure(selectedResource, {
+          code,
+          message: [snapshot.errorCode, snapshot.finalResponse].filter(Boolean).join(' '),
+        });
         this.repositories.executions.recordResult(executionId, {
           status: 'FAILED',
           errorCode: code,
@@ -701,6 +781,7 @@ export class ExecutionWorker {
       });
       if (execution.identity.phase === 'REVIEW')
         this.persistReviewVerdict(executionId, completion.evidence);
+      this.reportResourceSuccess(selectedResource);
       return {
         executionId,
         status: 'SUCCEEDED',
@@ -713,6 +794,7 @@ export class ExecutionWorker {
       };
     } catch (error) {
       const code = errorCode(error);
+      if (this.providerFailureEligible(code)) this.reportResourceFailure(selectedResource, error);
       const execution = this.repositories.executions.get(executionId);
       if (execution.status === 'RUNNING' && code.startsWith('WORKSPACE_')) {
         const retryable =

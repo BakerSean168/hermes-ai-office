@@ -246,6 +246,7 @@ export function providerNativeResources(
     enabled: boolean,
     ready: boolean,
     bindings: Array<Omit<ExecutionResourceBinding, 'transport' | 'enabled' | 'ready'>>,
+    requiresPolicy?: string,
   ): ExecutionResource => {
     const projectedBindings = bindings.map((binding) =>
       Object.freeze({
@@ -253,7 +254,7 @@ export function providerNativeResources(
         transport: 'PROVIDER_NATIVE' as const,
         enabled,
         ready: enabled && ready,
-        requiresPolicy: trusted,
+        ...(requiresPolicy ? { requiresPolicy } : {}),
       }),
     );
     const resource: ExecutionResource = Object.freeze({
@@ -265,7 +266,7 @@ export function providerNativeResources(
       commercialType: 'SUBSCRIPTION',
       supplyOrigin: 'OFFICIAL',
       resourceLifecycle: 'RECURRING',
-      requiresPolicy: trusted,
+      ...(requiresPolicy ? { requiresPolicy } : {}),
       providerId: resourceId,
       displayName: resourceId === 'chatgpt-business-primary' ? 'ChatGPT Business' : 'Antigravity',
       bindings: Object.freeze(projectedBindings),
@@ -283,12 +284,12 @@ export function providerNativeResources(
         {
           bindingId: 'chatgpt-business-luna',
           modelFamily: 'gpt-5.6-luna',
-          agentBackend: 'codex-business-worker-headless',
+          agentBackend: 'codex-acp',
         },
         {
           bindingId: 'chatgpt-business-sol',
           modelFamily: 'gpt-5.6-sol',
-          agentBackend: 'codex-business-review-headless',
+          agentBackend: 'codex-acp',
         },
       ],
     ),
@@ -314,6 +315,7 @@ export function providerNativeResources(
           agentBackend: 'antigravity-review',
         },
       ],
+      trusted,
     ),
   ]);
 }
@@ -356,16 +358,87 @@ export interface ResourceFeedbackPort {
   failure(selection: ExecutionResourceSelection, error: unknown): void;
 }
 
+export interface ResourceStateEffectPort {
+  apply(resource: ExecutionResource, state: ResourceState): Promise<void> | void;
+  applyBinding?(
+    resource: ExecutionResource,
+    binding: ExecutionResourceBinding,
+    state: 'ACTIVE' | 'DISABLED',
+  ): Promise<void> | void;
+}
+
+export class LiteLlmResourceStateEffect implements ResourceStateEffectPort {
+  readonly #baseUrl: string;
+  readonly #envFile: string;
+  readonly #keyName: string;
+  readonly #fetch: typeof fetch;
+  readonly #timeout: number;
+
+  constructor(options: LiteLlmResourceDirectoryOptions) {
+    this.#baseUrl = options.baseUrl.replace(/\/$/, '');
+    this.#envFile = options.envFile;
+    this.#keyName = options.keyName ?? 'LITELLM_MASTER_KEY';
+    this.#fetch = options.fetchImpl ?? fetch;
+    this.#timeout = Math.max(1_000, options.requestTimeoutMs ?? 10_000);
+  }
+
+  async #patch(deploymentId: string, blocked: boolean): Promise<void> {
+    const key = readEnvValue(this.#envFile, this.#keyName);
+    const response = await this.#fetch(
+      this.#baseUrl + '/model/' + encodeURIComponent(deploymentId) + '/update',
+      {
+        method: 'PATCH',
+        headers: {
+          ['Author' + 'ization']: 'Bearer ' + key,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ blocked }),
+        signal: AbortSignal.timeout(this.#timeout),
+      },
+    );
+    if (!response.ok) throw new V4Error('LITELLM_RESOURCE_STATE_HTTP_' + response.status);
+  }
+
+  async apply(resource: ExecutionResource, state: ResourceState): Promise<void> {
+    const deploymentIds = [
+      ...new Set(
+        resource.bindings
+          .map((binding) => binding.deploymentId)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ];
+    if (deploymentIds.length === 0) return;
+    for (const deploymentId of deploymentIds) await this.#patch(deploymentId, state !== 'ACTIVE');
+  }
+
+  async applyBinding(
+    _resource: ExecutionResource,
+    binding: ExecutionResourceBinding,
+    state: 'ACTIVE' | 'DISABLED',
+  ): Promise<void> {
+    if (!binding.deploymentId) throw new V4Error('LITELLM_BINDING_DEPLOYMENT_ID_REQUIRED');
+    await this.#patch(binding.deploymentId, state === 'DISABLED');
+  }
+}
+
 export class ResourceStateService implements ResourceFeedbackPort {
   constructor(
     readonly directory: ResourceDirectoryPort,
     readonly overrides: ResourceStateOverrideRepository,
     readonly maxCasRetries = 3,
+    readonly effect?: ResourceStateEffectPort,
   ) {}
   #resource(id: string): ExecutionResource {
     const value = this.directory.listResources().find((item) => item.resourceId === id);
     if (!value) throw new V4Error('RESOURCE_NOT_FOUND');
     return value;
+  }
+  #effect(resource: ExecutionResource, state: ResourceState): void {
+    if (!this.effect) return;
+    void Promise.resolve(this.effect.apply(resource, state)).catch(() => {
+      // The durable local override remains authoritative for Pixel routing. The
+      // next lifecycle/management reconcile can retry a failed remote projection.
+    });
   }
   #write(input: ResourceStateOverrideInput): MutationResult<ResourceStateOverride> {
     for (let attempt = 0; attempt < this.maxCasRetries; attempt += 1) {
@@ -393,8 +466,19 @@ export class ResourceStateService implements ResourceFeedbackPort {
       failure,
       new Date().toISOString(),
     );
-    if (failure.scope === 'BINDING') return;
-    this.#write({
+    if (failure.scope === 'BINDING') {
+      const binding = resource.bindings.find(
+        (item) =>
+          item.bindingId === selection.bindingId ||
+          (selection.deploymentId !== undefined && item.deploymentId === selection.deploymentId),
+      );
+      if (binding && this.effect?.applyBinding)
+        void Promise.resolve(this.effect.applyBinding(resource, binding, 'DISABLED')).catch(
+          () => {},
+        );
+      return;
+    }
+    const result = this.#write({
       resourceId: resource.resourceId,
       state: transition.state,
       source: 'EXECUTION',
@@ -402,6 +486,7 @@ export class ResourceStateService implements ResourceFeedbackPort {
       ...(transition.sanitizedReason ? { sanitizedReason: transition.sanitizedReason } : {}),
       ...(transition.suspendedUntil ? { suspendedUntil: transition.suspendedUntil } : {}),
     });
+    if (result.value) this.#effect(resource, result.value.state);
   }
   success(selection: ExecutionResourceSelection): void {
     const resource = this.#resource(selection.resourceId);
@@ -411,7 +496,12 @@ export class ResourceStateService implements ResourceFeedbackPort {
       state: current.state,
       resourceTier: resource.resourceTier,
     });
-    this.#write({ resourceId: resource.resourceId, state: transition.state, source: 'EXECUTION' });
+    const result = this.#write({
+      resourceId: resource.resourceId,
+      state: transition.state,
+      source: 'EXECUTION',
+    });
+    if (result.value) this.#effect(resource, result.value.state);
   }
   manual(
     resourceId: string,
@@ -423,7 +513,8 @@ export class ResourceStateService implements ResourceFeedbackPort {
         Boolean(options.suspendedUntil) && Date.parse(options.suspendedUntil!) > Date.now(),
         'RESOURCE_OVERRIDE_SUSPENSION_REQUIRED',
       );
-    return this.overrides.compareAndSet(
+    const resource = this.#resource(resourceId);
+    const result = this.overrides.compareAndSet(
       resourceId,
       options.expectedVersion ?? this.overrides.get(resourceId)?.version ?? null,
       {
@@ -434,6 +525,8 @@ export class ResourceStateService implements ResourceFeedbackPort {
         ...(state === 'SUSPENDED' ? { suspendedUntil: options.suspendedUntil! } : {}),
       },
     );
+    if (result.value && result.status !== 'rejected') this.#effect(resource, result.value.state);
+    return result;
   }
 }
 
@@ -445,6 +538,7 @@ export class ResourceLifecycleManager {
     readonly directory: ResourceDirectoryPort,
     readonly overrides: ResourceStateOverrideRepository,
     readonly probe: ResourceProbePort,
+    readonly effect?: ResourceStateEffectPort,
   ) {}
   async reconcileOnce(now = new Date()): Promise<number> {
     let changed = 0;
@@ -469,7 +563,10 @@ export class ResourceLifecycleManager {
           ? {}
           : { reasonClass: 'CONNECTION_UNAVAILABLE', sanitizedReason: 'CONNECTION_UNAVAILABLE' }),
       });
-      if (result.status !== 'rejected') changed += 1;
+      if (result.status !== 'rejected') {
+        changed += 1;
+        if (result.value && this.effect) await this.effect.apply(resource, result.value.state);
+      }
     }
     return changed;
   }

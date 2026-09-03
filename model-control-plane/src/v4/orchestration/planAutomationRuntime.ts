@@ -3,24 +3,50 @@ import { createHash } from 'node:crypto';
 import { isDeliveryComplete } from '../domain/delivery.js';
 import { V4Error } from '../domain/errors.js';
 import type { Execution, ExecutionPhase } from '../domain/execution.js';
+import {
+  createExecutionResourceSelection,
+  type ExecutableProfile,
+  type ExecutionResourceSelection,
+  type ResourceTransport,
+} from '../domain/resourceRouting.js';
 import type { Plan } from '../domain/plan.js';
 import type { Review } from '../domain/review.js';
 import type { WorkItem } from '../domain/workGraph.js';
 import type { V4Repositories } from '../persistence/repositories.js';
 import type { ExecutionWorkerResult } from './executionWorker.js';
 import type { DeliveryAutomationPort, WorkspaceProviderPort } from './contracts.js';
+import type {
+  ResourceSelectionExclusion,
+  ResourceSelectionPolicy,
+  ResourceSelectionRequest,
+  ResourceSelectionResult,
+} from './resourceSelector.js';
 
 export interface ExecutionRunnerPort {
   runExecution(executionId: string): Promise<ExecutionWorkerResult>;
 }
 
+export interface PlanResourceSelectionPolicy {
+  includeProviderNativeProfiles?: boolean;
+  allowedPolicyKeys?: string[];
+  allowedResourceIds?: string[];
+  disallowedResourceIds?: string[];
+  allowedTransports?: ResourceTransport[];
+}
+
 export interface PlanAutomationPolicy {
-  implementationRoutes: string[];
-  reviewRoutes: string[];
+  /** Compatibility-only routes for executions created before resource routing. */
+  implementationRoutes?: string[];
+  reviewRoutes?: string[];
+  resourceSelection?: PlanResourceSelectionPolicy;
   maxImplementationAttempts?: number;
   maxReviewAttempts?: number;
   maxRepairCycles?: number;
   requireDelivery?: boolean;
+}
+
+export interface PlanResourceSelectorPort {
+  select(request: ResourceSelectionRequest): ResourceSelectionResult;
 }
 
 export interface PlanAutomationPolicyResolver {
@@ -40,19 +66,27 @@ export interface PlanAutomationResult {
 interface NormalizedPolicy {
   implementationRoutes: string[];
   reviewRoutes: string[];
+  resourceSelection: PlanResourceSelectionPolicy;
   maxImplementationAttempts: number;
   maxReviewAttempts: number;
   maxRepairCycles: number;
   requireDelivery: boolean;
 }
 
-function normalizePolicy(policy: PlanAutomationPolicy): NormalizedPolicy {
+function normalizePolicy(
+  policy: PlanAutomationPolicy,
+  resourceSelectionEnabled = false,
+): NormalizedPolicy {
   const implementationRoutes = [
-    ...new Set(policy.implementationRoutes.map((item) => item.trim()).filter(Boolean)),
+    ...new Set((policy.implementationRoutes ?? []).map((item) => item.trim()).filter(Boolean)),
   ];
-  const reviewRoutes = [...new Set(policy.reviewRoutes.map((item) => item.trim()).filter(Boolean))];
-  if (implementationRoutes.length === 0) throw new V4Error('IMPLEMENTATION_ROUTE_REQUIRED');
-  if (reviewRoutes.length === 0) throw new V4Error('REVIEW_ROUTE_REQUIRED');
+  const reviewRoutes = [
+    ...new Set((policy.reviewRoutes ?? []).map((item) => item.trim()).filter(Boolean)),
+  ];
+  if (!resourceSelectionEnabled && implementationRoutes.length === 0)
+    throw new V4Error('IMPLEMENTATION_ROUTE_REQUIRED');
+  if (!resourceSelectionEnabled && reviewRoutes.length === 0)
+    throw new V4Error('REVIEW_ROUTE_REQUIRED');
   const maxImplementationAttempts =
     policy.maxImplementationAttempts ?? Math.max(implementationRoutes.length, 3);
   const maxReviewAttempts = policy.maxReviewAttempts ?? Math.max(reviewRoutes.length, 2);
@@ -69,6 +103,7 @@ function normalizePolicy(policy: PlanAutomationPolicy): NormalizedPolicy {
   return {
     implementationRoutes,
     reviewRoutes,
+    resourceSelection: policy.resourceSelection ?? {},
     maxImplementationAttempts,
     maxReviewAttempts,
     maxRepairCycles,
@@ -97,7 +132,9 @@ const REVIEW_RECOVERY_EVIDENCE_NAME = 'operator-review-recovery';
 
 function routeUnavailableFailure(execution: Execution): boolean {
   const detail = execution.errorCode ?? '';
-  return /(?:authentication|invalid api key|unauthorized|forbidden|http[_ ]?(?:401|403)|\b401\b|\b403\b|no deployments available|deployment unavailable)/i.test(detail);
+  return /(?:authentication|invalid api key|unauthorized|forbidden|http[_ ]?(?:401|403)|\b401\b|\b403\b|no deployments available|deployment unavailable)/i.test(
+    detail,
+  );
 }
 
 export class StaticPlanAutomationPolicyResolver implements PlanAutomationPolicyResolver {
@@ -127,13 +164,136 @@ export class PlanAutomationRuntime {
     readonly workspace: WorkspaceProviderPort,
     readonly policies: PlanAutomationPolicyResolver,
     readonly delivery?: DeliveryAutomationPort,
+    readonly resourceSelector?: PlanResourceSelectorPort,
   ) {}
+
+  private resourceSelectionPolicy(policy: NormalizedPolicy): ResourceSelectionPolicy {
+    const selection = policy.resourceSelection;
+    return {
+      allowProviderNative: true,
+      ...(selection.allowedResourceIds ? { allowedResourceIds: selection.allowedResourceIds } : {}),
+      ...(selection.disallowedResourceIds
+        ? { disallowedResourceIds: selection.disallowedResourceIds }
+        : {}),
+      ...(selection.allowedPolicyKeys ? { allowedPolicyKeys: selection.allowedPolicyKeys } : {}),
+      ...(selection.allowedTransports ? { allowedTransports: selection.allowedTransports } : {}),
+    };
+  }
+
+  private selectionExclusions(executions: readonly Execution[]): ResourceSelectionExclusion[] {
+    return executions.flatMap((execution) => {
+      const selection = this.repositories.resourceSelections.get(execution.identity.executionId);
+      return selection
+        ? [
+            {
+              resourceId: selection.resourceId,
+              ...(selection.bindingId ? { bindingId: selection.bindingId } : {}),
+              modelFamily: selection.modelFamily,
+            },
+          ]
+        : [];
+    });
+  }
+
+  private resourceRetryAllowed(execution: Execution): boolean {
+    const selection = this.repositories.resourceSelections.get(execution.identity.executionId);
+    if (!selection) return false;
+    const override = this.repositories.resourceStateOverrides.get(selection.resourceId);
+    return Boolean(override && override.state !== 'ACTIVE');
+  }
+
+  private resourceRoute(profile: ExecutableProfile): string {
+    return ['resource', profile.resourceId, profile.bindingId ?? profile.modelFamily]
+      .join(':')
+      .slice(0, 500);
+  }
+
+  private ensurePlanRunning(plan: Plan): Plan {
+    if (plan.status !== 'WAITING_FOR_RESOURCE') return plan;
+    const resumed = this.repositories.plans.compareAndSetStatus(
+      plan.planId,
+      'WAITING_FOR_RESOURCE',
+      'RUNNING',
+    );
+    if (!resumed.value || resumed.status === 'rejected')
+      throw new V4Error(resumed.reason ?? 'STALE_PLAN_STATUS');
+    return resumed.value;
+  }
+
+  private createSelectedExecution(
+    input: {
+      plan: Plan;
+      item: WorkItem;
+      phase: ExecutionPhase;
+      parentExecutionId?: string;
+      attempt: number;
+      sourceRevision: string;
+      objective: string;
+    },
+    policy: NormalizedPolicy,
+    legacyRoute: string,
+    priorExecutions: readonly Execution[] = [],
+    reuseSelection?: ExecutionResourceSelection,
+  ): Execution {
+    if (!this.resourceSelector) {
+      return this.createExecution({ ...input, route: legacyRoute });
+    }
+
+    let profile: ExecutableProfile;
+    if (reuseSelection) {
+      profile = {
+        capability: reuseSelection.capability,
+        phase: input.phase,
+        modelFamily: reuseSelection.modelFamily,
+        agentBackend: reuseSelection.agentBackend,
+        transport: reuseSelection.transport,
+        resourceId: reuseSelection.resourceId,
+        resourceTier: reuseSelection.resourceTier,
+        modelRank: reuseSelection.modelRank,
+        resourceSequence: reuseSelection.resourceSequence,
+        resourceState: reuseSelection.resourceState,
+        selectionReason: reuseSelection.selectionReason,
+        ...(reuseSelection.bindingId ? { bindingId: reuseSelection.bindingId } : {}),
+        ...(reuseSelection.deploymentId ? { deploymentId: reuseSelection.deploymentId } : {}),
+        ...(reuseSelection.routeModel ? { routeModel: reuseSelection.routeModel } : {}),
+        ...(reuseSelection.protocol ? { protocol: reuseSelection.protocol } : {}),
+      };
+    } else {
+      const selected = this.resourceSelector.select({
+        phase: input.phase,
+        includeProviderNativeProfiles:
+          policy.resourceSelection.includeProviderNativeProfiles === true,
+        policy: this.resourceSelectionPolicy(policy),
+        priorAttempts: this.selectionExclusions(priorExecutions),
+      });
+      if (selected.status !== 'SELECTED') throw new V4Error('NO_ELIGIBLE_RESOURCE');
+      profile = selected.profile;
+    }
+
+    const runningPlan = this.ensurePlanRunning(input.plan);
+    const execution = this.createExecution({
+      ...input,
+      plan: runningPlan,
+      route: this.resourceRoute(profile),
+    });
+    const selection = createExecutionResourceSelection(
+      execution.identity.executionId,
+      profile,
+      execution.createdAt,
+    );
+    this.repositories.resourceSelections.create(selection);
+    return execution;
+  }
 
   async runOnce(limit = 20): Promise<PlanAutomationResult[]> {
     const plans = [
       ...this.repositories.plans.listPlans({ status: 'READY', limit }),
       ...this.repositories.plans.listPlans({ status: 'RUNNING', limit }),
-      ...this.repositories.plans.listPlans({ status: 'SUCCEEDED', limit: 1000 }).filter((plan) => plan.delivery && !isDeliveryComplete(plan.delivery)).slice(0, limit),
+      ...this.repositories.plans.listPlans({ status: 'WAITING_FOR_RESOURCE', limit }),
+      ...this.repositories.plans
+        .listPlans({ status: 'SUCCEEDED', limit: 1000 })
+        .filter((plan) => plan.delivery && !isDeliveryComplete(plan.delivery))
+        .slice(0, limit),
     ];
     const unique = new Map(plans.map((plan) => [plan.planId, plan]));
     const results: PlanAutomationResult[] = [];
@@ -152,14 +312,32 @@ export class PlanAutomationRuntime {
   }
 
   async runPlan(planId: string): Promise<PlanAutomationResult> {
+    try {
+      return await this.runPlanInternal(planId);
+    } catch (error) {
+      if (!(error instanceof V4Error) || error.code !== 'NO_ELIGIBLE_RESOURCE') throw error;
+      const plan = this.repositories.plans.getPlan(planId);
+      if (plan.status === 'READY' || plan.status === 'RUNNING')
+        this.repositories.plans.updateStatus(planId, 'WAITING_FOR_RESOURCE');
+      return { planId, status: 'WAITING', code: 'WAITING_FOR_RESOURCE' };
+    }
+  }
+
+  private async runPlanInternal(planId: string): Promise<PlanAutomationResult> {
     let plan = this.repositories.plans.getPlan(planId);
-    const legacyDeliveryPending = plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery);
-    if (plan.status !== 'READY' && plan.status !== 'RUNNING' && !legacyDeliveryPending) {
+    const legacyDeliveryPending =
+      plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery);
+    if (
+      plan.status !== 'READY' &&
+      plan.status !== 'RUNNING' &&
+      plan.status !== 'WAITING_FOR_RESOURCE' &&
+      !legacyDeliveryPending
+    ) {
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_AUTOMATABLE' };
     }
     const rawPolicy = this.policies.resolve(plan.projectKey);
     if (!rawPolicy) return { planId, status: 'WAITING', code: 'PLAN_POLICY_UNAVAILABLE' };
-    const policy = normalizePolicy(rawPolicy);
+    const policy = normalizePolicy(rawPolicy, Boolean(this.resourceSelector));
     if (plan.status === 'READY') {
       const started = this.repositories.plans.compareAndSetStatus(planId, 'READY', 'RUNNING');
       if (started.status === 'rejected')
@@ -170,6 +348,10 @@ export class PlanAutomationRuntime {
     const active = this.repositories.executions
       .listByPlan(planId)
       .filter((execution) => execution.status === 'QUEUED' || execution.status === 'RUNNING');
+    if (plan.status === 'WAITING_FOR_RESOURCE' && active.length > 0) {
+      this.repositories.plans.updateStatus(planId, 'RUNNING');
+      plan = this.repositories.plans.getPlan(planId);
+    }
     for (const execution of active) {
       const result = await this.runner.runExecution(execution.identity.executionId);
       const durable = this.repositories.executions.get(execution.identity.executionId);
@@ -219,21 +401,29 @@ export class PlanAutomationRuntime {
   }
 
   async reconcilePlan(planId: string, mode = 'auto'): Promise<PlanAutomationResult> {
-    if (mode === 'retry-review' || mode === 'retry_review') return this.reconcileFailedReview(planId);
+    if (mode === 'retry-review' || mode === 'retry_review')
+      return this.reconcileFailedReview(planId);
     if (mode === 'retry-delivery' || mode === 'retry_delivery') return await this.runPlan(planId);
     if (mode !== 'auto') throw new V4Error('PLAN_RECONCILE_MODE_INVALID');
     let plan = this.repositories.plans.getPlan(planId);
-    if (plan.status === 'READY' || plan.status === 'RUNNING' || (plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery))) return await this.runPlan(planId);
+    if (
+      plan.status === 'READY' ||
+      plan.status === 'RUNNING' ||
+      (plan.status === 'SUCCEEDED' && plan.delivery && !isDeliveryComplete(plan.delivery))
+    )
+      return await this.runPlan(planId);
     if (plan.status !== 'FAILED')
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
 
     const rawPolicy = this.policies.resolve(plan.projectKey);
     if (!rawPolicy) return { planId, status: 'WAITING', code: 'PLAN_POLICY_UNAVAILABLE' };
-    const policy = normalizePolicy(rawPolicy);
+    const policy = normalizePolicy(rawPolicy, Boolean(this.resourceSelector));
     const graph = this.repositories.plans.getActiveGraphVersion(planId);
     if (!graph) throw new V4Error('PLAN_GRAPH_MISSING');
     const items = this.repositories.plans.listWorkItems(planId, graph.graphVersionId);
-    const failedItems = items.filter((item) => item.status === 'FAILED' || item.status === 'BLOCKED');
+    const failedItems = items.filter(
+      (item) => item.status === 'FAILED' || item.status === 'BLOCKED',
+    );
     if (failedItems.length !== 1) throw new V4Error('PLAN_RECOVERY_WORK_ITEM_AMBIGUOUS');
     const item = failedItems[0]!;
     const executions = this.repositories.executions.listByPlan(planId);
@@ -291,9 +481,15 @@ export class PlanAutomationRuntime {
       candidate.status !== 'CANCELLED'
     )
       throw new V4Error('PLAN_RECOVERY_EXECUTION_INVALID');
-    const finalizationRecovery =
-      Boolean(candidate.errorCode && FINALIZATION_RECOVERY_CODES.has(candidate.errorCode));
-    if (!candidate.retryable && !finalizationRecovery && !routeUnavailableFailure(candidate))
+    const finalizationRecovery = Boolean(
+      candidate.errorCode && FINALIZATION_RECOVERY_CODES.has(candidate.errorCode),
+    );
+    if (
+      !candidate.retryable &&
+      !finalizationRecovery &&
+      !routeUnavailableFailure(candidate) &&
+      !this.resourceRetryAllowed(candidate)
+    )
       return {
         planId,
         workItemId: item.workItemId,
@@ -316,7 +512,8 @@ export class PlanAutomationRuntime {
           code: 'IMPLEMENTATION_ATTEMPTS_EXHAUSTED',
         };
       parentExecutionId = candidate.identity.executionId;
-      if (!candidate.identity.sourceRevision) throw new V4Error('EXECUTION_SOURCE_REVISION_REQUIRED');
+      if (!candidate.identity.sourceRevision)
+        throw new V4Error('EXECUTION_SOURCE_REVISION_REQUIRED');
       sourceRevision = candidate.identity.sourceRevision;
     } else {
       const repairRoot = candidate.identity.parentExecutionId
@@ -340,19 +537,42 @@ export class PlanAutomationRuntime {
       sourceRevision = repairRoot.resultRevision;
     }
 
-    const route = finalizationRecovery
+    const legacyRoute = finalizationRecovery
       ? candidate.identity.route
-      : policy.implementationRoutes[Math.min(attempts, policy.implementationRoutes.length - 1)]!;
-    const recovery = this.createExecution({
-      plan,
-      item,
-      phase: candidate.identity.phase,
-      parentExecutionId,
-      attempt: candidate.identity.attempt + 1,
-      route,
-      sourceRevision,
-      objective: candidate.identity.phase === 'IMPLEMENT' ? item.objective : candidate.objective,
-    });
+      : (policy.implementationRoutes[
+          Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
+        ] ?? 'implementation');
+    let recovery: Execution;
+    try {
+      recovery = this.createSelectedExecution(
+        {
+          plan,
+          item,
+          phase: candidate.identity.phase,
+          parentExecutionId,
+          attempt: candidate.identity.attempt + 1,
+          sourceRevision,
+          objective:
+            candidate.identity.phase === 'IMPLEMENT' ? item.objective : candidate.objective,
+        },
+        policy,
+        legacyRoute,
+        candidates,
+        finalizationRecovery
+          ? this.repositories.resourceSelections.get(candidate.identity.executionId)
+          : undefined,
+      );
+    } catch (error) {
+      if (error instanceof V4Error && error.code === 'NO_ELIGIBLE_RESOURCE')
+        return {
+          planId,
+          workItemId: item.workItemId,
+          executionId: candidate.identity.executionId,
+          status: 'WAITING',
+          code: 'WAITING_FOR_RESOURCE',
+        };
+      throw error;
+    }
     this.reviveFailedPlan(plan, item);
     plan = this.repositories.plans.getPlan(planId);
     return {
@@ -373,7 +593,7 @@ export class PlanAutomationRuntime {
       return { planId, status: 'SKIPPED', code: 'PLAN_NOT_RECOVERABLE' };
     const rawPolicy = this.policies.resolve(plan.projectKey);
     if (!rawPolicy) return { planId, status: 'WAITING', code: 'PLAN_POLICY_UNAVAILABLE' };
-    const policy = normalizePolicy(rawPolicy);
+    const policy = normalizePolicy(rawPolicy, Boolean(this.resourceSelector));
     const graph = this.repositories.plans.getActiveGraphVersion(planId);
     if (!graph) throw new V4Error('PLAN_GRAPH_MISSING');
     const failedItems = this.repositories.plans
@@ -382,7 +602,11 @@ export class PlanAutomationRuntime {
     if (failedItems.length !== 1) throw new V4Error('PLAN_RECOVERY_WORK_ITEM_AMBIGUOUS');
     const item = failedItems[0]!;
     const executions = this.repositories.executions.listByWorkItem(item.workItemId);
-    if (executions.some((execution) => execution.status === 'QUEUED' || execution.status === 'RUNNING'))
+    if (
+      executions.some(
+        (execution) => execution.status === 'QUEUED' || execution.status === 'RUNNING',
+      )
+    )
       throw new V4Error('PLAN_RECOVERY_ACTIVE_EXECUTION_CONFLICT');
     const candidate = latest(
       executions.filter(
@@ -398,7 +622,10 @@ export class PlanAutomationRuntime {
       .listByWorkItem(item.workItemId)
       .filter((review) => review.implementationExecutionId === candidate.identity.executionId);
     const prior = latest(reviews);
-    if (!prior || (prior.status !== 'FAILED' && prior.status !== 'STALE' && prior.status !== 'CANCELLED'))
+    if (
+      !prior ||
+      (prior.status !== 'FAILED' && prior.status !== 'STALE' && prior.status !== 'CANCELLED')
+    )
       throw new V4Error('PLAN_REVIEW_RECOVERY_NOT_REQUIRED');
 
     const existing = this.repositories.evidence.find(
@@ -407,9 +634,7 @@ export class PlanAutomationRuntime {
       REVIEW_RECOVERY_EVIDENCE_NAME,
     );
     const attemptValue = existing?.payload.attempt;
-    const attempt = existing
-      ? Number(attemptValue)
-      : reviews.length + 1;
+    const attempt = existing ? Number(attemptValue) : reviews.length + 1;
     if (!Number.isInteger(attempt) || attempt < 1)
       throw new V4Error('PLAN_REVIEW_RECOVERY_EVIDENCE_INVALID');
     const reviewId = stableId(
@@ -463,34 +688,29 @@ export class PlanAutomationRuntime {
     workItem: WorkItem,
     rawPolicy?: PlanAutomationPolicy,
   ): Execution {
-    const policy = normalizePolicy(rawPolicy ?? this.requirePolicy(plan.projectKey));
-    if (plan.status !== 'READY' && plan.status !== 'RUNNING')
+    const policy = normalizePolicy(
+      rawPolicy ?? this.requirePolicy(plan.projectKey),
+      Boolean(this.resourceSelector),
+    );
+    if (
+      plan.status !== 'READY' &&
+      plan.status !== 'RUNNING' &&
+      plan.status !== 'WAITING_FOR_RESOURCE'
+    )
       throw new V4Error('PLAN_NOT_AUTOMATABLE');
     if (workItem.planId !== plan.planId) throw new V4Error('EXECUTION_WORK_ITEM_MISMATCH');
-    const route = policy.implementationRoutes[0]!;
-    const executionId = stableId(
-      'execution',
-      plan.planId,
-      workItem.workItemId,
-      'IMPLEMENT',
-      1,
-      route,
-      plan.currentRevision,
-    );
-    return this.repositories.executions.create({
-      executionId,
-      idempotencyKey: 'initial:' + executionId,
-      identity: {
-        executionId,
-        planId: plan.planId,
-        workItemId: workItem.workItemId,
+    return this.createSelectedExecution(
+      {
+        plan,
+        item: workItem,
         phase: 'IMPLEMENT',
         attempt: 1,
-        route,
         sourceRevision: plan.currentRevision,
+        objective: workItem.objective,
       },
-      objective: workItem.objective,
-    }).value!;
+      policy,
+      policy.implementationRoutes[0] ?? 'implementation',
+    );
   }
 
   private async reconcileRunningItem(
@@ -524,7 +744,9 @@ export class PlanAutomationRuntime {
           'RECOVERY',
           REVIEW_RECOVERY_EVIDENCE_NAME,
         );
-        return Boolean(evidence && (!newestCandidate || evidence.createdAt >= newestCandidate.createdAt));
+        return Boolean(
+          evidence && (!newestCandidate || evidence.createdAt >= newestCandidate.createdAt),
+        );
       }),
     );
     const candidate = recoveredCandidate ?? newestCandidate;
@@ -581,8 +803,7 @@ export class PlanAutomationRuntime {
         code: 'REVIEW_INVALID_RETRY_QUEUED',
       };
     }
-    if (review.status === 'CANCELLED')
-      return this.failPlan(plan, item, 'REVIEW_INVALID');
+    if (review.status === 'CANCELLED') return this.failPlan(plan, item, 'REVIEW_INVALID');
 
     if (!review.reviewerExecutionId) {
       const execution = this.createReviewerExecution(
@@ -602,6 +823,30 @@ export class PlanAutomationRuntime {
       };
     }
     const reviewer = this.repositories.executions.get(review.reviewerExecutionId);
+    if (
+      reviewer.status === 'SUCCEEDED' &&
+      (review.status === 'PENDING' || review.status === 'RUNNING')
+    ) {
+      const repaired = this.recoverReviewVerdict(review, reviewer);
+      if (repaired.status === 'PASSED')
+        return await this.acceptReviewedCandidate(plan, item, candidate, repaired);
+      if (repaired.status === 'FAILED')
+        return this.createRepairOrFail(plan, item, candidate, repaired, candidates, policy);
+      if (repaired.status === 'STALE') {
+        const attempt = reviews.length + 1;
+        if (attempt > policy.maxReviewAttempts)
+          return this.failPlan(plan, item, 'REVIEW_ATTEMPTS_EXHAUSTED');
+        const created = this.createReview(candidate, item, policy, attempt);
+        return {
+          planId: plan.planId,
+          workItemId: item.workItemId,
+          executionId: created.execution.identity.executionId,
+          reviewId: created.review.reviewId,
+          status: 'RUNNING',
+          code: 'REVIEW_INVALID_RETRY_QUEUED',
+        };
+      }
+    }
     if (
       reviewer.status === 'FAILED' ||
       reviewer.status === 'BLOCKED' ||
@@ -632,6 +877,33 @@ export class PlanAutomationRuntime {
     };
   }
 
+  private recoverReviewVerdict(review: Review, reviewer: Execution): Review {
+    const evidence = this.repositories.evidence.find(
+      reviewer.identity.executionId,
+      'REVIEW',
+      'review-verdict',
+    );
+    if (!evidence) throw new V4Error('REVIEW_COMPLETION_EVIDENCE_MISSING');
+    const verdict = evidence.payload.verdict;
+    const findings = evidence.payload.findings;
+    if (verdict !== 'PASS' && verdict !== 'FAIL' && verdict !== 'INVALID')
+      throw new V4Error('WORKSPACE_REVIEW_VERDICT_INVALID');
+    if (
+      !Array.isArray(findings) ||
+      !findings.every((finding) => typeof finding === 'string' && finding.length <= 8_000)
+    )
+      throw new V4Error('WORKSPACE_REVIEW_FINDINGS_INVALID');
+    if (review.status === 'PENDING')
+      this.repositories.reviews.updateStatus(review.reviewId, 'RUNNING');
+    const result = this.repositories.reviews.recordVerdict(
+      review.reviewId,
+      verdict,
+      findings as string[],
+    );
+    if (!result.value) throw new V4Error('REVIEW_VERDICT_PERSIST_FAILED');
+    return result.value;
+  }
+
   private retryOrFailImplementation(
     plan: Plan,
     item: WorkItem,
@@ -639,25 +911,36 @@ export class PlanAutomationRuntime {
     candidates: Execution[],
     policy: NormalizedPolicy,
   ): PlanAutomationResult {
-    if (!candidate.retryable && !routeUnavailableFailure(candidate)) return this.failPlan(plan, item, 'IMPLEMENTATION_NOT_RETRYABLE');
+    if (
+      !candidate.retryable &&
+      !routeUnavailableFailure(candidate) &&
+      !this.resourceRetryAllowed(candidate)
+    )
+      return this.failPlan(plan, item, 'IMPLEMENTATION_NOT_RETRYABLE');
     if (candidate.identity.phase === 'IMPLEMENT') {
       const attempts = candidates.filter(
         (execution) => execution.identity.phase === 'IMPLEMENT',
       ).length;
       if (attempts >= policy.maxImplementationAttempts)
         return this.failPlan(plan, item, 'IMPLEMENTATION_ATTEMPTS_EXHAUSTED');
-      const route =
-        policy.implementationRoutes[Math.min(attempts, policy.implementationRoutes.length - 1)]!;
-      const execution = this.createExecution({
-        plan,
-        item,
-        phase: 'IMPLEMENT',
-        parentExecutionId: candidate.identity.executionId,
-        attempt: candidate.identity.attempt + 1,
-        route,
-        sourceRevision: candidate.identity.sourceRevision!,
-        objective: item.objective,
-      });
+      const legacyRoute =
+        policy.implementationRoutes[
+          Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
+        ] ?? 'implementation';
+      const execution = this.createSelectedExecution(
+        {
+          plan,
+          item,
+          phase: 'IMPLEMENT',
+          parentExecutionId: candidate.identity.executionId,
+          attempt: candidate.identity.attempt + 1,
+          sourceRevision: candidate.identity.sourceRevision!,
+          objective: item.objective,
+        },
+        policy,
+        legacyRoute,
+        candidates,
+      );
       return {
         planId: plan.planId,
         workItemId: item.workItemId,
@@ -677,20 +960,24 @@ export class PlanAutomationRuntime {
     ).length;
     if (repairAttempts >= policy.maxImplementationAttempts)
       return this.failPlan(plan, item, 'REPAIR_ATTEMPTS_EXHAUSTED');
-    const route =
+    const legacyRoute =
       policy.implementationRoutes[
-        Math.min(repairAttempts, policy.implementationRoutes.length - 1)
-      ]!;
-    const execution = this.createExecution({
-      plan,
-      item,
-      phase: 'IMPLEMENT_FIX',
-      parentExecutionId: repairRoot.identity.executionId,
-      attempt: candidate.identity.attempt + 1,
-      route,
-      sourceRevision: repairRoot.resultRevision,
-      objective: candidate.objective,
-    });
+        Math.min(repairAttempts, Math.max(0, policy.implementationRoutes.length - 1))
+      ] ?? 'implementation';
+    const execution = this.createSelectedExecution(
+      {
+        plan,
+        item,
+        phase: 'IMPLEMENT_FIX',
+        parentExecutionId: repairRoot.identity.executionId,
+        attempt: candidate.identity.attempt + 1,
+        sourceRevision: repairRoot.resultRevision,
+        objective: candidate.objective,
+      },
+      policy,
+      legacyRoute,
+      candidates,
+    );
     return {
       planId: plan.planId,
       workItemId: item.workItemId,
@@ -734,22 +1021,31 @@ export class PlanAutomationRuntime {
   ): Execution {
     if (!candidate.resultRevision) throw new V4Error('REVIEW_EXACT_RESULT_REQUIRED');
     const index = Math.max(0, attempt - 1);
-    const route = policy.reviewRoutes[Math.min(index, policy.reviewRoutes.length - 1)]!;
-    const execution = this.createExecution({
-      plan: this.repositories.plans.getPlan(candidate.identity.planId),
-      item,
-      phase: 'REVIEW',
-      parentExecutionId: candidate.identity.executionId,
-      attempt: Math.max(1, attempt),
-      route,
-      sourceRevision: candidate.resultRevision,
-      objective:
-        'Independently review work item ' +
-        item.itemKey +
-        ' at exact revision ' +
-        candidate.resultRevision +
-        '.',
-    });
+    const legacyRoute =
+      policy.reviewRoutes[Math.min(index, Math.max(0, policy.reviewRoutes.length - 1))] ??
+      'reasoning';
+    const priorReviews = this.repositories.executions
+      .listByWorkItem(item.workItemId)
+      .filter((execution) => execution.identity.phase === 'REVIEW');
+    const execution = this.createSelectedExecution(
+      {
+        plan: this.repositories.plans.getPlan(candidate.identity.planId),
+        item,
+        phase: 'REVIEW',
+        parentExecutionId: candidate.identity.executionId,
+        attempt: Math.max(1, attempt),
+        sourceRevision: candidate.resultRevision,
+        objective:
+          'Independently review work item ' +
+          item.itemKey +
+          ' at exact revision ' +
+          candidate.resultRevision +
+          '.',
+      },
+      policy,
+      legacyRoute,
+      priorReviews,
+    );
     const session = this.repositories.sessions.getOptional(execution.identity.executionId);
     if (session?.providerSessionId && !review.reviewerExecutionId)
       this.repositories.reviews.attachReviewerExecution(
@@ -773,21 +1069,31 @@ export class PlanAutomationRuntime {
     ).length;
     if (repairCycles >= policy.maxRepairCycles)
       return this.failPlan(plan, item, 'REPAIR_CYCLES_EXHAUSTED');
-    const route =
-      policy.implementationRoutes[Math.min(repairCycles, policy.implementationRoutes.length - 1)]!;
-    const execution = this.createExecution({
-      plan,
-      item,
-      phase: 'IMPLEMENT_FIX',
-      parentExecutionId: candidate.identity.executionId,
-      attempt: candidate.identity.attempt + 1,
-      route,
-      sourceRevision: candidate.resultRevision,
-      objective: [
-        'Repair work item ' + item.itemKey + ' at exact revision ' + candidate.resultRevision + '.',
-        ...(review.findings ?? []).map((finding) => '- ' + finding),
-      ].join('\n'),
-    });
+    const legacyRoute =
+      policy.implementationRoutes[
+        Math.min(repairCycles, Math.max(0, policy.implementationRoutes.length - 1))
+      ] ?? 'implementation';
+    const execution = this.createSelectedExecution(
+      {
+        plan,
+        item,
+        phase: 'IMPLEMENT_FIX',
+        parentExecutionId: candidate.identity.executionId,
+        attempt: candidate.identity.attempt + 1,
+        sourceRevision: candidate.resultRevision,
+        objective: [
+          'Repair work item ' +
+            item.itemKey +
+            ' at exact revision ' +
+            candidate.resultRevision +
+            '.',
+          ...(review.findings ?? []).map((finding) => '- ' + finding),
+        ].join('\n'),
+      },
+      policy,
+      legacyRoute,
+      candidates,
+    );
     return {
       planId: plan.planId,
       workItemId: item.workItemId,
@@ -867,7 +1173,11 @@ export class PlanAutomationRuntime {
         });
       }
     } else {
-      return this.failPlan(plan, item, observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY');
+      return this.failPlan(
+        plan,
+        item,
+        observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY',
+      );
     }
     const current = this.repositories.plans.getPlan(plan.planId);
     if (current.currentRevision !== candidate.resultRevision) {
@@ -898,10 +1208,14 @@ export class PlanAutomationRuntime {
       };
     const all = this.repositories.plans.listWorkItems(plan.planId);
     if (all.every((workItem) => workItem.status === 'SUCCEEDED')) {
-      return await this.completePlan(this.repositories.plans.getPlan(plan.planId), normalizePolicy(this.requirePolicy(plan.projectKey)), {
-        workItemId: item.workItemId,
-        reviewId: review.reviewId,
-      });
+      return await this.completePlan(
+        this.repositories.plans.getPlan(plan.planId),
+        normalizePolicy(this.requirePolicy(plan.projectKey), Boolean(this.resourceSelector)),
+        {
+          workItemId: item.workItemId,
+          reviewId: review.reviewId,
+        },
+      );
     }
     return {
       planId: plan.planId,
@@ -921,61 +1235,102 @@ export class PlanAutomationRuntime {
     let current = this.repositories.plans.getPlan(plan.planId);
     current = this.supersedeDeliveryFromVerifiedChild(current);
     if (policy.requireDelivery && !current.delivery) {
-      return { planId: current.planId, ...context, status: 'WAITING', code: 'PLAN_DELIVERY_REQUIRED', revision: current.currentRevision };
+      return {
+        planId: current.planId,
+        ...context,
+        status: 'WAITING',
+        code: 'PLAN_DELIVERY_REQUIRED',
+        revision: current.currentRevision,
+      };
     }
     if (current.delivery && !isDeliveryComplete(current.delivery)) {
       if (!this.delivery) {
-        return { planId: current.planId, ...context, status: 'WAITING', code: 'DELIVERY_RUNTIME_UNAVAILABLE', revision: current.currentRevision };
+        return {
+          planId: current.planId,
+          ...context,
+          status: 'WAITING',
+          code: 'DELIVERY_RUNTIME_UNAVAILABLE',
+          revision: current.currentRevision,
+        };
       }
       try {
         const observation = await this.delivery.advance(current, current.delivery);
-        const durable = this.repositories.plans.recordDeliveryObservation(current.planId, observation).value;
+        const durable = this.repositories.plans.recordDeliveryObservation(
+          current.planId,
+          observation,
+        ).value;
         if (!durable) throw new V4Error('DELIVERY_OBSERVATION_PERSIST_FAILED');
         current = this.repositories.plans.getPlan(current.planId);
         if (durable.status !== 'VERIFIED') {
-          const code = durable.status === 'CHECKS_PENDING'
-            ? 'DELIVERY_CHECKS_PENDING'
-            : durable.status === 'PR_OPEN' && !durable.autoMerge
-              ? 'DELIVERY_PR_OPEN_EXTERNAL_MERGE_REQUIRED'
-              : 'DELIVERY_' + durable.status;
-          return { planId: current.planId, ...context, status: 'WAITING', code, revision: current.currentRevision };
+          const code =
+            durable.status === 'CHECKS_PENDING'
+              ? 'DELIVERY_CHECKS_PENDING'
+              : durable.status === 'PR_OPEN' && !durable.autoMerge
+                ? 'DELIVERY_PR_OPEN_EXTERNAL_MERGE_REQUIRED'
+                : 'DELIVERY_' + durable.status;
+          return {
+            planId: current.planId,
+            ...context,
+            status: 'WAITING',
+            code,
+            revision: current.currentRevision,
+          };
         }
       } catch (error) {
         const code = error instanceof V4Error ? error.code : 'DELIVERY_AUTOMATION_FAILED';
         this.repositories.plans.recordDeliveryError(current.planId, code);
-        return { planId: current.planId, ...context, status: 'WAITING', code, revision: current.currentRevision };
+        return {
+          planId: current.planId,
+          ...context,
+          status: 'WAITING',
+          code,
+          revision: current.currentRevision,
+        };
       }
     }
     if (current.status === 'RUNNING') {
-      const completed = this.repositories.plans.compareAndSetStatus(current.planId, 'RUNNING', 'SUCCEEDED');
-      if (completed.status === 'rejected') return { planId: current.planId, ...context, status: 'WAITING', code: completed.reason ?? 'STALE_PLAN_STATUS' };
+      const completed = this.repositories.plans.compareAndSetStatus(
+        current.planId,
+        'RUNNING',
+        'SUCCEEDED',
+      );
+      if (completed.status === 'rejected')
+        return {
+          planId: current.planId,
+          ...context,
+          status: 'WAITING',
+          code: completed.reason ?? 'STALE_PLAN_STATUS',
+        };
       current = this.repositories.plans.getPlan(current.planId);
     }
     return {
       planId: current.planId,
       ...context,
       status: 'SUCCEEDED',
-      code: current.delivery?.status === 'SUPERSEDED'
-        ? 'PLAN_DELIVERY_SUPERSEDED'
-        : current.delivery
-          ? 'PLAN_DELIVERED'
-          : 'PLAN_SUCCEEDED_LOCAL_ONLY',
+      code:
+        current.delivery?.status === 'SUPERSEDED'
+          ? 'PLAN_DELIVERY_SUPERSEDED'
+          : current.delivery
+            ? 'PLAN_DELIVERED'
+            : 'PLAN_SUCCEEDED_LOCAL_ONLY',
       revision: current.currentRevision,
     };
   }
 
   private supersedeDeliveryFromVerifiedChild(plan: Plan): Plan {
-    if (!plan.delivery || isDeliveryComplete(plan.delivery) || plan.childPlanIds.length === 0) return plan;
+    if (!plan.delivery || isDeliveryComplete(plan.delivery) || plan.childPlanIds.length === 0)
+      return plan;
     const candidates = plan.childPlanIds
       .map((childPlanId) => this.repositories.plans.getPlan(childPlanId))
-      .filter((child) =>
-        child.parentPlanId === plan.planId &&
-        child.baseRevision === plan.currentRevision &&
-        child.status === 'SUCCEEDED' &&
-        child.delivery?.status === 'VERIFIED' &&
-        child.delivery.remote === plan.delivery!.remote &&
-        child.delivery.branch === plan.delivery!.branch &&
-        child.delivery.targetBranch === plan.delivery!.targetBranch,
+      .filter(
+        (child) =>
+          child.parentPlanId === plan.planId &&
+          child.baseRevision === plan.currentRevision &&
+          child.status === 'SUCCEEDED' &&
+          child.delivery?.status === 'VERIFIED' &&
+          child.delivery.remote === plan.delivery!.remote &&
+          child.delivery.branch === plan.delivery!.branch &&
+          child.delivery.targetBranch === plan.delivery!.targetBranch,
       );
     if (candidates.length === 0) return plan;
     if (candidates.length > 1) throw new V4Error('DELIVERY_SUPERSEDING_CHILD_AMBIGUOUS');

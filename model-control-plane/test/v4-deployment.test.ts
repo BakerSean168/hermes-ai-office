@@ -35,6 +35,14 @@ const headlessReview = fs.readFileSync(
   path.join(root, 'openhands_tools/headless_review_acp.mjs'),
   'utf8',
 );
+const antigravityUnit = fs.readFileSync(
+  path.join(root, 'deploy/gcp/hermes-antigravity-v4@.service'),
+  'utf8',
+);
+const antigravityRunner = fs.readFileSync(
+  path.join(root, 'scripts/run-antigravity-v4-unit.mjs'),
+  'utf8',
+);
 
 test('V4 service enables durable execution with narrowly scoped writable paths', () => {
   assert.match(service, /Description=Hermes Pixel Agent V4 Durable Coding Control Plane/);
@@ -45,14 +53,14 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
-  assert.match(
-    service,
-    /MODEL_CP_V4_IMPLEMENTATION_ROUTES=gpt-5\.6-luna,implementation-efficient,implementation-glm=glm-5\.2/,
-  );
-  assert.match(
-    service,
-    /MODEL_CP_V4_REVIEW_ROUTES=codex-business-review=gpt-5\.6-sol,gpt-5\.6-sol,codex-auto-review,review-glm=glm-5\.2/,
-  );
+  assert.match(service, /MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED=true/);
+  assert.match(service, /MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED=true/);
+  assert.match(service, /MODEL_CP_V4_ANTIGRAVITY_RESOURCE_ENABLED=true/);
+  assert.match(service, /MODEL_CP_V4_ANTIGRAVITY_PROJECTS=digital-biome/);
+  assert.match(service, /MODEL_CP_V4_ANTIGRAVITY_SYSTEMD_UNIT=hermes-antigravity-v4@%i\.service/);
+  assert.doesNotMatch(service, /MODEL_CP_V4_IMPLEMENTATION_ROUTES=/);
+  assert.doesNotMatch(service, /MODEL_CP_V4_REVIEW_ROUTES=/);
+  assert.doesNotMatch(service, /codex-auto-review/);
   assert.match(service, /ProtectSystem=strict/);
   assert.match(service, /ProtectHome=read-only/);
   for (const writable of [
@@ -76,6 +84,16 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
     service,
     /AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID/,
   );
+  assert.doesNotMatch(service, /CAP_SYS_ADMIN/);
+  assert.match(antigravityUnit, /CapabilityBoundingSet=.*CAP_SYS_ADMIN/);
+  assert.match(
+    antigravityUnit,
+    /ExecStart=\/usr\/bin\/node \/usr\/local\/libexec\/hermes-antigravity-v4-unit\.mjs %i/,
+  );
+  assert.match(antigravityUnit, /KillMode=control-group/);
+  assert.match(antigravityRunner, /ANTIGRAVITY_UNIT_REQUEST_POLICY_INVALID/);
+  assert.match(antigravityRunner, /--kill-child=SIGKILL/);
+  assert.match(antigravityRunner, /allowedModels/);
   assert.doesNotMatch(service, /(?:SESSION_API_KEY|LITELLM_V3_KEY|OH_SECRET_KEY)=\S+/);
 });
 
@@ -102,18 +120,26 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /canonical source SHA/);
   assert.match(release, /await backup\(db, target\)/);
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
-  assert.match(release, /runtime\.implementationRoutes\[0\] !== 'gpt-5\.6-luna'/);
-  assert.match(release, /runtime\.reviewRoutes\[0\] !== 'codex-business-review'/);
+  assert.match(release, /runtime\.resourceSelectorEnabled !== true/);
+  assert.match(release, /runtime\.compatibilityReviewRoutes.*codex-auto-review/);
   assert.match(release, /runtime\.requireDelivery !== true/);
   assert.match(release, /runtime\.automationProjectKeys/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
+  assert.match(release, /api\/v4\/resources/);
+  assert.match(release, /hermes-antigravity-v4-unit\.mjs/);
+  assert.match(release, /hermes-antigravity-v4@\.service/);
+  assert.match(release, /gemini-3\.8-flash-high/);
+  assert.match(release, /gemini-3\.1-pro-high/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });
 
 test('V4 Luna implementation uses managed Codex Responses and bridges durable implementation evidence', () => {
   assert.match(headlessReview, /wire_api = \"responses\"/);
   assert.match(headlessReview, /unified_exec = false/);
-  assert.doesNotMatch(headlessReview, /managedCodexModelCatalog|model_catalog_json|use_responses_lite/);
+  assert.doesNotMatch(
+    headlessReview,
+    /managedCodexModelCatalog|model_catalog_json|use_responses_lite/,
+  );
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH/);
   assert.match(headlessReview, /PIXEL_V4_SOURCE_SHA/);
   assert.match(headlessReview, /writePixelV4ImplementationEvidence/);
@@ -158,7 +184,10 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
   assert.match(launcher, /zcode_key="\$\{AI_OFFICE_LITELLM_API_KEY:-\$\{ZCODE_API_KEY:-\}\}"/);
   assert.match(launcher, /zcode_base="\$\{AI_OFFICE_LITELLM_BASE_URL:-\$\{ZCODE_BASE_URL:-\}\}"/);
   assert.match(launcher, /zcode_model="\$\{AI_OFFICE_AGENT_MODEL:-\$\{ZCODE_MODEL:-\}\}"/);
-  assert.match(launcher, /unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN/);
+  assert.match(
+    launcher,
+    /unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN/,
+  );
   assert.match(launcher, /exec \/openhands-state\/tooling\/node_modules\/\.bin\/zcode-acp-server/);
   assert.match(launcher, /target\.chmod\(0o600\)/);
   assert.doesNotMatch(launcher, /\.config\/zcode|\.zcode/);

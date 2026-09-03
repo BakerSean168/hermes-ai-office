@@ -502,7 +502,7 @@ export function normalizeResourceFailure(input: unknown): NormalizedResourceFail
   ) {
     failureClass = 'PROMOTION_EXPIRED';
   } else if (
-    /monthly\s+(?:usage|spend)\s+limit|quota\s+(?:is\s+)?exhausted|quota\s+exceeded|insufficient\s+balance|credits?\s+exhausted|usage\s+limit\s+(?:reached|exceeded)|billing\s+limit/.test(
+    /monthly\s+(?:usage|spend)\s+limit|quota\s+(?:is\s+)?exhausted|quota\s+exceeded|unable\s+to\s+(?:reserve|pre-?authorize)\s+quota|insufficient\s+(?:balance|funds|credits?)|remaining\s+balance|credits?\s+exhausted|usage\s+limit\s+(?:reached|exceeded)|billing\s+limit|预扣费额度失败|剩余额度|余额不足|额度(?:已)?(?:耗尽|用完)/.test(
       lowered,
     )
   ) {
@@ -523,7 +523,7 @@ export function normalizeResourceFailure(input: unknown): NormalizedResourceFail
   ) {
     failureClass = 'MODEL_UNAVAILABLE';
   } else if (
-    /no\s+(?:active\s+)?deployments?|route\s+(?:not\s+found|misconfigured|unavailable)|deployment\s+(?:not\s+found|misconfigured)/.test(
+    /no\s+(?:active\s+)?deployments?|route\s+(?:not\s+found|misconfigured|unavailable)|deployment\s+(?:not\s+found|misconfigured)|unknown\s+provider\s+for\s+model|no\s+available\s+channel/.test(
       lowered,
     )
   ) {

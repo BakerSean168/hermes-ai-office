@@ -1,24 +1,47 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 import Fastify, { type FastifyInstance } from 'fastify';
 
+import {
+  AntigravityExecutionProvider,
+  AntigravityReviewProvider,
+} from './v4/adapters/antigravity.js';
 import { LocalGitWorkspaceAdapter } from './v4/adapters/gitWorkspace.js';
 import { LiteLlmExecutionTelemetry } from './v4/adapters/liteLlmTelemetry.js';
 import { GitHubCliDeliveryAdapter } from './v4/adapters/githubDelivery.js';
 import {
+  createOpenHandsProviderFactory,
   OpenHandsCodexBusinessReviewProvider,
   OpenHandsCodexManagedExecutionProvider,
   OpenHandsExecutionProvider,
   OpenHandsReviewProvider,
+  type OpenHandsAgentBackend,
 } from './v4/adapters/openHandsCoding.js';
 import {
   HttpOpenHandsSupervisorClient,
   OpenHandsSupervisorAdapter,
 } from './v4/adapters/openhands.js';
+import {
+  CompositeResourceDirectory,
+  LiteLlmResourceDirectory,
+  LiteLlmResourceStateEffect,
+  ResourceLifecycleManager,
+  ResourceStateService,
+  StaticResourceDirectory,
+  providerNativeResources,
+  type ResourceProbePort,
+} from './v4/adapters/resourceDirectory.js';
 import type { PlanDeliveryConfig } from './v4/domain/delivery.js';
 import { V4Error } from './v4/domain/errors.js';
 import { EXECUTION_STATUSES, type ExecutionStatus } from './v4/domain/execution.js';
 import { PLAN_STATUSES, type PlanStatus } from './v4/domain/plan.js';
+import {
+  DEFAULT_AFFINITY_POLICY,
+  type ExecutionResource,
+  type ExecutionResourceSelection,
+  type ResourceState,
+} from './v4/domain/resourceRouting.js';
 import {
   DeliveryKernel,
   ExecutionKernel,
@@ -28,6 +51,7 @@ import {
   WorkGraphKernel,
 } from './v4/kernel/index.js';
 import { ExecutionWorker, type ExecutionWorkerRoute } from './v4/orchestration/executionWorker.js';
+import { ResourceSelector } from './v4/orchestration/resourceSelector.js';
 import {
   PlanAutomationRuntime,
   StaticPlanAutomationPolicyResolver,
@@ -63,6 +87,13 @@ export interface ExecutionAutomationRuntime {
   automationProjectKeys: string[];
   requireDelivery: boolean;
   routeModels: Record<string, string>;
+  resourceSelectorEnabled: boolean;
+  resources: CompositeResourceDirectory;
+  liteLlmResources: LiteLlmResourceDirectory;
+  resourceSelector: ResourceSelector;
+  resourceState: ResourceStateService;
+  resourceStateEffect: LiteLlmResourceStateEffect;
+  resourceLifecycle: ResourceLifecycleManager;
 }
 
 export interface ControlPlaneRuntime {
@@ -187,11 +218,11 @@ function statusFor(error: V4Error): number {
   return 400;
 }
 
-function buildExecutionAutomation(
+async function buildExecutionAutomation(
   env: NodeJS.ProcessEnv,
   repositories: V4Repositories,
   fetchImpl: typeof fetch,
-): ExecutionAutomationRuntime | undefined {
+): Promise<ExecutionAutomationRuntime | undefined> {
   if (env.MODEL_CP_EXECUTION_RUNTIME_ENABLED !== 'true') return undefined;
   const openHandsUrl = requiredText(env.MODEL_CP_OPENHANDS_URL, 'OPENHANDS_BASE_URL_REQUIRED');
   const sessionApiKey = requiredText(env.SESSION_API_KEY, 'OPENHANDS_SESSION_KEY_REQUIRED');
@@ -218,7 +249,6 @@ function buildExecutionAutomation(
   const reviewSpecs = routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, [
     'codex-business-review=gpt-5.6-sol',
     'gpt-5.6-sol',
-    'codex-auto-review',
     'review-glm=glm-5.2',
   ]);
   const implementationRoutes = implementationSpecs.map((item) => item.route);
@@ -254,6 +284,115 @@ function buildExecutionAutomation(
       'OPENHANDS_ITERATION_LIMIT_INVALID',
     ),
   };
+  const resourceSelectorEnabled = env.MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED === 'true';
+  const liteLlmAdminBaseUrl = (
+    env.MODEL_CP_V4_LITELLM_ADMIN_BASE_URL ??
+    env.MODEL_CP_V3_LITELLM_URL ??
+    liteLlmBaseUrl
+  )
+    .replace(/\/$/, '')
+    .replace(/\/v1$/, '');
+  const liteLlmResources = new LiteLlmResourceDirectory({
+    baseUrl: liteLlmAdminBaseUrl,
+    envFile: env.MODEL_CP_LITELLM_ADMIN_ENV_FILE ?? '/srv/hermes-personal/secrets/litellm.env',
+    keyName: env.MODEL_CP_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+    fetchImpl,
+    requestTimeoutMs: integerValue(
+      env.MODEL_CP_V4_RESOURCE_DIRECTORY_TIMEOUT_MS,
+      10_000,
+      1_000,
+      60_000,
+      'RESOURCE_DIRECTORY_TIMEOUT_INVALID',
+    ),
+    overrides: repositories.resourceStateOverrides,
+  });
+  if (resourceSelectorEnabled) await liteLlmResources.refresh();
+
+  const businessAuthFile =
+    env.MODEL_CP_V4_BUSINESS_AUTH_FILE ??
+    '/opt/data/hermes-ai-office-v3/openhands/codex-business/auth.json';
+  const businessEnabled = env.MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED !== 'false';
+  const businessReady = businessEnabled && fs.existsSync(businessAuthFile);
+  const antigravityBinary =
+    env.MODEL_CP_V4_ANTIGRAVITY_BIN ??
+    env.MODEL_CP_V3_ANTIGRAVITY_BIN ??
+    '/home/dev/.local/bin/agy';
+  const antigravityHome =
+    env.MODEL_CP_V4_ANTIGRAVITY_HOME ?? env.MODEL_CP_V3_ANTIGRAVITY_HOME ?? '/home/dev';
+  const antigravityAuthFile = path.join(
+    antigravityHome,
+    '.gemini/antigravity-cli/antigravity-oauth-token',
+  );
+  const antigravityEnabled = env.MODEL_CP_V4_ANTIGRAVITY_RESOURCE_ENABLED === 'true';
+  const antigravityReady =
+    antigravityEnabled && fs.existsSync(antigravityBinary) && fs.existsSync(antigravityAuthFile);
+  const nativeResources = new StaticResourceDirectory(
+    providerNativeResources({
+      businessEnabled,
+      businessReady,
+      antigravityEnabled,
+      antigravityReady,
+    }),
+  );
+  const resources = new CompositeResourceDirectory(
+    [liteLlmResources, nativeResources],
+    repositories.resourceStateOverrides,
+  );
+  const resourceSelector = new ResourceSelector(resources);
+  const resourceStateEffect = new LiteLlmResourceStateEffect({
+    baseUrl: liteLlmAdminBaseUrl,
+    envFile: env.MODEL_CP_LITELLM_ADMIN_ENV_FILE ?? '/srv/hermes-personal/secrets/litellm.env',
+    keyName: env.MODEL_CP_LITELLM_ADMIN_KEY_NAME ?? 'LITELLM_MASTER_KEY',
+    fetchImpl,
+    requestTimeoutMs: integerValue(
+      env.MODEL_CP_V4_RESOURCE_DIRECTORY_TIMEOUT_MS,
+      10_000,
+      1_000,
+      60_000,
+      'RESOURCE_DIRECTORY_TIMEOUT_INVALID',
+    ),
+  });
+  const resourceState = new ResourceStateService(
+    resources,
+    repositories.resourceStateOverrides,
+    3,
+    resourceStateEffect,
+  );
+  const resourceProbe: ResourceProbePort = {
+    probe: async (resource: ExecutionResource): Promise<boolean> => {
+      if (resource.resourceId === 'chatgpt-business-primary') return businessReady;
+      if (resource.resourceId === 'antigravity-primary') return antigravityReady;
+      const binding = resource.bindings.find(
+        (item) => item.enabled && item.routeModel && item.ready,
+      );
+      if (!binding?.routeModel) return false;
+      try {
+        const response = await fetchImpl(liteLlmBaseUrl.replace(/\/$/, '') + '/chat/completions', {
+          method: 'POST',
+          headers: {
+            ['Author' + 'ization']: 'Bearer ' + liteLlmApiKey,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: binding.routeModel,
+            messages: [{ role: 'user', content: 'Reply with OK.' }],
+            max_tokens: 1,
+            user: 'pixel-v4-resource-probe',
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        return response.ok;
+      } catch {
+        return false;
+      }
+    },
+  };
+  const resourceLifecycle = new ResourceLifecycleManager(
+    resources,
+    repositories.resourceStateOverrides,
+    resourceProbe,
+    resourceStateEffect,
+  );
   const routes: ExecutionWorkerRoute[] = [
     ...implementationSpecs.map(({ route, model }) => ({
       route,
@@ -270,6 +409,20 @@ function buildExecutionAutomation(
           : new OpenHandsReviewProvider({ ...common, reviewModel: model }),
     })),
   ];
+  const workspaceUid = integerValue(
+    env.MODEL_CP_V4_WORKSPACE_UID,
+    10_001,
+    0,
+    2 ** 31 - 1,
+    'WORKSPACE_OWNER_INVALID',
+  );
+  const workspaceGid = integerValue(
+    env.MODEL_CP_V4_WORKSPACE_GID,
+    10_001,
+    0,
+    2 ** 31 - 1,
+    'WORKSPACE_OWNER_INVALID',
+  );
   const workspace = new LocalGitWorkspaceAdapter({
     allowedRepositoryRoots,
     managedHostRoot,
@@ -288,21 +441,64 @@ function buildExecutionAutomation(
       64 * 1024 * 1024,
       'WORKSPACE_GIT_BUFFER_INVALID',
     ),
-    workspaceUid: integerValue(
-      env.MODEL_CP_V4_WORKSPACE_UID,
-      10_001,
-      0,
-      2 ** 31 - 1,
-      'WORKSPACE_OWNER_INVALID',
-    ),
-    workspaceGid: integerValue(
-      env.MODEL_CP_V4_WORKSPACE_GID,
-      10_001,
-      0,
-      2 ** 31 - 1,
-      'WORKSPACE_OWNER_INVALID',
-    ),
+    workspaceUid,
+    workspaceGid,
   });
+  const openHandsProviderFactory = createOpenHandsProviderFactory(common);
+  const antigravityBase = {
+    binary: antigravityBinary,
+    stateRoot:
+      env.MODEL_CP_V4_ANTIGRAVITY_STATE_ROOT ??
+      '/srv/hermes-personal/data/model-control-plane/antigravity-v4',
+    workspaceHostRoot: managedHostRoot,
+    home: antigravityHome,
+    uid: integerValue(
+      env.MODEL_CP_V4_ANTIGRAVITY_UID ?? env.MODEL_CP_V3_ANTIGRAVITY_UID,
+      1001,
+      1,
+      2 ** 31 - 1,
+      'ANTIGRAVITY_UID_INVALID',
+    ),
+    gid: integerValue(
+      env.MODEL_CP_V4_ANTIGRAVITY_GID ?? env.MODEL_CP_V3_ANTIGRAVITY_GID,
+      1002,
+      1,
+      2 ** 31 - 1,
+      'ANTIGRAVITY_GID_INVALID',
+    ),
+    workspaceGid,
+    user: env.MODEL_CP_V4_ANTIGRAVITY_USER ?? env.MODEL_CP_V3_ANTIGRAVITY_USER ?? 'dev',
+    printTimeout:
+      env.MODEL_CP_V4_ANTIGRAVITY_PRINT_TIMEOUT ??
+      env.MODEL_CP_V3_ANTIGRAVITY_PRINT_TIMEOUT ??
+      '20m',
+    sandboxWrapper:
+      env.MODEL_CP_V4_ANTIGRAVITY_SANDBOX_WRAPPER ??
+      path.join(process.cwd(), 'model-control-plane/scripts/run-antigravity-sandbox.sh'),
+    systemdUnitTemplate:
+      env.MODEL_CP_V4_ANTIGRAVITY_SYSTEMD_UNIT ?? 'hermes-antigravity-v4@%i.service',
+  };
+  const providerFactory = (selection: ExecutionResourceSelection) => {
+    if (
+      selection.agentBackend === 'antigravity-worker' ||
+      selection.agentBackend === 'antigravity-review'
+    ) {
+      const options = { ...antigravityBase, model: selection.modelFamily };
+      return selection.agentBackend === 'antigravity-review'
+        ? new AntigravityReviewProvider(options)
+        : new AntigravityExecutionProvider(options);
+    }
+    if (!['IMPLEMENT', 'IMPLEMENT_FIX', 'REVIEW'].includes(selection.phase))
+      throw new V4Error('EXECUTION_RESOURCE_SELECTION_PHASE_UNSUPPORTED');
+    return openHandsProviderFactory({
+      backend: selection.agentBackend as OpenHandsAgentBackend,
+      model: selection.routeModel ?? selection.modelFamily,
+      transport: selection.transport,
+      phase: selection.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'REVIEW',
+      capability: selection.capability,
+      resourceId: selection.resourceId,
+    });
+  };
   const worker = new ExecutionWorker(repositories, workspace, routes, {
     leaseTtlMs: integerValue(
       env.MODEL_CP_V4_EXECUTION_LEASE_TTL_MS,
@@ -318,10 +514,14 @@ function buildExecutionAutomation(
       1_000,
       'EXECUTION_CYCLE_LIMIT_INVALID',
     ),
+    ...(resourceSelectorEnabled ? { providerFactory, resourceFeedback: resourceState } : {}),
   });
   const defaultPolicy: PlanAutomationPolicy = {
     implementationRoutes,
     reviewRoutes,
+    resourceSelection: {
+      includeProviderNativeProfiles: false,
+    },
     requireDelivery: env.MODEL_CP_V4_REQUIRE_DELIVERY !== 'false',
     maxImplementationAttempts: integerValue(
       env.MODEL_CP_V4_MAX_IMPLEMENTATION_ATTEMPTS,
@@ -332,7 +532,7 @@ function buildExecutionAutomation(
     ),
     maxReviewAttempts: integerValue(
       env.MODEL_CP_V4_MAX_REVIEW_ATTEMPTS,
-      2,
+      4,
       1,
       20,
       'PLAN_AUTOMATION_LIMIT_INVALID',
@@ -346,9 +546,26 @@ function buildExecutionAutomation(
     ),
   };
   const automationProjectKeys = commaList(env.MODEL_CP_V4_AUTOMATION_PROJECTS);
+  const antigravityProjectKeys = new Set(
+    commaList(env.MODEL_CP_V4_ANTIGRAVITY_PROJECTS ?? 'digital-biome'),
+  );
+  const policyOverrides = Object.fromEntries(
+    automationProjectKeys
+      .filter((projectKey) => antigravityEnabled && antigravityProjectKeys.has(projectKey))
+      .map((projectKey) => [
+        projectKey,
+        {
+          ...defaultPolicy,
+          resourceSelection: {
+            includeProviderNativeProfiles: true,
+            allowedPolicyKeys: ['provider-native-trusted-input'],
+          },
+        } satisfies PlanAutomationPolicy,
+      ]),
+  );
   const policy = new StaticPlanAutomationPolicyResolver(
     defaultPolicy,
-    {},
+    policyOverrides,
     automationProjectKeys.length > 0 ? automationProjectKeys : undefined,
   );
   const delivery = new GitHubCliDeliveryAdapter({
@@ -368,7 +585,14 @@ function buildExecutionAutomation(
       'DELIVERY_BUFFER_INVALID',
     ),
   });
-  const plans = new PlanAutomationRuntime(repositories, worker, workspace, policy, delivery);
+  const plans = new PlanAutomationRuntime(
+    repositories,
+    worker,
+    workspace,
+    policy,
+    delivery,
+    resourceSelectorEnabled ? resourceSelector : undefined,
+  );
   return {
     workspace,
     worker,
@@ -381,6 +605,13 @@ function buildExecutionAutomation(
     routeModels: Object.fromEntries(
       [...implementationSpecs, ...reviewSpecs].map(({ route, model }) => [route, model]),
     ),
+    resourceSelectorEnabled,
+    resources,
+    liteLlmResources,
+    resourceSelector,
+    resourceState,
+    resourceStateEffect,
+    resourceLifecycle,
   };
 }
 
@@ -422,24 +653,14 @@ export async function buildControlPlane(
     recovery: new RecoveryKernel(repositories),
     delivery: new DeliveryKernel(),
   };
-  const automation = buildExecutionAutomation(env, repositories, options.fetchImpl ?? fetch);
+  const automation = await buildExecutionAutomation(env, repositories, options.fetchImpl ?? fetch);
   const requireAutomation = (): ExecutionAutomationRuntime => {
     if (!automation) throw new V4Error('EXECUTION_RUNTIME_DISABLED');
     return automation;
   };
-  const policyForExecution = (executionId: string): PlanAutomationPolicy => {
-    const execution = repositories.executions.get(executionId);
-    const plan = repositories.plans.getPlan(execution.identity.planId);
-    const policy = automation?.policy.resolve(plan.projectKey);
-    if (!policy) throw new V4Error('PLAN_POLICY_UNAVAILABLE');
-    return policy;
-  };
-
   const supervisorKernel: SupervisorKernelPort = {
     createExecution: async (payload, planId) => {
       const runtime = requireAutomation();
-      if (payload.route !== runtime.implementationRoutes[0])
-        throw new V4Error('INITIAL_ROUTE_POLICY_MISMATCH');
       const item = repositories.plans.getWorkItem(payload.workItemId);
       if (item.planId !== planId) throw new V4Error('EXECUTION_WORK_ITEM_MISMATCH');
       const result = await runtime.plans.runPlan(planId);
@@ -456,86 +677,35 @@ export async function buildControlPlane(
     retryExecution: async (payload) => {
       const runtime = requireAutomation();
       const execution = repositories.executions.get(payload.executionId);
-      if (execution.identity.phase === 'REVIEW') {
-        const result = await runtime.plans.runPlan(execution.identity.planId);
-        if (!result.executionId) throw new V4Error(result.code);
-        return { code: result.code, linkedExecutionId: result.executionId };
-      }
-      const policy = policyForExecution(payload.executionId);
-      const routes = policy.implementationRoutes;
-      const currentIndex = Math.max(0, routes.indexOf(execution.identity.route));
-      const route = routes[Math.min(currentIndex + 1, routes.length - 1)]!;
-      const result = kernels.recovery.retry({
-        executionId: payload.executionId,
-        idempotencyKey:
-          'supervisor-retry:' + payload.executionId + ':' + execution.identity.attempt,
-        route,
-        maxAttempts: policy.maxImplementationAttempts ?? 3,
-      });
-      if (!result.value || result.status === 'rejected')
-        throw new V4Error(result.reason ?? 'RETRY_NOT_CREATED');
-      return { code: 'RETRY_QUEUED', linkedExecutionId: result.value.identity.executionId };
+      const plan = repositories.plans.getPlan(execution.identity.planId);
+      const result =
+        plan.status === 'FAILED'
+          ? await runtime.plans.reconcilePlan(plan.planId, 'auto')
+          : await runtime.plans.runPlan(plan.planId);
+      if (!result.executionId) throw new V4Error(result.code);
+      return { code: result.code, linkedExecutionId: result.executionId };
     },
-    requestReview: (payload) => {
+    requestReview: async (payload) => {
       const execution = repositories.executions.get(payload.executionId);
       if (!execution.resultRevision || execution.status !== 'SUCCEEDED')
         throw new V4Error('REVIEW_EXACT_RESULT_REQUIRED');
-      if (!automation?.reviewRoutes.includes(payload.reviewerRoute))
-        throw new V4Error('REVIEW_ROUTE_UNAVAILABLE');
-      const result = kernels.review.request({
-        idempotencyKey: 'supervisor-review:' + payload.executionId,
-        planId: execution.identity.planId,
-        workItemId: execution.identity.workItemId,
-        implementationExecutionId: execution.identity.executionId,
-        sourceRevision: execution.resultRevision,
-      });
-      if (!result.value) throw new V4Error('REVIEW_NOT_CREATED');
-      return { code: 'REVIEW_QUEUED', linkedExecutionId: result.value.implementationExecutionId };
+      const result = await requireAutomation().plans.runPlan(execution.identity.planId);
+      if (!result.executionId) throw new V4Error(result.code);
+      return { code: result.code, linkedExecutionId: result.executionId };
     },
-    switchRoute: (payload) => {
-      const runtime = requireAutomation();
+    switchRoute: async (payload) => {
       const execution = repositories.executions.get(payload.executionId);
-      if (execution.identity.phase === 'REVIEW')
-        throw new V4Error('REVIEW_ROUTE_SWITCH_USE_AUTOMATION');
-      if (!runtime.implementationRoutes.includes(payload.route))
-        throw new V4Error('EXECUTION_ROUTE_UNAVAILABLE');
-      const policy = policyForExecution(payload.executionId);
-      const result = kernels.recovery.retry({
-        executionId: payload.executionId,
-        idempotencyKey: 'supervisor-route:' + payload.executionId + ':' + payload.route,
-        route: payload.route,
-        maxAttempts: policy.maxImplementationAttempts ?? 3,
-      });
-      if (!result.value || result.status === 'rejected')
-        throw new V4Error(result.reason ?? 'ROUTE_SWITCH_NOT_CREATED');
-      return { code: 'ROUTE_SWITCH_QUEUED', linkedExecutionId: result.value.identity.executionId };
+      const result = await requireAutomation().plans.runPlan(execution.identity.planId);
+      if (!result.executionId) throw new V4Error(result.code);
+      return { code: result.code, linkedExecutionId: result.executionId };
     },
-    createRepair: (payload) => {
-      const runtime = requireAutomation();
+    createRepair: async (payload) => {
       const base = repositories.executions.get(payload.baseExecutionId);
       if (!base.resultRevision || base.status !== 'SUCCEEDED')
         throw new V4Error('REPAIR_EXACT_RESULT_REQUIRED');
-      const route = runtime.implementationRoutes[0]!;
-      const executionId = 'execution-repair-' + payload.baseExecutionId;
-      const result = kernels.execution.queue({
-        executionId,
-        idempotencyKey: 'supervisor-repair:' + payload.baseExecutionId,
-        identity: {
-          ...base.identity,
-          executionId,
-          phase: 'IMPLEMENT_FIX',
-          parentExecutionId: base.identity.executionId,
-          attempt: base.identity.attempt + 1,
-          route,
-          sourceRevision: base.resultRevision,
-        },
-        objective: [
-          'Repair work item ' + payload.workItemId,
-          ...payload.findingRefs.map((finding) => '- ' + finding),
-        ].join('\n'),
-      });
-      if (!result.value) throw new V4Error('REPAIR_NOT_CREATED');
-      return { code: 'REPAIR_QUEUED', linkedExecutionId: result.value.identity.executionId };
+      const result = await requireAutomation().plans.runPlan(base.identity.planId);
+      if (!result.executionId) throw new V4Error(result.code);
+      return { code: result.code, linkedExecutionId: result.executionId };
     },
     replanRemainder: (payload, planId) => {
       const supervisor = repositories.supervisors.getByPlanId(planId);
@@ -611,6 +781,55 @@ export async function buildControlPlane(
     modelClient,
   );
   const app = Fastify({ logger: options.logger ?? true });
+  const affinityEntries = [
+    ...DEFAULT_AFFINITY_POLICY.capabilities.IMPLEMENTATION,
+    ...DEFAULT_AFFINITY_POLICY.capabilities.REASONING,
+    ...(DEFAULT_AFFINITY_POLICY.providerNativeProfiles ?? []),
+  ];
+  const resourceProjection = (resource: ExecutionResource) => {
+    const override = repositories.resourceStateOverrides.get(resource.resourceId);
+    return {
+      resourceId: resource.resourceId,
+      displayName: resource.displayName ?? resource.providerId ?? resource.resourceId,
+      providerKey: resource.providerId ?? null,
+      resourceTier: resource.resourceTier,
+      resourceSequence: resource.resourceSequence,
+      state: resource.state,
+      transport: resource.bindings[0]?.transport ?? 'LITELLM_MANAGED',
+      modelBindings: resource.bindings.map((binding) => {
+        const affinity = affinityEntries.find(
+          (item) =>
+            item.modelFamily === binding.modelFamily &&
+            (!binding.agentBackend || item.agentBackend === binding.agentBackend),
+        );
+        return {
+          modelFamily: binding.modelFamily,
+          capability: affinity?.capability ?? null,
+          agentBackend: binding.agentBackend ?? affinity?.agentBackend ?? null,
+          modelRank: affinity?.modelRank ?? null,
+          enabled: binding.enabled,
+          ready: binding.ready,
+          deploymentId: binding.deploymentId ?? null,
+          routeModel: binding.routeModel ?? null,
+          protocol: binding.protocol ?? null,
+        };
+      }),
+      lastNormalizedFailure: override?.reasonClass
+        ? {
+            reasonClass: override.reasonClass,
+            sanitizedReason: override.sanitizedReason ?? null,
+            changedAt: override.updatedAt,
+            source: override.source,
+          }
+        : null,
+      suspendedUntil: override?.suspendedUntil ?? null,
+      version: override?.version ?? 0,
+    };
+  };
+  const executionProjection = (execution: ReturnType<V4Repositories['executions']['get']>) => ({
+    ...execution,
+    resourceSelection: repositories.resourceSelections.get(execution.identity.executionId) ?? null,
+  });
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -621,12 +840,92 @@ export async function buildControlPlane(
     executionRuntime: {
       enabled: Boolean(automation),
       autonomousPolling: Boolean(automation && env.MODEL_CP_AUTOMATION_RUNTIME_ENABLED === 'true'),
+      resourceSelectorEnabled: automation?.resourceSelectorEnabled ?? false,
+      resourceCount: automation?.resources.listResources().length ?? 0,
+      compatibilityImplementationRoutes: automation?.implementationRoutes ?? [],
+      compatibilityReviewRoutes: automation?.reviewRoutes ?? [],
       implementationRoutes: automation?.implementationRoutes ?? [],
       reviewRoutes: automation?.reviewRoutes ?? [],
       automationProjectKeys: automation?.automationProjectKeys ?? [],
       requireDelivery: automation?.requireDelivery ?? false,
     },
   }));
+
+  app.get('/api/v4/resources', async () => {
+    const runtime = requireAutomation();
+    if (runtime.resourceSelectorEnabled) await runtime.liteLlmResources.refresh();
+    return {
+      items: runtime.resources.listResources().map(resourceProjection),
+      count: runtime.resources.listResources().length,
+    };
+  });
+
+  app.post('/api/v4/resources/:resourceId/state', async (request) => {
+    const runtime = requireAutomation();
+    const resourceId = requiredText(
+      (request.params as { resourceId?: string }).resourceId,
+      'RESOURCE_ID_REQUIRED',
+    );
+    const body = bodyRecord(request.body);
+    const state = requiredText(body.state, 'RESOURCE_STATE_REQUIRED').toUpperCase();
+    if (!['ACTIVE', 'SUSPENDED', 'DISABLED'].includes(state))
+      throw new V4Error('RESOURCE_STATE_INVALID');
+    const resource = runtime.resources
+      .listResources()
+      .find((item) => item.resourceId === resourceId);
+    if (!resource) throw new V4Error('RESOURCE_NOT_FOUND');
+    const expectedVersion =
+      body.expectedVersion === undefined || body.expectedVersion === null
+        ? undefined
+        : integerValue(
+            String(body.expectedVersion),
+            0,
+            0,
+            Number.MAX_SAFE_INTEGER,
+            'RESOURCE_OVERRIDE_VERSION_INVALID',
+          );
+    const result = runtime.resourceState.manual(resourceId, state as ResourceState, {
+      ...(typeof body.reason === 'string' && body.reason.trim()
+        ? { reason: body.reason.trim() }
+        : {}),
+      ...(typeof body.suspendedUntil === 'string' && body.suspendedUntil.trim()
+        ? { suspendedUntil: body.suspendedUntil.trim() }
+        : {}),
+      ...(expectedVersion === undefined ? {} : { expectedVersion }),
+    });
+    if (result.status === 'rejected') throw new V4Error(result.reason ?? 'STALE_RESOURCE_STATE');
+    const projected = runtime.resources
+      .listResources()
+      .find((item) => item.resourceId === resourceId);
+    if (!projected) throw new V4Error('RESOURCE_NOT_FOUND');
+    return { resource: resourceProjection(projected), mutation: result.status };
+  });
+
+  app.post('/api/v4/resources/:resourceId/bindings/:bindingId/state', async (request) => {
+    const runtime = requireAutomation();
+    const params = request.params as { resourceId?: string; bindingId?: string };
+    const resourceId = requiredText(params.resourceId, 'RESOURCE_ID_REQUIRED');
+    const bindingId = requiredText(params.bindingId, 'RESOURCE_BINDING_ID_REQUIRED');
+    const body = bodyRecord(request.body);
+    const state = requiredText(body.state, 'RESOURCE_BINDING_STATE_REQUIRED').toUpperCase();
+    if (state !== 'ACTIVE' && state !== 'DISABLED')
+      throw new V4Error('RESOURCE_BINDING_STATE_INVALID');
+    const resource = runtime.resources
+      .listResources()
+      .find((item) => item.resourceId === resourceId);
+    if (!resource) throw new V4Error('RESOURCE_NOT_FOUND');
+    const binding = resource.bindings.find((item) => item.bindingId === bindingId);
+    if (!binding) throw new V4Error('RESOURCE_BINDING_NOT_FOUND');
+    if (!runtime.resourceStateEffect.applyBinding || !binding.deploymentId)
+      throw new V4Error('RESOURCE_BINDING_STATE_UNSUPPORTED');
+    await runtime.resourceStateEffect.applyBinding(resource, binding, state);
+    await runtime.liteLlmResources.refresh();
+    const projected = runtime.resources
+      .listResources()
+      .find((item) => item.resourceId === resourceId);
+    if (!projected) throw new V4Error('RESOURCE_NOT_FOUND');
+    return { resource: resourceProjection(projected), bindingId, state };
+  });
 
   const planView = (planId: string) => {
     const plan = repositories.plans.getPlan(planId);
@@ -636,7 +935,7 @@ export async function buildControlPlane(
       delivery: plan.delivery ?? null,
       graph,
       workItems: graph ? repositories.plans.listWorkItems(planId, graph.graphVersionId) : [],
-      executions: repositories.executions.listByPlan(planId),
+      executions: repositories.executions.listByPlan(planId).map(executionProjection),
       reviews: repositories.reviews.listByPlan(planId),
       sessions: repositories.sessions.listByPlan(planId),
       supervisor: repositories.supervisors.getByPlanId(planId),
@@ -668,7 +967,8 @@ export async function buildControlPlane(
                 : [],
               executions: repositories.executions
                 .listByPlan(plan.planId)
-                .filter((execution) => ['QUEUED', 'RUNNING', 'BLOCKED'].includes(execution.status)),
+                .filter((execution) => ['QUEUED', 'RUNNING', 'BLOCKED'].includes(execution.status))
+                .map(executionProjection),
             };
           })
         : plans.map((plan) => planView(plan.planId));
@@ -857,7 +1157,10 @@ export async function buildControlPlane(
       ...(query.planId ? { planId: requiredText(query.planId, 'EXECUTION_PLAN_REQUIRED') } : {}),
       ...(status ? { status: status as ExecutionStatus } : {}),
     });
-    if (query.view !== 'dashboard') return { items, count: items.length };
+    if (query.view !== 'dashboard') {
+      const projected = items.map(executionProjection);
+      return { items: projected, count: projected.length };
+    }
 
     const enriched = new Array(items.length);
     let cursor = 0;
@@ -871,19 +1174,30 @@ export async function buildControlPlane(
           createdAt: execution.createdAt,
           updatedAt: execution.updatedAt,
         });
+        const selection = repositories.resourceSelections.get(execution.identity.executionId);
         const providerNativeRoute =
-          execution.identity.route === 'codex-business-review' && automation
+          selection?.transport === 'PROVIDER_NATIVE'
             ? {
-                deploymentId: 'provider-native:openai-business',
-                providerKey: 'openai-business',
-                model: automation.routeModels[execution.identity.route] ?? execution.identity.route,
-                modelGroup: execution.identity.route,
+                deploymentId: 'provider-native:' + selection.resourceId,
+                providerKey: selection.resourceId,
+                model: selection.modelFamily,
+                modelGroup: selection.modelFamily,
                 commercialType: 'SUBSCRIPTION',
                 supplyOrigin: 'OFFICIAL',
               }
-            : undefined;
+            : execution.identity.route === 'codex-business-review' && automation
+              ? {
+                  deploymentId: 'provider-native:openai-business',
+                  providerKey: 'openai-business',
+                  model:
+                    automation.routeModels[execution.identity.route] ?? execution.identity.route,
+                  modelGroup: execution.identity.route,
+                  commercialType: 'SUBSCRIPTION',
+                  supplyOrigin: 'OFFICIAL',
+                }
+              : undefined;
         enriched[index] = {
-          ...execution,
+          ...executionProjection(execution),
           telemetry:
             telemetry.usage || telemetry.route || telemetry.routeUsage.length > 0
               ? telemetry
@@ -901,7 +1215,8 @@ export async function buildControlPlane(
       'EXECUTION_ID_REQUIRED',
     );
     return {
-      execution: repositories.executions.get(executionId),
+      execution: executionProjection(repositories.executions.get(executionId)),
+      resourceSelection: repositories.resourceSelections.get(executionId) ?? null,
       session: repositories.sessions.getOptional(executionId),
       evidence: repositories.evidence.listByExecution(executionId),
       reviewAsImplementation: repositories.reviews.findByImplementationExecution(executionId),
@@ -1062,6 +1377,35 @@ export async function buildControlPlane(
         )
       : undefined;
 
+  let resourceCycleRunning = false;
+  const resourceInterval = automation?.resourceSelectorEnabled
+    ? setInterval(
+        () => {
+          if (resourceCycleRunning) return;
+          resourceCycleRunning = true;
+          void automation.liteLlmResources
+            .refresh()
+            .then(() => automation.resourceLifecycle.reconcileOnce())
+            .catch((error) =>
+              app.log.error(
+                { error: error instanceof Error ? error.message : String(error) },
+                'resource directory cycle failed',
+              ),
+            )
+            .finally(() => {
+              resourceCycleRunning = false;
+            });
+        },
+        integerValue(
+          env.MODEL_CP_V4_RESOURCE_REFRESH_MS,
+          60_000,
+          10_000,
+          3_600_000,
+          'RESOURCE_REFRESH_INVALID',
+        ),
+      )
+    : undefined;
+
   let automationCycleRunning = false;
   const automationInterval =
     automation && env.MODEL_CP_AUTOMATION_RUNTIME_ENABLED === 'true'
@@ -1107,6 +1451,7 @@ export async function buildControlPlane(
 
   app.addHook('onClose', async () => {
     if (supervisorInterval) clearInterval(supervisorInterval);
+    if (resourceInterval) clearInterval(resourceInterval);
     if (automationInterval) clearInterval(automationInterval);
     db.close();
   });
