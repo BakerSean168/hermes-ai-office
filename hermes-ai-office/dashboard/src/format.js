@@ -50,6 +50,23 @@ export function routeLabel(item) {
   if (!route) return "—";
   return route.providerKey + " · " + route.physicalModel;
 }
+export function selectedModel(item) {
+  const selection = item && item.resourceSelection;
+  return (selection && selection.modelFamily) || (item && item.logicalModel) || "—";
+}
+export function selectedAgent(item) {
+  const selection = item && item.resourceSelection;
+  return (selection && selection.agentBackend) || (item && item.backend) || "—";
+}
+export function selectedResource(item) {
+  const selection = item && item.resourceSelection;
+  return (selection && selection.resourceId) || "—";
+}
+export function hasSelectionTelemetry(item) {
+  const usage = item && item.usage;
+  if (!usage) return false;
+  return Number(usage.calls || 0) > 0 || Number(usage.input || 0) > 0 || Number(usage.output || 0) > 0;
+}
 export function activityLabel(kind, t) {
   const labels = {
     IMPLEMENTATION: t.activityImplementation,

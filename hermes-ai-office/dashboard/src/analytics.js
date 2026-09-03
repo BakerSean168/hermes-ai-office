@@ -90,7 +90,7 @@ function AnalyticsTable(props) {
                 h(
                   'td',
                   { className: 'hao-right hao-mono', key: 'tokens' },
-                  compact(row.totalTokens, props.locale),
+                  row.totalTokens == null ? '—' : compact(row.totalTokens, props.locale),
                 ),
                 h(
                   'td',
@@ -107,7 +107,7 @@ function AnalyticsTable(props) {
                   { className: 'hao-right hao-mono', key: 'calls' },
                   compact(row.calls, props.locale),
                 ),
-                h('td', { className: 'hao-right hao-mono', key: 'cost' }, money(row.costUsd)),
+                h('td', { className: 'hao-right hao-mono', key: 'cost' }, row.costUsd == null ? '—' : money(row.costUsd)),
               ]
             : [
                 h(
@@ -118,19 +118,19 @@ function AnalyticsTable(props) {
                 h(
                   'td',
                   { className: 'hao-right hao-mono', key: 'tokens' },
-                  compact(row.totalTokens, props.locale),
+                  row.totalTokens == null ? '—' : compact(row.totalTokens, props.locale),
                 ),
                 h(
                   'td',
                   { className: 'hao-right hao-mono', key: 'calls' },
-                  compact(row.calls, props.locale),
+                  row.calls == null ? '—' : compact(row.calls, props.locale),
                 ),
                 h(
                   'td',
                   { className: 'hao-right hao-mono', key: 'duration' },
                   row.durationMs ? duration(row.durationMs) : '—',
                 ),
-                h('td', { className: 'hao-right hao-mono', key: 'cost' }, money(row.costUsd)),
+                h('td', { className: 'hao-right hao-mono', key: 'cost' }, row.costUsd == null ? '—' : money(row.costUsd)),
               ];
           return h('tr', { key: row.key }, common.concat(metrics));
         }),
@@ -150,12 +150,16 @@ export function Analytics(props) {
     ['physicalModels', t.groupPhysical],
     ['projects', t.groupProject],
     ['phases', t.groupPhase],
+    ['selectedModels', t.selectedModels],
+    ['agents', t.agents],
+    ['resources', t.selectedResources],
   ];
   const [group, setGroup] = React.useState('providers');
   const selected =
     groups.find(function (item) {
       return item[0] === group;
     }) || groups[0];
+  const selectionMode = ['selectedModels', 'agents', 'resources'].includes(selected[0]);
   return h(
     React.Fragment,
     null,
@@ -189,7 +193,11 @@ export function Analytics(props) {
       }),
       selected[0] === 'providers' || selected[0] === 'providerModels'
         ? h('p', { className: 'hao-muted' }, providerLabels.note)
-        : null,
+        : selectionMode
+          ? h('p', { className: 'hao-muted' }, props.locale === 'zh'
+            ? '这些统计来自执行时的静态选择；物理 LiteLLM 渠道遥测仍在渠道视图中单独统计。Provider 原生资源没有可用 Token 时显示为 —。'
+            : 'These aggregates come from static execution selection; physical LiteLLM telemetry remains separate in provider views. Provider-native resources show — when token data is unavailable.')
+          : null,
     ),
     h(
       'section',

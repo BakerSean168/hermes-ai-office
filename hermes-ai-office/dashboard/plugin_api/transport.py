@@ -19,8 +19,8 @@ def fetch_json(path: str, *, timeout: float = 12.0) -> Dict[str, Any]:
 
 
 def post_json(path: str, payload: Mapping[str, Any], *, timeout: float = 12.0) -> Dict[str, Any]:
-    if not path.startswith("/api/v3/"):
-        raise ValueError("dashboard actions may access only V3 control-plane APIs")
+    if not (path.startswith("/api/v3/") or path.startswith("/api/v4/")):
+        raise ValueError("dashboard actions may access only V3/V4 control-plane APIs")
     request = urllib.request.Request(
         BASE_URL + path,
         data=json.dumps(dict(payload)).encode("utf-8"),

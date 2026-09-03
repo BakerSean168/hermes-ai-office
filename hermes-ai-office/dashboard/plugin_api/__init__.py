@@ -30,7 +30,7 @@ from .detail import (
     _timeline_event,
     _timeline_execution,
 )
-from .executions import _analytics, _execution, _route_catalog, _summary
+from .executions import _analytics, _execution, _resource_selection, _route_catalog, _summary
 from .plans import (
     _activity_kind,
     _current_activity,
@@ -45,6 +45,7 @@ from .plans import (
     _summary_plan_health,
 )
 from .transport import fetch_json as _transport_fetch_json, post_json as _transport_post_json
+from .resources import _resource, resources as _resources
 
 router = APIRouter()
 
@@ -160,3 +161,66 @@ async def model_registry() -> Dict[str, Any]:
         return _assembly._health_views(health)[2]
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/resources")
+async def resource_list() -> Dict[str, Any]:
+    try:
+        payload = await asyncio.to_thread(_fetch_json, "/api/v4/resources")
+        return {
+            "schemaVersion": _config.DASHBOARD_SCHEMA_VERSION,
+            "items": _resources(payload),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+def _resource_state_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="resource state payload must be an object")
+    state = payload.get("state")
+    if not isinstance(state, str) or state.upper() not in {"ACTIVE", "SUSPENDED", "DISABLED"}:
+        raise HTTPException(status_code=422, detail="state must be ACTIVE, SUSPENDED, or DISABLED")
+    result: Dict[str, Any] = {"state": state.upper()}
+    for key in ("reason", "suspendedUntil"):
+        value = payload.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise HTTPException(status_code=422, detail=f"{key} must be a string or null")
+            if value.strip():
+                result[key] = value.strip()
+    if "expectedVersion" in payload and payload["expectedVersion"] is not None:
+        expected_version = payload["expectedVersion"]
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int) or expected_version < 0:
+            raise HTTPException(status_code=422, detail="expectedVersion must be a non-negative integer or null")
+        result["expectedVersion"] = expected_version
+    return result
+
+
+@router.post("/resources/{resource_id}/state")
+async def resource_state(resource_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    safe_resource_id = urllib.parse.quote(str(resource_id), safe="")
+    if not safe_resource_id:
+        raise HTTPException(status_code=422, detail="resource id is required")
+    try:
+        state_payload = _resource_state_payload(payload)
+        await asyncio.to_thread(
+            _post_json,
+            f"/api/v4/resources/{safe_resource_id}/state",
+            state_payload,
+            timeout=12.0,
+        )
+        return {"resourceId": str(resource_id), "state": state_payload["state"]}
+    except HTTPException:
+        raise
+    except urllib.error.HTTPError as exc:
+        if exc.code in {400, 404, 409, 422}:
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+                detail = body.get("error", {}).get("code") if isinstance(body, dict) else None
+            except Exception:
+                detail = None
+            raise HTTPException(status_code=exc.code, detail=detail or str(exc)) from exc
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

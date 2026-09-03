@@ -4,6 +4,7 @@ import { dateTime } from "./format.js";
 import { Analytics } from "./analytics.js";
 import { Overview } from "./overview.js";
 import { PlanDetail } from "./plan-detail.js";
+import { ResourcePage } from "./resources.js";
 
 export function App() {
   const locale = useLocale();
@@ -23,6 +24,7 @@ export function App() {
   const [handoffText, setHandoffText] = React.useState("");
   const [handoffError, setHandoffError] = React.useState("");
   const [handoffSubmitting, setHandoffSubmitting] = React.useState(false);
+  const [pendingResourceIds, setPendingResourceIds] = React.useState({});
 
   const load = React.useCallback(function () {
     setLoading(true);
@@ -131,6 +133,36 @@ export function App() {
     setDetailLoading(false);
   }
 
+  function updateResourceState(resource, state) {
+    const resourceId = String(resource && resource.resourceId || "");
+    if (!resourceId) return Promise.resolve();
+    setPendingResourceIds(function (current) {
+      return Object.assign({}, current, { [resourceId]: true });
+    });
+    const payload = {
+      state: state,
+      reason: "DASHBOARD_OPERATOR_" + state,
+    };
+    if (state === "SUSPENDED") {
+      payload.suspendedUntil = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    }
+    if (resource.version != null) payload.expectedVersion = resource.version;
+    return api("/resources/" + encodeURIComponent(resourceId) + "/state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+      .then(function () { setError(""); return load(); })
+      .catch(function (cause) { setError(String(cause)); })
+      .finally(function () {
+        setPendingResourceIds(function (current) {
+          const next = Object.assign({}, current);
+          delete next[resourceId];
+          return next;
+        });
+      });
+  }
+
   React.useEffect(function () {
     if (!data) return;
     setSyncingPlanIds(function (current) {
@@ -172,6 +204,7 @@ export function App() {
       h("nav", { className: "hao-toolbar-nav" },
         h("button", { type: "button", className: view === "overview" ? "is-active" : "", onClick: function () { setView("overview"); } }, t.overview),
         h("button", { type: "button", className: view === "analytics" ? "is-active" : "", onClick: function () { setView("analytics"); } }, t.analytics),
+        h("button", { type: "button", className: view === "resources" ? "is-active" : "", onClick: function () { setView("resources"); } }, t.resources),
       ),
       h("div", { className: "hao-toolbar-actions" },
         data ? h("span", { className: "hao-updated" }, t.updated + " " + dateTime(data.generatedAt, locale)) : null,
@@ -180,7 +213,7 @@ export function App() {
       ),
     ),
     error ? h("div", { className: "hao-error" }, error) : null,
-    !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds: syncingPlanIds }),
+    !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data: data, t: t, locale: locale }) : view === "resources" ? h(ResourcePage, { data: data, t: t, locale: locale, onState: updateResourceState, pendingResourceIds: pendingResourceIds }) : h(Overview, { data: data, t: t, locale: locale, now: now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds: syncingPlanIds }),
     detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t: t, locale: locale, now: now }) : null,
     handoffPlan ? h("div", { className: "hao-handoff-backdrop", role: "presentation", onMouseDown: function (event) { if (event.target === event.currentTarget) closeHandoff(); } },
       h("section", { className: "hao-handoff-dialog", role: "dialog", "aria-modal": "true", "aria-label": t.handoffTitle },

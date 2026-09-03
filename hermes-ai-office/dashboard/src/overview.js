@@ -1,5 +1,5 @@
 import { React, h } from "./runtime.js";
-import { activityLabel, compact, dateTime, duration, integer, money, percentage, routeLabel, shortRevision } from "./format.js";
+import { activityLabel, compact, dateTime, duration, integer, money, percentage, routeLabel, selectedAgent, selectedModel, selectedResource, shortRevision } from "./format.js";
 import { Badge, ExecutionTable, Metric, Panel, RunningCards } from "./components.js";
 import { HealthSummary } from "./plan-detail.js";
 
@@ -119,7 +119,7 @@ export function Overview(props) {
   const query = search.trim().toLowerCase();
   const history = (data.history || []).filter(function (item) {
     if (!query) return true;
-    return [item.projectKey, item.objective, item.phase, item.status, item.logicalModel, routeLabel(item)].join(" ").toLowerCase().includes(query);
+    return [item.projectKey, item.objective, item.phase, item.status, selectedModel(item), selectedAgent(item), selectedResource(item), routeLabel(item)].join(" ").toLowerCase().includes(query);
   });
   return h(
     React.Fragment,

@@ -5,6 +5,67 @@ from typing import Any, Dict, Mapping
 from .common import _number, _required_string, _usage
 
 _TERMINAL = {"SUCCEEDED", "FAILED", "STUCK", "CANCELLED"}
+_CAPABILITIES = {"IMPLEMENTATION", "REASONING"}
+_TRANSPORTS = {"LITELLM_MANAGED", "PROVIDER_NATIVE"}
+_RESOURCE_TIERS = {"PROMOTIONAL", "FREE", "SUBSCRIPTION", "METERED", "OTHER"}
+_RESOURCE_STATES = {"ACTIVE", "SUSPENDED", "DISABLED"}
+
+
+def _resource_selection(raw: Any) -> Dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise RuntimeError("control-plane contract violation: resourceSelection must be an object or null")
+    result: Dict[str, Any] = {}
+    for key in ("capability", "modelFamily", "agentBackend", "resourceId", "selectionReason"):
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(f"control-plane contract violation: resourceSelection.{key} must be a non-empty string")
+        result[key] = value.strip()
+    result["capability"] = result["capability"].upper()
+    if result["capability"] not in _CAPABILITIES:
+        raise RuntimeError("control-plane contract violation: resourceSelection.capability is invalid")
+    result["transport"] = raw.get("transport")
+    if not isinstance(result["transport"], str) or result["transport"].upper() not in _TRANSPORTS:
+        raise RuntimeError("control-plane contract violation: resourceSelection.transport is invalid")
+    result["transport"] = result["transport"].upper()
+    result["resourceTier"] = raw.get("resourceTier")
+    if not isinstance(result["resourceTier"], str) or result["resourceTier"].upper() not in _RESOURCE_TIERS:
+        raise RuntimeError("control-plane contract violation: resourceSelection.resourceTier is invalid")
+    result["resourceTier"] = result["resourceTier"].upper()
+    result["resourceState"] = raw.get("resourceState")
+    if not isinstance(result["resourceState"], str) or result["resourceState"].upper() not in _RESOURCE_STATES:
+        raise RuntimeError("control-plane contract violation: resourceSelection.resourceState is invalid")
+    result["resourceState"] = result["resourceState"].upper()
+    sequence = raw.get("resourceSequence")
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+        raise RuntimeError("control-plane contract violation: resourceSelection.resourceSequence must be a non-negative integer")
+    result["resourceSequence"] = sequence
+    if result["selectionReason"] != "STATIC_POLICY":
+        raise RuntimeError("control-plane contract violation: resourceSelection.selectionReason is invalid")
+    for key in ("routeModel", "deploymentId", "protocol"):
+        value = raw.get(key)
+        if value is not None:
+            if not isinstance(value, str):
+                raise RuntimeError(f"control-plane contract violation: resourceSelection.{key} must be a string or null")
+            value = value.strip() or None
+        result[key] = value
+    # Keep the canonical DTO order and do not pass through unknown fields.
+    canonical = {
+        "capability": result["capability"],
+        "modelFamily": result["modelFamily"],
+        "agentBackend": result["agentBackend"],
+        "transport": result["transport"],
+        "resourceId": result["resourceId"],
+        "resourceTier": result["resourceTier"],
+        "resourceSequence": result["resourceSequence"],
+        "resourceState": result["resourceState"],
+        "selectionReason": result["selectionReason"],
+    }
+    for key in ("routeModel", "deploymentId", "protocol"):
+        if key in raw and result[key] is not None:
+            canonical[key] = result[key]
+    return canonical
 
 def _route_catalog(registry: Mapping[str, Any]) -> Dict[str, Dict[str, Any]]:
     deployments = registry.get("deployments") if isinstance(registry.get("deployments"), Mapping) else {}
@@ -78,7 +139,7 @@ def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]])
     started_at = str(timing.get("startedAt") or "") or None
     ended_at = str(timing.get("endedAt") or "") or None
     duration_ms = int(_number(timing.get("durationMs"))) if timing.get("durationMs") is not None else None
-    return {
+    result = {
         "executionId": execution_id,
         "projectKey": project_key,
         "objective": objective,
@@ -97,6 +158,10 @@ def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]])
         "routeUsage": routes,
         "terminal": status in _TERMINAL,
     }
+    resource_selection = _resource_selection(raw.get("resourceSelection"))
+    if resource_selection is not None:
+        result["resourceSelection"] = resource_selection
+    return result
 
 
 def _new_bucket(key: str) -> Dict[str, Any]:
@@ -116,6 +181,7 @@ def _new_bucket(key: str) -> Dict[str, Any]:
         "successfulRequestDurationMs": 0,
         "costUsd": 0.0,
         "durationMs": 0,
+        "usageAvailable": False,
     }
 
 
@@ -154,6 +220,14 @@ def _add(
 
 
 def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]]:
+    return _finish_buckets_with_nullability(values, nullable_usage=False)
+
+
+def _finish_buckets_with_nullability(
+    values: Mapping[str, Dict[str, Any]],
+    *,
+    nullable_usage: bool,
+) -> list[Dict[str, Any]]:
     rows = []
     for bucket in values.values():
         executions = len(bucket["executions"])
@@ -164,7 +238,7 @@ def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]
         row = {
             k: v
             for k, v in bucket.items()
-            if k not in {"executions", "succeeded", "failed", "successfulRequestDurationMs"}
+            if k not in {"executions", "succeeded", "failed", "successfulRequestDurationMs", "usageAvailable"}
         }
         row.update(
             {
@@ -180,8 +254,21 @@ def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]
                 "avgSuccessfulLatencyMs": (bucket["successfulRequestDurationMs"] / bucket["successfulCalls"]) if bucket["successfulCalls"] else None,
             }
         )
+        if nullable_usage and not bucket["usageAvailable"]:
+            for key in (
+                "totalTokens", "input", "output", "cachedInput", "reasoningOutput", "calls",
+                "successfulCalls", "failedCalls", "responseCacheHits", "callSuccessRate",
+                "promptCacheRate", "responseCacheHitRate", "costPerMillionTokens", "costUsd",
+            ):
+                row[key] = None
         rows.append(row)
-    rows.sort(key=lambda row: (-float(row["costUsd"]), -int(row["totalTokens"]), str(row["key"])))
+    rows.sort(
+        key=lambda row: (
+            -(float(row["costUsd"]) if row["costUsd"] is not None else -1.0),
+            -(int(row["totalTokens"]) if row["totalTokens"] is not None else -1),
+            str(row["key"]),
+        )
+    )
     return rows
 
 
@@ -195,6 +282,9 @@ def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
             "providers",
             "providerModels",
             "physicalModels",
+            "selectedModels",
+            "agents",
+            "resources",
         )
     }
     for execution in executions:
@@ -234,7 +324,28 @@ def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
                 duration=False,
                 outcome=False,
             )
-    return {name: _finish_buckets(values) for name, values in groups.items()}
+        selection = execution.get("resourceSelection")
+        if isinstance(selection, Mapping):
+            selection_usage = execution.get("usage") if isinstance(execution.get("usage"), Mapping) else {}
+            usage_available = any(
+                _number(selection_usage.get(key)) > 0
+                for key in ("input", "output", "cachedInput", "reasoningOutput")
+            )
+            for group_name, key in (
+                ("selectedModels", selection.get("modelFamily")),
+                ("agents", selection.get("agentBackend")),
+                ("resources", selection.get("resourceId")),
+            ):
+                if not isinstance(key, str) or not key.strip():
+                    continue
+                bucket = groups[group_name].setdefault(key, _new_bucket(key))
+                _add(bucket, execution, selection_usage if usage_available else {})
+                if usage_available:
+                    bucket["usageAvailable"] = True
+    return {
+        name: (_finish_buckets_with_nullability(values, nullable_usage=True) if name in {"selectedModels", "agents", "resources"} else _finish_buckets(values))
+        for name, values in groups.items()
+    }
 
 
 def _summary(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:

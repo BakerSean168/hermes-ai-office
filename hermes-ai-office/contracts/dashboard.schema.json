@@ -15,12 +15,13 @@
     "runtime",
     "readiness",
     "registry",
+    "resources",
     "plans",
     "planSummary"
   ],
   "properties": {
     "schemaVersion": {
-      "const": 8
+      "const": 9
     },
     "generatedAt": {
       "type": "string",
@@ -52,6 +53,13 @@
     },
     "registry": {
       "$ref": "#/$defs/Registry"
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Resource"
+      },
+      "x-control-plane-source": "GET /api/v4/resources.items"
     },
     "plans": {
       "type": "array",
@@ -294,6 +302,143 @@
         }
       }
     },
+    "ResourceSelection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability",
+        "modelFamily",
+        "agentBackend",
+        "transport",
+        "resourceId",
+        "resourceTier",
+        "resourceSequence",
+        "resourceState",
+        "selectionReason"
+      ],
+      "properties": {
+        "capability": {
+          "type": "string",
+          "enum": ["IMPLEMENTATION", "REASONING"]
+        },
+        "modelFamily": {
+          "type": "string",
+          "minLength": 1
+        },
+        "agentBackend": {
+          "type": "string",
+          "minLength": 1
+        },
+        "transport": {
+          "type": "string",
+          "enum": ["LITELLM_MANAGED", "PROVIDER_NATIVE"]
+        },
+        "resourceId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resourceTier": {
+          "type": "string",
+          "enum": ["PROMOTIONAL", "FREE", "SUBSCRIPTION", "METERED", "OTHER"]
+        },
+        "resourceSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "resourceState": {
+          "type": "string",
+          "enum": ["ACTIVE", "SUSPENDED", "DISABLED"]
+        },
+        "routeModel": {
+          "type": "string"
+        },
+        "deploymentId": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        },
+        "selectionReason": {
+          "const": "STATIC_POLICY"
+        }
+      }
+    },
+    "ResourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["modelFamily", "capability", "agentBackend", "modelRank", "enabled", "deploymentId", "protocol"],
+      "properties": {
+        "modelFamily": {"type": "string", "minLength": 1},
+        "capability": {"type": ["string", "null"], "enum": ["IMPLEMENTATION", "REASONING", null]},
+        "agentBackend": {"type": ["string", "null"]},
+        "modelRank": {"type": ["integer", "null"], "minimum": 0},
+        "enabled": {"type": "boolean"},
+        "deploymentId": {"type": ["string", "null"]},
+        "protocol": {"type": ["string", "null"]}
+      }
+    },
+    "ResourceFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reasonClass", "sanitizedReason", "changedAt", "source"],
+      "properties": {
+        "reasonClass": {"type": "string", "minLength": 1},
+        "sanitizedReason": {"type": ["string", "null"]},
+        "changedAt": {"type": ["string", "null"]},
+        "source": {"type": ["string", "null"]}
+      }
+    },
+    "Resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resourceId", "displayName", "providerKey", "resourceTier", "resourceSequence", "state", "transport", "modelBindings", "lastNormalizedFailure", "suspendedUntil", "version"],
+      "properties": {
+        "resourceId": {"type": "string", "minLength": 1},
+        "displayName": {"type": "string", "minLength": 1},
+        "providerKey": {"type": ["string", "null"]},
+        "resourceTier": {"type": "string", "enum": ["PROMOTIONAL", "FREE", "SUBSCRIPTION", "METERED", "OTHER"]},
+        "resourceSequence": {"type": "integer", "minimum": 0},
+        "state": {"type": "string", "enum": ["ACTIVE", "SUSPENDED", "DISABLED"]},
+        "transport": {"type": "string", "enum": ["LITELLM_MANAGED", "PROVIDER_NATIVE"]},
+        "modelBindings": {"type": "array", "items": {"$ref": "#/$defs/ResourceBinding"}},
+        "lastNormalizedFailure": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/ResourceFailure"}]},
+        "suspendedUntil": {"type": ["string", "null"]},
+        "version": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "SelectionAnalyticsRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key", "executions", "succeeded", "failed", "successRate", "totalTokens", "input", "output",
+        "cachedInput", "reasoningOutput", "calls", "successfulCalls", "failedCalls", "responseCacheHits",
+        "callSuccessRate", "promptCacheRate", "responseCacheHitRate", "costPerMillionTokens",
+        "avgSuccessfulLatencyMs", "costUsd", "durationMs"
+      ],
+      "properties": {
+        "key": {"type": "string", "minLength": 1},
+        "executions": {"type": "integer", "minimum": 0},
+        "succeeded": {"type": "integer", "minimum": 0},
+        "failed": {"type": "integer", "minimum": 0},
+        "successRate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "totalTokens": {"type": ["integer", "null"], "minimum": 0},
+        "input": {"type": ["integer", "null"], "minimum": 0},
+        "output": {"type": ["integer", "null"], "minimum": 0},
+        "cachedInput": {"type": ["integer", "null"], "minimum": 0},
+        "reasoningOutput": {"type": ["integer", "null"], "minimum": 0},
+        "calls": {"type": ["integer", "null"], "minimum": 0},
+        "successfulCalls": {"type": ["integer", "null"], "minimum": 0},
+        "failedCalls": {"type": ["integer", "null"], "minimum": 0},
+        "responseCacheHits": {"type": ["integer", "null"], "minimum": 0},
+        "callSuccessRate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "promptCacheRate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "responseCacheHitRate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+        "costPerMillionTokens": {"type": ["number", "null"], "minimum": 0},
+        "avgSuccessfulLatencyMs": {"type": ["number", "null"], "minimum": 0},
+        "costUsd": {"type": ["number", "null"], "minimum": 0},
+        "durationMs": {"type": "integer", "minimum": 0}
+      }
+    },
     "Execution": {
       "type": "object",
       "additionalProperties": false,
@@ -417,6 +562,17 @@
             "$ref": "#/$defs/RouteUsage"
           },
           "x-control-plane-source": "refs.upstream.routeUsage"
+        },
+        "resourceSelection": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ResourceSelection"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "x-control-plane-source": "resourceSelection"
         },
         "terminal": {
           "type": "boolean",
@@ -635,7 +791,10 @@
         "logicalModels",
         "providers",
         "providerModels",
-        "physicalModels"
+        "physicalModels",
+        "selectedModels",
+        "agents",
+        "resources"
       ],
       "properties": {
         "projects": {
@@ -673,6 +832,27 @@
           "items": {
             "$ref": "#/$defs/AnalyticsRow"
           }
+        },
+        "selectedModels": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectionAnalyticsRow"
+          },
+          "x-derived": "execution.resourceSelection.modelFamily"
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectionAnalyticsRow"
+          },
+          "x-derived": "execution.resourceSelection.agentBackend"
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectionAnalyticsRow"
+          },
+          "x-derived": "execution.resourceSelection.resourceId"
         }
       }
     },
@@ -806,6 +986,13 @@
         "attempt": {"type": ["integer", "null"], "minimum": 1},
         "backend": {"type": ["string", "null"]},
         "model": {"type": ["string", "null"]},
+        "resourceSelection": {
+          "oneOf": [
+            {"$ref": "#/$defs/ResourceSelection"},
+            {"type": "null"}
+          ],
+          "x-control-plane-source": "resourceSelection"
+        },
         "policyReasons": {"type": "array", "items": {"type": "string"}},
         "strongModel": {"type": "boolean"},
         "decisionReason": {

@@ -162,10 +162,17 @@ function AuditAttention(props) {
 
 function TimelineExecution(props) {
   const item = props.execution || {};
+  const selection = item.resourceSelection || null;
   const chips = [];
   if (item.attempt) chips.push(props.t.attempt + " " + item.attempt);
-  if (item.backend) chips.push(item.backend);
-  if (item.model) chips.push(item.model);
+  if (item.backend) chips.push(props.t.agent + ": " + item.backend);
+  if (item.model) chips.push(props.t.selectedModel + ": " + item.model);
+  if (selection) {
+    chips.push(props.t.selectedResource + ": " + selection.resourceId);
+    chips.push(props.t.tier + ": " + selection.resourceTier);
+    chips.push(props.t.sequence + ": " + selection.resourceSequence);
+    chips.push(props.t.transport + ": " + selection.transport);
+  }
   chips.push(duration(runningElapsed(item, props.now)));
   chips.push(compact(item.totalTokens || 0, props.locale) + " tok");
   chips.push(money(item.costUsd));

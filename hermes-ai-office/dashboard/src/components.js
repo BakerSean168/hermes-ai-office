@@ -1,9 +1,10 @@
 import { h } from './runtime.js';
-import { compact, dateTime, duration, money, routeLabel, runningElapsed } from './format.js';
+import { compact, dateTime, duration, money, routeLabel, runningElapsed, selectedAgent, selectedModel, selectedResource } from './format.js';
 
 function measuredTokens(item, locale, suffix) {
   const usage = item && item.usage;
-  if (!usage || Number(usage.calls || 0) <= 0) return '—';
+  const selection = item && item.resourceSelection;
+  if (!usage || Number(usage.calls || 0) <= 0 || (selection && selection.transport === 'PROVIDER_NATIVE' && Number(item.totalTokens || 0) <= 0)) return '—';
   return compact(item.totalTokens || 0, locale) + (suffix || '');
 }
 
@@ -66,7 +67,9 @@ export function ExecutionTable(props) {
           h('th', null, t.task),
           h('th', null, t.phase),
           h('th', null, t.status),
-          h('th', null, t.model),
+          h('th', null, t.selectedModel),
+          h('th', null, t.agent),
+          h('th', null, t.selectedResource),
           h('th', null, t.route),
           h('th', null, t.started),
           h('th', null, t.elapsed),
@@ -85,7 +88,9 @@ export function ExecutionTable(props) {
             h('td', null, h('div', { className: 'hao-objective' }, item.objective)),
             h('td', null, h('span', { className: 'hao-phase' }, item.phase)),
             h('td', null, h(Badge, { value: item.status })),
-            h('td', null, h('span', { className: 'hao-mono' }, item.logicalModel)),
+            h('td', null, h('span', { className: 'hao-mono' }, selectedModel(item))),
+            h('td', null, h('span', { className: 'hao-mono' }, selectedAgent(item))),
+            h('td', null, h('span', { className: 'hao-mono' }, selectedResource(item))),
             h('td', null, h('span', { className: 'hao-route' }, routeLabel(item))),
             h('td', { className: 'hao-muted' }, dateTime(item.startedAt, locale)),
             h('td', { className: 'hao-mono' }, duration(runningElapsed(item, now))),
@@ -119,10 +124,13 @@ export function RunningCards(props) {
         h(
           'div',
           { className: 'hao-running-route' },
-          item.logicalModel,
-          h('span', null, '→'),
-          routeLabel(item),
+          selectedModel(item),
+          h('span', null, ' · '),
+          selectedAgent(item),
+          h('span', null, ' · '),
+          selectedResource(item),
         ),
+        h('div', { className: 'hao-running-physical' }, props.t.route + ': ' + routeLabel(item)),
         h(
           'div',
           { className: 'hao-running-foot' },

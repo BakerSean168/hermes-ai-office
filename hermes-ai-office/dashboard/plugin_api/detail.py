@@ -5,6 +5,7 @@ from typing import Any, Dict, Mapping
 
 from .common import _number, _required_string, _usage
 from .config import DASHBOARD_SCHEMA_VERSION
+from .executions import _resource_selection
 from .plans import (
     _event_detail,
     _health_from_attention,
@@ -55,12 +56,13 @@ def _decision_reason(work_item_key: str, phase: str, strong_model: bool) -> str 
 
 def _timeline_execution(raw: Mapping[str, Any], plan: Mapping[str, Any], work_item_key: str) -> Dict[str, Any]:
     selection = raw.get("selection") if isinstance(raw.get("selection"), Mapping) else {}
+    resource_selection = _resource_selection(raw.get("resourceSelection"))
     timing = raw.get("timing") if isinstance(raw.get("timing"), Mapping) else {}
     error = raw.get("error") if isinstance(raw.get("error"), Mapping) else {}
     usage = _usage(raw.get("usage"))
     execution_id = _required_string(raw, "executionId", "plan.execution")
     phase = _required_string(raw, "phase", "plan.execution").upper()
-    model = str(selection.get("modelClass") or "") or None
+    model = (resource_selection or {}).get("modelFamily") or str(selection.get("modelClass") or "") or None
     strong_model = _is_strong_model(model)
     policy_reasons = [
         str(value) for value in selection.get("reasons", [])
@@ -68,12 +70,12 @@ def _timeline_execution(raw: Mapping[str, Any], plan: Mapping[str, Any], work_it
     ] if isinstance(selection.get("reasons"), list) else []
     detail = _event_detail(plan, execution_id=execution_id)
     attempt = detail.get("attempt") if isinstance(detail.get("attempt"), int) else None
-    return {
+    result = {
         "executionId": execution_id,
         "phase": phase,
         "status": _required_string(raw, "status", "plan.execution").upper(),
         "attempt": attempt,
-        "backend": str(selection.get("backend") or "") or None,
+        "backend": (resource_selection or {}).get("agentBackend") or str(selection.get("backend") or "") or None,
         "model": model,
         "policyReasons": policy_reasons,
         "strongModel": strong_model,
@@ -88,6 +90,9 @@ def _timeline_execution(raw: Mapping[str, Any], plan: Mapping[str, Any], work_it
         "errorDetail": str(error.get("detail") or "") or None,
         "verdict": _review_verdict(raw),
     }
+    if resource_selection is not None:
+        result["resourceSelection"] = resource_selection
+    return result
 
 
 _TIMELINE_BATCH_EVENT_PREFIXES = (

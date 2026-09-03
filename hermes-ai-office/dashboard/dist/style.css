@@ -258,6 +258,28 @@
 .hao-health-priority-p3 { color: var(--hao-muted); }
 .hao-plan-health-issue { display: flex; align-items: flex-start; gap: 7px; }
 
+/* Deterministic resource directory */
+.hao-resource-table-wrap { max-height: 72vh; }
+.hao-resource-table td { vertical-align: top; }
+.hao-resource-name, .hao-resource-id, .hao-resource-table td > small { display: block; }
+.hao-resource-name { color: var(--hao-text); font-size: 11px; }
+.hao-resource-id { margin-top: 3px; color: var(--hao-muted); font-size: 9px; }
+.hao-resource-bindings { display: grid; gap: 5px; min-width: 230px; }
+.hao-resource-binding { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; color: var(--hao-text); font-size: 9.5px; }
+.hao-resource-failure { display: grid; gap: 3px; min-width: 180px; max-width: 270px; white-space: normal; overflow-wrap: anywhere; }
+.hao-resource-failure strong { color: var(--hao-warn); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; }
+.hao-resource-failure span, .hao-resource-until { color: var(--hao-muted); font-size: 9px; }
+.hao-resource-actions { display: flex; flex-wrap: wrap; gap: 5px; min-width: 210px; }
+.hao-resource-actions .hao-button { min-height: 28px; padding: 5px 8px; font-size: 10px; }
+.hao-badge-active { color: var(--hao-good); border-color: var(--hao-good); background: var(--hao-good-soft); }
+.hao-badge-suspended { color: var(--hao-warn); border-color: var(--hao-warn); background: var(--hao-warn-soft); }
+.hao-badge-disabled { color: var(--hao-bad); border-color: var(--hao-bad); background: var(--hao-bad-soft); }
+.hao-running-physical { margin-top: 5px; color: var(--hao-muted); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 720px) {
+  .hao-resource-actions { min-width: 180px; }
+  .hao-resource-bindings { min-width: 180px; }
+}
+
 /* Fixed plan portfolio cards and explicit actions */
 .hao-plan-card { height: 270px; min-height: 270px; display: flex; flex-direction: column; }
 .hao-plan-card > h3 { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; max-height: 5.6em; overflow: hidden; }

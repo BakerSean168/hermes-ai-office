@@ -59,7 +59,7 @@ class DashboardTest(unittest.TestCase):
         package = ROOT / "dashboard" / "plugin_api"
         self.assertEqual(
             {path.name for path in package.glob("*.py")},
-            {"__init__.py", "assembly.py", "common.py", "config.py", "detail.py", "executions.py", "plans.py", "transport.py"},
+            {"__init__.py", "assembly.py", "common.py", "config.py", "detail.py", "executions.py", "plans.py", "resources.py", "transport.py"},
         )
         facade = (package / "__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("def _plan_audit(", facade)
@@ -68,7 +68,7 @@ class DashboardTest(unittest.TestCase):
 
     def test_dashboard_exposes_read_projections_and_one_explicit_plan_action(self) -> None:
         paths = {route.path for route in api.router.routes}
-        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/plans/{plan_id}", "/plans/{plan_id}/resume-from-handoff", "/plans/{plan_id}/sync-and-continue"})
+        self.assertEqual(paths, {"/health", "/dashboard", "/model-registry", "/resources", "/resources/{resource_id}/state", "/plans/{plan_id}", "/plans/{plan_id}/resume-from-handoff", "/plans/{plan_id}/sync-and-continue"})
         source = API_PATH.read_text(encoding="utf-8")
         for forbidden in ("/api/v2/", "workforce", "employee", "provider-connections", "runtime-policy"):
             self.assertNotIn(forbidden, source.lower())
@@ -154,6 +154,215 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(row["route"]["providerKey"], "teamorouter")
         self.assertEqual(row["routeUsage"][0]["commercialType"], "METERED")
         self.assertEqual(row["durationMs"], 60000)
+
+    def test_new_execution_keeps_static_selection_separate_from_physical_route_telemetry(self) -> None:
+        selection = {
+            "capability": "IMPLEMENTATION",
+            "modelFamily": "deepseek-v4-flash",
+            "agentBackend": "dsh-acp",
+            "transport": "LITELLM_MANAGED",
+            "resourceId": "community-relay-a",
+            "resourceTier": "FREE",
+            "resourceSequence": 101,
+            "resourceState": "ACTIVE",
+            "routeModel": "openai/deepseek-v4-flash",
+            "deploymentId": "dep-deepseek-a",
+            "protocol": "openai-chat-completions",
+            "selectionReason": "STATIC_POLICY",
+            "apiKey": "must-not-cross-the-dashboard-boundary",
+        }
+        row = api._execution(
+            {
+                "executionId": "exec-v4-selection",
+                "projectKey": "project-a",
+                "objectiveSummary": "Use deterministic resource routing",
+                "phase": "IMPLEMENT",
+                "status": "SUCCEEDED",
+                "selection": {
+                    "modelClass": "implementation-efficient",
+                    "backend": "openhands-builtin",
+                    "workspaceMode": "isolated_workspace",
+                },
+                "resourceSelection": selection,
+                "timing": {"durationMs": 1000},
+                "usage": {"input": 10, "output": 2, "calls": 1},
+                "refs": {
+                    "upstream": {
+                        "routeUsage": [{
+                            "deploymentId": "dep-deepseek-a",
+                            "providerKey": "community-relay-a",
+                            "model": "openai/deepseek-v4-flash",
+                            "input": 10,
+                            "output": 2,
+                            "calls": 1,
+                        }],
+                    }
+                },
+            },
+            {},
+        )
+        self.assertEqual(row["logicalModel"], "implementation-efficient")
+        self.assertEqual(row["backend"], "openhands-builtin")
+        self.assertEqual(row["resourceSelection"]["modelFamily"], "deepseek-v4-flash")
+        self.assertEqual(row["resourceSelection"]["agentBackend"], "dsh-acp")
+        self.assertEqual(row["resourceSelection"]["resourceSequence"], 101)
+        self.assertNotIn("apiKey", row["resourceSelection"])
+        self.assertEqual(row["route"]["providerKey"], "community-relay-a")
+        self.assertEqual(row["route"]["physicalModel"], "openai/deepseek-v4-flash")
+
+    def test_resource_projection_is_sanitized_and_preserves_native_bindings(self) -> None:
+        row = api._resource({
+            "resourceId": "chatgpt-business-primary",
+            "displayName": "ChatGPT Business",
+            "providerKey": "chatgpt-business",
+            "resourceTier": "SUBSCRIPTION",
+            "resourceSequence": 120,
+            "state": "ACTIVE",
+            "transport": "PROVIDER_NATIVE",
+            "version": 4,
+            "bindings": [{
+                "modelFamily": "gpt-5.6-sol",
+                "capability": "REASONING",
+                "backend": "codex-business-worker-headless",
+                "protocol": "responses",
+                "enabled": True,
+            }],
+            "lastNormalizedFailure": {
+                "reasonClass": "AUTH_REJECTED",
+                "sanitizedReason": "authorization=sk-test-secret rejected",
+                "changedAt": "2026-09-03T00:00:00Z",
+                "source": "execution",
+            },
+            "apiKey": "never-display",
+            "baseUrl": "https://secret.example.invalid",
+            "credential": "credential-secret",
+        })
+        self.assertEqual(set(row), set(CONTRACT["$defs"]["Resource"]["properties"]))
+        self.assertEqual(row["transport"], "PROVIDER_NATIVE")
+        self.assertEqual(row["resourceSequence"], 120)
+        self.assertEqual(row["modelBindings"][0]["agentBackend"], "codex-business-worker-headless")
+        self.assertIn("[REDACTED]", row["lastNormalizedFailure"]["sanitizedReason"])
+        serialized = json.dumps(row)
+        for secret in ("never-display", "secret.example.invalid", "credential-secret"):
+            self.assertNotIn(secret, serialized)
+
+    def test_selection_analytics_has_independent_dimensions_and_native_unknown_usage(self) -> None:
+        managed = {
+            "executionId": "managed-exec",
+            "projectKey": "project-a",
+            "phase": "IMPLEMENT",
+            "status": "SUCCEEDED",
+            "logicalModel": "implementation-efficient",
+            "durationMs": 1000,
+            "usage": {"input": 100, "output": 20, "calls": 2, "costUsd": 0.01},
+            "routeUsage": [{
+                "providerKey": "relay-a",
+                "physicalModel": "openai/deepseek-v4-flash",
+                "input": 100,
+                "output": 20,
+                "calls": 2,
+                "costUsd": 0.01,
+            }],
+            "resourceSelection": {
+                "capability": "IMPLEMENTATION", "modelFamily": "deepseek-v4-flash", "agentBackend": "dsh-acp",
+                "transport": "LITELLM_MANAGED", "resourceId": "relay-resource-a", "resourceTier": "FREE",
+                "resourceSequence": 101, "resourceState": "ACTIVE", "selectionReason": "STATIC_POLICY",
+            },
+        }
+        native = {
+            "executionId": "native-exec",
+            "projectKey": "project-a",
+            "phase": "VERIFY_REVIEW",
+            "status": "SUCCEEDED",
+            "logicalModel": "review-premium",
+            "durationMs": 2000,
+            "usage": {"input": 0, "output": 0, "calls": 0, "costUsd": 0},
+            "routeUsage": [],
+            "resourceSelection": {
+                "capability": "REASONING", "modelFamily": "gpt-5.6-sol", "agentBackend": "codex-business-headless",
+                "transport": "PROVIDER_NATIVE", "resourceId": "chatgpt-business-primary", "resourceTier": "SUBSCRIPTION",
+                "resourceSequence": 120, "resourceState": "ACTIVE", "selectionReason": "STATIC_POLICY",
+            },
+        }
+        result = api._analytics([managed, native])
+        self.assertEqual({row["key"] for row in result["selectedModels"]}, {"deepseek-v4-flash", "gpt-5.6-sol"})
+        agents = {row["key"]: row for row in result["agents"]}
+        self.assertEqual(agents["dsh-acp"]["totalTokens"], 120)
+        resources = {row["key"]: row for row in result["resources"]}
+        self.assertIsNone(resources["chatgpt-business-primary"]["totalTokens"])
+        self.assertIsNone(resources["chatgpt-business-primary"]["calls"])
+        self.assertIsNone(resources["chatgpt-business-primary"]["costUsd"])
+        self.assertNotIn("chatgpt-business-primary", {row["key"] for row in result["providers"]})
+        self.assertEqual(result["providers"][0]["key"], "relay-a")
+
+    def test_plan_timeline_projects_new_selection_provenance_and_legacy_model_fallback(self) -> None:
+        value = api._timeline_execution(
+            {
+                "executionId": "timeline-selection",
+                "phase": "VERIFY_REVIEW",
+                "status": "SUCCEEDED",
+                "selection": {"backend": "openhands-builtin", "modelClass": "review-premium"},
+                "resourceSelection": {
+                    "capability": "REASONING",
+                    "modelFamily": "claude-opus-5",
+                    "agentBackend": "claude-code-acp",
+                    "transport": "PROVIDER_NATIVE",
+                    "resourceId": "claude-subscription",
+                    "resourceTier": "SUBSCRIPTION",
+                    "resourceSequence": 130,
+                    "resourceState": "ACTIVE",
+                    "selectionReason": "STATIC_POLICY",
+                },
+                "usage": {},
+            },
+            {"events": []},
+            "TASK-1",
+        )
+        self.assertEqual(value["model"], "claude-opus-5")
+        self.assertEqual(value["backend"], "claude-code-acp")
+        self.assertEqual(value["resourceSelection"]["resourceId"], "claude-subscription")
+        self.assertEqual(set(value), set(CONTRACT["$defs"]["PlanTimelineExecution"]["properties"]))
+
+    def test_resource_state_endpoint_forwards_only_safe_cas_payload(self) -> None:
+        with mock.patch.object(api, "_post_json", return_value={"resourceId": "resource/a", "state": "SUSPENDED"}) as post:
+            result = asyncio.run(api.resource_state(
+                "resource/a",
+                {
+                    "state": "suspended",
+                    "reason": "operator maintenance",
+                    "suspendedUntil": "2026-09-04T00:00:00Z",
+                    "expectedVersion": 7,
+                    "apiKey": "must-not-forward",
+                },
+            ))
+        self.assertEqual(result["state"], "SUSPENDED")
+        post.assert_called_once_with(
+            "/api/v4/resources/resource%2Fa/state",
+            {
+                "state": "SUSPENDED",
+                "reason": "operator maintenance",
+                "suspendedUntil": "2026-09-04T00:00:00Z",
+                "expectedVersion": 7,
+            },
+            timeout=12.0,
+        )
+
+    def test_resource_list_endpoint_projects_control_plane_items_with_dashboard_version(self) -> None:
+        payload = {
+            "items": [{
+                "resourceId": "relay-a",
+                "resourceTier": "FREE",
+                "resourceSequence": 101,
+                "state": "ACTIVE",
+                "transport": "LITELLM_MANAGED",
+                "modelBindings": [{"modelFamily": "deepseek-v4-flash"}],
+            }]
+        }
+        with mock.patch.object(api, "_fetch_json", return_value=payload) as fetch:
+            result = asyncio.run(api.resource_list())
+        self.assertEqual(result["schemaVersion"], CONTRACT["properties"]["schemaVersion"]["const"])
+        self.assertEqual(result["items"][0]["resourceId"], "relay-a")
+        fetch.assert_called_once_with("/api/v4/resources")
 
     def test_analytics_uses_route_level_cost_for_provider_totals(self) -> None:
         executions = [
@@ -274,7 +483,7 @@ class DashboardTest(unittest.TestCase):
         self.assertNotIn("hydrate", paths[0])
 
     def test_dashboard_cold_refresh_reads_independent_v4_sources_concurrently(self) -> None:
-        barrier = threading.Barrier(3, timeout=2)
+        barrier = threading.Barrier(4, timeout=2)
         paths: list[str] = []
         lock = threading.Lock()
 
@@ -296,6 +505,8 @@ class DashboardTest(unittest.TestCase):
                 }
             if "/api/v4/plans?" in path or "/api/v4/executions?" in path:
                 return {"items": []}
+            if path == "/api/v4/resources":
+                return {"items": []}
             raise AssertionError(path)
 
         old_cache = api._assembly._CACHE
@@ -304,7 +515,7 @@ class DashboardTest(unittest.TestCase):
             with mock.patch.object(api, "_fetch_json", side_effect=fetch):
                 value = api._build_dashboard(1)
             self.assertEqual(value["schemaVersion"], CONTRACT["properties"]["schemaVersion"]["const"])
-            self.assertEqual(len(paths), 3)
+            self.assertEqual(len(paths), 4)
             self.assertEqual(barrier.n_waiting, 0)
         finally:
             api._assembly._CACHE = old_cache
@@ -327,6 +538,8 @@ class DashboardTest(unittest.TestCase):
                     },
                 }
             if "/api/v4/plans?" in path or "/api/v4/executions?" in path:
+                return {"items": []}
+            if path == "/api/v4/resources":
                 return {"items": []}
             raise AssertionError(path)
 
@@ -645,16 +858,20 @@ class DashboardTest(unittest.TestCase):
             },
             catalog,
         )
-        self.assertEqual(set(execution), set(CONTRACT["$defs"]["Execution"]["properties"]))
+        self.assertEqual(
+            set(execution),
+            set(CONTRACT["$defs"]["Execution"]["properties"]) - {"resourceSelection"},
+        )
         self.assertEqual(set(execution["usage"]), set(CONTRACT["$defs"]["Usage"]["properties"]))
         self.assertEqual(set(execution["route"]), set(CONTRACT["$defs"]["Route"]["properties"]))
         self.assertEqual(set(execution["routeUsage"][0]), set(CONTRACT["$defs"]["RouteUsage"]["properties"]))
         self.assertEqual(set(api._summary([execution])), set(CONTRACT["$defs"]["Summary"]["properties"]))
         analytics = api._analytics([execution])
         self.assertEqual(set(analytics), set(CONTRACT["$defs"]["Analytics"]["properties"]))
-        for rows in analytics.values():
+        for group_name, rows in analytics.items():
             for row in rows:
-                self.assertEqual(set(row), set(CONTRACT["$defs"]["AnalyticsRow"]["properties"]))
+                row_def = "SelectionAnalyticsRow" if group_name in {"selectedModels", "agents", "resources"} else "AnalyticsRow"
+                self.assertEqual(set(row), set(CONTRACT["$defs"][row_def]["properties"]))
 
     def test_control_plane_projection_is_strict_not_alias_based(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "projectKey"):
@@ -802,7 +1019,10 @@ class DashboardTest(unittest.TestCase):
         self.assertFalse(batch["system"])
         self.assertEqual(len(batch["workItems"]), 2)
         failed = batch["workItems"][0]["executions"][0]
-        self.assertEqual(set(failed), set(CONTRACT["$defs"]["PlanTimelineExecution"]["properties"]))
+        self.assertEqual(
+            set(failed),
+            set(CONTRACT["$defs"]["PlanTimelineExecution"]["properties"]) - {"resourceSelection"},
+        )
         self.assertEqual(failed["attempt"], 2)
         self.assertEqual(failed["backend"], "opencode-acp")
         self.assertEqual(failed["model"], "implementation-efficient")
@@ -976,6 +1196,13 @@ class DashboardTest(unittest.TestCase):
         self.assertIn("hao-plan-details-button", source)
         self.assertIn("projectStats", source)
         self.assertIn("portfolioHealthRank", source)
+        self.assertIn("function ResourcePage", source)
+        self.assertIn('setView("resources")', source)
+        self.assertIn('api("/resources/" + encodeURIComponent(resourceId) + "/state"', source)
+        self.assertIn("resourceDirectory", source)
+        self.assertIn("providerNative", source)
+        self.assertIn("hao-resource-table", styles)
+        self.assertIn("hao-resource-actions", styles)
         self.assertNotIn('h("span", null, t.readiness)', source)
         self.assertIn("height: 270px", styles)
 
@@ -1002,7 +1229,7 @@ class DashboardTest(unittest.TestCase):
         source_dir = ROOT / "dashboard" / "src"
         self.assertEqual(
             {path.name for path in source_dir.glob("*.js")},
-            {"analytics.js", "app.js", "components.js", "format.js", "i18n.js", "index.js", "overview.js", "plan-detail.js", "runtime.js"},
+            {"analytics.js", "app.js", "components.js", "format.js", "i18n.js", "index.js", "overview.js", "plan-detail.js", "resources.js", "runtime.js"},
         )
         self.assertLessEqual(max(len(path.read_text(encoding="utf-8").splitlines()) for path in source_dir.glob("*.js")), 400)
         build_script = (ROOT / "scripts" / "build-dashboard.mjs").read_text(encoding="utf-8")
@@ -1011,10 +1238,11 @@ class DashboardTest(unittest.TestCase):
         dist = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('registry.register("hermes-ai-office", App)', dist)
 
-    def test_frontend_is_two_view_execution_console(self) -> None:
+    def test_frontend_is_three_view_execution_console(self) -> None:
         source = (ROOT / "dashboard" / "dist" / "index.js").read_text(encoding="utf-8")
         self.assertIn('setView("overview")', source)
         self.assertIn('setView("analytics")', source)
+        self.assertIn('setView("resources")', source)
         self.assertIn('className: "hao-toolbar"', source)
         self.assertNotIn("HERMES · EXECUTION CONTROL PLANE", source)
         self.assertNotIn('h("h1"', source)

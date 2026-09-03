@@ -175,6 +175,8 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
     latest = _latest_execution(item)
     selection = (latest or {}).get("selection")
     selection = selection if isinstance(selection, Mapping) else {}
+    resource_selection = (latest or {}).get("resourceSelection")
+    resource_selection = resource_selection if isinstance(resource_selection, Mapping) else {}
     timing = (latest or {}).get("timing")
     timing = timing if isinstance(timing, Mapping) else {}
     execution_id = (latest or {}).get("executionId")
@@ -208,8 +210,8 @@ def _current_activity(raw: Mapping[str, Any], current: Mapping[str, Any] | None)
         "workItemKey": item.get("key"),
         "workItemTitle": item.get("title"),
         "attempt": attempt,
-        "backend": selection.get("backend"),
-        "model": selection.get("modelClass"),
+        "backend": resource_selection.get("agentBackend") or selection.get("backend"),
+        "model": resource_selection.get("modelFamily") or selection.get("modelClass"),
         "reason": reason,
         "revision": revision,
         "executionId": execution_id,

@@ -7,8 +7,9 @@ import urllib.parse
 from typing import Any, Callable, Dict, Mapping
 
 from . import config
-from .executions import _analytics, _execution, _route_catalog, _summary
+from .executions import _analytics, _execution, _resource_selection, _route_catalog, _summary
 from .plans import _plans
+from .resources import resources as _resources
 
 FetchJson = Callable[..., Dict[str, Any]]
 
@@ -46,7 +47,7 @@ def _v4_execution(
         item for item in telemetry.get("routeUsage", [])
         if isinstance(item, Mapping)
     ] if isinstance(telemetry.get("routeUsage"), list) else []
-    return {
+    result = {
         "executionId": execution_id,
         "projectKey": project_keys.get(plan_id, plan_id),
         "objectiveSummary": str(raw.get("objective") or execution_id),
@@ -71,6 +72,10 @@ def _v4_execution(
         "previousExecutionId": identity.get("parentExecutionId"),
         "createdAt": created_at,
     }
+    resource_selection = _resource_selection(raw.get("resourceSelection"))
+    if resource_selection is not None:
+        result["resourceSelection"] = resource_selection
+    return result
 
 
 def _v4_plan(
@@ -216,15 +221,17 @@ def build_dashboard(limit: int, fetch_json: FetchJson) -> Dict[str, Any]:
         hit = cached()
         if hit is not None:
             return hit
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             health_future = pool.submit(fetch_json, "/api/health")
             plans_future = pool.submit(
                 fetch_json, "/api/v4/plans?limit=100&view=summary"
             )
             executions_future = pool.submit(fetch_all_executions, limit, fetch_json)
+            resources_future = pool.submit(fetch_json, "/api/v4/resources")
             health = health_future.result()
             raw_plan_payload = plans_future.result()
             raw_executions = executions_future.result()
+            resource_payload = resources_future.result()
 
         raw_aggregates = [
             item
@@ -237,6 +244,7 @@ def build_dashboard(limit: int, fetch_json: FetchJson) -> Dict[str, Any]:
             if isinstance(item.get("plan"), Mapping)
         }
         runtime, readiness, registry = _health_views(health)
+        resource_rows = _resources(resource_payload)
         plan_payload = {
             "items": [_v4_plan(item, project_keys) for item in raw_aggregates]
         }
@@ -260,6 +268,7 @@ def build_dashboard(limit: int, fetch_json: FetchJson) -> Dict[str, Any]:
             "runtime": runtime,
             "readiness": readiness,
             "registry": registry,
+            "resources": resource_rows,
         }
         with _CACHE_LOCK:
             _CACHE = (time.monotonic(), limit, result)

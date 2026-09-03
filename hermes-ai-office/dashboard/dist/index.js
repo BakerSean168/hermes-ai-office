@@ -5,6 +5,7 @@
     en: {
       overview: "Overview",
       analytics: "Analytics",
+      resources: "Resources",
       active: "Active now",
       spend: "Total spend",
       tokens: "Total tokens",
@@ -18,8 +19,11 @@
       task: "Task",
       phase: "Phase",
       status: "Status",
-      model: "Logical model",
-      route: "Provider / physical model",
+      model: "Legacy logical model",
+      selectedModel: "Selected model",
+      agent: "Agent",
+      selectedResource: "Selected resource",
+      route: "LiteLLM provider / physical model",
       started: "Started",
       elapsed: "Elapsed",
       cost: "Cost",
@@ -32,6 +36,31 @@
       readiness: "Readiness",
       plans: "Development plans",
       providers: "LiteLLM registry",
+      resourceDirectory: "Deterministic resource directory",
+      resourceDirectoryHelp: "Static policy selection is separate from physical LiteLLM provider telemetry. Resource IDs and state are safe, sanitized routing metadata.",
+      resource: "Resource",
+      tier: "Tier",
+      sequence: "Sequence",
+      state: "State",
+      transport: "Transport",
+      modelBindings: "Model bindings",
+      lastFailure: "Last normalized failure",
+      actions: "Actions",
+      enable: "Enable",
+      disable: "Disable",
+      suspend: "Suspend 24h",
+      until: "until",
+      noResources: "No resources are registered",
+      selectedModels: "Selected models",
+      agents: "Agents",
+      selectedResources: "Selected resources",
+      tierPromotional: "Promotional",
+      tierFree: "Free / sponsored",
+      tierSubscription: "Subscription",
+      tierMetered: "Metered",
+      tierOther: "Other",
+      providerNative: "Provider-native",
+      litellmManaged: "LiteLLM-managed",
       admin: "Open LiteLLM Admin",
       groupProject: "Projects",
       groupLogical: "Logical models",
@@ -125,6 +154,7 @@
     zh: {
       overview: "总览",
       analytics: "统计",
+      resources: "资源",
       active: "正在执行",
       spend: "历史总花费",
       tokens: "历史总 Token",
@@ -138,8 +168,11 @@
       task: "任务",
       phase: "阶段",
       status: "状态",
-      model: "逻辑模型",
-      route: "渠道 / 物理模型",
+      model: "历史逻辑模型",
+      selectedModel: "已选模型",
+      agent: "Agent",
+      selectedResource: "已选资源",
+      route: "LiteLLM 渠道 / 物理模型",
       started: "开始时间",
       elapsed: "耗时",
       cost: "花费",
@@ -152,6 +185,31 @@
       readiness: "晋级证据",
       plans: "项目计划",
       providers: "LiteLLM 供应池",
+      resourceDirectory: "确定性资源目录",
+      resourceDirectoryHelp: "静态策略选择与物理 LiteLLM 渠道遥测分开显示。资源 ID 与状态均为安全的脱敏路由元数据。",
+      resource: "资源",
+      tier: "层级",
+      sequence: "序号",
+      state: "状态",
+      transport: "传输",
+      modelBindings: "模型绑定",
+      lastFailure: "最近一次规范化失败",
+      actions: "操作",
+      enable: "启用",
+      disable: "禁用",
+      suspend: "暂停 24 小时",
+      until: "截至",
+      noResources: "尚未注册资源",
+      selectedModels: "已选模型",
+      agents: "Agent",
+      selectedResources: "已选资源",
+      tierPromotional: "促销",
+      tierFree: "免费 / 赞助",
+      tierSubscription: "订阅",
+      tierMetered: "按量计费",
+      tierOther: "其他",
+      providerNative: "Provider 原生",
+      litellmManaged: "LiteLLM 管理",
       admin: "打开 LiteLLM Admin",
       groupProject: "按项目",
       groupLogical: "按逻辑模型",
@@ -252,7 +310,7 @@
   var h = React ? React.createElement : null;
   var fetchJSON = runtimeReady ? SDK.fetchJSON : null;
   var API_ROOT = "/api/plugins/hermes-ai-office";
-  var DASHBOARD_SCHEMA_VERSION = 8;
+  var DASHBOARD_SCHEMA_VERSION = 9;
   function useLocale() {
     const hook = SDK && SDK.useI18n;
     if (hook) {
@@ -381,6 +439,18 @@
     if (!route) return "—";
     return route.providerKey + " · " + route.physicalModel;
   }
+  function selectedModel(item) {
+    const selection = item && item.resourceSelection;
+    return selection && selection.modelFamily || item && item.logicalModel || "—";
+  }
+  function selectedAgent(item) {
+    const selection = item && item.resourceSelection;
+    return selection && selection.agentBackend || item && item.backend || "—";
+  }
+  function selectedResource(item) {
+    const selection = item && item.resourceSelection;
+    return selection && selection.resourceId || "—";
+  }
   function activityLabel(kind, t) {
     const labels = {
       IMPLEMENTATION: t.activityImplementation,
@@ -408,7 +478,8 @@
   // dashboard/src/components.js
   function measuredTokens(item, locale, suffix) {
     const usage = item && item.usage;
-    if (!usage || Number(usage.calls || 0) <= 0) return "—";
+    const selection = item && item.resourceSelection;
+    if (!usage || Number(usage.calls || 0) <= 0 || selection && selection.transport === "PROVIDER_NATIVE" && Number(item.totalTokens || 0) <= 0) return "—";
     return compact(item.totalTokens || 0, locale) + (suffix || "");
   }
   function Badge(props) {
@@ -467,7 +538,9 @@
             h("th", null, t.task),
             h("th", null, t.phase),
             h("th", null, t.status),
-            h("th", null, t.model),
+            h("th", null, t.selectedModel),
+            h("th", null, t.agent),
+            h("th", null, t.selectedResource),
             h("th", null, t.route),
             h("th", null, t.started),
             h("th", null, t.elapsed),
@@ -486,7 +559,9 @@
               h("td", null, h("div", { className: "hao-objective" }, item.objective)),
               h("td", null, h("span", { className: "hao-phase" }, item.phase)),
               h("td", null, h(Badge, { value: item.status })),
-              h("td", null, h("span", { className: "hao-mono" }, item.logicalModel)),
+              h("td", null, h("span", { className: "hao-mono" }, selectedModel(item))),
+              h("td", null, h("span", { className: "hao-mono" }, selectedAgent(item))),
+              h("td", null, h("span", { className: "hao-mono" }, selectedResource(item))),
               h("td", null, h("span", { className: "hao-route" }, routeLabel(item))),
               h("td", { className: "hao-muted" }, dateTime(item.startedAt, locale)),
               h("td", { className: "hao-mono" }, duration(runningElapsed(item, now))),
@@ -519,10 +594,13 @@
           h(
             "div",
             { className: "hao-running-route" },
-            item.logicalModel,
-            h("span", null, "→"),
-            routeLabel(item)
+            selectedModel(item),
+            h("span", null, " · "),
+            selectedAgent(item),
+            h("span", null, " · "),
+            selectedResource(item)
           ),
+          h("div", { className: "hao-running-physical" }, props.t.route + ": " + routeLabel(item)),
           h(
             "div",
             { className: "hao-running-foot" },
@@ -623,7 +701,7 @@
               h(
                 "td",
                 { className: "hao-right hao-mono", key: "tokens" },
-                compact(row.totalTokens, props.locale)
+                row.totalTokens == null ? "—" : compact(row.totalTokens, props.locale)
               ),
               h(
                 "td",
@@ -640,7 +718,7 @@
                 { className: "hao-right hao-mono", key: "calls" },
                 compact(row.calls, props.locale)
               ),
-              h("td", { className: "hao-right hao-mono", key: "cost" }, money(row.costUsd))
+              h("td", { className: "hao-right hao-mono", key: "cost" }, row.costUsd == null ? "—" : money(row.costUsd))
             ] : [
               h(
                 "td",
@@ -650,19 +728,19 @@
               h(
                 "td",
                 { className: "hao-right hao-mono", key: "tokens" },
-                compact(row.totalTokens, props.locale)
+                row.totalTokens == null ? "—" : compact(row.totalTokens, props.locale)
               ),
               h(
                 "td",
                 { className: "hao-right hao-mono", key: "calls" },
-                compact(row.calls, props.locale)
+                row.calls == null ? "—" : compact(row.calls, props.locale)
               ),
               h(
                 "td",
                 { className: "hao-right hao-mono", key: "duration" },
                 row.durationMs ? duration(row.durationMs) : "—"
               ),
-              h("td", { className: "hao-right hao-mono", key: "cost" }, money(row.costUsd))
+              h("td", { className: "hao-right hao-mono", key: "cost" }, row.costUsd == null ? "—" : money(row.costUsd))
             ];
             return h("tr", { key: row.key }, common.concat(metrics));
           })
@@ -680,12 +758,16 @@
       ["logicalModels", t.groupLogical],
       ["physicalModels", t.groupPhysical],
       ["projects", t.groupProject],
-      ["phases", t.groupPhase]
+      ["phases", t.groupPhase],
+      ["selectedModels", t.selectedModels],
+      ["agents", t.agents],
+      ["resources", t.selectedResources]
     ];
     const [group, setGroup] = React.useState("providers");
     const selected = groups.find(function(item) {
       return item[0] === group;
     }) || groups[0];
+    const selectionMode = ["selectedModels", "agents", "resources"].includes(selected[0]);
     return h(
       React.Fragment,
       null,
@@ -717,7 +799,7 @@
           t,
           locale: props.locale
         }),
-        selected[0] === "providers" || selected[0] === "providerModels" ? h("p", { className: "hao-muted" }, providerLabels.note) : null
+        selected[0] === "providers" || selected[0] === "providerModels" ? h("p", { className: "hao-muted" }, providerLabels.note) : selectionMode ? h("p", { className: "hao-muted" }, props.locale === "zh" ? "这些统计来自执行时的静态选择；物理 LiteLLM 渠道遥测仍在渠道视图中单独统计。Provider 原生资源没有可用 Token 时显示为 —。" : "These aggregates come from static execution selection; physical LiteLLM telemetry remains separate in provider views. Provider-native resources show — when token data is unavailable.") : null
       ),
       h(
         "section",
@@ -940,10 +1022,17 @@
   }
   function TimelineExecution(props) {
     const item = props.execution || {};
+    const selection = item.resourceSelection || null;
     const chips = [];
     if (item.attempt) chips.push(props.t.attempt + " " + item.attempt);
-    if (item.backend) chips.push(item.backend);
-    if (item.model) chips.push(item.model);
+    if (item.backend) chips.push(props.t.agent + ": " + item.backend);
+    if (item.model) chips.push(props.t.selectedModel + ": " + item.model);
+    if (selection) {
+      chips.push(props.t.selectedResource + ": " + selection.resourceId);
+      chips.push(props.t.tier + ": " + selection.resourceTier);
+      chips.push(props.t.sequence + ": " + selection.resourceSequence);
+      chips.push(props.t.transport + ": " + selection.transport);
+    }
     chips.push(duration(runningElapsed(item, props.now)));
     chips.push(compact(item.totalTokens || 0, props.locale) + " tok");
     chips.push(money(item.costUsd));
@@ -1289,7 +1378,7 @@
     const query = search.trim().toLowerCase();
     const history = (data.history || []).filter(function(item) {
       if (!query) return true;
-      return [item.projectKey, item.objective, item.phase, item.status, item.logicalModel, routeLabel(item)].join(" ").toLowerCase().includes(query);
+      return [item.projectKey, item.objective, item.phase, item.status, selectedModel(item), selectedAgent(item), selectedResource(item), routeLabel(item)].join(" ").toLowerCase().includes(query);
     });
     return h(
       React.Fragment,
@@ -1333,6 +1422,140 @@
     );
   }
 
+  // dashboard/src/resources.js
+  function tierLabel(value, t) {
+    const labels = {
+      PROMOTIONAL: t.tierPromotional,
+      FREE: t.tierFree,
+      SUBSCRIPTION: t.tierSubscription,
+      METERED: t.tierMetered,
+      OTHER: t.tierOther
+    };
+    return labels[String(value || "").toUpperCase()] || String(value || "—");
+  }
+  function transportLabel(value, t) {
+    return String(value || "").toUpperCase() === "PROVIDER_NATIVE" ? t.providerNative : t.litellmManaged;
+  }
+  function BindingList(props) {
+    const bindings = props.bindings || [];
+    if (!bindings.length) return h("span", { className: "hao-muted" }, "—");
+    return h("div", { className: "hao-resource-bindings" }, bindings.map(function(binding, index) {
+      const parts = [binding.modelFamily];
+      if (binding.capability) parts.push(binding.capability);
+      if (binding.agentBackend) parts.push(binding.agentBackend);
+      if (binding.protocol) parts.push(binding.protocol);
+      return h(
+        "div",
+        { className: "hao-resource-binding", key: binding.modelFamily + index },
+        h("span", { className: "hao-mono" }, parts.join(" · ")),
+        binding.enabled === false ? h(Badge, { value: "DISABLED" }) : null
+      );
+    }));
+  }
+  function Failure(props) {
+    const failure = props.failure;
+    if (!failure) return h("span", { className: "hao-muted" }, "—");
+    return h(
+      "div",
+      { className: "hao-resource-failure" },
+      h("strong", null, failure.reasonClass || "UNKNOWN_PROVIDER_FAILURE"),
+      failure.sanitizedReason ? h("span", null, failure.sanitizedReason) : null,
+      failure.changedAt ? h("small", null, dateTime(failure.changedAt, props.locale)) : null
+    );
+  }
+  function ResourceActions(props) {
+    const resource = props.resource;
+    const state = String(resource.state || "").toUpperCase();
+    const busy = Boolean(props.pending);
+    function action(nextState) {
+      props.onState(resource, nextState);
+    }
+    return h(
+      "div",
+      { className: "hao-resource-actions" },
+      h("button", {
+        type: "button",
+        className: "hao-button hao-button-secondary",
+        disabled: busy || state === "ACTIVE",
+        onClick: function() {
+          action("ACTIVE");
+        }
+      }, props.t.enable),
+      h("button", {
+        type: "button",
+        className: "hao-button hao-button-secondary",
+        disabled: busy || state === "DISABLED",
+        onClick: function() {
+          action("DISABLED");
+        }
+      }, props.t.disable),
+      h("button", {
+        type: "button",
+        className: "hao-button hao-button-secondary",
+        disabled: busy || state === "SUSPENDED",
+        onClick: function() {
+          action("SUSPENDED");
+        }
+      }, props.t.suspend)
+    );
+  }
+  function ResourcePage(props) {
+    const rows = props.data.resources || [];
+    const t = props.t;
+    return h(
+      Panel,
+      {
+        title: t.resourceDirectory,
+        subtitle: t.resourceDirectoryHelp
+      },
+      rows.length ? h(
+        "div",
+        { className: "hao-table-wrap hao-resource-table-wrap" },
+        h(
+          "table",
+          { className: "hao-table hao-resource-table" },
+          h("thead", null, h(
+            "tr",
+            null,
+            h("th", null, t.resource),
+            h("th", null, t.tier),
+            h("th", null, t.sequence),
+            h("th", null, t.state),
+            h("th", null, t.transport),
+            h("th", null, t.modelBindings),
+            h("th", null, t.lastFailure),
+            h("th", null, t.actions)
+          )),
+          h("tbody", null, rows.map(function(resource) {
+            return h(
+              "tr",
+              { key: resource.resourceId },
+              h(
+                "td",
+                null,
+                h("strong", { className: "hao-resource-name" }, resource.displayName),
+                h("span", { className: "hao-resource-id hao-mono" }, resource.resourceId),
+                resource.providerKey ? h("span", { className: "hao-muted" }, resource.providerKey) : null
+              ),
+              h("td", null, h("span", { className: "hao-plan-chip" }, tierLabel(resource.resourceTier, t))),
+              h("td", { className: "hao-mono" }, integer(resource.resourceSequence, props.locale)),
+              h(
+                "td",
+                null,
+                h(Badge, { value: resource.state }),
+                resource.suspendedUntil ? h("small", { className: "hao-resource-until" }, t.until + " " + dateTime(resource.suspendedUntil, props.locale)) : null
+              ),
+              h("td", null, transportLabel(resource.transport, t)),
+              h("td", null, h(BindingList, { bindings: resource.modelBindings })),
+              h("td", null, h(Failure, { failure: resource.lastNormalizedFailure, locale: props.locale })),
+              h("td", null, h(ResourceActions, { resource, pending: props.pendingResourceIds && props.pendingResourceIds[resource.resourceId], onState: props.onState, t }))
+            );
+          }))
+        )
+      ) : h("div", { className: "hao-empty" }, t.noResources)
+    );
+  }
+
   // dashboard/src/app.js
   function App() {
     const locale = useLocale();
@@ -1352,6 +1575,7 @@
     const [handoffText, setHandoffText] = React.useState("");
     const [handoffError, setHandoffError] = React.useState("");
     const [handoffSubmitting, setHandoffSubmitting] = React.useState(false);
+    const [pendingResourceIds, setPendingResourceIds] = React.useState({});
     const load = React.useCallback(function() {
       setLoading(true);
       return api("/dashboard").then(assertDashboardContract).then(function(value) {
@@ -1457,6 +1681,37 @@
       setDetailError("");
       setDetailLoading(false);
     }
+    function updateResourceState(resource, state) {
+      const resourceId = String(resource && resource.resourceId || "");
+      if (!resourceId) return Promise.resolve();
+      setPendingResourceIds(function(current) {
+        return Object.assign({}, current, { [resourceId]: true });
+      });
+      const payload = {
+        state,
+        reason: "DASHBOARD_OPERATOR_" + state
+      };
+      if (state === "SUSPENDED") {
+        payload.suspendedUntil = new Date(Date.now() + 24 * 60 * 60 * 1e3).toISOString();
+      }
+      if (resource.version != null) payload.expectedVersion = resource.version;
+      return api("/resources/" + encodeURIComponent(resourceId) + "/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      }).then(function() {
+        setError("");
+        return load();
+      }).catch(function(cause) {
+        setError(String(cause));
+      }).finally(function() {
+        setPendingResourceIds(function(current) {
+          const next = Object.assign({}, current);
+          delete next[resourceId];
+          return next;
+        });
+      });
+    }
     React.useEffect(function() {
       if (!data) return;
       setSyncingPlanIds(function(current) {
@@ -1517,7 +1772,10 @@
           } }, t.overview),
           h("button", { type: "button", className: view === "analytics" ? "is-active" : "", onClick: function() {
             setView("analytics");
-          } }, t.analytics)
+          } }, t.analytics),
+          h("button", { type: "button", className: view === "resources" ? "is-active" : "", onClick: function() {
+            setView("resources");
+          } }, t.resources)
         ),
         h(
           "div",
@@ -1528,7 +1786,7 @@
         )
       ),
       error ? h("div", { className: "hao-error" }, error) : null,
-      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data, t, locale }) : h(Overview, { data, t, locale, now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds }),
+      !data ? h("div", { className: "hao-loading" }, loading ? "Loading…" : "No data") : view === "analytics" ? h(Analytics, { data, t, locale }) : view === "resources" ? h(ResourcePage, { data, t, locale, onState: updateResourceState, pendingResourceIds }) : h(Overview, { data, t, locale, now, onOpenPlan: openPlan, onHandoffPlan: openHandoff, onScanPlan: syncExternalProgress, syncingPlanIds }),
       detailPlanId ? h(PlanDetail, { detail: planDetail, loading: detailLoading, error: detailError, onClose: closePlan, t, locale, now }) : null,
       handoffPlan ? h(
         "div",

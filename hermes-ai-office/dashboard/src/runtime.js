@@ -5,7 +5,7 @@ export const React = runtimeReady ? SDK.React : null;
 export const h = React ? React.createElement : null;
 const fetchJSON = runtimeReady ? SDK.fetchJSON : null;
 const API_ROOT = "/api/plugins/hermes-ai-office";
-export const DASHBOARD_SCHEMA_VERSION = 8;
+export const DASHBOARD_SCHEMA_VERSION = 9;
 
 export function useLocale() {
   const hook = SDK && SDK.useI18n;
