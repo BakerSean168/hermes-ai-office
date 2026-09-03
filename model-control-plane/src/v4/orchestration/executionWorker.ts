@@ -97,16 +97,25 @@ export class ExecutionWorker {
     this.ownerId = options.ownerId ?? 'execution-worker-' + randomUUID();
     this.leaseTtlMs = options.leaseTtlMs ?? 30_000;
     this.maxExecutionsPerCycle = options.maxExecutionsPerCycle ?? 20;
-    if (this.leaseTtlMs < 1_000 || this.leaseTtlMs > 5 * 60_000) throw new V4Error('EXECUTION_LEASE_TTL_INVALID');
-    if (!Number.isInteger(this.maxExecutionsPerCycle) || this.maxExecutionsPerCycle < 1 || this.maxExecutionsPerCycle > 1_000) {
+    if (this.leaseTtlMs < 1_000 || this.leaseTtlMs > 5 * 60_000)
+      throw new V4Error('EXECUTION_LEASE_TTL_INVALID');
+    if (
+      !Number.isInteger(this.maxExecutionsPerCycle) ||
+      this.maxExecutionsPerCycle < 1 ||
+      this.maxExecutionsPerCycle > 1_000
+    ) {
       throw new V4Error('EXECUTION_CYCLE_LIMIT_INVALID');
     }
   }
 
   async runOnce(): Promise<ExecutionWorkerResult[]> {
-    const executions = this.repositories.executions.listByStatuses(['QUEUED', 'RUNNING'], this.maxExecutionsPerCycle);
+    const executions = this.repositories.executions.listByStatuses(
+      ['QUEUED', 'RUNNING'],
+      this.maxExecutionsPerCycle,
+    );
     const results: ExecutionWorkerResult[] = [];
-    for (const execution of executions) results.push(await this.runExecution(execution.identity.executionId));
+    for (const execution of executions)
+      results.push(await this.runExecution(execution.identity.executionId));
     return results;
   }
 
@@ -115,19 +124,28 @@ export class ExecutionWorker {
     instruction = 'Continue the same bounded execution from its durable workspace and finish the original objective.',
     options: { interruptCurrent?: boolean } = {},
   ): Promise<ExecutionWorkerResult> {
-    const claim = this.repositories.executions.claimLease(executionId, this.ownerId, this.leaseTtlMs);
-    if (!claim.value || claim.status === 'rejected') return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
+    const claim = this.repositories.executions.claimLease(
+      executionId,
+      this.ownerId,
+      this.leaseTtlMs,
+    );
+    if (!claim.value || claim.status === 'rejected')
+      return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     try {
       const execution = this.repositories.executions.get(executionId);
-      if (execution.status !== 'RUNNING') return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_RESUMABLE' };
+      if (execution.status !== 'RUNNING')
+        return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_RESUMABLE' };
       const provider = this.routes.get(execution.identity.route);
       if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
-      if (!provider.continue) return { executionId, status: 'WAITING', code: 'PROVIDER_CONTINUE_UNAVAILABLE' };
+      if (!provider.continue)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_CONTINUE_UNAVAILABLE' };
       let session = this.repositories.sessions.get(executionId);
       const providerSessionId = session.providerSessionId;
-      if (!providerSessionId) return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
+      if (!providerSessionId)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
       if (options.interruptCurrent) {
-        if (!provider.interrupt) return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
+        if (!provider.interrupt)
+          return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
         const interrupted = await provider.interrupt(providerSessionId);
         if (TERMINAL_PROVIDER_STATUSES.has(interrupted.status))
           this.recordTerminalProviderStatus(executionId, session, interrupted);
@@ -135,15 +153,21 @@ export class ExecutionWorker {
         session = this.repositories.sessions.get(executionId);
       }
       const snapshot = await provider.continue(providerSessionId, instruction);
-      if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status)) this.recordTerminalProviderStatus(executionId, session, snapshot);
+      if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status))
+        this.recordTerminalProviderStatus(executionId, session, snapshot);
       else this.recordActiveProviderStatus(executionId, session, snapshot);
       return {
         executionId,
-        status: snapshot.status === 'FAILED' || snapshot.status === 'STUCK' || snapshot.status === 'CANCELLED'
-          ? 'FAILED'
-          : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
-            ? 'WAITING'
-            : snapshot.status === 'SUCCEEDED' ? 'SUCCEEDED' : 'RUNNING',
+        status:
+          snapshot.status === 'FAILED' ||
+          snapshot.status === 'STUCK' ||
+          snapshot.status === 'CANCELLED'
+            ? 'FAILED'
+            : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+              ? 'WAITING'
+              : snapshot.status === 'SUCCEEDED'
+                ? 'SUCCEEDED'
+                : 'RUNNING',
         code: 'PROVIDER_' + snapshot.status,
         providerSessionId: snapshot.providerSessionId,
       };
@@ -160,7 +184,11 @@ export class ExecutionWorker {
     instruction = 'Resume the same bounded execution from the existing durable workspace and finish the original objective.',
     reason = 'stalled provider session recovery',
   ): Promise<ExecutionWorkerResult> {
-    const claim = this.repositories.executions.claimLease(executionId, this.ownerId, this.leaseTtlMs);
+    const claim = this.repositories.executions.claimLease(
+      executionId,
+      this.ownerId,
+      this.leaseTtlMs,
+    );
     if (!claim.value || claim.status === 'rejected')
       return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     try {
@@ -175,12 +203,18 @@ export class ExecutionWorker {
         throw new V4Error('PROVIDER_SESSION_REPLACEMENT_INVALID');
       const provider = this.routes.get(execution.identity.route);
       if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
-      if (!provider.replace) return { executionId, status: 'WAITING', code: 'PROVIDER_REPLACE_UNAVAILABLE' };
-      if (!provider.interrupt) return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
+      if (!provider.replace)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_REPLACE_UNAVAILABLE' };
+      if (!provider.interrupt)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
       const evidenceName =
         'provider-session-replacement-' +
         createHash('sha256').update(idempotencyKey.trim()).digest('hex').slice(0, 40);
-      const existingEvidence = this.repositories.evidence.find(executionId, 'RECOVERY', evidenceName);
+      const existingEvidence = this.repositories.evidence.find(
+        executionId,
+        'RECOVERY',
+        evidenceName,
+      );
       if (existingEvidence) {
         const previous = existingEvidence.payload.previousProviderSessionId;
         const replacementId = existingEvidence.payload.providerSessionId;
@@ -213,7 +247,9 @@ export class ExecutionWorker {
         return {
           executionId,
           status:
-            snapshot.status === 'FAILED' || snapshot.status === 'STUCK' || snapshot.status === 'CANCELLED'
+            snapshot.status === 'FAILED' ||
+            snapshot.status === 'STUCK' ||
+            snapshot.status === 'CANCELLED'
               ? 'FAILED'
               : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
                 ? 'WAITING'
@@ -256,7 +292,10 @@ export class ExecutionWorker {
         ? this.repositories.plans.getWorkItem(execution.identity.workItemId)
         : undefined;
       const recoveryKey =
-        'provider-session-replacement:' + execution.identity.executionId + ':' + idempotencyKey.trim();
+        'provider-session-replacement:' +
+        execution.identity.executionId +
+        ':' +
+        idempotencyKey.trim();
       const replacement = await provider.replace({
         executionId: execution.identity.executionId,
         planId: execution.identity.planId,
@@ -307,9 +346,12 @@ export class ExecutionWorker {
       return {
         executionId,
         status:
-          currentReplacement.status === 'FAILED' || currentReplacement.status === 'STUCK' || currentReplacement.status === 'CANCELLED'
+          currentReplacement.status === 'FAILED' ||
+          currentReplacement.status === 'STUCK' ||
+          currentReplacement.status === 'CANCELLED'
             ? 'FAILED'
-            : currentReplacement.status === 'PAUSED' || currentReplacement.status === 'WAITING_FOR_CONFIRMATION'
+            : currentReplacement.status === 'PAUSED' ||
+                currentReplacement.status === 'WAITING_FOR_CONFIRMATION'
               ? 'WAITING'
               : currentReplacement.status === 'SUCCEEDED'
                 ? 'SUCCEEDED'
@@ -324,8 +366,76 @@ export class ExecutionWorker {
     }
   }
 
+  async adoptPausedImplementation(
+    executionId: string,
+    idempotencyKey: string,
+    reason = 'operator-assisted durable workspace recovery',
+  ): Promise<ExecutionWorkerResult> {
+    const claim = this.repositories.executions.claimLease(
+      executionId,
+      this.ownerId,
+      this.leaseTtlMs,
+    );
+    if (!claim.value || claim.status === 'rejected')
+      return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
+    try {
+      const execution = this.repositories.executions.get(executionId);
+      if (execution.status !== 'RUNNING')
+        return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_ADOPTABLE' };
+      if (execution.identity.phase !== 'IMPLEMENT' && execution.identity.phase !== 'IMPLEMENT_FIX')
+        throw new V4Error('OPERATOR_ADOPTION_IMPLEMENTATION_ONLY');
+      if (!idempotencyKey.trim() || idempotencyKey.length > 1_000)
+        throw new V4Error('OPERATOR_ADOPTION_IDEMPOTENCY_REQUIRED');
+      if (!reason.trim() || reason.length > 2_000)
+        throw new V4Error('OPERATOR_ADOPTION_REASON_INVALID');
+      const provider = this.routes.get(execution.identity.route);
+      if (!provider) return { executionId, status: 'WAITING', code: 'EXECUTION_ROUTE_UNAVAILABLE' };
+      this.assertProviderPhase(provider, execution);
+      const session = this.repositories.sessions.get(executionId);
+      if (!session.providerSessionId)
+        return { executionId, status: 'WAITING', code: 'PROVIDER_SESSION_ID_REQUIRED' };
+      const observed = await provider.inspect(session.providerSessionId);
+      if (observed.status !== 'PAUSED') {
+        if (!TERMINAL_PROVIDER_STATUSES.has(observed.status))
+          this.recordActiveProviderStatus(executionId, session, observed);
+        return {
+          executionId,
+          status: 'WAITING',
+          code: 'OPERATOR_ADOPTION_PROVIDER_NOT_PAUSED',
+          providerSessionId: session.providerSessionId,
+        };
+      }
+      this.recordActiveProviderStatus(executionId, session, observed);
+      const completion = await this.workspace.verifyImplementation(session.workspace);
+      const evidenceName =
+        'operator-workspace-adoption-' +
+        createHash('sha256').update(idempotencyKey.trim()).digest('hex').slice(0, 40);
+      this.persistOperatorCompletion(execution, completion, observed, evidenceName, reason.trim());
+      this.repositories.executions.recordResult(executionId, {
+        status: 'SUCCEEDED',
+        resultRevision: completion.headRevision,
+        resultSummary: bounded(completion.evidence.summary, MAX_RESULT_SUMMARY),
+      });
+      return {
+        executionId,
+        status: 'SUCCEEDED',
+        code: 'OPERATOR_WORKSPACE_ADOPTED',
+        providerSessionId: session.providerSessionId,
+        resultRevision: completion.headRevision,
+      };
+    } catch (error) {
+      return { executionId, status: 'FAILED', code: errorCode(error) };
+    } finally {
+      this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
+    }
+  }
+
   async runExecution(executionId: string): Promise<ExecutionWorkerResult> {
-    const claim = this.repositories.executions.claimLease(executionId, this.ownerId, this.leaseTtlMs);
+    const claim = this.repositories.executions.claimLease(
+      executionId,
+      this.ownerId,
+      this.leaseTtlMs,
+    );
     if (!claim.value || claim.status === 'rejected') {
       return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     }
@@ -341,10 +451,16 @@ export class ExecutionWorker {
       const workItem = execution.identity.workItemId
         ? this.repositories.plans.getWorkItem(execution.identity.workItemId)
         : undefined;
-      if (!execution.identity.sourceRevision) throw new V4Error('EXECUTION_SOURCE_REVISION_REQUIRED');
+      if (!execution.identity.sourceRevision)
+        throw new V4Error('EXECUTION_SOURCE_REVISION_REQUIRED');
 
       let session = this.repositories.sessions.getOptional(executionId);
-      if (session && (session.provider !== provider.provider || session.phase !== execution.identity.phase || session.sourceRevision !== execution.identity.sourceRevision)) {
+      if (
+        session &&
+        (session.provider !== provider.provider ||
+          session.phase !== execution.identity.phase ||
+          session.sourceRevision !== execution.identity.sourceRevision)
+      ) {
         throw new V4Error('EXECUTION_SESSION_ROUTE_MISMATCH');
       }
       if (!session) {
@@ -381,13 +497,28 @@ export class ExecutionWorker {
         });
       }
 
-      let snapshot = await this.resolveProviderSnapshot(provider, execution, session, plan.projectKey, workItem?.acceptanceCriteria ?? []);
+      let snapshot = await this.resolveProviderSnapshot(
+        provider,
+        execution,
+        session,
+        plan.projectKey,
+        workItem?.acceptanceCriteria ?? [],
+      );
       session = this.repositories.sessions.get(executionId);
       if (!session.providerSessionId) throw new V4Error('PROVIDER_SESSION_ID_REQUIRED');
 
       if (execution.status === 'QUEUED') {
-        const started = this.repositories.executions.compareAndSetStatus(executionId, 'QUEUED', 'RUNNING');
-        if (started.status === 'rejected') return { executionId, status: 'SKIPPED', code: started.reason ?? 'STALE_EXECUTION_STATUS' };
+        const started = this.repositories.executions.compareAndSetStatus(
+          executionId,
+          'QUEUED',
+          'RUNNING',
+        );
+        if (started.status === 'rejected')
+          return {
+            executionId,
+            status: 'SKIPPED',
+            code: started.reason ?? 'STALE_EXECUTION_STATUS',
+          };
       }
       if (execution.identity.phase === 'REVIEW') this.bindReviewerExecution(execution, session);
       this.renewLease(executionId, claim.value.leaseToken);
@@ -396,7 +527,10 @@ export class ExecutionWorker {
         this.recordActiveProviderStatus(executionId, session, snapshot);
         return {
           executionId,
-          status: snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION' ? 'WAITING' : 'RUNNING',
+          status:
+            snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+              ? 'WAITING'
+              : 'RUNNING',
           code: 'PROVIDER_' + snapshot.status,
           providerSessionId: snapshot.providerSessionId,
         };
@@ -405,9 +539,13 @@ export class ExecutionWorker {
       let completion: WorkspaceCompletionSnapshot | undefined;
       if (snapshot.status === 'SUCCEEDED') {
         try {
-          completion = execution.identity.phase === 'REVIEW'
-            ? await this.workspace.verifyReview(session.workspace, execution.identity.sourceRevision)
-            : await this.workspace.verifyImplementation(session.workspace);
+          completion =
+            execution.identity.phase === 'REVIEW'
+              ? await this.workspace.verifyReview(
+                  session.workspace,
+                  execution.identity.sourceRevision,
+                )
+              : await this.workspace.verifyImplementation(session.workspace);
         } catch (error) {
           const code = errorCode(error);
           const canFinalize =
@@ -456,18 +594,30 @@ export class ExecutionWorker {
 
       this.recordTerminalProviderStatus(executionId, session, snapshot);
       if (snapshot.status === 'FAILED' || snapshot.status === 'STUCK') {
-        const code = bounded(snapshot.errorCode, MAX_ERROR_CODE) ?? (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
+        const code =
+          bounded(snapshot.errorCode, MAX_ERROR_CODE) ??
+          (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
         this.repositories.executions.recordResult(executionId, {
           status: 'FAILED',
           errorCode: code,
           retryable: snapshot.status === 'STUCK' ? true : Boolean(snapshot.retryable),
           resultSummary: bounded(snapshot.finalResponse, MAX_RESULT_SUMMARY),
         });
-        return { executionId, status: 'FAILED', code, providerSessionId: snapshot.providerSessionId };
+        return {
+          executionId,
+          status: 'FAILED',
+          code,
+          providerSessionId: snapshot.providerSessionId,
+        };
       }
       if (snapshot.status === 'CANCELLED') {
         this.repositories.executions.updateStatus(executionId, 'CANCELLED');
-        return { executionId, status: 'FAILED', code: 'PROVIDER_CANCELLED', providerSessionId: snapshot.providerSessionId };
+        return {
+          executionId,
+          status: 'FAILED',
+          code: 'PROVIDER_CANCELLED',
+          providerSessionId: snapshot.providerSessionId,
+        };
       }
       if (!completion) throw new V4Error('WORKSPACE_COMPLETION_MISSING');
       this.persistCompletion(execution, completion, snapshot);
@@ -476,11 +626,15 @@ export class ExecutionWorker {
         resultRevision: completion.headRevision,
         resultSummary: bounded(completion.evidence.summary, MAX_RESULT_SUMMARY),
       });
-      if (execution.identity.phase === 'REVIEW') this.persistReviewVerdict(executionId, completion.evidence);
+      if (execution.identity.phase === 'REVIEW')
+        this.persistReviewVerdict(executionId, completion.evidence);
       return {
         executionId,
         status: 'SUCCEEDED',
-        code: execution.identity.phase === 'REVIEW' ? 'REVIEW_EXECUTION_SUCCEEDED' : 'IMPLEMENTATION_EXECUTION_SUCCEEDED',
+        code:
+          execution.identity.phase === 'REVIEW'
+            ? 'REVIEW_EXECUTION_SUCCEEDED'
+            : 'IMPLEMENTATION_EXECUTION_SUCCEEDED',
         providerSessionId: snapshot.providerSessionId,
         resultRevision: completion.headRevision,
       };
@@ -525,24 +679,31 @@ export class ExecutionWorker {
     });
     return [
       'Finalize the existing Pixel implementation in the same workspace.',
-      'The provider already reported completion, but deterministic verification returned ' + triggerCode + '.',
+      'The provider already reported completion, but deterministic verification returned ' +
+        triggerCode +
+        '.',
       'Do not broaden scope and do not discard intended existing work.',
       'Inspect the current changes, run focused checks for the original objective, commit every intended repository change, and leave git status clean.',
-      'Then atomically write one JSON object outside the Git repository at ' + session.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
+      'Then atomically write one JSON object outside the Git repository at ' +
+        session.workspace.evidenceExecutionPath +
+        ' using this schema: ' +
+        evidenceTemplate,
       'The resultRevision must be the exact committed git HEAD. Finish only after the commit, checks, clean-status verification, and evidence write all succeed.',
     ].join('\n');
   }
 
   private assertProviderPhase(provider: ExecutionProviderPort, execution: Execution): void {
     if (execution.identity.phase === 'REVIEW') {
-      if ((provider as Partial<ReviewProviderPort>).independentReview !== true) throw new V4Error('INDEPENDENT_REVIEW_PROVIDER_REQUIRED');
+      if ((provider as Partial<ReviewProviderPort>).independentReview !== true)
+        throw new V4Error('INDEPENDENT_REVIEW_PROVIDER_REQUIRED');
     } else if ((provider as Partial<ReviewProviderPort>).independentReview === true) {
       throw new V4Error('IMPLEMENTATION_PROVIDER_REQUIRED');
     }
   }
 
   private sourceWorkspace(execution: Execution): WorkspaceDescriptor | undefined {
-    if (execution.identity.phase === 'IMPLEMENT' || !execution.identity.parentExecutionId) return undefined;
+    if (execution.identity.phase === 'IMPLEMENT' || !execution.identity.parentExecutionId)
+      return undefined;
     return this.repositories.sessions.get(execution.identity.parentExecutionId).workspace;
   }
 
@@ -586,7 +747,9 @@ export class ExecutionWorker {
           sourceRevision: execution.identity.sourceRevision!,
           route: execution.identity.route,
           workspace: session.workspace,
-          ...(execution.identity.phase === 'IMPLEMENT_FIX' ? { reviewFindings: this.reviewFindings(execution) } : {}),
+          ...(execution.identity.phase === 'IMPLEMENT_FIX'
+            ? { reviewFindings: this.reviewFindings(execution) }
+            : {}),
         });
       } catch (error) {
         const recovered = await provider.recover(recovery);
@@ -594,35 +757,66 @@ export class ExecutionWorker {
         snapshot = recovered;
       }
     }
-    const attached = this.repositories.sessions.attachProviderSession(execution.identity.executionId, snapshot.providerSessionId);
-    if (attached.status === 'rejected') throw new V4Error(attached.reason ?? 'STALE_PROVIDER_SESSION');
+    const attached = this.repositories.sessions.attachProviderSession(
+      execution.identity.executionId,
+      snapshot.providerSessionId,
+    );
+    if (attached.status === 'rejected')
+      throw new V4Error(attached.reason ?? 'STALE_PROVIDER_SESSION');
     return snapshot;
   }
 
   private reviewFindings(execution: Execution): string[] {
     if (!execution.identity.parentExecutionId) return [];
-    return this.repositories.reviews.findByImplementationExecution(execution.identity.parentExecutionId)?.findings ?? [];
+    return (
+      this.repositories.reviews.findByImplementationExecution(execution.identity.parentExecutionId)
+        ?.findings ?? []
+    );
   }
 
   private bindReviewerExecution(execution: Execution, session: ExecutionSession): void {
-    if (!execution.identity.parentExecutionId || !session.providerSessionId) throw new V4Error('REVIEW_PARENT_REQUIRED');
-    const review = this.repositories.reviews.findByImplementationExecution(execution.identity.parentExecutionId);
+    if (!execution.identity.parentExecutionId || !session.providerSessionId)
+      throw new V4Error('REVIEW_PARENT_REQUIRED');
+    const review = this.repositories.reviews.findByImplementationExecution(
+      execution.identity.parentExecutionId,
+    );
     if (!review) throw new V4Error('REVIEW_NOT_FOUND');
-    const attached = this.repositories.reviews.attachReviewerExecution(review.reviewId, execution.identity.executionId);
-    if (attached.status === 'rejected') throw new V4Error(attached.reason ?? 'STALE_REVIEWER_EXECUTION');
+    const attached = this.repositories.reviews.attachReviewerExecution(
+      review.reviewId,
+      execution.identity.executionId,
+    );
+    if (attached.status === 'rejected')
+      throw new V4Error(attached.reason ?? 'STALE_REVIEWER_EXECUTION');
   }
 
-  private recordActiveProviderStatus(executionId: string, session: ExecutionSession, snapshot: ProviderSessionSnapshot): void {
+  private recordActiveProviderStatus(
+    executionId: string,
+    session: ExecutionSession,
+    snapshot: ProviderSessionSnapshot,
+  ): void {
     if (session.providerStatus === snapshot.status) {
-      const heartbeat = this.repositories.sessions.heartbeat(executionId, snapshot.status, snapshot.observedAt);
-      if (heartbeat.status === 'rejected' && heartbeat.reason !== 'STALE_PROVIDER_HEARTBEAT') throw new V4Error(heartbeat.reason ?? 'PROVIDER_HEARTBEAT_REJECTED');
+      const heartbeat = this.repositories.sessions.heartbeat(
+        executionId,
+        snapshot.status,
+        snapshot.observedAt,
+      );
+      if (heartbeat.status === 'rejected' && heartbeat.reason !== 'STALE_PROVIDER_HEARTBEAT')
+        throw new V4Error(heartbeat.reason ?? 'PROVIDER_HEARTBEAT_REJECTED');
       return;
     }
-    const updated = this.repositories.sessions.updateProviderStatus(executionId, snapshot.status, snapshot.observedAt);
+    const updated = this.repositories.sessions.updateProviderStatus(
+      executionId,
+      snapshot.status,
+      snapshot.observedAt,
+    );
     if (updated.status === 'rejected') throw new V4Error(updated.reason ?? 'STALE_PROVIDER_STATUS');
   }
 
-  private recordTerminalProviderStatus(executionId: string, session: ExecutionSession, snapshot: ProviderSessionSnapshot): void {
+  private recordTerminalProviderStatus(
+    executionId: string,
+    session: ExecutionSession,
+    snapshot: ProviderSessionSnapshot,
+  ): void {
     if (TERMINAL_PROVIDER_STATUSES.has(session.providerStatus)) return;
     const completed = this.repositories.sessions.complete(executionId, {
       status: snapshot.status as 'SUCCEEDED' | 'FAILED' | 'STUCK' | 'CANCELLED',
@@ -630,10 +824,65 @@ export class ExecutionWorker {
       ...(snapshot.errorCode ? { errorCode: bounded(snapshot.errorCode, MAX_ERROR_CODE) } : {}),
       completedAt: snapshot.observedAt,
     });
-    if (completed.status === 'rejected') throw new V4Error(completed.reason ?? 'STALE_PROVIDER_STATUS');
+    if (completed.status === 'rejected')
+      throw new V4Error(completed.reason ?? 'STALE_PROVIDER_STATUS');
   }
 
-  private persistCompletion(execution: Execution, snapshot: WorkspaceCompletionSnapshot, provider: ProviderSessionSnapshot): void {
+  private persistOperatorCompletion(
+    execution: Execution,
+    snapshot: WorkspaceCompletionSnapshot,
+    provider: ProviderSessionSnapshot,
+    recoveryName: string,
+    reason: string,
+  ): void {
+    const sourceRevision = execution.identity.sourceRevision;
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'WORKSPACE',
+      name: 'verified-workspace',
+      sourceRevision,
+      payload: workspacePayload(snapshot),
+    });
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'REVISION',
+      name: 'result-revision',
+      sourceRevision,
+      payload: { sourceRevision: snapshot.sourceRevision, resultRevision: snapshot.headRevision },
+    });
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'DIFF',
+      name: 'implementation-diff',
+      sourceRevision,
+      payload: {
+        changedFiles: snapshot.changedFiles,
+        diffStat: snapshot.diffStat,
+        completion: evidencePayload(snapshot.evidence),
+      },
+    });
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'RECOVERY',
+      name: recoveryName,
+      sourceRevision,
+      payload: {
+        mode: 'operator-assisted-workspace-adoption',
+        reason,
+        provider: provider.provider,
+        providerSessionId: provider.providerSessionId,
+        providerStatus: provider.status,
+        observedAt: provider.observedAt,
+        resultRevision: snapshot.headRevision,
+      },
+    });
+  }
+
+  private persistCompletion(
+    execution: Execution,
+    snapshot: WorkspaceCompletionSnapshot,
+    provider: ProviderSessionSnapshot,
+  ): void {
     const sourceRevision = execution.identity.sourceRevision;
     this.repositories.evidence.append({
       executionId: execution.identity.executionId,
@@ -654,9 +903,14 @@ export class ExecutionWorker {
       kind: execution.identity.phase === 'REVIEW' ? 'REVIEW' : 'DIFF',
       name: execution.identity.phase === 'REVIEW' ? 'review-verdict' : 'implementation-diff',
       sourceRevision,
-      payload: execution.identity.phase === 'REVIEW'
-        ? evidencePayload(snapshot.evidence)
-        : { changedFiles: snapshot.changedFiles, diffStat: snapshot.diffStat, completion: evidencePayload(snapshot.evidence) },
+      payload:
+        execution.identity.phase === 'REVIEW'
+          ? evidencePayload(snapshot.evidence)
+          : {
+              changedFiles: snapshot.changedFiles,
+              diffStat: snapshot.diffStat,
+              completion: evidencePayload(snapshot.evidence),
+            },
     });
     this.repositories.evidence.append({
       executionId: execution.identity.executionId,
@@ -676,12 +930,19 @@ export class ExecutionWorker {
     if (evidence.phase !== 'REVIEW') throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_INVALID');
     const review = this.repositories.reviews.findByReviewerExecution(executionId);
     if (!review) throw new V4Error('REVIEW_NOT_FOUND');
-    if (review.status === 'PENDING') this.repositories.reviews.updateStatus(review.reviewId, 'RUNNING');
+    if (review.status === 'PENDING')
+      this.repositories.reviews.updateStatus(review.reviewId, 'RUNNING');
     this.repositories.reviews.recordVerdict(review.reviewId, evidence.verdict, evidence.findings);
   }
 
   private renewLease(executionId: string, leaseToken: string): void {
-    const renewed = this.repositories.executions.renewLease(executionId, this.ownerId, leaseToken, this.leaseTtlMs);
-    if (!renewed.value || renewed.status === 'rejected') throw new V4Error(renewed.reason ?? 'EXECUTION_LEASE_LOST');
+    const renewed = this.repositories.executions.renewLease(
+      executionId,
+      this.ownerId,
+      leaseToken,
+      this.leaseTtlMs,
+    );
+    if (!renewed.value || renewed.status === 'rejected')
+      throw new V4Error(renewed.reason ?? 'EXECUTION_LEASE_LOST');
   }
 }

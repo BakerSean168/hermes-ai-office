@@ -934,6 +934,24 @@ export async function buildControlPlane(
     });
   });
 
+  app.post('/api/v4/executions/:executionId/adopt-workspace', async (request) => {
+    const executionId = requiredText(
+      (request.params as { executionId?: string }).executionId,
+      'EXECUTION_ID_REQUIRED',
+    );
+    const body = request.body === undefined ? {} : bodyRecord(request.body);
+    const idempotencyKey = requiredText(
+      request.headers['idempotency-key'] ?? body.idempotencyKey,
+      'OPERATOR_ADOPTION_IDEMPOTENCY_REQUIRED',
+    );
+    const reason = requiredText(body.reason, 'OPERATOR_ADOPTION_REASON_INVALID');
+    return await requireAutomation().worker.adoptPausedImplementation(
+      executionId,
+      idempotencyKey,
+      reason,
+    );
+  });
+
   app.post('/api/v4/executions/:executionId/replace-provider-session', async (request) => {
     const executionId = requiredText(
       (request.params as { executionId?: string }).executionId,
