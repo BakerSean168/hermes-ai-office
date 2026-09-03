@@ -110,6 +110,17 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });
 
+test('V4 Luna implementation uses managed Codex Responses and bridges durable implementation evidence', () => {
+  assert.match(headlessReview, /wire_api = \"responses\"/);
+  assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH/);
+  assert.match(headlessReview, /PIXEL_V4_SOURCE_SHA/);
+  assert.match(headlessReview, /writePixelV4ImplementationEvidence/);
+  assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY/);
+  assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING/);
+  assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
+  assert.match(headlessReview, /HEADLESS_ROLE === 'worker'/);
+});
+
 test('V4 Business Codex review is provider-native and bridges durable review evidence', () => {
   assert.match(service, /MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=4/);
   assert.match(headlessReview, /PIXEL_V4_REVIEW_EVIDENCE_PATH/);

@@ -2,26 +2,54 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
-import { OpenHandsCodexBusinessReviewProvider, OpenHandsExecutionProvider, OpenHandsReviewProvider, mapOpenHandsStatus } from '../src/v4/adapters/openHandsCoding.js';
-import type { ProviderLaunchInput, ProviderSessionReplacementInput } from '../src/v4/orchestration/contracts.js';
+import {
+  OpenHandsCodexBusinessReviewProvider,
+  OpenHandsCodexManagedExecutionProvider,
+  OpenHandsExecutionProvider,
+  OpenHandsReviewProvider,
+  mapOpenHandsStatus,
+} from '../src/v4/adapters/openHandsCoding.js';
+import type {
+  ProviderLaunchInput,
+  ProviderSessionReplacementInput,
+} from '../src/v4/orchestration/contracts.js';
 
 const secrets = { sessionApiKey: 'session-secret-value', liteLlmApiKey: 'sk-super-secret-value' };
 
-function launchInput(phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'REVIEW' = 'IMPLEMENT'): ProviderLaunchInput {
+function launchInput(
+  phase: 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'REVIEW' = 'IMPLEMENT',
+): ProviderLaunchInput {
   return {
-    executionId: 'exec-1', planId: 'plan-1', projectKey: 'pixel-agents', workItemId: 'work-1', phase,
-    objective: 'Implement the bounded change.', acceptanceCriteria: ['tests pass'], sourceRevision: 'source-sha',
+    executionId: 'exec-1',
+    planId: 'plan-1',
+    projectKey: 'pixel-agents',
+    workItemId: 'work-1',
+    phase,
+    objective: 'Implement the bounded change.',
+    acceptanceCriteria: ['tests pass'],
+    sourceRevision: 'source-sha',
     route: phase === 'REVIEW' ? 'review-route' : 'implementation-route',
     workspace: {
-      executionId: 'exec-1', hostPath: '/host/executions/exec-1/repo', executionPath: '/workspace/executions/exec-1/repo',
-      evidenceHostPath: '/host/executions/exec-1/evidence.json', evidenceExecutionPath: '/workspace/executions/exec-1/evidence.json',
-      sourceRepositoryPath: '/repos/pixel-agents', sourceRevision: 'source-sha', createdAt: '2026-09-01T00:00:00.000Z',
+      executionId: 'exec-1',
+      hostPath: '/host/executions/exec-1/repo',
+      executionPath: '/workspace/executions/exec-1/repo',
+      evidenceHostPath: '/host/executions/exec-1/evidence.json',
+      evidenceExecutionPath: '/workspace/executions/exec-1/evidence.json',
+      sourceRepositoryPath: '/repos/pixel-agents',
+      sourceRevision: 'source-sha',
+      createdAt: '2026-09-01T00:00:00.000Z',
     },
   };
 }
 
 function options(fetchImpl: typeof fetch) {
-  return { baseUrl: 'http://openhands.test', ...secrets, liteLlmBaseUrl: 'http://litellm.test/v1', fetchImpl, requestTimeoutMs: 5_000 };
+  return {
+    baseUrl: 'http://openhands.test',
+    ...secrets,
+    liteLlmBaseUrl: 'http://litellm.test/v1',
+    fetchImpl,
+    requestTimeoutMs: 5_000,
+  };
 }
 
 test('OpenHands implementation and review launches use distinct models, tools and safe provenance', async () => {
@@ -29,10 +57,15 @@ test('OpenHands implementation and review launches use distinct models, tools an
   const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
     requests.push({ url: String(url), init });
     const body = JSON.parse(String(init.body)) as Record<string, any>;
-    return new Response(JSON.stringify({
-      id: body.tags.role === 'independentreview' ? 'review-session' : 'implementation-session',
-      execution_status: 'running', workspace: body.workspace, tags: body.tags,
-    }), { status: 201, headers: { 'content-type': 'application/json' } });
+    return new Response(
+      JSON.stringify({
+        id: body.tags.role === 'independentreview' ? 'review-session' : 'implementation-session',
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    );
   }) as typeof fetch;
   const implementation = new OpenHandsExecutionProvider(options(fake));
   const review = new OpenHandsReviewProvider(options(fake));
@@ -43,31 +76,112 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.equal(review.independentReview, true);
   const implementationRequest = requests[0]!;
   const reviewRequest = requests[1]!;
-  const implementationBody = JSON.parse(String(implementationRequest.init.body)) as Record<string, any>;
+  const implementationBody = JSON.parse(String(implementationRequest.init.body)) as Record<
+    string,
+    any
+  >;
   const reviewBody = JSON.parse(String(reviewRequest.init.body)) as Record<string, any>;
-  assert.equal((implementationRequest.init.headers as Record<string, string>)['X-Session-API-Key'], secrets.sessionApiKey);
-  assert.equal((implementationRequest.init.headers as Record<string, string>).authorization, undefined);
+  assert.equal(
+    (implementationRequest.init.headers as Record<string, string>)['X-Session-API-Key'],
+    secrets.sessionApiKey,
+  );
+  assert.equal(
+    (implementationRequest.init.headers as Record<string, string>).authorization,
+    undefined,
+  );
   assert.equal(implementationBody.agent.llm.model, 'litellm_proxy/gpt-5.6-luna');
   assert.equal(reviewBody.agent.llm.model, 'litellm_proxy/gpt-5.6-sol');
-  assert.deepEqual(implementationBody.agent.tools.map((item: { name: string }) => item.name), ['terminal', 'file_editor', 'task_tracker']);
-  assert.deepEqual(reviewBody.agent.tools.map((item: { name: string }) => item.name), ['terminal', 'task_tracker']);
+  assert.deepEqual(
+    implementationBody.agent.tools.map((item: { name: string }) => item.name),
+    ['terminal', 'file_editor', 'task_tracker'],
+  );
+  assert.deepEqual(
+    reviewBody.agent.tools.map((item: { name: string }) => item.name),
+    ['terminal', 'task_tracker'],
+  );
   assert.equal(implementationBody.initial_message.run, true);
-  assert.match(implementationBody.initial_message.content[0].text, /\/workspace\/executions\/exec-1\/evidence\.json/);
-  assert.match(implementationBody.initial_message.content[0].text, /honor checked-in runtime declarations/);
-  assert.match(implementationBody.initial_message.content[0].text, /immutable\/frozen-lockfile mode/);
+  assert.match(
+    implementationBody.initial_message.content[0].text,
+    /\/workspace\/executions\/exec-1\/evidence\.json/,
+  );
+  assert.match(
+    implementationBody.initial_message.content[0].text,
+    /honor checked-in runtime declarations/,
+  );
+  assert.match(
+    implementationBody.initial_message.content[0].text,
+    /immutable\/frozen-lockfile mode/,
+  );
   assert.match(implementationBody.initial_message.content[0].text, /never rewrite the lockfile/);
   assert.match(reviewBody.initial_message.content[0].text, /\"phase\":\"REVIEW\"/);
   assert.match(reviewBody.initial_message.content[0].text, /immutable\/frozen-lockfile mode/);
-  assert.match(reviewBody.initial_message.content[0].text, /Use FAIL only for a concrete defect attributable/);
-  assert.match(reviewBody.initial_message.content[0].text, /Use INVALID when the environment or tooling prevents/);
+  assert.match(
+    reviewBody.initial_message.content[0].text,
+    /Use FAIL only for a concrete defect attributable/,
+  );
+  assert.match(
+    reviewBody.initial_message.content[0].text,
+    /Use INVALID when the environment or tooling prevents/,
+  );
   assert.equal(implementationBody.agent.llm.api_mode, 'chat');
   assert.equal(implementationBody.agent.llm.reasoning_effort, null);
   assert.equal(implementationBody.tags.execution, 'exec1');
   assert.equal(reviewBody.tags.role, 'independentreview');
   assert.equal(JSON.stringify(implementationSnapshot).includes(secrets.sessionApiKey), false);
   assert.equal(JSON.stringify(implementationSnapshot).includes(secrets.liteLlmApiKey), false);
-  await assert.rejects(() => implementation.launch(launchInput('REVIEW')), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_IMPLEMENTATION_PHASE_REQUIRED');
-  await assert.rejects(() => review.launch(launchInput('IMPLEMENT')), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_REVIEW_PHASE_REQUIRED');
+  await assert.rejects(
+    () => implementation.launch(launchInput('REVIEW')),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'OPENHANDS_IMPLEMENTATION_PHASE_REQUIRED',
+  );
+  await assert.rejects(
+    () => review.launch(launchInput('IMPLEMENT')),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'OPENHANDS_REVIEW_PHASE_REQUIRED',
+  );
+});
+
+test('Managed Codex implementation launches ACP with Responses transport and controller-owned V4 evidence', async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    requests.push({ url: String(url), init });
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    return new Response(
+      JSON.stringify({
+        id: 'managed-codex-session',
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  const implementation = new OpenHandsCodexManagedExecutionProvider(options(fake));
+  const snapshot = await implementation.launch(launchInput('IMPLEMENT'));
+  assert.equal(snapshot.provider, 'codex-managed-coding');
+  const body = JSON.parse(String(requests[0]!.init.body)) as Record<string, any>;
+  assert.equal(body.agent.kind, 'ACPAgent');
+  assert.deepEqual(body.agent.acp_command, [
+    '/usr/local/bin/node',
+    '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+  ]);
+  assert.equal(body.agent.acp_model, 'gpt-5.6-luna');
+  assert.equal(body.agent.llm, undefined);
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_DRIVER.value, 'codex');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'worker');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value, 'litellm-managed');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value, 'xhigh');
+  assert.equal(body.secrets.AI_OFFICE_LITELLM_BASE_URL.value, 'http://litellm.test/v1');
+  assert.equal(body.secrets.AI_OFFICE_LITELLM_API_KEY.value, secrets.liteLlmApiKey);
+  assert.equal(body.secrets.HERMES_V3_EXECUTION_ID.value, 'exec-1');
+  assert.equal(
+    body.secrets.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH.value,
+    '/workspace/executions/exec-1/evidence.json',
+  );
+  assert.equal(body.secrets.PIXEL_V4_EXECUTION_ID.value, 'exec-1');
+  assert.equal(body.secrets.PIXEL_V4_SOURCE_SHA.value, 'source-sha');
+  assert.equal(body.secrets.PIXEL_V4_IMPLEMENTATION_PHASE.value, 'IMPLEMENT');
+  assert.equal(JSON.stringify(snapshot).includes(secrets.liteLlmApiKey), false);
 });
 
 test('Business Codex review launches provider-native ACP with persisted ChatGPT auth and V4 evidence metadata', async () => {
@@ -75,9 +189,15 @@ test('Business Codex review launches provider-native ACP with persisted ChatGPT 
   const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
     requests.push({ url: String(url), init });
     const body = JSON.parse(String(init.body)) as Record<string, any>;
-    return new Response(JSON.stringify({
-      id: 'business-review-session', execution_status: 'running', workspace: body.workspace, tags: body.tags,
-    }), { status: 201, headers: { 'content-type': 'application/json' } });
+    return new Response(
+      JSON.stringify({
+        id: 'business-review-session',
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    );
   }) as typeof fetch;
   const review = new OpenHandsCodexBusinessReviewProvider(options(fake));
   const snapshot = await review.launch(launchInput('REVIEW'));
@@ -85,14 +205,20 @@ test('Business Codex review launches provider-native ACP with persisted ChatGPT 
   assert.equal(review.independentReview, true);
   const body = JSON.parse(String(requests[0]!.init.body)) as Record<string, any>;
   assert.equal(body.agent.kind, 'ACPAgent');
-  assert.deepEqual(body.agent.acp_command, ['/usr/local/bin/node', '/opt/hermes-ai-office-tools/headless_review_acp.mjs']);
+  assert.deepEqual(body.agent.acp_command, [
+    '/usr/local/bin/node',
+    '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+  ]);
   assert.equal(body.agent.acp_model, 'gpt-5.6-sol');
   assert.equal(body.agent.llm, undefined);
   assert.equal(body.secrets.AI_OFFICE_HEADLESS_TRANSPORT.value, 'provider-native');
   assert.equal(body.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'review');
   assert.equal(body.secrets.AI_OFFICE_CODEX_AUTH_HOME.value, '/openhands-state/codex-business');
   assert.equal(body.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value, 'medium');
-  assert.equal(body.secrets.PIXEL_V4_REVIEW_EVIDENCE_PATH.value, '/workspace/executions/exec-1/evidence.json');
+  assert.equal(
+    body.secrets.PIXEL_V4_REVIEW_EVIDENCE_PATH.value,
+    '/workspace/executions/exec-1/evidence.json',
+  );
   assert.equal(body.secrets.PIXEL_V4_EXECUTION_ID.value, 'exec-1');
   assert.equal(body.secrets.PIXEL_V4_REVIEWED_SHA.value, 'source-sha');
   assert.equal(JSON.stringify(body).includes(secrets.liteLlmApiKey), false);
@@ -106,25 +232,39 @@ test('OpenHands launch explicitly runs an idle initial conversation before retur
     calls.push({ url: value, method: String(init.method ?? 'GET') });
     if (value.endsWith('/api/conversations') && init.method === 'POST') {
       const body = JSON.parse(String(init.body)) as Record<string, any>;
-      return new Response(JSON.stringify({ id: 'idle-session', execution_status: 'idle', workspace: body.workspace, tags: body.tags }), { status: 201 });
+      return new Response(
+        JSON.stringify({
+          id: 'idle-session',
+          execution_status: 'idle',
+          workspace: body.workspace,
+          tags: body.tags,
+        }),
+        { status: 201 },
+      );
     }
     if (value.endsWith('/api/conversations/idle-session/run') && init.method === 'POST') {
       running = true;
       return new Response(JSON.stringify({ success: true }), { status: 200 });
     }
     if (value.endsWith('/api/conversations/idle-session')) {
-      return new Response(JSON.stringify({ id: 'idle-session', execution_status: running ? 'running' : 'idle' }), { status: 200 });
+      return new Response(
+        JSON.stringify({ id: 'idle-session', execution_status: running ? 'running' : 'idle' }),
+        { status: 200 },
+      );
     }
     throw new Error('unexpected request ' + value);
   }) as typeof fetch;
   const provider = new OpenHandsExecutionProvider(options(fake));
   const snapshot = await provider.launch(launchInput('IMPLEMENT'));
   assert.equal(snapshot.status, 'RUNNING');
-  assert.deepEqual(calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]), [
-    ['POST', '/api/conversations'],
-    ['POST', '/api/conversations/idle-session/run'],
-    ['GET', '/api/conversations/idle-session'],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]),
+    [
+      ['POST', '/api/conversations'],
+      ['POST', '/api/conversations/idle-session/run'],
+      ['GET', '/api/conversations/idle-session'],
+    ],
+  );
 });
 
 test('OpenHands launch never interrupts an initial turn that is already running', async () => {
@@ -134,13 +274,25 @@ test('OpenHands launch never interrupts an initial turn that is already running'
     calls.push({ url: value, method: String(init.method ?? 'GET') });
     if (value.endsWith('/api/conversations') && init.method === 'POST') {
       const body = JSON.parse(String(init.body)) as Record<string, any>;
-      return new Response(JSON.stringify({ id: 'race-session', execution_status: 'idle', workspace: body.workspace, tags: body.tags }), { status: 201 });
+      return new Response(
+        JSON.stringify({
+          id: 'race-session',
+          execution_status: 'idle',
+          workspace: body.workspace,
+          tags: body.tags,
+        }),
+        { status: 201 },
+      );
     }
     if (value.endsWith('/api/conversations/race-session/run') && init.method === 'POST') {
-      return new Response(JSON.stringify({ detail: 'Conversation already running.' }), { status: 409 });
+      return new Response(JSON.stringify({ detail: 'Conversation already running.' }), {
+        status: 409,
+      });
     }
     if (value.endsWith('/api/conversations/race-session')) {
-      return new Response(JSON.stringify({ id: 'race-session', execution_status: 'running' }), { status: 200 });
+      return new Response(JSON.stringify({ id: 'race-session', execution_status: 'running' }), {
+        status: 200,
+      });
     }
     if (value.endsWith('/api/conversations/race-session/interrupt')) {
       throw new Error('initial active turn must not be interrupted');
@@ -150,11 +302,14 @@ test('OpenHands launch never interrupts an initial turn that is already running'
   const provider = new OpenHandsExecutionProvider(options(fake));
   const snapshot = await provider.launch(launchInput('IMPLEMENT'));
   assert.equal(snapshot.status, 'RUNNING');
-  assert.deepEqual(calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]), [
-    ['POST', '/api/conversations'],
-    ['POST', '/api/conversations/race-session/run'],
-    ['GET', '/api/conversations/race-session'],
-  ]);
+  assert.deepEqual(
+    calls.map((call) => [call.method, call.url.replace('http://openhands.test', '')]),
+    [
+      ['POST', '/api/conversations'],
+      ['POST', '/api/conversations/race-session/run'],
+      ['GET', '/api/conversations/race-session'],
+    ],
+  );
 });
 
 test('OpenHands recovery is paginated, provenance checked and duplicate-safe', async () => {
@@ -162,24 +317,43 @@ test('OpenHands recovery is paginated, provenance checked and duplicate-safe', a
   const fake = (async (url: string | URL | Request) => {
     if (!String(url).includes('/api/conversations/search')) throw new Error('unexpected request');
     const matching = {
-      id: 'session-1', execution_status: 'paused', created_at: '2026-09-01T00:00:01.000Z',
+      id: 'session-1',
+      execution_status: 'paused',
+      created_at: '2026-09-01T00:00:01.000Z',
       workspace: { working_dir: '/workspace/executions/exec-1/repo' },
       tags: { execution: 'exec1', project: 'pixel-agents', phase: 'implement' },
     };
-    if (mode === 'duplicate') return new Response(JSON.stringify({ items: [matching, { ...matching, id: 'session-2' }] }), { status: 200 });
-    if (mode === 'mismatch') return new Response(JSON.stringify({ items: [{ ...matching, workspace: { working_dir: '/wrong' } }] }), { status: 200 });
+    if (mode === 'duplicate')
+      return new Response(JSON.stringify({ items: [matching, { ...matching, id: 'session-2' }] }), {
+        status: 200,
+      });
+    if (mode === 'mismatch')
+      return new Response(
+        JSON.stringify({ items: [{ ...matching, workspace: { working_dir: '/wrong' } }] }),
+        { status: 200 },
+      );
     return new Response(JSON.stringify({ items: [matching] }), { status: 200 });
   }) as typeof fetch;
   const provider = new OpenHandsExecutionProvider(options(fake));
   const input = {
-    executionId: 'exec-1', createdAt: '2026-09-01T00:00:00.000Z', projectKey: 'pixel-agents', phase: 'IMPLEMENT' as const,
+    executionId: 'exec-1',
+    createdAt: '2026-09-01T00:00:00.000Z',
+    projectKey: 'pixel-agents',
+    phase: 'IMPLEMENT' as const,
     expectedWorkspacePath: '/workspace/executions/exec-1/repo',
   };
   assert.equal((await provider.recover(input))?.providerSessionId, 'session-1');
   mode = 'duplicate';
-  await assert.rejects(() => provider.recover(input), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_EXECUTION_DUPLICATE');
+  await assert.rejects(
+    () => provider.recover(input),
+    (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_EXECUTION_DUPLICATE',
+  );
   mode = 'mismatch';
-  await assert.rejects(() => provider.recover(input), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_WORKSPACE_PROVENANCE_MISMATCH');
+  await assert.rejects(
+    () => provider.recover(input),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'OPENHANDS_WORKSPACE_PROVENANCE_MISMATCH',
+  );
 });
 
 test('OpenHands replacement conversation is crash-safe and excluded from initial recovery duplicates', async () => {
@@ -189,18 +363,23 @@ test('OpenHands replacement conversation is crash-safe and excluded from initial
     const value = String(url);
     requests.push({ url: value, init });
     if (value.includes('/api/conversations/search')) {
-      return new Response(JSON.stringify({
-        items: replacement
-          ? [
-              replacement,
-              {
-                id: 'original-session', execution_status: 'paused', created_at: '2026-09-01T00:00:00.000Z',
-                workspace: { working_dir: '/workspace/executions/exec-1/repo' },
-                tags: { execution: 'exec1', project: 'pixel-agents', phase: 'implement' },
-              },
-            ]
-          : [],
-      }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          items: replacement
+            ? [
+                replacement,
+                {
+                  id: 'original-session',
+                  execution_status: 'paused',
+                  created_at: '2026-09-01T00:00:00.000Z',
+                  workspace: { working_dir: '/workspace/executions/exec-1/repo' },
+                  tags: { execution: 'exec1', project: 'pixel-agents', phase: 'implement' },
+                },
+              ]
+            : [],
+        }),
+        { status: 200 },
+      );
     }
     if (value.endsWith('/api/conversations') && init.method === 'POST') {
       const body = JSON.parse(String(init.body)) as Record<string, any>;
@@ -228,7 +407,9 @@ test('OpenHands replacement conversation is crash-safe and excluded from initial
   const second = await provider.replace(input);
   assert.equal(first.providerSessionId, 'replacement-session');
   assert.equal(second.providerSessionId, 'replacement-session');
-  const creates = requests.filter((request) => request.url.endsWith('/api/conversations') && request.init.method === 'POST');
+  const creates = requests.filter(
+    (request) => request.url.endsWith('/api/conversations') && request.init.method === 'POST',
+  );
   assert.equal(creates.length, 1);
   const createBody = JSON.parse(String(creates[0]!.init.body)) as Record<string, any>;
   assert.match(String(createBody.tags.recovery), /^repl-[0-9a-f]{40}$/);
@@ -250,11 +431,37 @@ test('OpenHands inspect, continue and cancel sanitize terminal provider evidence
   const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
     const value = String(url);
     calls.push({ url: value, method: String(init.method ?? 'GET') });
-    if (value.endsWith('/events') && init.method === 'POST') return new Response(JSON.stringify({ success: true }), { status: 200 });
-    if (value.endsWith('/pause') && init.method === 'POST') { state = 'paused'; return new Response(JSON.stringify({ success: true }), { status: 200 }); }
-    if (value.endsWith('/agent_final_response')) return new Response(JSON.stringify({ response: 'failed without ' + secrets.liteLlmApiKey }), { status: 200 });
-    if (value.includes('/events/search')) return new Response(JSON.stringify({ items: [{ kind: 'ConversationErrorEvent', code: 'ServiceUnavailableError', detail: 'Authorization: Bearer token-value and ' + secrets.sessionApiKey + ' ' + secrets.liteLlmApiKey }] }), { status: 200 });
-    if (value.endsWith('/api/conversations/session-1')) return new Response(JSON.stringify({ id: 'session-1', execution_status: state }), { status: 200 });
+    if (value.endsWith('/events') && init.method === 'POST')
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    if (value.endsWith('/pause') && init.method === 'POST') {
+      state = 'paused';
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
+    if (value.endsWith('/agent_final_response'))
+      return new Response(JSON.stringify({ response: 'failed without ' + secrets.liteLlmApiKey }), {
+        status: 200,
+      });
+    if (value.includes('/events/search'))
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              kind: 'ConversationErrorEvent',
+              code: 'ServiceUnavailableError',
+              detail:
+                'Authorization: Bearer token-value and ' +
+                secrets.sessionApiKey +
+                ' ' +
+                secrets.liteLlmApiKey,
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    if (value.endsWith('/api/conversations/session-1'))
+      return new Response(JSON.stringify({ id: 'session-1', execution_status: state }), {
+        status: 200,
+      });
     throw new Error('unexpected request ' + value);
   }) as typeof fetch;
   const provider = new OpenHandsExecutionProvider(options(fake));
@@ -287,14 +494,19 @@ test('OpenHands paused continuation explicitly runs and recovers a stale in-flig
     }
     if (value.endsWith('/run') && init.method === 'POST') {
       runAttempts += 1;
-      if (runAttempts === 1) return new Response(JSON.stringify({ detail: 'still running' }), { status: 409 });
+      if (runAttempts === 1)
+        return new Response(JSON.stringify({ detail: 'still running' }), { status: 409 });
       state = 'running';
       return new Response(JSON.stringify({ success: true }), { status: 200 });
     }
-    if (value.endsWith('/agent_final_response')) return new Response(JSON.stringify({ response: '' }), { status: 200 });
-    if (value.includes('/events/search')) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (value.endsWith('/agent_final_response'))
+      return new Response(JSON.stringify({ response: '' }), { status: 200 });
+    if (value.includes('/events/search'))
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
     if (value.endsWith('/api/conversations/session-stuck'))
-      return new Response(JSON.stringify({ id: 'session-stuck', execution_status: state }), { status: 200 });
+      return new Response(JSON.stringify({ id: 'session-stuck', execution_status: state }), {
+        status: 200,
+      });
     throw new Error('unexpected request ' + value);
   }) as typeof fetch;
   const provider = new OpenHandsExecutionProvider(options(fake));
@@ -305,13 +517,50 @@ test('OpenHands paused continuation explicitly runs and recovers a stale in-flig
 });
 
 test('OpenHands status and transport failures fail closed', async () => {
-  assert.deepEqual([
-    'created', 'queued', 'running', 'idle', 'paused', 'waiting_for_confirmation', 'finished', 'error', 'stuck', 'deleting', 'other',
-  ].map(mapOpenHandsStatus), [
-    'CREATED', 'QUEUED', 'RUNNING', 'PAUSED', 'PAUSED', 'WAITING_FOR_CONFIRMATION', 'SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED', 'UNKNOWN',
-  ]);
-  const httpFailure = new OpenHandsExecutionProvider(options((async () => new Response('busy', { status: 503 })) as typeof fetch));
-  await assert.rejects(() => httpFailure.inspect('session'), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_HTTP_503');
-  const timeout = new OpenHandsExecutionProvider(options((async () => { const error = new Error('timeout'); error.name = 'TimeoutError'; throw error; }) as typeof fetch));
-  await assert.rejects(() => timeout.inspect('session'), (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_TIMEOUT');
+  assert.deepEqual(
+    [
+      'created',
+      'queued',
+      'running',
+      'idle',
+      'paused',
+      'waiting_for_confirmation',
+      'finished',
+      'error',
+      'stuck',
+      'deleting',
+      'other',
+    ].map(mapOpenHandsStatus),
+    [
+      'CREATED',
+      'QUEUED',
+      'RUNNING',
+      'PAUSED',
+      'PAUSED',
+      'WAITING_FOR_CONFIRMATION',
+      'SUCCEEDED',
+      'FAILED',
+      'STUCK',
+      'CANCELLED',
+      'UNKNOWN',
+    ],
+  );
+  const httpFailure = new OpenHandsExecutionProvider(
+    options((async () => new Response('busy', { status: 503 })) as typeof fetch),
+  );
+  await assert.rejects(
+    () => httpFailure.inspect('session'),
+    (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_HTTP_503',
+  );
+  const timeout = new OpenHandsExecutionProvider(
+    options((async () => {
+      const error = new Error('timeout');
+      error.name = 'TimeoutError';
+      throw error;
+    }) as typeof fetch),
+  );
+  await assert.rejects(
+    () => timeout.inspect('session'),
+    (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_TIMEOUT',
+  );
 });

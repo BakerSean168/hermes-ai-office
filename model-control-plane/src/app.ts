@@ -7,6 +7,7 @@ import { LiteLlmExecutionTelemetry } from './v4/adapters/liteLlmTelemetry.js';
 import { GitHubCliDeliveryAdapter } from './v4/adapters/githubDelivery.js';
 import {
   OpenHandsCodexBusinessReviewProvider,
+  OpenHandsCodexManagedExecutionProvider,
   OpenHandsExecutionProvider,
   OpenHandsReviewProvider,
 } from './v4/adapters/openHandsCoding.js';
@@ -256,7 +257,10 @@ function buildExecutionAutomation(
   const routes: ExecutionWorkerRoute[] = [
     ...implementationSpecs.map(({ route, model }) => ({
       route,
-      provider: new OpenHandsExecutionProvider({ ...common, implementationModel: model }),
+      provider:
+        model === 'gpt-5.6-luna'
+          ? new OpenHandsCodexManagedExecutionProvider({ ...common, implementationModel: model })
+          : new OpenHandsExecutionProvider({ ...common, implementationModel: model }),
     })),
     ...reviewSpecs.map(({ route, model }) => ({
       route,

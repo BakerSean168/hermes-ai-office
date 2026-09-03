@@ -28,6 +28,16 @@ export interface OpenHandsProviderOptions {
   reviewModel?: string;
 }
 
+export interface CodexManagedExecutionOptions {
+  command?: string[];
+  acpServer?: string;
+  codexBin?: string;
+  workspaceRoot?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh';
+  promptTimeoutSeconds?: number;
+  startupTimeoutSeconds?: number;
+}
+
 export interface CodexBusinessReviewOptions {
   command?: string[];
   acpServer?: string;
@@ -52,14 +62,21 @@ interface NormalizedOptions {
   reviewModel: string;
 }
 
-const TERMINAL_STATUSES = new Set<ProviderSessionStatus>(['SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED']);
+const TERMINAL_STATUSES = new Set<ProviderSessionStatus>([
+  'SUCCEEDED',
+  'FAILED',
+  'STUCK',
+  'CANCELLED',
+]);
 const MAX_ERROR_TEXT = 2_000;
 const MAX_FINAL_TEXT = 64_000;
 const MAX_INSTRUCTION_TEXT = 32_000;
 const MAX_RECOVERY_PAGES = 100;
 
 function record(value: unknown): JsonRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as JsonRecord : {};
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as JsonRecord)
+    : {};
 }
 
 function normalizeOptions(options: OpenHandsProviderOptions): NormalizedOptions {
@@ -70,9 +87,18 @@ function normalizeOptions(options: OpenHandsProviderOptions): NormalizedOptions 
   const requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
   const llmTimeoutSeconds = options.llmTimeoutSeconds ?? 600;
   const maxIterations = options.maxIterations ?? 500;
-  failClosed(Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 1_000 && requestTimeoutMs <= 120_000, 'OPENHANDS_TIMEOUT_INVALID');
-  failClosed(Number.isInteger(llmTimeoutSeconds) && llmTimeoutSeconds >= 30 && llmTimeoutSeconds <= 1_800, 'OPENHANDS_LLM_TIMEOUT_INVALID');
-  failClosed(Number.isInteger(maxIterations) && maxIterations >= 1 && maxIterations <= 1_000, 'OPENHANDS_ITERATION_LIMIT_INVALID');
+  failClosed(
+    Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 1_000 && requestTimeoutMs <= 120_000,
+    'OPENHANDS_TIMEOUT_INVALID',
+  );
+  failClosed(
+    Number.isInteger(llmTimeoutSeconds) && llmTimeoutSeconds >= 30 && llmTimeoutSeconds <= 1_800,
+    'OPENHANDS_LLM_TIMEOUT_INVALID',
+  );
+  failClosed(
+    Number.isInteger(maxIterations) && maxIterations >= 1 && maxIterations <= 1_000,
+    'OPENHANDS_ITERATION_LIMIT_INVALID',
+  );
   const implementationModel = (options.implementationModel ?? 'gpt-5.6-luna').trim();
   const reviewModel = (options.reviewModel ?? 'gpt-5.6-sol').trim();
   failClosed(implementationModel.length > 0 && reviewModel.length > 0, 'OPENHANDS_MODEL_REQUIRED');
@@ -109,29 +135,44 @@ function executionTag(executionId: string): string {
 }
 
 function recoveryTag(recoveryKey: string): string {
-  failClosed(recoveryKey.trim().length > 0 && recoveryKey.length <= 1_000, 'OPENHANDS_RECOVERY_KEY_INVALID');
+  failClosed(
+    recoveryKey.trim().length > 0 && recoveryKey.length <= 1_000,
+    'OPENHANDS_RECOVERY_KEY_INVALID',
+  );
   return 'repl-' + createHash('sha256').update(recoveryKey).digest('hex').slice(0, 40);
 }
 
 export function mapOpenHandsStatus(value: unknown): ProviderSessionStatus {
   switch (String(value ?? '').toLowerCase()) {
-    case 'created': return 'CREATED';
-    case 'queued': return 'QUEUED';
-    case 'running': return 'RUNNING';
+    case 'created':
+      return 'CREATED';
+    case 'queued':
+      return 'QUEUED';
+    case 'running':
+      return 'RUNNING';
     case 'idle':
-    case 'paused': return 'PAUSED';
-    case 'waiting_for_confirmation': return 'WAITING_FOR_CONFIRMATION';
-    case 'finished': return 'SUCCEEDED';
-    case 'error': return 'FAILED';
-    case 'stuck': return 'STUCK';
+    case 'paused':
+      return 'PAUSED';
+    case 'waiting_for_confirmation':
+      return 'WAITING_FOR_CONFIRMATION';
+    case 'finished':
+      return 'SUCCEEDED';
+    case 'error':
+      return 'FAILED';
+    case 'stuck':
+      return 'STUCK';
     case 'deleting':
-    case 'cancelled': return 'CANCELLED';
-    default: return 'UNKNOWN';
+    case 'cancelled':
+      return 'CANCELLED';
+    default:
+      return 'UNKNOWN';
   }
 }
 
 function retryableFailure(code: string, detail: string): boolean {
-  return /(?:timeout|connection|rate.?limit|service.?unavailable|internal.?server|authentication|invalid api key|unauthorized|forbidden|no deployments available|http[_ ]?(?:401|403|429|5\d\d)|\b(?:401|403|429|5\d\d)\b)/i.test(code + ' ' + detail);
+  return /(?:timeout|connection|rate.?limit|service.?unavailable|internal.?server|authentication|invalid api key|unauthorized|forbidden|no deployments available|http[_ ]?(?:401|403|429|5\d\d)|\b(?:401|403|429|5\d\d)\b)/i.test(
+    code + ' ' + detail,
+  );
 }
 
 function phasePrompt(input: ProviderLaunchInput): string {
@@ -141,49 +182,71 @@ function phasePrompt(input: ProviderLaunchInput): string {
   const findings = input.reviewFindings?.length
     ? ['Review findings to repair:', ...input.reviewFindings.map((item) => '- ' + item.trim())]
     : [];
-  const evidenceTemplate = input.phase === 'REVIEW'
-    ? JSON.stringify({
-        version: 1,
-        executionId: input.executionId,
-        phase: 'REVIEW',
-        reviewedSha: input.sourceRevision,
-        verdict: 'PASS|FAIL|INVALID',
-        findings: ['concrete finding when not PASS'],
-        checks: [{ command: 'exact command', status: 'PASS|FAIL|SKIP', exitCode: 0, summary: 'bounded result' }],
-        summary: 'bounded review summary',
-      })
-    : JSON.stringify({
-        version: 1,
-        executionId: input.executionId,
-        phase: input.phase,
-        sourceRevision: input.sourceRevision,
-        resultRevision: '<exact git HEAD after commit or unchanged source HEAD>',
-        outcome: 'CHANGED|SATISFIED',
-        summary: 'bounded implementation summary',
-        tests: [{ command: 'exact command', status: 'PASS|FAIL|SKIP', exitCode: 0, summary: 'bounded result' }],
-      });
-  const rules = input.phase === 'REVIEW'
-    ? [
-        'Perform an independent review of the exact supplied revision.',
-        'Do not edit tracked repository files or delegate the review. The workspace is writable only so checks may create ignored dependency and tool-cache artifacts.',
-        'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
-        'If dependencies are missing, bootstrap only from the checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
-        'Leave the exact supplied git HEAD unchanged and leave no tracked or non-ignored workspace changes.',
-        'Use FAIL only for a concrete defect attributable to the exact reviewed revision. Use INVALID when the environment or tooling prevents a conclusive review.',
-        'The first non-empty line of the final response must be exactly PASS, FAIL, or INVALID.',
-        'Use PASS only when the exact revision satisfies every acceptance criterion.',
-        'Before finishing, atomically write one JSON object to ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
-      ]
-    : [
-        'Implement the bounded objective in the supplied isolated workspace.',
-        'Do not broaden scope, access credentials, merge, deploy, or modify remotes.',
-        'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
-        'If a JavaScript workspace has no installed dependencies, bootstrap only from its checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
-        'If tracked changes are required, set outcome=CHANGED, run focused checks, commit every intended change, and leave the workspace clean.',
-        'If the supplied exact source revision already satisfies the entire bounded objective, do not manufacture a commit. Verify every acceptance criterion with focused checks, keep exact HEAD and a clean tree, and set outcome=SATISFIED. This path is still subject to independent review.',
-        'A planning-only response or an unverified no-op is not successful implementation.',
-        'Before finishing, atomically write one JSON object outside the Git repository at ' + input.workspace.evidenceExecutionPath + ' using this schema: ' + evidenceTemplate,
-      ];
+  const evidenceTemplate =
+    input.phase === 'REVIEW'
+      ? JSON.stringify({
+          version: 1,
+          executionId: input.executionId,
+          phase: 'REVIEW',
+          reviewedSha: input.sourceRevision,
+          verdict: 'PASS|FAIL|INVALID',
+          findings: ['concrete finding when not PASS'],
+          checks: [
+            {
+              command: 'exact command',
+              status: 'PASS|FAIL|SKIP',
+              exitCode: 0,
+              summary: 'bounded result',
+            },
+          ],
+          summary: 'bounded review summary',
+        })
+      : JSON.stringify({
+          version: 1,
+          executionId: input.executionId,
+          phase: input.phase,
+          sourceRevision: input.sourceRevision,
+          resultRevision: '<exact git HEAD after commit or unchanged source HEAD>',
+          outcome: 'CHANGED|SATISFIED',
+          summary: 'bounded implementation summary',
+          tests: [
+            {
+              command: 'exact command',
+              status: 'PASS|FAIL|SKIP',
+              exitCode: 0,
+              summary: 'bounded result',
+            },
+          ],
+        });
+  const rules =
+    input.phase === 'REVIEW'
+      ? [
+          'Perform an independent review of the exact supplied revision.',
+          'Do not edit tracked repository files or delegate the review. The workspace is writable only so checks may create ignored dependency and tool-cache artifacts.',
+          'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
+          'If dependencies are missing, bootstrap only from the checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
+          'Leave the exact supplied git HEAD unchanged and leave no tracked or non-ignored workspace changes.',
+          'Use FAIL only for a concrete defect attributable to the exact reviewed revision. Use INVALID when the environment or tooling prevents a conclusive review.',
+          'The first non-empty line of the final response must be exactly PASS, FAIL, or INVALID.',
+          'Use PASS only when the exact revision satisfies every acceptance criterion.',
+          'Before finishing, atomically write one JSON object to ' +
+            input.workspace.evidenceExecutionPath +
+            ' using this schema: ' +
+            evidenceTemplate,
+        ]
+      : [
+          'Implement the bounded objective in the supplied isolated workspace.',
+          'Do not broaden scope, access credentials, merge, deploy, or modify remotes.',
+          'Before running project commands, honor checked-in runtime declarations such as .node-version, .nvmrc, packageManager, and engines; never weaken them to fit the worker image.',
+          'If a JavaScript workspace has no installed dependencies, bootstrap only from its checked-in lockfile with the declared package manager and an immutable/frozen-lockfile mode; never rewrite the lockfile as an environment workaround.',
+          'If tracked changes are required, set outcome=CHANGED, run focused checks, commit every intended change, and leave the workspace clean.',
+          'If the supplied exact source revision already satisfies the entire bounded objective, do not manufacture a commit. Verify every acceptance criterion with focused checks, keep exact HEAD and a clean tree, and set outcome=SATISFIED. This path is still subject to independent review.',
+          'A planning-only response or an unverified no-op is not successful implementation.',
+          'Before finishing, atomically write one JSON object outside the Git repository at ' +
+            input.workspace.evidenceExecutionPath +
+            ' using this schema: ' +
+            evidenceTemplate,
+        ];
   const text = [
     'Pixel Agent V4 execution phase: ' + input.phase,
     'Execution: ' + input.executionId,
@@ -200,8 +263,11 @@ function phasePrompt(input: ProviderLaunchInput): string {
     '',
     'Execution rules:',
     ...rules.map((rule) => '- ' + rule),
-  ].filter(Boolean).join('\n');
-  if (Buffer.byteLength(text, 'utf8') > MAX_INSTRUCTION_TEXT) throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
+  ]
+    .filter(Boolean)
+    .join('\n');
+  if (Buffer.byteLength(text, 'utf8') > MAX_INSTRUCTION_TEXT)
+    throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
   return text;
 }
 
@@ -241,7 +307,9 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         if (matches.size > 1) throw new V4Error('OPENHANDS_EXECUTION_DUPLICATE');
       }
       const next = boundedText(payload.next_page_id, 2_000);
-      const times = items.map((item) => Date.parse(String(record(item).created_at ?? ''))).filter(Number.isFinite);
+      const times = items
+        .map((item) => Date.parse(String(record(item).created_at ?? '')))
+        .filter(Number.isFinite);
       if (!next || (times.length > 0 && Math.min(...times) < createdAt - 60_000)) break;
       pageId = next;
     }
@@ -252,7 +320,8 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   async replace(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot> {
     this.validateLaunchInput(input);
     failClosed(
-      input.previousProviderSessionId.trim().length > 0 && input.previousProviderSessionId.length <= 200,
+      input.previousProviderSessionId.trim().length > 0 &&
+        input.previousProviderSessionId.length <= 200,
       'EXPECTED_PROVIDER_SESSION_ID_REQUIRED',
     );
     failClosed(input.instruction.trim().length > 0, 'OPENHANDS_REPLACEMENT_INSTRUCTION_REQUIRED');
@@ -282,10 +351,15 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   async continue(providerSessionId: string, instruction: string): Promise<ProviderSessionSnapshot> {
     failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
     failClosed(instruction.trim().length > 0, 'OPENHANDS_CONTINUE_INSTRUCTION_REQUIRED');
-    if (Buffer.byteLength(instruction, 'utf8') > MAX_INSTRUCTION_TEXT) throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
+    if (Buffer.byteLength(instruction, 'utf8') > MAX_INSTRUCTION_TEXT)
+      throw new V4Error('OPENHANDS_INSTRUCTION_TOO_LARGE');
     await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/events', {
       method: 'POST',
-      body: JSON.stringify({ role: 'user', content: [{ type: 'text', text: instruction }], run: true }),
+      body: JSON.stringify({
+        role: 'user',
+        content: [{ type: 'text', text: instruction }],
+        run: true,
+      }),
     });
     const snapshot = await this.inspect(providerSessionId);
     return await this.ensureRunning(providerSessionId, snapshot);
@@ -293,13 +367,18 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
 
   async interrupt(providerSessionId: string): Promise<ProviderSessionSnapshot> {
     failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
+    await this.request(
+      '/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt',
+      { method: 'POST' },
+    );
     return await this.inspect(providerSessionId);
   }
 
   async cancel(providerSessionId: string): Promise<ProviderSessionSnapshot> {
     failClosed(providerSessionId.trim().length > 0, 'PROVIDER_SESSION_ID_REQUIRED');
-    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/pause', { method: 'POST' });
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/pause', {
+      method: 'POST',
+    });
     return await this.inspect(providerSessionId);
   }
 
@@ -307,7 +386,8 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     input: ProviderLaunchInput,
     tools: Array<{ name: string }>,
   ): JsonRecord {
-    const model = this.mode === 'REVIEW' ? this.options.reviewModel : this.options.implementationModel;
+    const model =
+      this.mode === 'REVIEW' ? this.options.reviewModel : this.options.implementationModel;
     return {
       kind: 'Agent',
       llm: {
@@ -326,9 +406,10 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         load_project_skills: true,
         load_user_skills: false,
         load_public_skills: false,
-        system_message_suffix: this.mode === 'REVIEW'
-          ? 'You are an independent read-only reviewer. Never edit files and never ask the user questions.'
-          : 'You are a bounded implementation worker. Never ask the user questions; implement, test, commit, and finish.',
+        system_message_suffix:
+          this.mode === 'REVIEW'
+            ? 'You are an independent read-only reviewer. Never edit files and never ask the user questions.'
+            : 'You are a bounded implementation worker. Never ask the user questions; implement, test, commit, and finish.',
       },
     };
   }
@@ -346,8 +427,14 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     failClosed(input.planId.trim().length > 0, 'PLAN_ID_REQUIRED');
     failClosed(input.projectKey.trim().length > 0, 'PROJECT_KEY_REQUIRED');
     failClosed(input.sourceRevision.trim().length > 0, 'EXECUTION_SOURCE_REVISION_REQUIRED');
-    failClosed(input.workspace.executionId === input.executionId, 'OPENHANDS_WORKSPACE_EXECUTION_MISMATCH');
-    failClosed(input.workspace.sourceRevision === input.sourceRevision, 'OPENHANDS_WORKSPACE_REVISION_MISMATCH');
+    failClosed(
+      input.workspace.executionId === input.executionId,
+      'OPENHANDS_WORKSPACE_EXECUTION_MISMATCH',
+    );
+    failClosed(
+      input.workspace.sourceRevision === input.sourceRevision,
+      'OPENHANDS_WORKSPACE_REVISION_MISMATCH',
+    );
     failClosed(input.workspace.executionPath.trim().length > 0, 'OPENHANDS_WORKSPACE_REQUIRED');
   }
 
@@ -356,17 +443,20 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     initialText: string,
     extraTags: Record<string, string> = {},
   ): Promise<ProviderSessionSnapshot> {
-    const tools = this.mode === 'REVIEW'
-      ? [{ name: 'terminal' }, { name: 'task_tracker' }]
-      : [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }];
-    const toolModuleQualnames = Object.fromEntries(tools.map((tool) => [
-      tool.name,
-      tool.name === 'terminal'
-        ? 'openhands.tools.terminal.definition'
-        : tool.name === 'file_editor'
-          ? 'openhands.tools.file_editor.definition'
-          : 'openhands.tools.task_tracker.definition',
-    ]));
+    const tools =
+      this.mode === 'REVIEW'
+        ? [{ name: 'terminal' }, { name: 'task_tracker' }]
+        : [{ name: 'terminal' }, { name: 'file_editor' }, { name: 'task_tracker' }];
+    const toolModuleQualnames = Object.fromEntries(
+      tools.map((tool) => [
+        tool.name,
+        tool.name === 'terminal'
+          ? 'openhands.tools.terminal.definition'
+          : tool.name === 'file_editor'
+            ? 'openhands.tools.file_editor.definition'
+            : 'openhands.tools.task_tracker.definition',
+      ]),
+    );
     const payload = {
       workspace: { kind: 'LocalWorkspace', working_dir: input.workspace.executionPath },
       confirmation_policy: { kind: 'NeverConfirm' },
@@ -394,7 +484,10 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       },
       observability_tags: ['pixel-v4', input.phase.toLowerCase()],
     };
-    const response = await this.json('/api/conversations', { method: 'POST', body: JSON.stringify(payload) });
+    const response = await this.json('/api/conversations', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
     const conversationId = boundedText(response.id ?? response.conversation_id, 200);
     if (!conversationId) throw new V4Error('OPENHANDS_CONVERSATION_ID_MISSING');
     this.validateConversation(response, {
@@ -446,44 +539,83 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   ): Promise<ProviderSessionSnapshot> {
     if (snapshot.status !== 'PAUSED') return snapshot;
     try {
-      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
+      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', {
+        method: 'POST',
+      });
     } catch (error) {
       if (!(error instanceof V4Error) || error.code !== 'OPENHANDS_HTTP_409') throw error;
       const concurrent = await this.inspect(providerSessionId);
-      if (concurrent.status === 'RUNNING' || concurrent.status === 'WAITING_FOR_CONFIRMATION' || TERMINAL_STATUSES.has(concurrent.status)) {
+      if (
+        concurrent.status === 'RUNNING' ||
+        concurrent.status === 'WAITING_FOR_CONFIRMATION' ||
+        TERMINAL_STATUSES.has(concurrent.status)
+      ) {
         return concurrent;
       }
       if (concurrent.status !== 'PAUSED') throw error;
-      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt', { method: 'POST' });
-      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', { method: 'POST' });
+      await this.request(
+        '/api/conversations/' + encodeURIComponent(providerSessionId) + '/interrupt',
+        { method: 'POST' },
+      );
+      await this.request('/api/conversations/' + encodeURIComponent(providerSessionId) + '/run', {
+        method: 'POST',
+      });
     }
     return await this.inspect(providerSessionId);
   }
 
   protected validatePhase(phase: ExecutionPhase): void {
-    if (this.mode === 'REVIEW' && phase !== 'REVIEW') throw new V4Error('OPENHANDS_REVIEW_PHASE_REQUIRED');
-    if (this.mode === 'IMPLEMENTATION' && phase === 'REVIEW') throw new V4Error('OPENHANDS_IMPLEMENTATION_PHASE_REQUIRED');
+    if (this.mode === 'REVIEW' && phase !== 'REVIEW')
+      throw new V4Error('OPENHANDS_REVIEW_PHASE_REQUIRED');
+    if (this.mode === 'IMPLEMENTATION' && phase === 'REVIEW')
+      throw new V4Error('OPENHANDS_IMPLEMENTATION_PHASE_REQUIRED');
   }
 
-  private validateConversation(conversation: JsonRecord, input: Pick<ProviderRecoveryInput, 'executionId' | 'projectKey' | 'phase' | 'expectedWorkspacePath'>): void {
+  private validateConversation(
+    conversation: JsonRecord,
+    input: Pick<
+      ProviderRecoveryInput,
+      'executionId' | 'projectKey' | 'phase' | 'expectedWorkspacePath'
+    >,
+  ): void {
     const tags = record(conversation.tags);
-    if (tags.execution !== undefined && tags.execution !== executionTag(input.executionId)) throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
-    if (input.projectKey && tags.project !== undefined && tags.project !== tagValue(input.projectKey)) throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
-    if (input.phase && tags.phase !== undefined && tags.phase !== input.phase.toLowerCase().replace(/_/g, '')) throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
+    if (tags.execution !== undefined && tags.execution !== executionTag(input.executionId))
+      throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
+    if (
+      input.projectKey &&
+      tags.project !== undefined &&
+      tags.project !== tagValue(input.projectKey)
+    )
+      throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
+    if (
+      input.phase &&
+      tags.phase !== undefined &&
+      tags.phase !== input.phase.toLowerCase().replace(/_/g, '')
+    )
+      throw new V4Error('OPENHANDS_EXECUTION_PROVENANCE_MISMATCH');
     const workspace = record(conversation.workspace);
-    if (input.expectedWorkspacePath && workspace.working_dir !== undefined && workspace.working_dir !== input.expectedWorkspacePath) {
+    if (
+      input.expectedWorkspacePath &&
+      workspace.working_dir !== undefined &&
+      workspace.working_dir !== input.expectedWorkspacePath
+    ) {
       throw new V4Error('OPENHANDS_WORKSPACE_PROVENANCE_MISMATCH');
     }
   }
 
-  private async snapshot(payload: JsonRecord, conversationId: string): Promise<ProviderSessionSnapshot> {
+  private async snapshot(
+    payload: JsonRecord,
+    conversationId: string,
+  ): Promise<ProviderSessionSnapshot> {
     const status = mapOpenHandsStatus(payload.execution_status);
     let finalResponse: string | undefined;
     let errorCode: string | undefined;
     let retryable: boolean | undefined;
     if (TERMINAL_STATUSES.has(status)) {
       try {
-        const result = await this.json('/api/conversations/' + encodeURIComponent(conversationId) + '/agent_final_response');
+        const result = await this.json(
+          '/api/conversations/' + encodeURIComponent(conversationId) + '/agent_final_response',
+        );
         finalResponse = this.sanitize(boundedText(result.response, MAX_FINAL_TEXT), MAX_FINAL_TEXT);
       } catch (error) {
         if (!(error instanceof V4Error) || !error.code.startsWith('OPENHANDS_HTTP_')) throw error;
@@ -491,12 +623,24 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     }
     if (status === 'FAILED' || status === 'STUCK') {
       try {
-        const events = await this.json('/api/conversations/' + encodeURIComponent(conversationId) + '/events/search?limit=20&sort_order=TIMESTAMP_DESC');
+        const events = await this.json(
+          '/api/conversations/' +
+            encodeURIComponent(conversationId) +
+            '/events/search?limit=20&sort_order=TIMESTAMP_DESC',
+        );
         const items = Array.isArray(events.items) ? events.items : [];
-        const raw = items.map(record).find((item) => ['ConversationErrorEvent', 'ServerErrorEvent', 'AgentErrorEvent'].includes(String(item.kind ?? '')));
+        const raw = items
+          .map(record)
+          .find((item) =>
+            ['ConversationErrorEvent', 'ServerErrorEvent', 'AgentErrorEvent'].includes(
+              String(item.kind ?? ''),
+            ),
+          );
         if (raw) {
           const code = boundedText(raw.code ?? raw.kind, 200) ?? 'OPENHANDS_PROVIDER_FAILURE';
-          const detail = this.sanitize(boundedText(raw.detail ?? raw.error, MAX_ERROR_TEXT), MAX_ERROR_TEXT) ?? '';
+          const detail =
+            this.sanitize(boundedText(raw.detail ?? raw.error, MAX_ERROR_TEXT), MAX_ERROR_TEXT) ??
+            '';
           errorCode = detail ? (code + ':' + detail).slice(0, MAX_ERROR_TEXT) : code;
           retryable = retryableFailure(code, detail);
         }
@@ -535,7 +679,8 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     } catch (error) {
       throw new V4Error('OPENHANDS_RESPONSE_INVALID', 'OpenHands returned invalid JSON.', error);
     }
-    if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) throw new V4Error('OPENHANDS_RESPONSE_INVALID');
+    if (payload === null || typeof payload !== 'object' || Array.isArray(payload))
+      throw new V4Error('OPENHANDS_RESPONSE_INVALID');
     return payload as JsonRecord;
   }
 
@@ -550,11 +695,16 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         },
         signal: init.signal ?? AbortSignal.timeout(this.options.requestTimeoutMs),
       });
-      if (!response.ok) throw new V4Error('OPENHANDS_HTTP_' + response.status, 'OpenHands request failed with HTTP ' + response.status + '.');
+      if (!response.ok)
+        throw new V4Error(
+          'OPENHANDS_HTTP_' + response.status,
+          'OpenHands request failed with HTTP ' + response.status + '.',
+        );
       return response;
     } catch (error) {
       if (error instanceof V4Error) throw error;
-      if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError')) throw new V4Error('OPENHANDS_TIMEOUT');
+      if (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+        throw new V4Error('OPENHANDS_TIMEOUT');
       throw new V4Error('OPENHANDS_UNAVAILABLE', 'OpenHands request failed.');
     }
   }
@@ -565,13 +715,101 @@ export class OpenHandsExecutionProvider extends OpenHandsProviderBase {
   protected readonly mode = 'IMPLEMENTATION' as const;
 }
 
+export class OpenHandsCodexManagedExecutionProvider extends OpenHandsProviderBase {
+  readonly provider = 'codex-managed-coding';
+  protected readonly mode = 'IMPLEMENTATION' as const;
+  readonly codex: Required<CodexManagedExecutionOptions>;
+
+  constructor(options: OpenHandsProviderOptions, codex: CodexManagedExecutionOptions = {}) {
+    super(options);
+    const command = codex.command ?? [
+      '/usr/local/bin/node',
+      '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
+    ];
+    failClosed(
+      command.length > 0 && command.every((item) => item.trim().length > 0),
+      'CODEX_MANAGED_COMMAND_REQUIRED',
+    );
+    const promptTimeoutSeconds = codex.promptTimeoutSeconds ?? 1_800;
+    const startupTimeoutSeconds = codex.startupTimeoutSeconds ?? 90;
+    failClosed(
+      Number.isInteger(promptTimeoutSeconds) &&
+        promptTimeoutSeconds >= 30 &&
+        promptTimeoutSeconds <= 1_800,
+      'CODEX_MANAGED_TIMEOUT_INVALID',
+    );
+    failClosed(
+      Number.isInteger(startupTimeoutSeconds) &&
+        startupTimeoutSeconds >= 10 &&
+        startupTimeoutSeconds <= 300,
+      'CODEX_MANAGED_STARTUP_TIMEOUT_INVALID',
+    );
+    this.codex = {
+      command,
+      acpServer: codex.acpServer ?? 'custom',
+      codexBin: codex.codexBin ?? '/openhands-state/tooling/node_modules/.bin/codex',
+      workspaceRoot: codex.workspaceRoot ?? '/workspace',
+      reasoningEffort: codex.reasoningEffort ?? 'xhigh',
+      promptTimeoutSeconds,
+      startupTimeoutSeconds,
+    };
+  }
+
+  protected override conversationAgent(
+    _input: ProviderLaunchInput,
+    _tools: Array<{ name: string }>,
+  ): JsonRecord {
+    return {
+      kind: 'ACPAgent',
+      acp_command: this.codex.command,
+      acp_server: this.codex.acpServer,
+      acp_prompt_timeout: this.codex.promptTimeoutSeconds,
+      acp_startup_timeout: this.codex.startupTimeoutSeconds,
+      acp_model: this.options.implementationModel,
+    };
+  }
+
+  protected override conversationSecrets(input: ProviderLaunchInput): JsonRecord {
+    return {
+      ...super.conversationSecrets(input),
+      AI_OFFICE_HEADLESS_DRIVER: { kind: 'StaticSecret', value: 'codex' },
+      AI_OFFICE_HEADLESS_ROLE: { kind: 'StaticSecret', value: 'worker' },
+      AI_OFFICE_HEADLESS_TRANSPORT: { kind: 'StaticSecret', value: 'litellm-managed' },
+      AI_OFFICE_HEADLESS_MODEL: { kind: 'StaticSecret', value: this.options.implementationModel },
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: {
+        kind: 'StaticSecret',
+        value: this.codex.reasoningEffort,
+      },
+      AI_OFFICE_LITELLM_BASE_URL: { kind: 'StaticSecret', value: this.options.liteLlmBaseUrl },
+      AI_OFFICE_LITELLM_API_KEY: { kind: 'StaticSecret', value: this.options.liteLlmApiKey },
+      AI_OFFICE_CODEX_BIN: { kind: 'StaticSecret', value: this.codex.codexBin },
+      AI_OFFICE_WORKSPACE_ROOT: { kind: 'StaticSecret', value: this.codex.workspaceRoot },
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: {
+        kind: 'StaticSecret',
+        value: String(this.codex.promptTimeoutSeconds),
+      },
+      HERMES_V3_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
+      PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH: {
+        kind: 'StaticSecret',
+        value: input.workspace.evidenceExecutionPath,
+      },
+      PIXEL_V4_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
+      PIXEL_V4_SOURCE_SHA: { kind: 'StaticSecret', value: input.sourceRevision },
+      PIXEL_V4_IMPLEMENTATION_PHASE: { kind: 'StaticSecret', value: input.phase },
+    };
+  }
+}
+
 export class OpenHandsReviewProvider extends OpenHandsProviderBase implements ReviewProviderPort {
   readonly provider = 'openhands-independent-review';
   readonly independentReview = true as const;
   protected readonly mode = 'REVIEW' as const;
 }
 
-export class OpenHandsCodexBusinessReviewProvider extends OpenHandsProviderBase implements ReviewProviderPort {
+export class OpenHandsCodexBusinessReviewProvider
+  extends OpenHandsProviderBase
+  implements ReviewProviderPort
+{
   readonly provider = 'codex-business-independent-review';
   readonly independentReview = true as const;
   protected readonly mode = 'REVIEW' as const;
@@ -583,11 +821,24 @@ export class OpenHandsCodexBusinessReviewProvider extends OpenHandsProviderBase 
       '/usr/local/bin/node',
       '/opt/hermes-ai-office-tools/headless_review_acp.mjs',
     ];
-    failClosed(command.length > 0 && command.every((item) => item.trim().length > 0), 'CODEX_BUSINESS_COMMAND_REQUIRED');
+    failClosed(
+      command.length > 0 && command.every((item) => item.trim().length > 0),
+      'CODEX_BUSINESS_COMMAND_REQUIRED',
+    );
     const promptTimeoutSeconds = business.promptTimeoutSeconds ?? 1_200;
     const startupTimeoutSeconds = business.startupTimeoutSeconds ?? 90;
-    failClosed(Number.isInteger(promptTimeoutSeconds) && promptTimeoutSeconds >= 30 && promptTimeoutSeconds <= 1_800, 'CODEX_BUSINESS_TIMEOUT_INVALID');
-    failClosed(Number.isInteger(startupTimeoutSeconds) && startupTimeoutSeconds >= 10 && startupTimeoutSeconds <= 300, 'CODEX_BUSINESS_STARTUP_TIMEOUT_INVALID');
+    failClosed(
+      Number.isInteger(promptTimeoutSeconds) &&
+        promptTimeoutSeconds >= 30 &&
+        promptTimeoutSeconds <= 1_800,
+      'CODEX_BUSINESS_TIMEOUT_INVALID',
+    );
+    failClosed(
+      Number.isInteger(startupTimeoutSeconds) &&
+        startupTimeoutSeconds >= 10 &&
+        startupTimeoutSeconds <= 300,
+      'CODEX_BUSINESS_STARTUP_TIMEOUT_INVALID',
+    );
     this.business = {
       command,
       acpServer: business.acpServer ?? 'custom',
@@ -600,7 +851,10 @@ export class OpenHandsCodexBusinessReviewProvider extends OpenHandsProviderBase 
     };
   }
 
-  protected override conversationAgent(_input: ProviderLaunchInput, _tools: Array<{ name: string }>): JsonRecord {
+  protected override conversationAgent(
+    _input: ProviderLaunchInput,
+    _tools: Array<{ name: string }>,
+  ): JsonRecord {
     return {
       kind: 'ACPAgent',
       acp_command: this.business.command,
@@ -618,12 +872,21 @@ export class OpenHandsCodexBusinessReviewProvider extends OpenHandsProviderBase 
       AI_OFFICE_HEADLESS_ROLE: { kind: 'StaticSecret', value: 'review' },
       AI_OFFICE_HEADLESS_TRANSPORT: { kind: 'StaticSecret', value: 'provider-native' },
       AI_OFFICE_HEADLESS_MODEL: { kind: 'StaticSecret', value: this.options.reviewModel },
-      AI_OFFICE_HEADLESS_REASONING_EFFORT: { kind: 'StaticSecret', value: this.business.reasoningEffort },
+      AI_OFFICE_HEADLESS_REASONING_EFFORT: {
+        kind: 'StaticSecret',
+        value: this.business.reasoningEffort,
+      },
       AI_OFFICE_CODEX_AUTH_HOME: { kind: 'StaticSecret', value: this.business.authHome },
       AI_OFFICE_CODEX_BIN: { kind: 'StaticSecret', value: this.business.codexBin },
       AI_OFFICE_WORKSPACE_ROOT: { kind: 'StaticSecret', value: this.business.workspaceRoot },
-      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: { kind: 'StaticSecret', value: String(this.business.promptTimeoutSeconds) },
-      PIXEL_V4_REVIEW_EVIDENCE_PATH: { kind: 'StaticSecret', value: input.workspace.evidenceExecutionPath },
+      AI_OFFICE_HEADLESS_TIMEOUT_SECONDS: {
+        kind: 'StaticSecret',
+        value: String(this.business.promptTimeoutSeconds),
+      },
+      PIXEL_V4_REVIEW_EVIDENCE_PATH: {
+        kind: 'StaticSecret',
+        value: input.workspace.evidenceExecutionPath,
+      },
       PIXEL_V4_EXECUTION_ID: { kind: 'StaticSecret', value: input.executionId },
       PIXEL_V4_REVIEWED_SHA: { kind: 'StaticSecret', value: input.sourceRevision },
     };
@@ -634,5 +897,8 @@ export function createOpenHandsProviders(options: OpenHandsProviderOptions): {
   execution: OpenHandsExecutionProvider;
   review: OpenHandsReviewProvider;
 } {
-  return { execution: new OpenHandsExecutionProvider(options), review: new OpenHandsReviewProvider(options) };
+  return {
+    execution: new OpenHandsExecutionProvider(options),
+    review: new OpenHandsReviewProvider(options),
+  };
 }

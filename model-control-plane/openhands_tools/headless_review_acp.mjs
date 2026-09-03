@@ -19,7 +19,8 @@ const HEADLESS_REASONING_EFFORT =
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
 const HARNESS_PROFILE =
-  process.env.AI_OFFICE_HARNESS_PROFILE ?? (HEADLESS_ROLE === 'review' ? 'openhands-review' : 'openhands');
+  process.env.AI_OFFICE_HARNESS_PROFILE ??
+  (HEADLESS_ROLE === 'review' ? 'openhands-review' : 'openhands');
 const CODEX_BIN =
   process.env.AI_OFFICE_CODEX_BIN ?? '/openhands-state/tooling/node_modules/.bin/codex';
 const CLAUDE_BIN =
@@ -39,8 +40,12 @@ const EVIDENCE_LIMIT = 768 * 1024;
 const UNTRACKED_FILE_LIMIT = 128 * 1024;
 const MAX_UNTRACKED_FILES = 80;
 const PIXEL_V4_REVIEW_EVIDENCE_PATH = process.env.PIXEL_V4_REVIEW_EVIDENCE_PATH ?? '';
+const PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH =
+  process.env.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH ?? '';
 const PIXEL_V4_EXECUTION_ID = process.env.PIXEL_V4_EXECUTION_ID ?? '';
 const PIXEL_V4_REVIEWED_SHA = process.env.PIXEL_V4_REVIEWED_SHA ?? '';
+const PIXEL_V4_SOURCE_SHA = process.env.PIXEL_V4_SOURCE_SHA ?? '';
+const PIXEL_V4_IMPLEMENTATION_PHASE = process.env.PIXEL_V4_IMPLEMENTATION_PHASE ?? 'IMPLEMENT';
 
 const REVIEW_SCHEMA = {
   type: 'object',
@@ -310,7 +315,12 @@ function canonicalReview(value) {
   const findings = Array.isArray(value.findings) ? value.findings : [];
   const lines = [
     verdict,
-    summary || (verdict === 'PASS' ? 'No blocking findings.' : verdict === 'INVALID' ? 'Review environment invalid.' : 'Blocking findings exist.'),
+    summary ||
+      (verdict === 'PASS'
+        ? 'No blocking findings.'
+        : verdict === 'INVALID'
+          ? 'Review environment invalid.'
+          : 'Blocking findings exist.'),
   ];
   if (findings.length) {
     lines.push('', 'Findings:');
@@ -454,16 +464,20 @@ function successfulCodexChecks(stdout) {
       const command = typeof item.command === 'string' ? item.command.trim() : '';
       const exitCode = Number(item.exit_code ?? item.exitCode);
       if (!command || !Number.isInteger(exitCode) || exitCode !== 0) continue;
-      const output = typeof item.aggregated_output === 'string'
-        ? item.aggregated_output
-        : typeof item.output === 'string'
-          ? item.output
-          : '';
+      const output =
+        typeof item.aggregated_output === 'string'
+          ? item.aggregated_output
+          : typeof item.output === 'string'
+            ? item.output
+            : '';
       checks.push({
         command: command.slice(0, 2_000),
         status: 'PASS',
         exitCode,
-        summary: (output.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? 'command exited 0').slice(0, 2_000),
+        summary: (output.trim().split(/\r?\n/).filter(Boolean).at(-1) ?? 'command exited 0').slice(
+          0,
+          2_000,
+        ),
       });
       if (checks.length >= 20) break;
     } catch {
@@ -494,6 +508,55 @@ function normalizedReviewChecks(value, stdout) {
   return normalized.length ? normalized : successfulCodexChecks(stdout);
 }
 
+function writePixelV4ImplementationEvidence(session, summary, stdout) {
+  if (!PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH) return;
+  if (!PIXEL_V4_EXECUTION_ID || !PIXEL_V4_SOURCE_SHA) {
+    throw new Error('PIXEL_V4_IMPLEMENTATION_EVIDENCE_METADATA_MISSING');
+  }
+  if (
+    PIXEL_V4_IMPLEMENTATION_PHASE !== 'IMPLEMENT' &&
+    PIXEL_V4_IMPLEMENTATION_PHASE !== 'IMPLEMENT_FIX'
+  ) {
+    throw new Error('PIXEL_V4_IMPLEMENTATION_PHASE_INVALID');
+  }
+  const target = path.resolve(PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH);
+  const executionRoot = path.dirname(session.cwd);
+  if (
+    path.dirname(target) !== executionRoot ||
+    path.basename(target) !== 'completion-evidence.json'
+  ) {
+    throw new Error('PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH_INVALID');
+  }
+  const status = git(session.cwd, ['status', '--porcelain=v1', '-z']);
+  if (status.length > 0) throw new Error('PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY');
+  const resultRevision = git(session.cwd, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
+  const tests = successfulCodexChecks(stdout);
+  if (!tests.some((item) => item.status === 'PASS')) {
+    throw new Error('PIXEL_V4_IMPLEMENTATION_TEST_EVIDENCE_MISSING');
+  }
+  const outcome = resultRevision === PIXEL_V4_SOURCE_SHA ? 'SATISFIED' : 'CHANGED';
+  const evidence = {
+    version: 1,
+    executionId: PIXEL_V4_EXECUTION_ID,
+    phase: PIXEL_V4_IMPLEMENTATION_PHASE,
+    sourceRevision: PIXEL_V4_SOURCE_SHA,
+    resultRevision,
+    outcome,
+    summary: String(
+      summary ||
+        (outcome === 'CHANGED'
+          ? 'Implementation completed.'
+          : 'Source revision already satisfies the objective.'),
+    )
+      .trim()
+      .slice(0, 8_000),
+    tests,
+  };
+  const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
+  fs.writeFileSync(temporary, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
+  fs.renameSync(temporary, target);
+}
+
 function writePixelV4ReviewEvidence(session, value, stdout) {
   if (!PIXEL_V4_REVIEW_EVIDENCE_PATH) return;
   if (!PIXEL_V4_EXECUTION_ID || !PIXEL_V4_REVIEWED_SHA) {
@@ -508,7 +571,11 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
     throw new Error('PIXEL_V4_REVIEW_EVIDENCE_PATH_INVALID');
   }
   const checks = normalizedReviewChecks(value, stdout);
-  if (value?.verdict === 'PASS' && (!checks.some((item) => item.status === 'PASS') || checks.some((item) => item.status === 'FAIL'))) {
+  if (
+    value?.verdict === 'PASS' &&
+    (!checks.some((item) => item.status === 'PASS') ||
+      checks.some((item) => item.status === 'FAIL'))
+  ) {
     throw new Error('PIXEL_V4_REVIEW_CHECK_EVIDENCE_INVALID');
   }
   const findings = Array.isArray(value?.findings)
@@ -533,7 +600,8 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
       ? value.summary.trim()
       : value?.verdict === 'PASS'
         ? 'No blocking findings.'
-        : 'Blocking findings exist.').slice(0, 8_000),
+        : 'Blocking findings exist.'
+    ).slice(0, 8_000),
   };
   const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
   fs.writeFileSync(temporary, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
@@ -613,7 +681,10 @@ function codexCommand(session, prompt, evidence) {
   }
 
   if (IS_WORKER) {
-    const workerPrompt = `${prompt}\n\nYou are the implementation worker. Work directly in the current repository and complete the requested change, not merely analyze it. Inspect the relevant repository instructions, active plan, code, and tests; preserve existing contracts outside scope; implement the acceptance criteria; run focused verification first and then the appropriate wider checks. Commit the completed change with a concise conventional commit and leave the workspace clean. Do not wait for human confirmation for ordinary implementation choices. If a genuine external blocker remains, report the exact blocker and the evidence you collected.`;
+    const pixelV4EvidenceNote = PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH
+      ? `\n\nPixel V4 controller note: the outer headless adapter, not this Codex sandbox, persists ${PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH} after validating your committed HEAD, clean workspace, and command evidence. Do NOT attempt to write that controller-owned evidence path yourself. This note overrides any earlier instruction asking you to write the V4 completion-evidence file directly.`
+      : '';
+    const workerPrompt = `${prompt}\n\nYou are the implementation worker. Work directly in the current repository and complete the requested change, not merely analyze it. Inspect the relevant repository instructions, active plan, code, and tests; preserve existing contracts outside scope; implement the acceptance criteria; run focused verification first and then the appropriate wider checks. Commit the completed change with a concise conventional commit and leave the workspace clean. Do not wait for human confirmation for ordinary implementation choices. If a genuine external blocker remains, report the exact blocker and the evidence you collected.${pixelV4EvidenceNote}`;
     return {
       command: CODEX_BIN,
       args: [
@@ -911,7 +982,9 @@ class HeadlessReviewAgent {
               sessionUpdate: 'tool_call_update',
               toolCallId,
               status: 'in_progress',
-              rawOutput: { state: IS_WORKER ? 'implementing' : IS_PLANNER ? 'planning' : 'reviewing' },
+              rawOutput: {
+                state: IS_WORKER ? 'implementing' : IS_PLANNER ? 'planning' : 'reviewing',
+              },
             },
           })
           .catch(() => {});
@@ -988,10 +1061,9 @@ class HeadlessReviewAgent {
       }
 
       const parsed = spec.parse(result.stdout);
-      if (!IS_WORKER && !IS_PLANNER) writePixelV4ReviewEvidence(session, parsed, result.stdout);
-      const canonical = IS_WORKER || IS_PLANNER
-        ? String(parsed).trim()
-        : canonicalReview(parsed);
+      if (IS_WORKER) writePixelV4ImplementationEvidence(session, parsed, result.stdout);
+      else if (!IS_PLANNER) writePixelV4ReviewEvidence(session, parsed, result.stdout);
+      const canonical = IS_WORKER || IS_PLANNER ? String(parsed).trim() : canonicalReview(parsed);
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,
         update: {
@@ -1055,7 +1127,9 @@ const output = Readable.toWeb(process.stdin);
 const stream = acp.ndJsonStream(input, output);
 const agent = new HeadlessReviewAgent();
 acp
-  .agent({ name: `ai-office-${DRIVER || 'headless'}-${IS_WORKER ? 'worker' : IS_PLANNER ? 'planner' : 'review'}` })
+  .agent({
+    name: `ai-office-${DRIVER || 'headless'}-${IS_WORKER ? 'worker' : IS_PLANNER ? 'planner' : 'review'}`,
+  })
   .onRequest('initialize', (ctx) => agent.initialize(ctx.params))
   .onRequest('session/new', (ctx) => agent.newSession(ctx.params))
   .onRequest('authenticate', () => ({}))
