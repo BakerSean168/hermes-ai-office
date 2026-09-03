@@ -166,8 +166,32 @@ class DashboardTest(unittest.TestCase):
                 "durationMs": 1000,
                 "usage": {"input": 300, "output": 30, "costUsd": 0.3, "calls": 3},
                 "routeUsage": [
-                    {"providerKey": "free", "physicalModel": "model-a", "input": 100, "output": 10, "costUsd": 0.0, "calls": 1},
-                    {"providerKey": "paid", "physicalModel": "model-a", "input": 200, "output": 20, "costUsd": 0.3, "calls": 2},
+                    {
+                        "providerKey": "free",
+                        "physicalModel": "model-a",
+                        "input": 100,
+                        "output": 10,
+                        "cachedInput": 50,
+                        "costUsd": 0.0,
+                        "calls": 1,
+                        "successfulCalls": 1,
+                        "failedCalls": 0,
+                        "responseCacheHits": 0,
+                        "successfulRequestDurationMs": 500,
+                    },
+                    {
+                        "providerKey": "paid",
+                        "physicalModel": "model-a",
+                        "input": 200,
+                        "output": 20,
+                        "cachedInput": 120,
+                        "costUsd": 0.3,
+                        "calls": 2,
+                        "successfulCalls": 1,
+                        "failedCalls": 1,
+                        "responseCacheHits": 1,
+                        "successfulRequestDurationMs": 1000,
+                    },
                 ],
             }
         ]
@@ -176,9 +200,17 @@ class DashboardTest(unittest.TestCase):
         self.assertEqual(providers["free"]["totalTokens"], 110)
         self.assertEqual(providers["paid"]["totalTokens"], 220)
         self.assertEqual(providers["paid"]["costUsd"], 0.3)
+        self.assertEqual(providers["free"]["callSuccessRate"], 1.0)
+        self.assertEqual(providers["paid"]["callSuccessRate"], 0.5)
+        self.assertEqual(providers["paid"]["promptCacheRate"], 0.6)
+        self.assertEqual(providers["paid"]["responseCacheHitRate"], 0.5)
+        self.assertEqual(providers["paid"]["avgSuccessfulLatencyMs"], 1000.0)
+        self.assertAlmostEqual(providers["paid"]["costPerMillionTokens"], 0.3 * 1_000_000 / 220)
         self.assertIsNone(providers["free"]["successRate"])
         self.assertIsNone(providers["paid"]["successRate"])
         self.assertEqual(result["logicalModels"][0]["totalTokens"], 330)
+        provider_models = {row["key"]: row for row in result["providerModels"]}
+        self.assertEqual(provider_models["paid · model-a"]["callSuccessRate"], 0.5)
 
     def test_v4_execution_uses_control_plane_telemetry_instead_of_agent_identity(self) -> None:
         raw = api._assembly._v4_execution(

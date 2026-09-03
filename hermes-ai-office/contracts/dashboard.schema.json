@@ -188,6 +188,10 @@
         "cachedInput",
         "reasoningOutput",
         "calls",
+        "successfulCalls",
+        "failedCalls",
+        "responseCacheHits",
+        "successfulRequestDurationMs",
         "costUsd"
       ],
       "properties": {
@@ -263,6 +267,26 @@
         "calls": {
           "type": "integer",
           "minimum": 0
+        },
+        "successfulCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "x-control-plane-source": "refs.upstream.routeUsage[].successfulCalls"
+        },
+        "failedCalls": {
+          "type": "integer",
+          "minimum": 0,
+          "x-control-plane-source": "refs.upstream.routeUsage[].failedCalls"
+        },
+        "responseCacheHits": {
+          "type": "integer",
+          "minimum": 0,
+          "x-control-plane-source": "refs.upstream.routeUsage[].responseCacheHits"
+        },
+        "successfulRequestDurationMs": {
+          "type": "integer",
+          "minimum": 0,
+          "x-control-plane-source": "refs.upstream.routeUsage[].successfulRequestDurationMs"
         },
         "costUsd": {
           "type": "number",
@@ -497,6 +521,14 @@
         "cachedInput",
         "reasoningOutput",
         "calls",
+        "successfulCalls",
+        "failedCalls",
+        "responseCacheHits",
+        "callSuccessRate",
+        "promptCacheRate",
+        "responseCacheHitRate",
+        "costPerMillionTokens",
+        "avgSuccessfulLatencyMs",
         "costUsd",
         "durationMs"
       ],
@@ -549,6 +581,41 @@
           "type": "integer",
           "minimum": 0
         },
+        "successfulCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "failedCalls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "responseCacheHits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "callSuccessRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "promptCacheRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "responseCacheHitRate": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "costPerMillionTokens": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "avgSuccessfulLatencyMs": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
         "costUsd": {
           "type": "number",
           "minimum": 0
@@ -567,6 +634,7 @@
         "phases",
         "logicalModels",
         "providers",
+        "providerModels",
         "physicalModels"
       ],
       "properties": {
@@ -589,6 +657,12 @@
           }
         },
         "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AnalyticsRow"
+          }
+        },
+        "providerModels": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/AnalyticsRow"

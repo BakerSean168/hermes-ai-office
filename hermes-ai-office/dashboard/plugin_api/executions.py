@@ -54,6 +54,12 @@ def _execution(raw: Mapping[str, Any], catalog: Mapping[str, Mapping[str, Any]])
             continue
         route = _enrich_route(route_raw, catalog)
         route.update(_usage(route_raw))
+        route.update({
+            "successfulCalls": int(_number(route_raw.get("successfulCalls"))),
+            "failedCalls": int(_number(route_raw.get("failedCalls"))),
+            "responseCacheHits": int(_number(route_raw.get("responseCacheHits"))),
+            "successfulRequestDurationMs": int(_number(route_raw.get("successfulRequestDurationMs"))),
+        })
         routes.append(route)
     last_raw = upstream.get("route") if isinstance(upstream.get("route"), Mapping) else {}
     last_route = (
@@ -104,6 +110,10 @@ def _new_bucket(key: str) -> Dict[str, Any]:
         "cachedInput": 0,
         "reasoningOutput": 0,
         "calls": 0,
+        "successfulCalls": 0,
+        "failedCalls": 0,
+        "responseCacheHits": 0,
+        "successfulRequestDurationMs": 0,
         "costUsd": 0.0,
         "durationMs": 0,
     }
@@ -126,7 +136,17 @@ def _add(
                 bucket["succeeded"].add(execution_id)
             elif status in {"FAILED", "STUCK", "CANCELLED"}:
                 bucket["failed"].add(execution_id)
-    for key in ("input", "output", "cachedInput", "reasoningOutput", "calls"):
+    for key in (
+        "input",
+        "output",
+        "cachedInput",
+        "reasoningOutput",
+        "calls",
+        "successfulCalls",
+        "failedCalls",
+        "responseCacheHits",
+        "successfulRequestDurationMs",
+    ):
         bucket[key] += int(_number(usage.get(key)))
     bucket["costUsd"] += _number(usage.get("costUsd"))
     if duration:
@@ -139,14 +159,25 @@ def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]
         executions = len(bucket["executions"])
         succeeded = len(bucket["succeeded"])
         failed = len(bucket["failed"])
-        row = {k: v for k, v in bucket.items() if k not in {"executions", "succeeded", "failed"}}
+        total_tokens = bucket["input"] + bucket["output"]
+        measured_calls = bucket["successfulCalls"] + bucket["failedCalls"]
+        row = {
+            k: v
+            for k, v in bucket.items()
+            if k not in {"executions", "succeeded", "failed", "successfulRequestDurationMs"}
+        }
         row.update(
             {
                 "executions": executions,
                 "succeeded": succeeded,
                 "failed": failed,
                 "successRate": (succeeded / (succeeded + failed)) if succeeded + failed else None,
-                "totalTokens": bucket["input"] + bucket["output"],
+                "totalTokens": total_tokens,
+                "callSuccessRate": (bucket["successfulCalls"] / measured_calls) if measured_calls else None,
+                "promptCacheRate": (bucket["cachedInput"] / bucket["input"]) if bucket["input"] else None,
+                "responseCacheHitRate": (bucket["responseCacheHits"] / bucket["calls"]) if bucket["calls"] else None,
+                "costPerMillionTokens": (bucket["costUsd"] * 1_000_000 / total_tokens) if total_tokens else None,
+                "avgSuccessfulLatencyMs": (bucket["successfulRequestDurationMs"] / bucket["successfulCalls"]) if bucket["successfulCalls"] else None,
             }
         )
         rows.append(row)
@@ -155,7 +186,17 @@ def _finish_buckets(values: Mapping[str, Dict[str, Any]]) -> list[Dict[str, Any]
 
 
 def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
-    groups = {name: {} for name in ("projects", "phases", "logicalModels", "providers", "physicalModels")}
+    groups = {
+        name: {}
+        for name in (
+            "projects",
+            "phases",
+            "logicalModels",
+            "providers",
+            "providerModels",
+            "physicalModels",
+        )
+    }
     for execution in executions:
         usage = execution.get("usage") if isinstance(execution.get("usage"), Mapping) else {}
         for group_name, key in (
@@ -173,6 +214,14 @@ def _analytics(executions: list[Mapping[str, Any]]) -> Dict[str, Any]:
             physical_model = str(route["physicalModel"])
             _add(
                 groups["providers"].setdefault(provider_key, _new_bucket(provider_key)),
+                execution,
+                route,
+                duration=False,
+                outcome=False,
+            )
+            provider_model = provider_key + " · " + physical_model
+            _add(
+                groups["providerModels"].setdefault(provider_model, _new_bucket(provider_model)),
                 execution,
                 route,
                 duration=False,

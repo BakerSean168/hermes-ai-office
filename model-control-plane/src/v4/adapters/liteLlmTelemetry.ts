@@ -16,6 +16,10 @@ export interface ExecutionUsageProjection {
 
 export interface ExecutionRouteUsageProjection extends Omit<ExecutionUsageProjection, 'source'> {
   deploymentId: string;
+  successfulCalls: number;
+  failedCalls: number;
+  responseCacheHits: number;
+  successfulRequestDurationMs: number;
   providerKey: string;
   model: string;
   provider?: string;
@@ -30,7 +34,14 @@ export interface ExecutionRouteUsageProjection extends Omit<ExecutionUsageProjec
 export interface ExecutionTelemetryProjection {
   health: 'OK' | 'UNAVAILABLE';
   usage: ExecutionUsageProjection | null;
-  route?: Omit<ExecutionRouteUsageProjection, keyof Omit<ExecutionUsageProjection, 'source'>>;
+  route?: Omit<
+    ExecutionRouteUsageProjection,
+    | keyof Omit<ExecutionUsageProjection, 'source'>
+    | 'successfulCalls'
+    | 'failedCalls'
+    | 'responseCacheHits'
+    | 'successfulRequestDurationMs'
+  >;
   routeUsage: ExecutionRouteUsageProjection[];
 }
 
@@ -261,6 +272,9 @@ export class LiteLlmExecutionTelemetry {
       const completionDetails = asRecord(usageObject.completion_tokens_details);
       const rowCached = finite(promptDetails.cached_tokens);
       const rowReasoning = finite(completionDetails.reasoning_tokens);
+      const rowSucceeded = text(row.status).toLowerCase() === 'success';
+      const rowResponseCacheHit = row.cache_hit === true;
+      const rowRequestDurationMs = finite(row.request_duration_ms);
       const deploymentId = text(row.model_id);
       const apiBase = normalizedApiBase(row.api_base);
       const metadata =
@@ -287,6 +301,10 @@ export class LiteLlmExecutionTelemetry {
           reasoningOutput: 0,
           costUsd: 0,
           calls: 0,
+          successfulCalls: 0,
+          failedCalls: 0,
+          responseCacheHits: 0,
+          successfulRequestDurationMs: 0,
         };
         route.input += rowInput;
         route.output += rowOutput;
@@ -294,6 +312,10 @@ export class LiteLlmExecutionTelemetry {
         route.reasoningOutput += rowReasoning;
         route.costUsd += rowCost;
         route.calls += 1;
+        route.successfulCalls += rowSucceeded ? 1 : 0;
+        route.failedCalls += rowSucceeded ? 0 : 1;
+        route.responseCacheHits += rowResponseCacheHit ? 1 : 0;
+        if (rowSucceeded) route.successfulRequestDurationMs += rowRequestDurationMs;
         routeTotals.set(key, route);
       }
       input += rowInput;

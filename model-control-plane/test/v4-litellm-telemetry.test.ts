@@ -72,6 +72,9 @@ test('V4 LiteLLM telemetry uses exact end_user correlation and reports physical 
               prompt_tokens: 120,
               completion_tokens: 20,
               spend: 0.03,
+              status: 'success',
+              cache_hit: true,
+              request_duration_ms: 2500,
               metadata: {
                 usage_object: {
                   prompt_tokens_details: { cached_tokens: 80 },
@@ -122,6 +125,10 @@ test('V4 LiteLLM telemetry uses exact end_user correlation and reports physical 
     assert.equal(result.route?.deploymentId, 'deployment-1');
     assert.equal(result.route?.commercialType, 'METERED');
     assert.equal(result.routeUsage[0]?.input, 120);
+    assert.equal(result.routeUsage[0]?.successfulCalls, 1);
+    assert.equal(result.routeUsage[0]?.failedCalls, 0);
+    assert.equal(result.routeUsage[0]?.responseCacheHits, 1);
+    assert.equal(result.routeUsage[0]?.successfulRequestDurationMs, 2500);
     const spend = seen.find((url) => url.pathname === '/spend/logs/v2');
     assert.ok(spend);
     assert.equal(spend.searchParams.get('end_user'), 'execution-1');
