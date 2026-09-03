@@ -61,6 +61,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
     '/home/dev/projects/memoflow-platform-1003',
     '/home/dev/projects/memoflow/.git',
     '/home/dev/projects/digital-biome',
+    '/home/dev/projects/bodysense',
   ])
     assert.match(
       service,
@@ -198,6 +199,10 @@ test('V4 release proves the exact service sandbox can read, chown and write only
   assert.match(release, /memoflow\/\.git\/pixel-v4-release/);
   assert.match(probe, /memo_git_probe/);
   assert.match(release, /digital-biome\/\.pixel-v4-release/);
+  assert.match(release, /bodysense\/\.pixel-v4-release/);
+  assert.match(release, /bodysense\/\.git\/pixel-v4-release/);
+  assert.match(probe, /body_probe/);
+  assert.match(probe, /body_git_probe/);
   assert.match(release, /trap cleanup_probe EXIT/);
 });
 

@@ -6,13 +6,15 @@ probe_dir="${2:?workspace probe directory required}"
 memo_probe="${3:?MemoFlow probe file required}"
 memo_git_probe="${4:?MemoFlow Git common-dir probe file required}"
 digital_probe="${5:?Digital Biome probe file required}"
-owner_uid="${6:?workspace owner uid required}"
-owner_gid="${7:?workspace owner gid required}"
+body_probe="${6:?BodySense probe file required}"
+body_git_probe="${7:?BodySense Git probe file required}"
+owner_uid="${8:?workspace owner uid required}"
+owner_gid="${9:?workspace owner gid required}"
 repository_probe="${digital_probe}.repository-owner"
 
 cleanup() {
   rm -rf -- "$probe_dir" "$repository_probe"
-  rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe"
+  rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe" "$body_probe" "$body_git_probe"
 }
 trap cleanup EXIT
 
@@ -25,7 +27,7 @@ chown -R "$owner_uid:$owner_gid" "$probe_dir"
 chmod 0711 "$probe_dir"
 test "$(stat -c %u "$probe_dir")" = "$owner_uid"
 test "$(stat -c %g "$probe_dir")" = "$owner_gid"
-touch -- "$memo_probe" "$memo_git_probe" "$digital_probe"
+touch -- "$memo_probe" "$memo_git_probe" "$digital_probe" "$body_probe" "$body_git_probe"
 
 # The control plane intentionally launches Git as the owning repository UID/GID so
 # integration never leaves root-owned Git metadata behind. Prove the exact service
@@ -95,5 +97,5 @@ test "$(stat -c %g "$repository_probe/.git/index")" = "$repo_gid"
 # Preserve only the worker probe directory for the subsequent container-write gate.
 # Source-repository probes must never escape a successful sandbox probe.
 rm -rf -- "$repository_probe"
-rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe"
+rm -f -- "$memo_probe" "$memo_git_probe" "$digital_probe" "$body_probe" "$body_git_probe"
 trap - EXIT

@@ -57,6 +57,7 @@ ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces
 ReadWritePaths=/home/dev/projects/memoflow-platform-1003
 ReadWritePaths=/home/dev/projects/memoflow/.git
 ReadWritePaths=/home/dev/projects/digital-biome
+ReadWritePaths=/home/dev/projects/bodysense
 
 [Install]
 WantedBy=multi-user.target

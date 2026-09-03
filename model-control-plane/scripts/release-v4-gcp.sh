@@ -36,10 +36,12 @@ probe_dir="/opt/data/hermes-ai-office-v3/workspaces/v4/executions/.pixel-v4-rele
 memo_probe="/home/dev/projects/memoflow-platform-1003/.pixel-v4-release-$probe_id"
 memo_git_probe="/home/dev/projects/memoflow/.git/pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
+body_probe="/home/dev/projects/bodysense/.pixel-v4-release-$probe_id"
+body_git_probe="/home/dev/projects/bodysense/.git/pixel-v4-release-$probe_id"
 probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
 cleanup_probe() {
   sudo rm -rf "$probe_dir" "${digital_probe}.repository-owner"
-  sudo rm -f "$memo_probe" "$memo_git_probe" "$digital_probe"
+  sudo rm -f "$memo_probe" "$memo_git_probe" "$digital_probe" "$body_probe" "$body_git_probe"
 }
 trap cleanup_probe EXIT
 sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
@@ -65,12 +67,15 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
   -p ReadWritePaths=/home/dev/projects/memoflow-platform-1003 \
   -p ReadWritePaths=/home/dev/projects/memoflow/.git \
   -p ReadWritePaths=/home/dev/projects/digital-biome \
+  -p ReadWritePaths=/home/dev/projects/bodysense \
   "$probe_script" \
   "$target_root/model-control-plane/dist/main.js" \
   "$probe_dir" \
   "$memo_probe" \
   "$memo_git_probe" \
   "$digital_probe" \
+  "$body_probe" \
+  "$body_git_probe" \
   10001 \
   10001
 sudo docker exec --user 10001:10001 hermes-openhands-v3 \
