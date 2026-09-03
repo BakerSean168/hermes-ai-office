@@ -6,15 +6,31 @@ export { EXECUTION_PHASES } from '../domain/execution.js';
 export type ExecutionPhase = DomainExecutionPhase;
 
 export const PROVIDER_SESSION_STATUSES = [
-  'CREATED', 'QUEUED', 'RUNNING', 'PAUSED', 'WAITING_FOR_CONFIRMATION',
-  'SUCCEEDED', 'FAILED', 'STUCK', 'CANCELLED', 'UNKNOWN',
+  'CREATED',
+  'QUEUED',
+  'RUNNING',
+  'PAUSED',
+  'WAITING_FOR_CONFIRMATION',
+  'SUCCEEDED',
+  'FAILED',
+  'STUCK',
+  'CANCELLED',
+  'UNKNOWN',
 ] as const;
 export type ProviderSessionStatus = (typeof PROVIDER_SESSION_STATUSES)[number];
 
 export const EXECUTION_EVIDENCE_KINDS = [
-  'WORKSPACE', 'REVISION', 'DIFF', 'TEST', 'PROVIDER_OUTPUT', 'REVIEW', 'RECOVERY',
+  'WORKSPACE',
+  'REVISION',
+  'DIFF',
+  'TEST',
+  'PROVIDER_OUTPUT',
+  'REVIEW',
+  'RECOVERY',
 ] as const;
 export type ExecutionEvidenceKind = (typeof EXECUTION_EVIDENCE_KINDS)[number];
+
+export const REPOSITORY_COMPLETION_EVIDENCE_FILE = '.pixel-v4-completion-evidence.json';
 
 export interface RepositoryObservation {
   repositoryPath: string;
@@ -158,7 +174,10 @@ export interface WorkspaceProviderPort {
   observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
   provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
   verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot>;
-  verifyReview(workspace: WorkspaceDescriptor, reviewedSha: string): Promise<WorkspaceCompletionSnapshot>;
+  verifyReview(
+    workspace: WorkspaceDescriptor,
+    reviewedSha: string,
+  ): Promise<WorkspaceCompletionSnapshot>;
   integrateAcceptedRevision(input: {
     repositoryPath: string;
     expectedRevision: string;

@@ -448,6 +448,7 @@ export const NORMALIZED_FAILURE_CLASSES = [
   'CONNECTION_UNAVAILABLE',
   'MODEL_UNAVAILABLE',
   'ROUTE_MISCONFIGURED',
+  'POLICY_DISALLOWED',
   'PROMOTION_EXPIRED',
   'UNKNOWN_PROVIDER_FAILURE',
 ] as const;
@@ -508,6 +509,12 @@ export function normalizeResourceFailure(input: unknown): NormalizedResourceFail
   ) {
     failureClass = 'QUOTA_EXHAUSTED';
   } else if (
+    /key\s+(?:is\s+)?not\s+allowed\s+to\s+access\s+model|model\s+is\s+blocked|proxy\s+policy|policy\s+(?:denied|disallowed)|permissiondeniederror.*(?:model\s+is\s+blocked|not\s+allowed\s+to\s+access\s+model)/.test(
+      lowered,
+    )
+  ) {
+    failureClass = 'POLICY_DISALLOWED';
+  } else if (
     status === 401 ||
     status === 403 ||
     /invalid\s+(?:api\s*)?key|authentication\s+(?:failed|rejected)|unauthori[sz]ed|access\s+denied|forbidden|credential(?:s)?\s+(?:expired|invalid|rejected)/.test(
@@ -546,7 +553,7 @@ export function normalizeResourceFailure(input: unknown): NormalizedResourceFail
   } else {
     failureClass = 'UNKNOWN_PROVIDER_FAILURE';
   }
-  const binding = failureClass === 'MODEL_UNAVAILABLE';
+  const binding = failureClass === 'MODEL_UNAVAILABLE' || failureClass === 'ROUTE_MISCONFIGURED';
   const resetAt =
     input !== null &&
     typeof input === 'object' &&
@@ -566,6 +573,7 @@ export function normalizeResourceFailure(input: unknown): NormalizedResourceFail
       'PROMOTION_EXPIRED',
       'MODEL_UNAVAILABLE',
       'ROUTE_MISCONFIGURED',
+      'POLICY_DISALLOWED',
     ].includes(failureClass),
     ...(status === undefined ? {} : { statusCode: status }),
     ...(resetAt === undefined ? {} : { resetAt }),
@@ -632,8 +640,7 @@ export function transitionResourceState(
   if (
     failure.failureClass === 'AUTH_REJECTED' ||
     failure.failureClass === 'QUOTA_EXHAUSTED' ||
-    failure.failureClass === 'PROMOTION_EXPIRED' ||
-    failure.failureClass === 'ROUTE_MISCONFIGURED'
+    failure.failureClass === 'PROMOTION_EXPIRED'
   ) {
     return Object.freeze({
       state: 'DISABLED',

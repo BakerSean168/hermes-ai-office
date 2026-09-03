@@ -400,6 +400,7 @@ export class LiteLlmResourceStateEffect implements ResourceStateEffectPort {
   }
 
   async apply(resource: ExecutionResource, state: ResourceState): Promise<void> {
+    if (state === 'SUSPENDED') return;
     const deploymentIds = [
       ...new Set(
         resource.bindings
@@ -455,6 +456,7 @@ export class ResourceStateService implements ResourceFeedbackPort {
   failure(selection: ExecutionResourceSelection, error: unknown): void {
     const resource = this.#resource(selection.resourceId);
     const failure = normalizeResourceFailure(error);
+    if (failure.failureClass === 'POLICY_DISALLOWED') return;
     const transition = transitionResourceState(
       {
         state: resource.state,

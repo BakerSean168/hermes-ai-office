@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { V4Error, failClosed } from '../domain/errors.js';
+import { REPOSITORY_COMPLETION_EVIDENCE_FILE } from '../orchestration/contracts.js';
 import type {
   ExecutionPhase,
   ExecutionProviderPort,
@@ -134,10 +136,7 @@ function record(value: unknown): JsonRecord {
 
 function modelName(value: string, code = 'OPENHANDS_MODEL_INVALID'): string {
   const model = value.trim();
-  failClosed(
-    model.length > 0 && model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model),
-    code,
-  );
+  failClosed(model.length > 0 && model.length <= 200 && !/[\u0000-\u001f\u007f]/.test(model), code);
   return model;
 }
 
@@ -255,7 +254,10 @@ function retryableFailure(code: string, detail: string): boolean {
   );
 }
 
-function phasePrompt(input: ProviderLaunchInput): string {
+function phasePrompt(
+  input: ProviderLaunchInput,
+  evidencePath = input.workspace.evidenceExecutionPath,
+): string {
   const acceptance = input.acceptanceCriteria.length
     ? ['Acceptance criteria:', ...input.acceptanceCriteria.map((item) => '- ' + item.trim())]
     : [];
@@ -298,6 +300,10 @@ function phasePrompt(input: ProviderLaunchInput): string {
             },
           ],
         });
+  const repositoryEvidenceStaging = evidencePath !== input.workspace.evidenceExecutionPath;
+  const evidenceStagingRule = repositoryEvidenceStaging
+    ? 'The evidence path is a controller-owned staging file inside the Git workspace. Do not git add or commit it. Write it as your final filesystem action; it may be the only untracked residue when you finish, and Pixel will validate, promote, and remove it before the clean-tree gate.'
+    : undefined;
   const rules =
     input.phase === 'REVIEW'
       ? [
@@ -310,9 +316,10 @@ function phasePrompt(input: ProviderLaunchInput): string {
           'The first non-empty line of the final response must be exactly PASS, FAIL, or INVALID.',
           'Use PASS only when the exact revision satisfies every acceptance criterion.',
           'Before finishing, atomically write one JSON object to ' +
-            input.workspace.evidenceExecutionPath +
+            evidencePath +
             ' using this schema: ' +
             evidenceTemplate,
+          ...(evidenceStagingRule ? [evidenceStagingRule] : []),
         ]
       : [
           'Implement the bounded objective in the supplied isolated workspace.',
@@ -322,10 +329,11 @@ function phasePrompt(input: ProviderLaunchInput): string {
           'If tracked changes are required, set outcome=CHANGED, run focused checks, commit every intended change, and leave the workspace clean.',
           'If the supplied exact source revision already satisfies the entire bounded objective, do not manufacture a commit. Verify every acceptance criterion with focused checks, keep exact HEAD and a clean tree, and set outcome=SATISFIED. This path is still subject to independent review.',
           'A planning-only response or an unverified no-op is not successful implementation.',
-          'Before finishing, atomically write one JSON object outside the Git repository at ' +
-            input.workspace.evidenceExecutionPath +
+          'Before finishing, atomically write one JSON object to ' +
+            evidencePath +
             ' using this schema: ' +
             evidenceTemplate,
+          ...(evidenceStagingRule ? [evidenceStagingRule] : []),
         ];
   const text = [
     'Pixel Agent V4 execution phase: ' + input.phase,
@@ -360,9 +368,13 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     this.options = normalizeOptions(options, requiresLiteLlm);
   }
 
+  protected evidencePath(input: ProviderLaunchInput): string {
+    return path.posix.join(input.workspace.executionPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+  }
+
   async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
     this.validateLaunchInput(input);
-    return await this.createConversation(input, phasePrompt(input));
+    return await this.createConversation(input, phasePrompt(input, this.evidencePath(input)));
   }
 
   async recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined> {
@@ -882,7 +894,9 @@ function pathIsAbsolute(value: string): boolean {
 function executablePath(value: string, code: string): string {
   const executable = value.trim();
   failClosed(
-    executable.length > 0 && pathIsAbsolute(executable) && !/[\u0000-\u001f\u007f]/.test(executable),
+    executable.length > 0 &&
+      pathIsAbsolute(executable) &&
+      !/[\u0000-\u001f\u007f]/.test(executable),
     code,
   );
   return executable;
@@ -922,6 +936,12 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
     this.driver = config.driver;
     this.authHome = config.authHome;
     this.binary = config.binary;
+  }
+
+  protected override evidencePath(input: ProviderLaunchInput): string {
+    return this.driver === 'codex' || this.driver === 'claude'
+      ? input.workspace.evidenceExecutionPath
+      : super.evidencePath(input);
   }
 
   protected override conversationAgent(
@@ -1039,14 +1059,14 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
     if (this.mode === 'IMPLEMENTATION') {
       secrets.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH = {
         kind: 'StaticSecret',
-        value: input.workspace.evidenceExecutionPath,
+        value: this.evidencePath(input),
       };
       secrets.PIXEL_V4_SOURCE_SHA = { kind: 'StaticSecret', value: input.sourceRevision };
       secrets.PIXEL_V4_IMPLEMENTATION_PHASE = { kind: 'StaticSecret', value: input.phase };
     } else {
       secrets.PIXEL_V4_REVIEW_EVIDENCE_PATH = {
         kind: 'StaticSecret',
-        value: input.workspace.evidenceExecutionPath,
+        value: this.evidencePath(input),
       };
       secrets.PIXEL_V4_REVIEWED_SHA = { kind: 'StaticSecret', value: input.sourceRevision };
     }
@@ -1069,8 +1089,8 @@ const HARNESS_LAUNCHER = '/opt/hermes-ai-office-tools/harness_agent_launcher.sh'
 
 function modelForRole(options: OpenHandsProviderOptions, role: OpenHandsProviderRole): string {
   return role === 'IMPLEMENTATION'
-    ? options.implementationModel ?? 'gpt-5.6-luna'
-    : options.reviewModel ?? 'gpt-5.6-sol';
+    ? (options.implementationModel ?? 'gpt-5.6-luna')
+    : (options.reviewModel ?? 'gpt-5.6-sol');
 }
 
 function codexConfig(
@@ -1315,7 +1335,10 @@ function selectionRole(selection: OpenHandsProviderSelection): OpenHandsProvider
   ].filter((value): value is OpenHandsProviderRole => value !== undefined);
   failClosed(candidates.length > 0, 'OPENHANDS_SELECTION_ROLE_REQUIRED');
   const role = candidates[0]!;
-  failClosed(candidates.every((candidate) => candidate === role), 'OPENHANDS_SELECTION_ROLE_CONFLICT');
+  failClosed(
+    candidates.every((candidate) => candidate === role),
+    'OPENHANDS_SELECTION_ROLE_CONFLICT',
+  );
   return role;
 }
 
@@ -1331,9 +1354,7 @@ export function createOpenHandsProviderForSelection(
   );
   const providerOptions: OpenHandsProviderOptions = {
     ...options,
-    ...(role === 'IMPLEMENTATION'
-      ? { implementationModel: model }
-      : { reviewModel: model }),
+    ...(role === 'IMPLEMENTATION' ? { implementationModel: model } : { reviewModel: model }),
   };
   switch (selection.backend) {
     case 'codex-acp':
@@ -1347,7 +1368,10 @@ export function createOpenHandsProviderForSelection(
             providerOptions,
             options.businessCodex ?? options.business,
           )
-        : new OpenHandsCodexBusinessReviewProvider(providerOptions, options.businessCodex ?? options.business);
+        : new OpenHandsCodexBusinessReviewProvider(
+            providerOptions,
+            options.businessCodex ?? options.business,
+          );
     case 'dsh-acp':
       failClosed(selection.transport === 'LITELLM_MANAGED', 'DSH_PROVIDER_NATIVE_UNSUPPORTED');
       failClosed(role === 'IMPLEMENTATION', 'DSH_REVIEW_UNSUPPORTED');

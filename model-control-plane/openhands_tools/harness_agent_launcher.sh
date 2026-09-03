@@ -17,9 +17,10 @@ case "$execution_id" in
 esac
 
 workspace_repo="${HERMES_V3_WORKSPACE_REF:-}"
-expected_workspace_repo="/workspace/executions/$execution_id/repo"
-if [[ "$workspace_repo" != "$expected_workspace_repo" ]]; then
-  echo "agent-harness launch requires the execution-scoped HERMES_V3_WORKSPACE_REF" >&2
+expected_v3_workspace_repo="/workspace/executions/$execution_id/repo"
+expected_v4_workspace_repo="/workspace/v4/executions/$execution_id/repo"
+if [[ "$workspace_repo" != "$expected_v3_workspace_repo" && "$workspace_repo" != "$expected_v4_workspace_repo" ]]; then
+  echo "agent-harness launch requires an execution-scoped V3/V4 HERMES_V3_WORKSPACE_REF" >&2
   exit 2
 fi
 if [[ ! -d "$workspace_repo" ]]; then
@@ -28,8 +29,9 @@ if [[ ! -d "$workspace_repo" ]]; then
 fi
 cd -- "$workspace_repo"
 # Execution-scoped harness state must stay isolated even when IMPLEMENT_FIX reuses
-# an earlier implementation/adoption workspace.
-execution_root="/workspace/executions/$execution_id"
+# an earlier implementation/adoption workspace. Derive it only after the exact
+# V3/V4 path admission above so arbitrary workspace roots remain rejected.
+execution_root="${workspace_repo%/repo}"
 harness_home="$execution_root/.agent-harness/home"
 harness_state="$execution_root/.agent-harness/state"
 harness_share="$execution_root/.agent-harness/share"
@@ -96,16 +98,17 @@ case "$mode" in
       --patch "$root/dsh/capabilities.patch.yml" "$@"
     ;;
   zcode-acp)
-    # ZCode has no provider-native role in this path. Start it with a fresh,
-    # execution-scoped home and an OpenAI-compatible LiteLLM configuration.
-    # Deliberately discard inherited OAuth/session variables: this mode must
-    # never discover or reuse a developer's ZCode credential store.
+    root="$(prepare_root zcode)"
+    # ZCode ACP reads provider credentials/models from ~/.zcode/v2/config.json
+    # and MCP/skill state from ~/.zcode/cli/config.json. Agent Harness owns the
+    # latter; this execution-scoped launcher writes only the selected LiteLLM
+    # provider binding into the former.
     zcode_root="$root/zcode"
     zcode_home="$zcode_root/home"
-    zcode_config_home="$zcode_root/config"
-    zcode_config="$zcode_config_home/config.json"
-    mkdir -p "$zcode_home" "$zcode_config_home"
-    chmod 0700 "$zcode_root" "$zcode_home" "$zcode_config_home"
+    zcode_provider_dir="$zcode_home/.zcode/v2"
+    zcode_provider_config="$zcode_provider_dir/config.json"
+    mkdir -p "$zcode_home" "$zcode_provider_dir"
+    chmod 0700 "$zcode_root" "$zcode_home" "$zcode_provider_dir"
     zcode_key="${AI_OFFICE_LITELLM_API_KEY:-${ZCODE_API_KEY:-}}"
     zcode_base="${AI_OFFICE_LITELLM_BASE_URL:-${ZCODE_BASE_URL:-}}"
     zcode_model="${AI_OFFICE_AGENT_MODEL:-${ZCODE_MODEL:-}}"
@@ -121,30 +124,43 @@ case "$mode" in
       *[!a-zA-Z0-9._:/-]*) echo "zcode-acp launch received an invalid model" >&2; exit 2 ;;
     esac
     unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN
-    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE
+    unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE ANTHROPIC_API_KEY
     export HOME="$zcode_home"
-    export XDG_CONFIG_HOME="$zcode_config_home"
     export ZCODE_HOME="$zcode_home"
-    export ZCODE_CONFIG="$zcode_config"
-    export ZCODE_CONFIG_PATH="$zcode_config"
+    export ZCODE_CONFIG="$zcode_provider_config"
+    export ZCODE_CONFIG_PATH="$zcode_provider_config"
     export ZCODE_API_KEY="$zcode_key"
     export ZCODE_BASE_URL="$zcode_base"
     export ZCODE_MODEL="$zcode_model"
-    export OPENAI_API_KEY="$zcode_key"
-    export OPENAI_BASE_URL="$zcode_base"
-    /usr/local/bin/python3 - "$zcode_config" <<'PY'
+    export ZCODE_BIN="/openhands-state/zcode-cli/zcode.cjs"
+    export ZCODE_NODE="/usr/local/bin/node"
+    [[ -x "$ZCODE_BIN" ]] || { echo "zcode-acp backend runtime is missing: $ZCODE_BIN" >&2; exit 2; }
+    /usr/local/bin/python3 - "$zcode_provider_config" <<'PY'
 import json
 import os
 import pathlib
 import sys
 
 target = pathlib.Path(sys.argv[1])
+model = os.environ["ZCODE_MODEL"]
 target.write_text(json.dumps({
-    "provider": "openai-compatible",
-    "baseUrl": os.environ["ZCODE_BASE_URL"],
-    "apiKey": os.environ["ZCODE_API_KEY"],
-    "model": os.environ["ZCODE_MODEL"],
-}) + "\n")
+    "provider": {
+        "pixel-litellm": {
+            "enabled": True,
+            "kind": "openai-compatible",
+            "name": "Pixel LiteLLM",
+            "source": "custom",
+            "options": {
+                "baseURL": os.environ["ZCODE_BASE_URL"],
+                "apiKey": os.environ["ZCODE_API_KEY"],
+                "apiKeyRequired": True,
+            },
+            "models": {
+                model: {"name": model},
+            },
+        },
+    },
+}, separators=(",", ":")) + "\n")
 target.chmod(0o600)
 PY
     exec /openhands-state/tooling/node_modules/.bin/zcode-acp-server "$@"

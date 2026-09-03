@@ -25,6 +25,18 @@ CLAUDE_CODE_VERSION="${CLAUDE_CODE_VERSION:-$(runtime_lock_version claude)}"
 DSH_VERSION="${DSH_VERSION:-$(runtime_lock_version dsh)}"
 DSH_ACP_VERSION="${DSH_ACP_VERSION:-0.10.0}"
 ZCODE_ACP_VERSION="${ZCODE_ACP_VERSION:-0.11.5}"
+ZCODE_CLI_VERSION="${ZCODE_CLI_VERSION:-$(runtime_lock_version zcode)}"
+ZCODE_DESKTOP_VERSION="${ZCODE_DESKTOP_VERSION:-3.10.2}"
+ZCODE_APPIMAGE_SHA256="${ZCODE_APPIMAGE_SHA256:-6f4bad68aa1a69026e8a45d0a9df25f18683bc9a417af483105dcbef448bab3f}"
+ZCODE_APPIMAGE_URL="${ZCODE_APPIMAGE_URL:-https://cdn-zcode.z.ai/zcode/electron/releases/${ZCODE_DESKTOP_VERSION}/linux-x64/ZCode-${ZCODE_DESKTOP_VERSION}-linux-x64.AppImage}"
+ZCODE_CLI_ROOT="${OPENHANDS_ZCODE_CLI_ROOT:-/openhands-state/zcode-cli}"
+ZCODE_CLI_BIN="$ZCODE_CLI_ROOT/zcode.cjs"
+OPENHANDS_STATE_HOST_ROOT="${OPENHANDS_STATE_HOST_ROOT:-$(docker inspect "$CONTAINER" --format '{{range .Mounts}}{{if eq .Destination "/openhands-state"}}{{.Source}}{{end}}{{end}}')}"
+[[ -n "$OPENHANDS_STATE_HOST_ROOT" && -d "$OPENHANDS_STATE_HOST_ROOT" ]] || {
+  echo "cannot resolve OpenHands persistent state host root" >&2
+  exit 1
+}
+ZCODE_CLI_HOST_ROOT="$OPENHANDS_STATE_HOST_ROOT/zcode-cli"
 CODEGRAPH_VERSION="${CODEGRAPH_VERSION:-1.5.0}"
 MCP_REMOTE_VERSION="${MCP_REMOTE_VERSION:-0.7.0}"
 NX_MCP_VERSION="${NX_MCP_VERSION:-0.25.0}"
@@ -59,6 +71,42 @@ case "$actual_go" in
 esac
 docker exec --user 10001:10001 "$CONTAINER" test -x "$GO_TOOLCHAIN_ROOT/bin/gofmt"
 printf '%-20s%s\n' "go" "$actual_go"
+
+# ZCode's ACP bridge is an adapter around the official desktop-bundled headless
+# backend (`resources/glm/zcode.cjs`). Persist only that 12 MB backend entry in
+# OpenHands state; do not install or launch the Electron desktop application.
+# The source AppImage, SHA256 and backend version are all pinned so upstream
+# replacement or incompatible CLI drift fails closed during release.
+current_zcode="$(docker exec --user 10001:10001 "$CONTAINER" "$ZCODE_CLI_BIN" --version 2>/dev/null | head -1 || true)"
+if [[ "$current_zcode" != "$ZCODE_CLI_VERSION" ]]; then
+  zcode_appimage="$(mktemp /tmp/zcode-appimage.XXXXXX)"
+  zcode_extract="$(mktemp -d /tmp/zcode-extract.XXXXXX)"
+  cleanup_zcode() { rm -f "$zcode_appimage"; rm -rf "$zcode_extract"; }
+  trap cleanup_zcode EXIT
+  curl -fL --retry 3 --connect-timeout 10 --max-time 240 "$ZCODE_APPIMAGE_URL" -o "$zcode_appimage"
+  printf '%s  %s\n' "$ZCODE_APPIMAGE_SHA256" "$zcode_appimage" | sha256sum -c -
+  chmod 0755 "$zcode_appimage"
+  (
+    cd "$zcode_extract"
+    "$zcode_appimage" --appimage-extract resources/glm/zcode.cjs >/dev/null
+  )
+  extracted="$zcode_extract/squashfs-root/resources/glm/zcode.cjs"
+  [[ -s "$extracted" ]] || { echo "ZCode backend extraction failed" >&2; exit 1; }
+  extracted_version="$(/usr/bin/node "$extracted" --version | head -1)"
+  [[ "$extracted_version" == "$ZCODE_CLI_VERSION" ]] || {
+    echo "ZCode backend expected $ZCODE_CLI_VERSION, got: $extracted_version" >&2
+    exit 1
+  }
+  install -d -o 10001 -g 10001 -m 0755 "$ZCODE_CLI_HOST_ROOT"
+  install -o 10001 -g 10001 -m 0755 "$extracted" "$ZCODE_CLI_HOST_ROOT/zcode.cjs.tmp"
+  mv "$ZCODE_CLI_HOST_ROOT/zcode.cjs.tmp" "$ZCODE_CLI_HOST_ROOT/zcode.cjs"
+  cleanup_zcode
+  trap - EXIT
+fi
+docker exec --user 10001:10001 "$CONTAINER" /usr/local/bin/node -e "new (require('node:sqlite').DatabaseSync)(':memory:')"
+actual_zcode="$(docker exec --user 10001:10001 "$CONTAINER" "$ZCODE_CLI_BIN" --version | head -1)"
+[[ "$actual_zcode" == "$ZCODE_CLI_VERSION" ]] || { echo "ZCode backend version drift: $actual_zcode" >&2; exit 1; }
+printf '%-20s%s\n' "zcode" "$actual_zcode"
 
 # Keep package-manager downloads deterministic and persistent across OpenHands
 # container recreation. Each repository still selects its exact checked-in
@@ -122,6 +170,6 @@ for bin in opencode codex codex-acp claude claude-agent-acp dsh-acp-server zcode
     || echo "installed"
 done
 
-# ZCode ACP is installed as a registered backend, but it requires the official
-# ZCode desktop bundle/CLI and its own credentials. Production availability is
-# controlled separately and stays disabled until that runtime probe succeeds.
+# ZCode ACP receives execution-scoped provider/MCP state from the V4 launcher;
+# the official headless backend above is version-governed by Agent Harness and
+# no desktop credential/config is mounted.

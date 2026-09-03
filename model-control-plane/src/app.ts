@@ -304,7 +304,6 @@ async function buildExecutionAutomation(
       60_000,
       'RESOURCE_DIRECTORY_TIMEOUT_INVALID',
     ),
-    overrides: repositories.resourceStateOverrides,
   });
   if (resourceSelectorEnabled) await liteLlmResources.refresh();
 
@@ -334,6 +333,7 @@ async function buildExecutionAutomation(
       antigravityReady,
     }),
   );
+  const sourceResources = new CompositeResourceDirectory([liteLlmResources, nativeResources]);
   const resources = new CompositeResourceDirectory(
     [liteLlmResources, nativeResources],
     repositories.resourceStateOverrides,
@@ -388,7 +388,7 @@ async function buildExecutionAutomation(
     },
   };
   const resourceLifecycle = new ResourceLifecycleManager(
-    resources,
+    sourceResources,
     repositories.resourceStateOverrides,
     resourceProbe,
     resourceStateEffect,

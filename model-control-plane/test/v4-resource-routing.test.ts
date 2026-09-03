@@ -409,6 +409,21 @@ test('fault classification and pure resource state policy follow the V4 lifecycl
     'ROUTE_MISCONFIGURED',
   );
   assert.equal(
+    normalizeResourceFailure({
+      status: 403,
+      message: 'litellm.PermissionDeniedError: key not allowed to access model route-x',
+    }).failureClass,
+    'POLICY_DISALLOWED',
+  );
+  assert.equal(
+    normalizeResourceFailure({ status: 403, message: 'Model is blocked' }).failureClass,
+    'POLICY_DISALLOWED',
+  );
+  assert.equal(
+    normalizeResourceFailure({ status: 400, message: 'unknown provider for model review' }).scope,
+    'BINDING',
+  );
+  assert.equal(
     normalizeResourceFailure({ status: 429, message: 'too many requests' }).failureClass,
     'RATE_LIMITED',
   );

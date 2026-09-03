@@ -196,8 +196,43 @@ test('state service disables quota exhaustion and suspends free transient failur
   const service = new ResourceStateService(directory, repositories.resourceStateOverrides);
   service.failure(selection(), new Error('HTTP 429 rate limit'));
   assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'SUSPENDED');
+  const versionBeforePolicyFailure =
+    repositories.resourceStateOverrides.get('free-provider')?.version;
+  service.failure(
+    selection(),
+    new Error('HTTP 403 litellm.PermissionDeniedError: key not allowed to access model route-x'),
+  );
+  assert.equal(
+    repositories.resourceStateOverrides.get('free-provider')?.version,
+    versionBeforePolicyFailure,
+  );
   service.failure(selection(), new Error('monthly usage limit reached'));
   assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'DISABLED');
+  db.close();
+});
+
+test('LiteLLM transient suspension stays local and does not block the probe route', async () => {
+  const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
+  const repositories = createRepositories(db);
+  const calls: string[] = [];
+  const effect = new LiteLlmResourceStateEffect({
+    baseUrl: 'http://litellm.test',
+    envFile: envFile(),
+    fetchImpl: (async (input: string | URL | Request) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }) as typeof fetch,
+  });
+  const service = new ResourceStateService(
+    new StaticResourceDirectory([freeResource()]),
+    repositories.resourceStateOverrides,
+    3,
+    effect,
+  );
+  service.failure(selection(), new Error('HTTP 429 rate limit'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'SUSPENDED');
+  assert.deepEqual(calls, []);
   db.close();
 });
 
@@ -244,6 +279,32 @@ test('LiteLLM resource state effect blocks every selected-resource deployment', 
       ['http://litellm.test/model/deployment-2/update', { blocked: true }],
     ],
   );
+  db.close();
+});
+
+test('lifecycle probes the raw source view and can reactivate a locally suspended resource', async () => {
+  const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
+  const repositories = createRepositories(db);
+  repositories.resourceStateOverrides.create({
+    resourceId: 'free-provider',
+    state: 'SUSPENDED',
+    suspendedUntil: '2026-01-01T00:00:00.000Z',
+    source: 'EXECUTION',
+  });
+  const raw = new StaticResourceDirectory([freeResource()]);
+  const effective = new CompositeResourceDirectory([raw], repositories.resourceStateOverrides);
+  assert.equal(effective.listResources()[0]?.ready, false);
+  let observedReady: boolean | undefined;
+  const manager = new ResourceLifecycleManager(raw, repositories.resourceStateOverrides, {
+    probe: async (resource) => {
+      observedReady = resource.ready;
+      return resource.bindings.some((binding) => binding.enabled && binding.ready);
+    },
+  });
+  assert.equal(await manager.reconcileOnce(new Date('2026-01-02T00:00:00.000Z')), 1);
+  assert.equal(observedReady, true);
+  assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'ACTIVE');
+  assert.equal(effective.listResources()[0]?.ready, true);
   db.close();
 });
 

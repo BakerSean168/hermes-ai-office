@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 import { V4Error, failClosed } from '../domain/errors.js';
 import { assertSafeEventPayload } from '../domain/events.js';
+import { REPOSITORY_COMPLETION_EVIDENCE_FILE } from '../orchestration/contracts.js';
 import type {
   CompletionEvidence,
   ImplementationCompletionEvidence,
@@ -52,9 +53,19 @@ function canonicalTimestamp(value: string, code: string): void {
 }
 
 function repositoryNameFromRemote(value: string): string | undefined {
-  const text = value.trim().replace(/[?#].*$/, '').replace(/\\/g, '/').replace(/\/$/, '');
+  const text = value
+    .trim()
+    .replace(/[?#].*$/, '')
+    .replace(/\\/g, '/')
+    .replace(/\/$/, '');
   if (!text) return undefined;
-  const tail = text.split('/').at(-1)?.split(':').at(-1)?.replace(/\.git$/, '') ?? '';
+  const tail =
+    text
+      .split('/')
+      .at(-1)
+      ?.split(':')
+      .at(-1)
+      ?.replace(/\.git$/, '') ?? '';
   if (!/^[A-Za-z0-9._-]{1,200}$/.test(tail) || tail === '.' || tail === '..') return undefined;
   return tail;
 }
@@ -413,14 +424,15 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
 
   async verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot> {
     const descriptor = this.validateWorkspace(workspace);
-    const clean =
-      (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
-    if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     const headRevision = await this.git(descriptor.hostPath, [
       'rev-parse',
       '--verify',
       'HEAD^{commit}',
     ]);
+    await this.promoteRepositoryEvidence(descriptor, 'IMPLEMENTATION', headRevision);
+    const clean =
+      (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
+    if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     if (headRevision === descriptor.sourceRevision && !fs.existsSync(descriptor.evidenceHostPath))
       throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
     const evidence = decodeImplementationEvidence(this.readEvidence(descriptor.evidenceHostPath));
@@ -465,7 +477,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         )
           .split('\0')
           .filter(Boolean);
-    if (changedFiles.length > MAX_CHANGED_FILES || (!satisfiedWithoutChange && changedFiles.length === 0))
+    if (
+      changedFiles.length > MAX_CHANGED_FILES ||
+      (!satisfiedWithoutChange && changedFiles.length === 0)
+    )
       throw new V4Error('WORKSPACE_CHANGED_FILES_INVALID');
     const diffStat = satisfiedWithoutChange
       ? ''
@@ -495,9 +510,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     reviewedSha: string,
   ): Promise<WorkspaceCompletionSnapshot> {
     const descriptor = this.validateWorkspace(workspace);
-    const clean =
-      (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
-    if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     const headRevision = await this.git(descriptor.hostPath, [
       'rev-parse',
       '--verify',
@@ -505,6 +517,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ]);
     if (headRevision !== reviewedSha || descriptor.sourceRevision !== reviewedSha)
       throw new V4Error('WORKSPACE_REVIEW_SHA_MISMATCH');
+    await this.promoteRepositoryEvidence(descriptor, 'REVIEW', reviewedSha);
+    const clean =
+      (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
+    if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     const evidence = decodeReviewEvidence(this.readEvidence(descriptor.evidenceHostPath));
     if (evidence.executionId !== descriptor.executionId || evidence.reviewedSha !== reviewedSha)
       throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
@@ -627,12 +643,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         if (
           !(await this.gitSucceeds(
             repositoryRoot,
-            [
-              'merge-base',
-              '--is-ancestor',
-              input.expectedRevision,
-              input.acceptedRevision,
-            ],
+            ['merge-base', '--is-ancestor', input.expectedRevision, input.acceptedRevision],
             repositoryIdentity,
           ))
         ) {
@@ -658,12 +669,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         if (
           !(await this.gitSucceeds(
             repositoryRoot,
-            [
-              'merge-base',
-              '--is-ancestor',
-              input.expectedRevision,
-              input.acceptedRevision,
-            ],
+            ['merge-base', '--is-ancestor', input.expectedRevision, input.acceptedRevision],
             repositoryIdentity,
           ))
         )
@@ -680,11 +686,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       if (after !== input.acceptedRevision)
         throw new V4Error('WORKSPACE_INTEGRATION_RESULT_MISMATCH');
       if (
-        (await this.git(
-          repositoryRoot,
-          ['status', '--porcelain=v1', '-z'],
-          repositoryIdentity,
-        )).length !== 0
+        (await this.git(repositoryRoot, ['status', '--porcelain=v1', '-z'], repositoryIdentity))
+          .length !== 0
       )
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
       return await this.observeRepository(repositoryRoot, input.acceptedRevision);
@@ -694,7 +697,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       fs.rmSync(lockPath, { force: true });
     }
   }
-
 
   private gitlinkEntries(tree: string): Array<{ revision: string; relativePath: string }> {
     return tree
@@ -750,9 +752,19 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       state.count += 1;
       const initialized = await this.initializedSubmoduleState(repositoryRoot, entry.relativePath);
       if (!initialized) continue;
-      const status = await this.git(initialized.path, ['status', '--porcelain=v1', '-z'], initialized.identity);
+      const status = await this.git(
+        initialized.path,
+        ['status', '--porcelain=v1', '-z'],
+        initialized.identity,
+      );
       if (status.length !== 0) throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_DIRTY');
-      if (!(await this.gitSucceeds(initialized.path, ['cat-file', '-e', entry.revision + '^{commit}'], initialized.identity)))
+      if (
+        !(await this.gitSucceeds(
+          initialized.path,
+          ['cat-file', '-e', entry.revision + '^{commit}'],
+          initialized.identity,
+        ))
+      )
         throw new V4Error('WORKSPACE_INTEGRATION_SUBMODULE_REVISION_MISSING');
       await this.preflightInitializedSubmodules(initialized.path, entry.revision, depth + 1, state);
     }
@@ -772,7 +784,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       state.count += 1;
       const initialized = await this.initializedSubmoduleState(repositoryRoot, entry.relativePath);
       if (!initialized) continue;
-      await this.git(initialized.path, ['checkout', '--detach', entry.revision], initialized.identity);
+      await this.git(
+        initialized.path,
+        ['checkout', '--detach', entry.revision],
+        initialized.identity,
+      );
       await this.alignInitializedSubmodules(initialized.path, entry.revision, depth + 1, state);
     }
   }
@@ -784,7 +800,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     identity: { uid: number; gid: number },
   ): Promise<void> {
     if (status.length === 0) return;
-    const tree = await this.git(repositoryRoot, ['ls-tree', '-r', '-z', acceptedRevision], identity);
+    const tree = await this.git(
+      repositoryRoot,
+      ['ls-tree', '-r', '-z', acceptedRevision],
+      identity,
+    );
     const gitlinks = new Set(this.gitlinkEntries(tree).map((entry) => entry.relativePath));
 
     // Replay is allowed only for worktree-only submodule HEAD drift after the
@@ -853,7 +873,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       if (fallbackPath && !inside(fallbackPath, fallbackRepository!))
         throw new V4Error('WORKSPACE_SUBMODULE_PATH_INVALID');
 
-      const candidatePaths = [sourcePath, ...(fallbackPath && fallbackPath !== sourcePath ? [fallbackPath] : [])];
+      const candidatePaths = [
+        sourcePath,
+        ...(fallbackPath && fallbackPath !== sourcePath ? [fallbackPath] : []),
+      ];
       let objectSource: string | undefined;
       for (const candidatePath of candidatePaths) {
         const candidateRoot = candidatePath === sourcePath ? sourceRepository : fallbackRepository!;
@@ -865,11 +888,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         if (!inside(sourceReal, fs.realpathSync(candidateRoot)))
           throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_INVALID');
         if (
-          await this.gitSucceeds(candidatePath, [
-            'cat-file',
-            '-e',
-            expectedRevision + '^{commit}',
-          ])
+          await this.gitSucceeds(candidatePath, ['cat-file', '-e', expectedRevision + '^{commit}'])
         ) {
           objectSource = candidatePath;
           break;
@@ -879,7 +898,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
 
       const existing = fs.lstatSync(targetPath, { throwIfNoEntry: false });
       if (existing) {
-        if (!existing.isDirectory() || existing.isSymbolicLink() || fs.readdirSync(targetPath).length > 0)
+        if (
+          !existing.isDirectory() ||
+          existing.isSymbolicLink() ||
+          fs.readdirSync(targetPath).length > 0
+        )
           throw new V4Error('WORKSPACE_SUBMODULE_TARGET_NOT_EMPTY');
         fs.rmSync(targetPath, { recursive: true, force: true });
       }
@@ -897,7 +920,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         .filter(Boolean);
       const bundleRef = containingRefs[0];
       if (!bundleRef) throw new V4Error('WORKSPACE_SUBMODULE_SOURCE_REVISION_MISMATCH');
-      const bundle = path.join(bundleRoot, '.pixel-v4-submodule-' + state.count + '-' + randomUUID() + '.bundle');
+      const bundle = path.join(
+        bundleRoot,
+        '.pixel-v4-submodule-' + state.count + '-' + randomUUID() + '.bundle',
+      );
       try {
         await this.git(objectSource, ['bundle', 'create', bundle, bundleRef]);
         fs.mkdirSync(targetPath, { recursive: true });
@@ -1048,6 +1074,66 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     return descriptor;
   }
 
+  private async promoteRepositoryEvidence(
+    descriptor: WorkspaceDescriptor,
+    phase: 'IMPLEMENTATION' | 'REVIEW',
+    expectedRevision: string,
+  ): Promise<void> {
+    const staged = path.join(descriptor.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+    const stagedStat = fs.lstatSync(staged, { throwIfNoEntry: false });
+    if (!stagedStat) return;
+    if (
+      !stagedStat.isFile() ||
+      stagedStat.isSymbolicLink() ||
+      stagedStat.size <= 0 ||
+      stagedStat.size > MAX_EVIDENCE_BYTES
+    )
+      throw new V4Error('WORKSPACE_REPOSITORY_EVIDENCE_INVALID');
+    if (fs.existsSync(descriptor.evidenceHostPath))
+      throw new V4Error('WORKSPACE_EVIDENCE_AMBIGUOUS');
+    const tracked = await this.git(descriptor.hostPath, [
+      'ls-files',
+      '--',
+      REPOSITORY_COMPLETION_EVIDENCE_FILE,
+    ]);
+    if (tracked) throw new V4Error('WORKSPACE_REPOSITORY_EVIDENCE_TRACKED');
+
+    const raw = this.readEvidence(staged);
+    const evidence =
+      phase === 'IMPLEMENTATION' ? decodeImplementationEvidence(raw) : decodeReviewEvidence(raw);
+    if (phase === 'IMPLEMENTATION') {
+      const implementation = evidence as ImplementationCompletionEvidence;
+      if (
+        implementation.executionId !== descriptor.executionId ||
+        implementation.sourceRevision !== descriptor.sourceRevision ||
+        implementation.resultRevision !== expectedRevision
+      )
+        throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
+    } else {
+      const review = evidence as ReviewCompletionEvidence;
+      if (review.executionId !== descriptor.executionId || review.reviewedSha !== expectedRevision)
+        throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
+    }
+
+    const temporary = descriptor.evidenceHostPath + '.staging-' + randomUUID();
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(temporary, 'wx', 0o600);
+      fs.writeFileSync(fd, JSON.stringify(evidence) + '\n', 'utf8');
+      fs.fsyncSync(fd);
+      fs.closeSync(fd);
+      fd = undefined;
+      fs.linkSync(temporary, descriptor.evidenceHostPath);
+      fs.unlinkSync(temporary);
+      fs.unlinkSync(staged);
+    } catch (error) {
+      if (fd !== undefined) fs.closeSync(fd);
+      fs.rmSync(temporary, { force: true });
+      if (error instanceof V4Error) throw error;
+      throw new V4Error('WORKSPACE_EVIDENCE_PROMOTION_FAILED');
+    }
+  }
+
   private readDescriptor(file: string): StoredWorkspaceDescriptor {
     const stat = fs.lstatSync(file, { throwIfNoEntry: false });
     if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > 64_000)
@@ -1094,17 +1180,20 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     args: string[],
     identity?: { uid: number; gid: number },
   ): Promise<string> {
-    return await this.runGit([
-      '-c',
-      'core.fsmonitor=false',
-      '-c',
-      'core.hooksPath=/dev/null',
-      '-c',
-      'safe.directory=' + cwd,
-      '-C',
-      cwd,
-      ...args,
-    ], identity);
+    return await this.runGit(
+      [
+        '-c',
+        'core.fsmonitor=false',
+        '-c',
+        'core.hooksPath=/dev/null',
+        '-c',
+        'safe.directory=' + cwd,
+        '-C',
+        cwd,
+        ...args,
+      ],
+      identity,
+    );
   }
 
   private async gitOptional(
@@ -1135,7 +1224,11 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
 
   private async sourceRepositoryIdentity(repositoryRoot: string): Promise<string | undefined> {
     const identity = this.repositoryIdentity(repositoryRoot);
-    const remote = await this.gitOptional(repositoryRoot, ['remote', 'get-url', 'origin'], identity);
+    const remote = await this.gitOptional(
+      repositoryRoot,
+      ['remote', 'get-url', 'origin'],
+      identity,
+    );
     return remote ? repositoryNameFromRemote(remote) : undefined;
   }
 
@@ -1144,10 +1237,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     return { uid: stat.uid, gid: stat.gid };
   }
 
-  private async runGit(
-    args: string[],
-    identity?: { uid: number; gid: number },
-  ): Promise<string> {
+  private async runGit(args: string[], identity?: { uid: number; gid: number }): Promise<string> {
     try {
       const result = await execFileAsync('git', args, {
         encoding: 'utf8',

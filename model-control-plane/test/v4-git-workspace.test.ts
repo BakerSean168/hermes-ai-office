@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { LocalGitWorkspaceAdapter } from '../src/v4/adapters/gitWorkspace.js';
 import { V4Error } from '../src/v4/domain/errors.js';
+import { REPOSITORY_COMPLETION_EVIDENCE_FILE } from '../src/v4/orchestration/contracts.js';
 import type {
   ReviewCompletionEvidence,
   WorkspaceDescriptor,
@@ -207,7 +208,9 @@ test('LocalGitWorkspace materializes exact initialized submodules without using 
   const gitmodules = path.join(value.repositoryPath, '.gitmodules');
   write(
     gitmodules,
-    fs.readFileSync(gitmodules, 'utf8').replace(child.repositoryPath, 'https://invalid.example/child.git'),
+    fs
+      .readFileSync(gitmodules, 'utf8')
+      .replace(child.repositoryPath, 'https://invalid.example/child.git'),
   );
   const parentRevision = commit(value.repositoryPath, 'feat: add exact child submodule');
   const workspace = await value.adapter.provision({
@@ -221,7 +224,6 @@ test('LocalGitWorkspace materializes exact initialized submodules without using 
   assert.equal(git(workspace.hostPath, ['status', '--porcelain=v1']), '');
   assert.ok(fs.statSync(path.join(childWorkspace, '.git')).isDirectory());
 });
-
 
 test('LocalGitWorkspace review provisioning recovers an exact submodule from the canonical local object store when the implementation submodule is deinitialized', async () => {
   const value = fixture();
@@ -240,7 +242,9 @@ test('LocalGitWorkspace review provisioning recovers an exact submodule from the
   const gitmodules = path.join(value.repositoryPath, '.gitmodules');
   write(
     gitmodules,
-    fs.readFileSync(gitmodules, 'utf8').replace(child.repositoryPath, 'https://invalid.example/child.git'),
+    fs
+      .readFileSync(gitmodules, 'utf8')
+      .replace(child.repositoryPath, 'https://invalid.example/child.git'),
   );
   const parentRevision = commit(value.repositoryPath, 'feat: add fallback child submodule');
   const canonicalChild = path.join(value.repositoryPath, 'vendor/child');
@@ -298,9 +302,7 @@ test('LocalGitWorkspace implementation verification rejects no-op, dirty and mis
   );
   write(
     workspace.evidenceHostPath,
-    JSON.stringify(
-      implementationEvidence(workspace, value.baseRevision, { outcome: 'SATISFIED' }),
-    ),
+    JSON.stringify(implementationEvidence(workspace, value.baseRevision, { outcome: 'SATISFIED' })),
   );
   const satisfied = await value.adapter.verifyImplementation(workspace);
   assert.equal(satisfied.headRevision, value.baseRevision);
@@ -357,6 +359,74 @@ test('LocalGitWorkspace implementation verification rejects no-op, dirty and mis
   assert.equal(verified.evidence.phase, 'IMPLEMENT');
 });
 
+test('LocalGitWorkspace promotes controller-staged repository evidence and rejects unsafe staging files', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-repository-evidence',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(workspace);
+  write(path.join(workspace.hostPath, 'feature.txt'), 'feature\n');
+  const resultRevision = commit(workspace.hostPath, 'feat: repository evidence');
+  const staged = path.join(workspace.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+  write(staged, JSON.stringify(implementationEvidence(workspace, resultRevision)));
+  assert.match(
+    git(workspace.hostPath, ['status', '--porcelain=v1']),
+    /\?\? \.pixel-v4-completion-evidence\.json/,
+  );
+  const verified = await value.adapter.verifyImplementation(workspace);
+  assert.equal(verified.headRevision, resultRevision);
+  assert.equal(fs.existsSync(staged), false);
+  assert.equal(fs.existsSync(workspace.evidenceHostPath), true);
+  assert.equal(git(workspace.hostPath, ['status', '--porcelain=v1']), '');
+
+  const tracked = await value.adapter.provision({
+    executionId: 'exec-tracked-evidence',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(tracked);
+  write(path.join(tracked.hostPath, 'feature.txt'), 'feature\n');
+  write(path.join(tracked.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE), '{}');
+  const trackedRevision = commit(tracked.hostPath, 'feat: wrongly track evidence');
+  write(
+    path.join(tracked.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE),
+    JSON.stringify(implementationEvidence(tracked, trackedRevision)),
+  );
+  await assert.rejects(
+    () => value.adapter.verifyImplementation(tracked),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_REPOSITORY_EVIDENCE_TRACKED',
+  );
+
+  const symlinked = await value.adapter.provision({
+    executionId: 'exec-symlink-evidence',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(symlinked);
+  write(path.join(symlinked.hostPath, 'feature.txt'), 'feature\n');
+  const symlinkRevision = commit(symlinked.hostPath, 'feat: symlink evidence fixture');
+  write(
+    '/tmp/pixel-v4-evidence-target.json',
+    JSON.stringify(implementationEvidence(symlinked, symlinkRevision)),
+  );
+  fs.symlinkSync(
+    '/tmp/pixel-v4-evidence-target.json',
+    path.join(symlinked.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE),
+  );
+  await assert.rejects(
+    () => value.adapter.verifyImplementation(symlinked),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_REPOSITORY_EVIDENCE_INVALID',
+  );
+  fs.rmSync('/tmp/pixel-v4-evidence-target.json', { force: true });
+});
+
 test('LocalGitWorkspace provisions independent exact-SHA review snapshots and validates verdict evidence', async () => {
   const value = fixture();
   const implementation = await value.adapter.provision({
@@ -378,6 +448,13 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
   assert.equal(git(review.hostPath, ['rev-parse', 'HEAD']), reviewedSha);
   write(path.join(review.hostPath, 'node_modules', '.cache', 'review-probe'), 'runtime\n');
   assert.equal(git(review.hostPath, ['status', '--porcelain=v1']), '');
+  const stagedReviewEvidence = path.join(review.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+  write(stagedReviewEvidence, JSON.stringify(reviewEvidence(review, reviewedSha)));
+  const stagedReview = await value.adapter.verifyReview(review, reviewedSha);
+  if (stagedReview.evidence.phase === 'REVIEW') assert.equal(stagedReview.evidence.verdict, 'PASS');
+  assert.equal(fs.existsSync(stagedReviewEvidence), false);
+  assert.equal(git(review.hostPath, ['status', '--porcelain=v1']), '');
+  fs.rmSync(review.evidenceHostPath);
   write(review.evidenceHostPath, JSON.stringify(reviewEvidence(review, 'wrong-sha')));
   await assert.rejects(
     () => value.adapter.verifyReview(review, reviewedSha),
@@ -389,10 +466,7 @@ test('LocalGitWorkspace provisions independent exact-SHA review snapshots and va
   assert.equal(passed.evidence.phase, 'REVIEW');
   if (passed.evidence.phase === 'REVIEW') assert.equal(passed.evidence.verdict, 'PASS');
 
-  write(
-    review.evidenceHostPath,
-    JSON.stringify(reviewEvidence(review, reviewedSha)) + '\\n\n',
-  );
+  write(review.evidenceHostPath, JSON.stringify(reviewEvidence(review, reviewedSha)) + '\\n\n');
   const normalizedTrailingLiteralNewline = await value.adapter.verifyReview(review, reviewedSha);
   if (normalizedTrailingLiteralNewline.evidence.phase === 'REVIEW')
     assert.equal(normalizedTrailingLiteralNewline.evidence.verdict, 'PASS');
@@ -503,8 +577,7 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
         acceptedRevision,
         candidateWorkspace: candidate,
       }),
-    (error: unknown) =>
-      error instanceof V4Error && error.code === 'WORKSPACE_INTEGRATION_LOCKED',
+    (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_INTEGRATION_LOCKED',
   );
   fs.rmSync(integrationLock);
 
@@ -514,11 +587,7 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
     identity?: { uid: number; gid: number };
   }> = [];
   type GitInternals = {
-    git(
-      cwd: string,
-      args: string[],
-      identity?: { uid: number; gid: number },
-    ): Promise<string>;
+    git(cwd: string, args: string[], identity?: { uid: number; gid: number }): Promise<string>;
   };
   const internals = value.adapter as unknown as GitInternals;
   const originalGit = internals.git.bind(value.adapter);
@@ -556,7 +625,6 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
     ),
   );
 });
-
 
 test('LocalGitWorkspace integration aligns initialized submodules and replays a post-fast-forward submodule checkout crash safely', async () => {
   const value = fixture();

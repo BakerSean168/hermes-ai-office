@@ -179,7 +179,16 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
     'utf8',
   );
   assert.match(launcher, /dsh-acp\|zcode-acp/);
-  assert.match(launcher, /expected_workspace_repo="\/workspace\/executions\/\$execution_id\/repo"/);
+  assert.match(
+    launcher,
+    /expected_v3_workspace_repo="\/workspace\/executions\/\$execution_id\/repo"/,
+  );
+  assert.match(
+    launcher,
+    /expected_v4_workspace_repo="\/workspace\/v4\/executions\/\$execution_id\/repo"/,
+  );
+  assert.match(launcher, /execution_root="\$\{workspace_repo%\/repo\}"/);
+  assert.match(launcher, /zcode-acp\)\n    root="\$\(prepare_root zcode\)"/);
   assert.match(launcher, /zcode_root="\$root\/zcode"/);
   assert.match(launcher, /zcode_key="\$\{AI_OFFICE_LITELLM_API_KEY:-\$\{ZCODE_API_KEY:-\}\}"/);
   assert.match(launcher, /zcode_base="\$\{AI_OFFICE_LITELLM_BASE_URL:-\$\{ZCODE_BASE_URL:-\}\}"/);
@@ -190,7 +199,11 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
   );
   assert.match(launcher, /exec \/openhands-state\/tooling\/node_modules\/\.bin\/zcode-acp-server/);
   assert.match(launcher, /target\.chmod\(0o600\)/);
-  assert.doesNotMatch(launcher, /\.config\/zcode|\.zcode/);
+  assert.match(launcher, /zcode_provider_config="\$zcode_provider_dir\/config\.json"/);
+  assert.match(launcher, /zcode_home="\$zcode_root\/home"/);
+  assert.match(launcher, /"kind": "openai-compatible"/);
+  assert.match(launcher, /"provider":/);
+  assert.doesNotMatch(launcher, /\.config\/zcode/);
   execFileSync('bash', ['-n', path.join(root, 'openhands_tools/harness_agent_launcher.sh')]);
 });
 
@@ -209,6 +222,7 @@ test('V4 release reconciles OpenHands Agent runtimes from the shared Harness loc
   assert.match(openHandsTooling, /runtime_lock_version codex/);
   assert.match(openHandsTooling, /runtime_lock_version opencode/);
   assert.match(openHandsTooling, /runtime_lock_version claude/);
+  assert.match(openHandsTooling, /runtime_lock_version zcode/);
   assert.match(release, /install-openhands-v3-tooling\.sh/);
   assert.match(release, /CODEX_HOME=\/openhands-state\/codex-business/);
   assert.match(release, /codex login status/);

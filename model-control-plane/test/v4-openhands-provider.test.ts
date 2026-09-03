@@ -108,7 +108,7 @@ test('OpenHands implementation and review launches use distinct models, tools an
   assert.equal(implementationBody.initial_message.run, true);
   assert.match(
     implementationBody.initial_message.content[0].text,
-    /\/workspace\/executions\/exec-1\/evidence\.json/,
+    /\/workspace\/executions\/exec-1\/repo\/\.pixel-v4-completion-evidence\.json/,
   );
   assert.match(
     implementationBody.initial_message.content[0].text,
@@ -320,6 +320,8 @@ test('model-native factory resolves selected backend, model and transport withou
         DEEPSEEK_BASE_URL: 'http://litellm.test/v1',
         HERMES_V3_EXECUTION_ID: 'exec-1',
         HERMES_V3_WORKSPACE_REF: '/workspace/executions/exec-1/repo',
+        PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH:
+          '/workspace/executions/exec-1/repo/.pixel-v4-completion-evidence.json',
       },
     },
     {
@@ -336,6 +338,8 @@ test('model-native factory resolves selected backend, model and transport withou
         ZCODE_MODEL: 'glm-5.2',
         ZCODE_API_KEY: secrets.liteLlmApiKey,
         ZCODE_BASE_URL: 'http://litellm.test/v1',
+        PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH:
+          '/workspace/executions/exec-1/repo/.pixel-v4-completion-evidence.json',
       },
     },
     {
@@ -369,6 +373,13 @@ test('model-native factory resolves selected backend, model and transport withou
     assert.equal(body.agent.acp_model, item.selection.model);
     for (const [name, value] of Object.entries(item.expectedSecrets))
       assert.equal(body.secrets[name].value, value);
+    const prompt = String(body.initial_message.content[0].text);
+    if (item.selection.backend === 'dsh-acp' || item.selection.backend === 'zcode-acp') {
+      assert.match(prompt, /\.pixel-v4-completion-evidence\.json/);
+      assert.match(prompt, /Do not git add or commit it/);
+    } else {
+      assert.match(prompt, /\/workspace\/executions\/exec-1\/evidence\.json/);
+    }
     assert.equal(JSON.stringify(snapshot).includes(secrets.liteLlmApiKey), false);
     assert.equal(JSON.stringify(snapshot).includes(secrets.sessionApiKey), false);
   }
@@ -378,7 +389,12 @@ test('provider-native Codex does not require LiteLLM credentials and builtin fal
   const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
     const body = JSON.parse(String(init.body)) as Record<string, any>;
     return new Response(
-      JSON.stringify({ id: 'native-no-key', execution_status: 'running', workspace: body.workspace, tags: body.tags }),
+      JSON.stringify({
+        id: 'native-no-key',
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
       { status: 201 },
     );
   }) as typeof fetch;
@@ -672,16 +688,25 @@ test('OpenHands maps finished ACP transport errors to retryable provider failure
   const fake = (async (url: string | URL | Request) => {
     const value = String(url);
     if (value.endsWith('/agent_final_response')) {
-      return new Response(JSON.stringify({
-        response: 'ACP error: api_key=sk-transport-secret\nworker finalization completed without repository command or file-change activity',
-      }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          response:
+            'ACP error: api_key=sk-transport-secret\nworker finalization completed without repository command or file-change activity',
+        }),
+        { status: 200 },
+      );
     }
     if (value.endsWith('/api/conversations/session-transport-error')) {
-      return new Response(JSON.stringify({
-        id: 'session-transport-error', execution_status: 'finished',
-      }), { status: 200 });
+      return new Response(
+        JSON.stringify({
+          id: 'session-transport-error',
+          execution_status: 'finished',
+        }),
+        { status: 200 },
+      );
     }
-    if (value.includes('/events/search')) return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (value.includes('/events/search'))
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
     throw new Error('unexpected request ' + value);
   }) as typeof fetch;
   const provider = new OpenHandsCodexManagedExecutionProvider(options(fake));
