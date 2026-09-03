@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DataResetRequiredError, V4Error } from '../domain/errors.js';
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 const CREATE_EXECUTION_SESSIONS_SQL = `
 CREATE TABLE IF NOT EXISTS execution_sessions (
@@ -54,6 +54,39 @@ CREATE TABLE IF NOT EXISTS v4_jules_sessions (
 );
 `;
 
+const CREATE_RESOURCE_ROUTING_SQL = `
+CREATE TABLE IF NOT EXISTS execution_resource_selections (
+  execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id),
+  capability TEXT NOT NULL,
+  model_family TEXT NOT NULL,
+  agent_backend TEXT NOT NULL,
+  transport TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_tier INTEGER NOT NULL,
+  model_rank INTEGER NOT NULL,
+  resource_sequence INTEGER NOT NULL,
+  resource_state TEXT NOT NULL,
+  selection_reason TEXT NOT NULL,
+  binding_id TEXT,
+  deployment_id TEXT,
+  route_model TEXT,
+  protocol TEXT,
+  selected_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_resource_selections_resource
+  ON execution_resource_selections(resource_id, selected_at);
+CREATE TABLE IF NOT EXISTS resource_state_overrides (
+  resource_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  reason_class TEXT,
+  sanitized_reason TEXT,
+  suspended_until TEXT,
+  source TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
 export const SCHEMA_V4_SQL = [
   'PRAGMA journal_mode = WAL;',
   'PRAGMA foreign_keys = ON;',
@@ -77,11 +110,12 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS supervisor_actions (action_id TEXT PRIMARY KEY, supervisor_id TEXT NOT NULL REFERENCES supervisors(supervisor_id), plan_id TEXT NOT NULL REFERENCES plans(plan_id), version INTEGER NOT NULL, type TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, observation_cursor INTEGER NOT NULL, projection_digest TEXT NOT NULL, precondition_snapshot TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, validation TEXT, result TEXT, execution_id TEXT, child_plan_id TEXT, pull_request_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS leases (aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, owner_id TEXT NOT NULL, lease_token TEXT NOT NULL, claimed_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (aggregate_type, aggregate_id));',
   'CREATE TABLE IF NOT EXISTS resources (resource_id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, capabilities TEXT NOT NULL, quota_remaining REAL, observation TEXT NOT NULL, updated_at TEXT NOT NULL, observed_at TEXT NOT NULL);',
+  CREATE_RESOURCE_ROUTING_SQL,
   'CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT REFERENCES plans(plan_id), pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
-  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 5, CAST(strftime('%s','now') AS INTEGER));",
+  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 6, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
 const V1_REQUIRED_COLUMNS = {
@@ -124,6 +158,38 @@ const V4_REQUIRED_COLUMNS = {
 const V5_REQUIRED_COLUMNS = {
   ...V4_REQUIRED_COLUMNS,
   plan_deliveries: [...V4_REQUIRED_COLUMNS.plan_deliveries, 'superseded_by_plan_id'],
+} as const satisfies Record<string, readonly string[]>;
+
+const V6_REQUIRED_COLUMNS = {
+  ...V5_REQUIRED_COLUMNS,
+  execution_resource_selections: [
+    'execution_id',
+    'capability',
+    'model_family',
+    'agent_backend',
+    'transport',
+    'resource_id',
+    'resource_tier',
+    'model_rank',
+    'resource_sequence',
+    'resource_state',
+    'selection_reason',
+    'binding_id',
+    'deployment_id',
+    'route_model',
+    'protocol',
+    'selected_at',
+  ],
+  resource_state_overrides: [
+    'resource_id',
+    'state',
+    'reason_class',
+    'sanitized_reason',
+    'suspended_until',
+    'source',
+    'version',
+    'updated_at',
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 export interface V4DatabaseOptions {
@@ -189,6 +255,24 @@ function assertV5Relationships(db: DatabaseSync): void {
   assertV3Relationships(db);
   if (!hasForeignKey(db, 'plan_deliveries', 'superseded_by_plan_id', 'plans', 'plan_id')) {
     throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing foreign key: plan_deliveries.superseded_by_plan_id -> plans.plan_id');
+  }
+}
+
+function assertV6Relationships(db: DatabaseSync): void {
+  assertV5Relationships(db);
+  if (
+    !hasForeignKey(
+      db,
+      'execution_resource_selections',
+      'execution_id',
+      'executions',
+      'execution_id',
+    )
+  ) {
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: execution_resource_selections.execution_id -> executions.execution_id',
+    );
   }
 }
 
@@ -317,10 +401,49 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
     }
   }
 
+  const afterV5 = schemaVersion(db);
+  if (afterV5 === 5) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const lockedVersion = schemaVersion(db);
+      if (lockedVersion !== 5) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      assertSchemaColumns(db, V5_REQUIRED_COLUMNS);
+      assertV5Relationships(db);
+      const existingTables = tableNames(db);
+      if (existingTables.has('execution_resource_selections')) {
+        assertSchemaColumns(db, {
+          execution_resource_selections: V6_REQUIRED_COLUMNS.execution_resource_selections,
+        });
+      }
+      if (existingTables.has('resource_state_overrides')) {
+        assertSchemaColumns(db, {
+          resource_state_overrides: V6_REQUIRED_COLUMNS.resource_state_overrides,
+        });
+      }
+      db.exec(CREATE_RESOURCE_ROUTING_SQL);
+      assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
+      assertV6Relationships(db);
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=6 WHERE schema_id='pixel-v4' AND schema_version=5",
+        )
+        .run();
+      if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
+      throw error;
+    }
+  }
+
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V5_REQUIRED_COLUMNS);
-  assertV5Relationships(db);
+  assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
+  assertV6Relationships(db);
 }
 
 function dropAllTables(db: DatabaseSync): void {
@@ -338,8 +461,8 @@ function createSchema(db: DatabaseSync): void {
 export function assertCurrentV4Schema(db: DatabaseSync): void {
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V5_REQUIRED_COLUMNS);
-  assertV5Relationships(db);
+  assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
+  assertV6Relationships(db);
 }
 
 export function openV4Database(file: string, options: V4DatabaseOptions = {}): DatabaseSync {

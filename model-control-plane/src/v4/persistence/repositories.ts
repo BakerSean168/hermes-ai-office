@@ -8,10 +8,23 @@ import { transitionExecution, validateExecutionIdentity, type Execution, type Ex
 import { transitionPlan, validatePlanInput, type CreatePlanInput, type Plan, type PlanStatus } from '../domain/plan.js';
 import { transitionReview, validateReviewLineage, type Review, type ReviewStatus } from '../domain/review.js';
 import { type Lease, validateResourceObservation, type ResourceObservation } from '../domain/resource.js';
+import {
+  createExecutionResourceSelection,
+  resourceTierRank,
+  validateExecutionResourceSelection,
+  validateResourceStateOverride,
+  type ExecutionResourceSelection,
+  type ResourceState,
+  type ResourceStateOverride,
+  type ResourceStateOverrideSource,
+  type NormalizedFailureClass,
+  type ResourceTier,
+  type RoutingExecutionPhase,
+} from '../domain/resourceRouting.js';
 import { transitionAction, validateActionShape, type ActionStatus, type SupervisorAction } from '../domain/action.js';
 import { transitionSupervisor, validateSupervisor, type Supervisor, type SupervisorDecision, type SupervisorStatus, type SupervisorWakeReason } from '../domain/supervisor.js';
 import { transitionWorkItem, validateGraphItems, type GraphVersion, type WorkItem, type WorkItemStatus } from '../domain/workGraph.js';
-import { withTransaction } from './database.js';
+import { assertCurrentV4Schema, withTransaction } from './database.js';
 import { EventStore } from './eventStore.js';
 import { ExecutionEvidenceRepository, ExecutionSessionRepository } from './executionArtifacts.js';
 
@@ -1364,6 +1377,351 @@ export class ResourceRepository {
   }
 }
 
+interface ExecutionResourceSelectionRow {
+  execution_id: string;
+  capability: ExecutionResourceSelection['capability'];
+  phase: RoutingExecutionPhase;
+  model_family: string;
+  agent_backend: string;
+  transport: ExecutionResourceSelection['transport'];
+  resource_id: string;
+  resource_tier: number;
+  model_rank: number;
+  resource_sequence: number;
+  resource_state: ExecutionResourceSelection['resourceState'];
+  selection_reason: ExecutionResourceSelection['selectionReason'];
+  binding_id: string | null;
+  deployment_id: string | null;
+  route_model: string | null;
+  protocol: string | null;
+  selected_at: string;
+}
+
+function tierFromRank(rank: number): ResourceTier {
+  if (rank === 10) return 'PROMOTIONAL';
+  if (rank === 20) return 'FREE';
+  if (rank === 30) return 'SUBSCRIPTION';
+  if (rank === 40) return 'METERED';
+  if (rank === 60) return 'OTHER';
+  throw new V4Error('RESOURCE_TIER_RANK_INVALID', 'Unknown resource tier rank: ' + String(rank));
+}
+
+function selectionFrom(row: ExecutionResourceSelectionRow): ExecutionResourceSelection {
+  return createExecutionResourceSelection(
+    row.execution_id,
+    {
+      capability: row.capability,
+      phase: row.phase,
+      modelFamily: row.model_family,
+      agentBackend: row.agent_backend,
+      transport: row.transport,
+      resourceId: row.resource_id,
+      resourceTier: tierFromRank(row.resource_tier),
+      modelRank: row.model_rank,
+      resourceSequence: row.resource_sequence,
+      resourceState: row.resource_state,
+      selectionReason: row.selection_reason,
+      ...(row.binding_id === null ? {} : { bindingId: row.binding_id }),
+      ...(row.deployment_id === null ? {} : { deploymentId: row.deployment_id }),
+      ...(row.route_model === null ? {} : { routeModel: row.route_model }),
+      ...(row.protocol === null ? {} : { protocol: row.protocol }),
+    },
+    row.selected_at,
+  );
+}
+
+function sameSelection(
+  left: ExecutionResourceSelection,
+  right: ExecutionResourceSelection,
+): boolean {
+  return (
+    left.executionId === right.executionId &&
+    left.selectionVersion === right.selectionVersion &&
+    left.capability === right.capability &&
+    left.phase === right.phase &&
+    left.modelFamily === right.modelFamily &&
+    left.agentBackend === right.agentBackend &&
+    left.transport === right.transport &&
+    left.resourceId === right.resourceId &&
+    left.resourceTier === right.resourceTier &&
+    resourceTierRank(left.resourceTier) === resourceTierRank(right.resourceTier) &&
+    left.modelRank === right.modelRank &&
+    left.resourceSequence === right.resourceSequence &&
+    left.resourceState === right.resourceState &&
+    left.selectionReason === right.selectionReason &&
+    left.bindingId === right.bindingId &&
+    left.deploymentId === right.deploymentId &&
+    left.routeModel === right.routeModel &&
+    left.protocol === right.protocol &&
+    left.selectedAt === right.selectedAt
+  );
+}
+
+export class ExecutionResourceSelectionRepository {
+  constructor(
+    readonly db: DatabaseSync,
+    readonly events = new EventStore(db),
+  ) {
+    assertCurrentV4Schema(db);
+  }
+
+  create(selection: ExecutionResourceSelection): MutationResult<ExecutionResourceSelection> {
+    validateExecutionResourceSelection(selection);
+    assertSafeEventPayload(selection);
+    return withTransaction(this.db, () => {
+      const existing = this.get(selection.executionId);
+      if (existing) {
+        if (!sameSelection(existing, selection))
+          throw new V4Error('EXECUTION_RESOURCE_SELECTION_IMMUTABLE');
+        return { status: 'existing', value: existing };
+      }
+      if (
+        !this.db
+          .prepare('SELECT execution_id FROM executions WHERE execution_id=?')
+          .get(selection.executionId)
+      ) {
+        throw new V4Error('EXECUTION_NOT_FOUND');
+      }
+      this.db
+        .prepare(
+          `INSERT INTO execution_resource_selections(
+        execution_id,capability,model_family,agent_backend,transport,resource_id,resource_tier,
+        model_rank,resource_sequence,resource_state,selection_reason,binding_id,deployment_id,route_model,protocol,selected_at
+      ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          selection.executionId,
+          selection.capability,
+          selection.modelFamily,
+          selection.agentBackend,
+          selection.transport,
+          selection.resourceId,
+          resourceTierRank(selection.resourceTier),
+          selection.modelRank,
+          selection.resourceSequence,
+          selection.resourceState,
+          selection.selectionReason,
+          selection.bindingId ?? null,
+          selection.deploymentId ?? null,
+          selection.routeModel ?? null,
+          selection.protocol ?? null,
+          selection.selectedAt,
+        );
+      this.events.appendInTransaction(
+        makeEvent(selection.executionId, 'EXECUTION', 'EXECUTION_RESOURCE_SELECTED', {
+          capability: selection.capability,
+          phase: selection.phase,
+          modelFamily: selection.modelFamily,
+          agentBackend: selection.agentBackend,
+          transport: selection.transport,
+          resourceId: selection.resourceId,
+          resourceTier: selection.resourceTier,
+          modelRank: selection.modelRank,
+          resourceSequence: selection.resourceSequence,
+          resourceState: selection.resourceState,
+          selectionReason: selection.selectionReason,
+          bindingId: selection.bindingId ?? null,
+          deploymentId: selection.deploymentId ?? null,
+          routeModel: selection.routeModel ?? null,
+          protocol: selection.protocol ?? null,
+          selectedAt: selection.selectedAt,
+        }),
+      );
+      return { status: 'created', value: this.get(selection.executionId)! };
+    });
+  }
+
+  save(selection: ExecutionResourceSelection): MutationResult<ExecutionResourceSelection> {
+    return this.create(selection);
+  }
+
+  get(executionId: string): ExecutionResourceSelection | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT selections.*,executions.phase
+      FROM execution_resource_selections selections
+      JOIN executions ON executions.execution_id=selections.execution_id
+      WHERE selections.execution_id=?`,
+      )
+      .get(executionId) as ExecutionResourceSelectionRow | undefined;
+    return row ? selectionFrom(row) : undefined;
+  }
+
+  require(executionId: string): ExecutionResourceSelection {
+    const selection = this.get(executionId);
+    if (!selection) throw new V4Error('EXECUTION_RESOURCE_SELECTION_NOT_FOUND');
+    return selection;
+  }
+
+  listByResource(resourceId: string): ExecutionResourceSelection[] {
+    const rows = this.db
+      .prepare(
+        `SELECT selections.*,executions.phase
+      FROM execution_resource_selections selections
+      JOIN executions ON executions.execution_id=selections.execution_id
+      WHERE selections.resource_id=? ORDER BY selections.selected_at,selections.execution_id`,
+      )
+      .all(resourceId) as unknown as ExecutionResourceSelectionRow[];
+    return rows.map(selectionFrom);
+  }
+}
+
+export type ResourceStateOverrideInput = Omit<ResourceStateOverride, 'version' | 'updatedAt'>;
+
+interface ResourceStateOverrideRow {
+  resource_id: string;
+  state: ResourceState;
+  reason_class: NormalizedFailureClass | null;
+  sanitized_reason: string | null;
+  suspended_until: string | null;
+  source: ResourceStateOverrideSource;
+  version: number;
+  updated_at: string;
+}
+
+function resourceStateOverrideFrom(row: ResourceStateOverrideRow): ResourceStateOverride {
+  const override: ResourceStateOverride = {
+    resourceId: row.resource_id,
+    state: row.state,
+    ...(row.reason_class === null ? {} : { reasonClass: row.reason_class }),
+    ...(row.sanitized_reason === null ? {} : { sanitizedReason: row.sanitized_reason }),
+    ...(row.suspended_until === null ? {} : { suspendedUntil: row.suspended_until }),
+    source: row.source,
+    version: row.version,
+    updatedAt: row.updated_at,
+  };
+  validateResourceStateOverride(override);
+  return Object.freeze(override);
+}
+
+function sameOverrideInput(
+  left: ResourceStateOverride,
+  right: ResourceStateOverrideInput,
+): boolean {
+  return (
+    left.resourceId === right.resourceId &&
+    left.state === right.state &&
+    left.reasonClass === right.reasonClass &&
+    left.sanitizedReason === right.sanitizedReason &&
+    left.suspendedUntil === right.suspendedUntil &&
+    left.source === right.source
+  );
+}
+
+export class ResourceStateOverrideRepository {
+  constructor(
+    readonly db: DatabaseSync,
+    readonly events = new EventStore(db),
+  ) {
+    assertCurrentV4Schema(db);
+  }
+
+  get(resourceId: string): ResourceStateOverride | undefined {
+    const row = this.db
+      .prepare('SELECT * FROM resource_state_overrides WHERE resource_id=?')
+      .get(resourceId) as ResourceStateOverrideRow | undefined;
+    return row ? resourceStateOverrideFrom(row) : undefined;
+  }
+
+  list(): ResourceStateOverride[] {
+    const rows = this.db
+      .prepare('SELECT * FROM resource_state_overrides ORDER BY resource_id')
+      .all() as unknown as ResourceStateOverrideRow[];
+    return rows.map(resourceStateOverrideFrom);
+  }
+
+  compareAndSet(
+    resourceId: string,
+    expectedVersion: number | null,
+    input: ResourceStateOverrideInput,
+  ): MutationResult<ResourceStateOverride> {
+    failClosed(
+      expectedVersion === null || (Number.isInteger(expectedVersion) && expectedVersion >= 0),
+      'RESOURCE_OVERRIDE_EXPECTED_VERSION_INVALID',
+    );
+    failClosed(resourceId === input.resourceId, 'RESOURCE_OVERRIDE_ID_MISMATCH');
+    const now = iso();
+    const expectsAbsent = expectedVersion === null || expectedVersion === 0;
+    const nextVersion = expectsAbsent ? 1 : expectedVersion + 1;
+    const next: ResourceStateOverride = { ...input, version: nextVersion, updatedAt: now };
+    validateResourceStateOverride(next);
+    assertSafeEventPayload(next);
+    return withTransaction(this.db, () => {
+      const current = this.get(resourceId);
+      if (current ? expectsAbsent || current.version !== expectedVersion : !expectsAbsent) {
+        return { status: 'rejected', value: current, reason: 'STALE_RESOURCE_OVERRIDE' };
+      }
+      const result = current
+        ? this.db
+            .prepare(
+              `UPDATE resource_state_overrides SET state=?,reason_class=?,sanitized_reason=?,suspended_until=?,source=?,version=?,updated_at=?
+          WHERE resource_id=? AND version=?`,
+            )
+            .run(
+              next.state,
+              next.reasonClass ?? null,
+              next.sanitizedReason ?? null,
+              next.suspendedUntil ?? null,
+              next.source,
+              next.version,
+              next.updatedAt,
+              resourceId,
+              expectedVersion,
+            )
+        : this.db
+            .prepare(
+              `INSERT INTO resource_state_overrides(
+          resource_id,state,reason_class,sanitized_reason,suspended_until,source,version,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?)`,
+            )
+            .run(
+              next.resourceId,
+              next.state,
+              next.reasonClass ?? null,
+              next.sanitizedReason ?? null,
+              next.suspendedUntil ?? null,
+              next.source,
+              next.version,
+              next.updatedAt,
+            );
+      if (Number(result.changes) !== 1)
+        return {
+          status: 'rejected',
+          value: this.get(resourceId),
+          reason: 'STALE_RESOURCE_OVERRIDE',
+        };
+      this.events.appendInTransaction(
+        makeEvent(resourceId, 'RESOURCE', 'RESOURCE_STATE_OVERRIDE_CHANGED', {
+          resourceId: next.resourceId,
+          state: next.state,
+          reasonClass: next.reasonClass ?? null,
+          sanitizedReason: next.sanitizedReason ?? null,
+          suspendedUntil: next.suspendedUntil ?? null,
+          source: next.source,
+          version: next.version,
+          updatedAt: next.updatedAt,
+        }),
+      );
+      return { status: current ? 'updated' : 'created', value: this.get(resourceId)! };
+    });
+  }
+
+  create(input: ResourceStateOverrideInput): MutationResult<ResourceStateOverride> {
+    return this.compareAndSet(input.resourceId, null, input);
+  }
+
+  enable(
+    resourceId: string,
+    expectedVersion: number | null,
+  ): MutationResult<ResourceStateOverride> {
+    return this.compareAndSet(resourceId, expectedVersion, {
+      resourceId,
+      state: 'ACTIVE',
+      source: 'OPERATOR',
+    });
+  }
+}
+
 export interface PlanRelationshipRepository {
   createParentChild(input: { relationshipId?: string; parentPlanId: string; childPlanId: string; kind: 'SYSTEM_REPAIR' | 'INFRASTRUCTURE_REPAIR' | 'FOLLOW_UP' }): MutationResult<{ relationshipId: string; parentPlanId: string; childPlanId: string; kind: string }>;
   getParent(childPlanId: string): string | undefined;
@@ -1413,16 +1771,40 @@ export class RelationshipRepository implements PlanRelationshipRepository {
 }
 
 export interface V4Repositories {
-  plans: PlanRepository; executions: ExecutionRepository; reviews: ReviewRepository; supervisors: SupervisorRepository;
-  sessions: ExecutionSessionRepository; evidence: ExecutionEvidenceRepository;
-  decisions: DecisionRepository; actions: ActionRepository; resources: ResourceRepository; relationships: RelationshipRepository;
+  plans: PlanRepository;
+  executions: ExecutionRepository;
+  reviews: ReviewRepository;
+  supervisors: SupervisorRepository;
+  sessions: ExecutionSessionRepository;
+  evidence: ExecutionEvidenceRepository;
+  decisions: DecisionRepository;
+  actions: ActionRepository;
+  resources: ResourceRepository;
+  relationships: RelationshipRepository;
+  resourceSelections: ExecutionResourceSelectionRepository;
+  executionResourceSelections: ExecutionResourceSelectionRepository;
+  resourceStateOverrides: ResourceStateOverrideRepository;
   events: EventStore;
 }
 
 export function createRepositories(db: DatabaseSync): V4Repositories {
   const events = new EventStore(db);
-  return { plans: new PlanRepository(db, events), executions: new ExecutionRepository(db, events), reviews: new ReviewRepository(db, events),
-    supervisors: new SupervisorRepository(db, events), sessions: new ExecutionSessionRepository(db, events), evidence: new ExecutionEvidenceRepository(db, events),
-    decisions: new DecisionRepository(db, events), actions: new ActionRepository(db, events),
-    resources: new ResourceRepository(db, events), relationships: new RelationshipRepository(db, events), events };
+  const resourceSelections = new ExecutionResourceSelectionRepository(db, events);
+  const resourceStateOverrides = new ResourceStateOverrideRepository(db, events);
+  return {
+    plans: new PlanRepository(db, events),
+    executions: new ExecutionRepository(db, events),
+    reviews: new ReviewRepository(db, events),
+    supervisors: new SupervisorRepository(db, events),
+    sessions: new ExecutionSessionRepository(db, events),
+    evidence: new ExecutionEvidenceRepository(db, events),
+    decisions: new DecisionRepository(db, events),
+    actions: new ActionRepository(db, events),
+    resources: new ResourceRepository(db, events),
+    relationships: new RelationshipRepository(db, events),
+    resourceSelections,
+    executionResourceSelections: resourceSelections,
+    resourceStateOverrides,
+    events,
+  };
 }

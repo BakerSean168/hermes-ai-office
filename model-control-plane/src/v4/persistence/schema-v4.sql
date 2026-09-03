@@ -213,6 +213,36 @@ CREATE TABLE IF NOT EXISTS resources (
   observed_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS execution_resource_selections (
+  execution_id TEXT PRIMARY KEY REFERENCES executions(execution_id),
+  capability TEXT NOT NULL,
+  model_family TEXT NOT NULL,
+  agent_backend TEXT NOT NULL,
+  transport TEXT NOT NULL,
+  resource_id TEXT NOT NULL,
+  resource_tier INTEGER NOT NULL,
+  model_rank INTEGER NOT NULL,
+  resource_sequence INTEGER NOT NULL,
+  resource_state TEXT NOT NULL,
+  selection_reason TEXT NOT NULL,
+  binding_id TEXT,
+  deployment_id TEXT,
+  route_model TEXT,
+  protocol TEXT,
+  selected_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_execution_resource_selections_resource
+  ON execution_resource_selections(resource_id, selected_at);
+CREATE TABLE IF NOT EXISTS resource_state_overrides (
+  resource_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  reason_class TEXT,
+  sanitized_reason TEXT,
+  suspended_until TEXT,
+  source TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS external_changes (
   external_change_id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL UNIQUE,
@@ -255,4 +285,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 5, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 6, CAST(strftime('%s','now') AS INTEGER));
