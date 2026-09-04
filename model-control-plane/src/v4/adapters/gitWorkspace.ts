@@ -451,8 +451,15 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
 
   hasCompletionEvidence(workspace: WorkspaceDescriptor): boolean {
     const descriptor = this.validateWorkspace(workspace);
-    const stat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
-    return Boolean(stat?.isFile() && !stat.isSymbolicLink() && stat.size > 0);
+    const durable = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    const staged = fs.lstatSync(
+      path.join(descriptor.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE),
+      { throwIfNoEntry: false },
+    );
+    return Boolean(
+      (durable?.isFile() && !durable.isSymbolicLink() && durable.size > 0) ||
+      (staged?.isFile() && !staged.isSymbolicLink() && staged.size > 0),
+    );
   }
 
   async progressFingerprint(workspace: WorkspaceDescriptor): Promise<string> {
@@ -483,11 +490,18 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       'HEAD',
     ]);
     let evidenceHash = '';
-    const stat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
-    if (stat?.isFile() && !stat.isSymbolicLink())
+    const durableEvidence = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (durableEvidence?.isFile() && !durableEvidence.isSymbolicLink())
       evidenceHash = createHash('sha256')
         .update(fs.readFileSync(descriptor.evidenceHostPath))
         .digest('hex');
+    const stagedEvidence = fs.lstatSync(
+      path.join(descriptor.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE),
+      { throwIfNoEntry: false },
+    );
+    const stagedEvidenceCursor = stagedEvidence
+      ? `${stagedEvidence.size}:${stagedEvidence.mtimeMs}`
+      : '';
     return createHash('sha256')
       .update(head)
       .update('\0')
@@ -498,6 +512,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       .update(staged)
       .update('\0')
       .update(evidenceHash)
+      .update('\0')
+      .update(stagedEvidenceCursor)
       .digest('hex');
   }
 

@@ -423,6 +423,8 @@ test('LocalGitWorkspace promotes controller-staged repository evidence and rejec
   const resultRevision = commit(workspace.hostPath, 'feat: repository evidence');
   const staged = path.join(workspace.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
   write(staged, JSON.stringify(implementationEvidence(workspace, resultRevision)));
+  assert.equal(value.adapter.hasCompletionEvidence(workspace), true);
+  const beforeEvidenceFingerprint = await value.adapter.progressFingerprint(workspace);
   assert.match(
     git(workspace.hostPath, ['status', '--porcelain=v1']),
     /\?\? \.pixel-v4-completion-evidence\.json/,
@@ -431,6 +433,9 @@ test('LocalGitWorkspace promotes controller-staged repository evidence and rejec
   assert.equal(verified.headRevision, resultRevision);
   assert.equal(fs.existsSync(staged), false);
   assert.equal(fs.existsSync(workspace.evidenceHostPath), true);
+  assert.equal(value.adapter.hasCompletionEvidence(workspace), true);
+  const afterEvidenceFingerprint = await value.adapter.progressFingerprint(workspace);
+  assert.notEqual(beforeEvidenceFingerprint, afterEvidenceFingerprint);
   assert.equal(git(workspace.hostPath, ['status', '--porcelain=v1']), '');
 
   const tracked = await value.adapter.provision({
