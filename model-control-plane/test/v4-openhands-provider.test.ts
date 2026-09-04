@@ -320,6 +320,10 @@ test('model-native factory resolves selected backend, model and transport withou
         DEEPSEEK_BASE_URL: 'http://litellm.test/v1',
         HERMES_V3_EXECUTION_ID: 'exec-1',
         HERMES_V3_WORKSPACE_REF: '/workspace/executions/exec-1/repo',
+        GIT_AUTHOR_NAME: 'Pixel Agent',
+        GIT_AUTHOR_EMAIL: 'pixel-agent@localhost',
+        GIT_COMMITTER_NAME: 'Pixel Agent',
+        GIT_COMMITTER_EMAIL: 'pixel-agent@localhost',
         PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH:
           '/workspace/executions/exec-1/repo/.pixel-v4-completion-evidence.json',
       },
@@ -338,6 +342,10 @@ test('model-native factory resolves selected backend, model and transport withou
         ZCODE_MODEL: 'glm-5.2',
         ZCODE_API_KEY: secrets.liteLlmApiKey,
         ZCODE_BASE_URL: 'http://litellm.test/v1',
+        GIT_AUTHOR_NAME: 'Pixel Agent',
+        GIT_AUTHOR_EMAIL: 'pixel-agent@localhost',
+        GIT_COMMITTER_NAME: 'Pixel Agent',
+        GIT_COMMITTER_EMAIL: 'pixel-agent@localhost',
         PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH:
           '/workspace/executions/exec-1/repo/.pixel-v4-completion-evidence.json',
       },

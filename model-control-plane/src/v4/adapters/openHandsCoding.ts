@@ -1057,6 +1057,13 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
     }
 
     if (this.mode === 'IMPLEMENTATION') {
+      // Implementation agents commit inside isolated execution workspaces. Use
+      // process-scoped identity so commits never depend on mutable host/global
+      // git config and review sessions remain unable to inherit an author role.
+      secrets.GIT_AUTHOR_NAME = { kind: 'StaticSecret', value: 'Pixel Agent' };
+      secrets.GIT_AUTHOR_EMAIL = { kind: 'StaticSecret', value: 'pixel-agent@localhost' };
+      secrets.GIT_COMMITTER_NAME = { kind: 'StaticSecret', value: 'Pixel Agent' };
+      secrets.GIT_COMMITTER_EMAIL = { kind: 'StaticSecret', value: 'pixel-agent@localhost' };
       secrets.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH = {
         kind: 'StaticSecret',
         value: this.evidencePath(input),
