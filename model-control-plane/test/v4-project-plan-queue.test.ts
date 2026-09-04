@@ -31,7 +31,7 @@ function finish(repositories: ReturnType<typeof createRepositories>, planId: str
   repositories.plans.updateStatus(planId, 'SUCCEEDED');
 }
 
-test('single-active-plan scheduler keeps later root plans queued and hands off FIFO across restart', () => {
+test('single-active-plan scheduler keeps later root plans queued and hands off FIFO across restart', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-plan-queue-'));
   const dbFile = path.join(root, 'pixel.sqlite');
   let db = openV4Database(dbFile, { environment: 'test' });
@@ -69,7 +69,7 @@ test('single-active-plan scheduler keeps later root plans queued and hands off F
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-a');
 
   finish(repositories, 'plan-a');
-  const firstHandoff = runtime.reconcile();
+  const firstHandoff = await runtime.reconcile();
   assert.equal(firstHandoff[0]?.activatedPlanId, 'plan-b');
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-b');
   assert.equal(repositories.plans.getPlan('plan-b').status, 'READY');
@@ -78,13 +78,13 @@ test('single-active-plan scheduler keeps later root plans queued and hands off F
   assert.equal(repositories.supervisors.getByPlanId('plan-c'), undefined);
 
   finish(repositories, 'plan-b');
-  runtime.reconcile();
+  await runtime.reconcile();
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-c');
   assert.equal(repositories.plans.getPlan('plan-c').status, 'READY');
   assert.equal(repositories.supervisors.getByPlanId('plan-c')?.status, 'ACTIVE');
 
   finish(repositories, 'plan-c');
-  runtime.reconcile();
+  await runtime.reconcile();
   const emptyLease = repositories.projectPlans.getLease('bodysense')!;
   assert.equal(emptyLease.activeRootPlanId, undefined);
   assert.equal(repositories.projectPlans.listQueue('bodysense').length, 0);
@@ -178,4 +178,38 @@ test('schema v6 migrates additively to the single-active-plan scheduling schema'
   assert.equal(tables.has('project_plan_queue'), true);
   migrated.close();
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('terminal Plan cleanup must succeed before the project lease can hand off', async () => {
+  const db = openV4Database(':memory:', { environment: 'test' });
+  const repositories = createRepositories(db);
+  const calls: string[] = [];
+  let failCleanup = true;
+  const runtime = new ProjectPlanQueueRuntime(repositories, {
+    activate: async (planId) => {
+      calls.push('activate:' + planId);
+    },
+    retire: async (planId) => {
+      calls.push('retire:' + planId);
+      if (failCleanup) throw new V4Error('WORKTREE_CLEANUP_BLOCKED');
+    },
+  });
+  createRoot(repositories, 'plan-a');
+  createRoot(repositories, 'plan-b');
+  runtime.scheduleRootPlan('plan-a');
+  runtime.scheduleRootPlan('plan-b');
+  finish(repositories, 'plan-a');
+
+  const blocked = await runtime.reconcile();
+  assert.equal(blocked[0]?.code, 'WORKTREE_CLEANUP_BLOCKED');
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-a');
+  assert.equal(repositories.plans.getPlan('plan-b').status, 'QUEUED');
+  assert.equal(repositories.supervisors.getByPlanId('plan-b'), undefined);
+
+  failCleanup = false;
+  const result = await runtime.reconcile();
+  assert.equal(result[0]?.activatedPlanId, 'plan-b');
+  assert.deepEqual(calls, ['retire:plan-a', 'retire:plan-a', 'activate:plan-b']);
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-b');
+  db.close();
 });

@@ -515,23 +515,16 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   }
 
   protected conversationSecrets(input: ProviderLaunchInput): JsonRecord {
+    const parent = path.posix.dirname(input.workspace.executionPath);
+    const literal = input.workspace.executionPath.startsWith('/workspace/v4/plans/');
+    const harnessRoot = literal
+      ? path.posix.join(parent, '.executions', input.executionId, '.agent-harness')
+      : path.posix.join(parent, '.agent-harness');
     return {
       CI: { kind: 'StaticSecret', value: '1' },
       NX_TUI: { kind: 'StaticSecret', value: 'false' },
-      HOME: {
-        kind: 'StaticSecret',
-        value: path.posix.join(
-          path.posix.dirname(input.workspace.executionPath),
-          '.agent-harness/home',
-        ),
-      },
-      XDG_CONFIG_HOME: {
-        kind: 'StaticSecret',
-        value: path.posix.join(
-          path.posix.dirname(input.workspace.executionPath),
-          '.agent-harness/xdg',
-        ),
-      },
+      HOME: { kind: 'StaticSecret', value: path.posix.join(harnessRoot, 'home') },
+      XDG_CONFIG_HOME: { kind: 'StaticSecret', value: path.posix.join(harnessRoot, 'xdg') },
       GIT_CONFIG_NOSYSTEM: { kind: 'StaticSecret', value: '1' },
       GIT_OPTIONAL_LOCKS: { kind: 'StaticSecret', value: '0' },
       GIT_CONFIG_COUNT: { kind: 'StaticSecret', value: '4' },

@@ -89,6 +89,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
     implementationRoutes: ['gpt-5.6-luna'],
     reviewRoutes: ['codex-business-review', 'gpt-5.6-sol'],
     automationProjectKeys: ['app-runtime-project'],
+    literalWorktreeProjectKeys: [],
     requireDelivery: true,
   });
   const created = await runtime.app.inject({
@@ -513,7 +514,7 @@ test('single-active-plan API queues later root tasks without supervisor or execu
 
   runtime.repositories.plans.updateStatus(firstPlanId, 'RUNNING');
   runtime.repositories.plans.updateStatus(firstPlanId, 'SUCCEEDED');
-  const handoff = runtime.projectPlanQueue!.reconcile();
+  const handoff = await runtime.projectPlanQueue!.reconcile();
   assert.equal(handoff[0]?.releasedPlanId, firstPlanId);
   assert.equal(handoff[0]?.activatedPlanId, secondPlanId);
   assert.equal(runtime.repositories.plans.getPlan(secondPlanId).status, 'READY');
@@ -528,4 +529,120 @@ test('single-active-plan API queues later root tasks without supervisor or execu
   assert.equal(after.json().lease.activeRootPlanId, secondPlanId);
   assert.equal(after.json().items.length, 0);
   await runtime.app.close();
+});
+
+test('literal worktree canary is project-scoped and keeps legacy projects on isolated clones', async () => {
+  const value = fixture();
+  const legacyRepository = path.join(value.allowed, 'legacy-project');
+  fs.mkdirSync(legacyRepository, { recursive: true });
+  execFileSync('git', ['init', '-q', '-b', 'main', legacyRepository]);
+  git(legacyRepository, ['config', 'user.name', 'Pixel V4 Test']);
+  git(legacyRepository, ['config', 'user.email', 'pixel-v4-test@local']);
+  fs.writeFileSync(path.join(legacyRepository, 'README.md'), '# Legacy\n');
+  git(legacyRepository, ['add', 'README.md']);
+  git(legacyRepository, ['commit', '-m', 'chore: initialize legacy']);
+  const legacyRevision = git(legacyRepository, ['rev-parse', 'HEAD']);
+
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    environment: 'test',
+    logger: false,
+    fetchImpl: (async () => {
+      throw new Error('provider should not be called');
+    }) as typeof fetch,
+    env: {
+      NODE_ENV: 'test',
+      MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
+      MODEL_CP_AUTOMATION_RUNTIME_ENABLED: 'false',
+      MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED: 'true',
+      MODEL_CP_V4_LITERAL_WORKTREES_ENABLED: 'true',
+      MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS: 'literal-project',
+      MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS: '2',
+      MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
+      SESSION_API_KEY: 'test-session-key',
+      LITELLM_V3_KEY: 'test-litellm-key',
+      LITELLM_V3_BASE_URL: 'http://litellm.test/v1',
+      MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS: value.allowed,
+      MODEL_CP_V4_WORKSPACE_HOST_ROOT: value.managed,
+      MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
+      MODEL_CP_V4_AUTOMATION_PROJECTS: 'literal-project,legacy-project',
+      MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 1000),
+      MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 1000),
+    },
+  });
+
+  const create = async (
+    key: string,
+    projectKey: string,
+    repositoryPath: string,
+    baseRevision: string,
+  ) => {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v4/plans',
+      headers: { 'idempotency-key': key },
+      payload: {
+        projectKey,
+        objective: 'canary ' + projectKey,
+        repositoryPath,
+        baseRevision,
+        workItems: [
+          {
+            itemKey: 'first',
+            title: 'First',
+            objective: 'implement',
+            dependencies: [],
+            acceptanceCriteria: ['pass'],
+            parallelSafe: true,
+            writeScopes: ['src/' + projectKey],
+          },
+        ],
+      },
+    });
+    assert.equal(response.statusCode, 201);
+    return response.json();
+  };
+
+  const literal = await create('literal-plan', 'literal-project', value.repository, value.revision);
+  const legacy = await create('legacy-plan', 'legacy-project', legacyRepository, legacyRevision);
+  assert.deepEqual(runtime.automation?.literalWorktreeProjectKeys, ['literal-project']);
+  assert.equal(runtime.automation?.policy.resolve('literal-project')?.maxParallelWorkItems, 2);
+  assert.equal(runtime.automation?.policy.resolve('legacy-project')?.maxParallelWorkItems, 1);
+
+  const provision = async (body: any, executionId: string, sourceRevision: string) => {
+    const planId = body.plan.planId as string;
+    const workItemId = body.graph.items[0].workItemId as string;
+    runtime.repositories.executions.create({
+      executionId,
+      idempotencyKey: executionId,
+      identity: {
+        executionId,
+        planId,
+        workItemId,
+        phase: 'IMPLEMENT',
+        attempt: 1,
+        route: 'gpt-5.6-luna',
+        sourceRevision,
+      },
+      objective: 'implement',
+    });
+    return await runtime.automation!.workspace.provision({
+      executionId,
+      planId,
+      projectKey: body.plan.projectKey,
+      workItemId,
+      repositoryPath: body.plan.repositoryPath,
+      sourceRevision,
+      phase: 'IMPLEMENT',
+    });
+  };
+  const literalWorkspace = await provision(literal, 'exec-literal-canary', value.revision);
+  const legacyWorkspace = await provision(legacy, 'exec-legacy-canary', legacyRevision);
+  assert.match(literalWorkspace.executionPath, /^\/workspace\/v4\/plans\/literal-project\//);
+  assert.equal(legacyWorkspace.executionPath, '/workspace/v4/executions/exec-legacy-canary/repo');
+  assert.equal(git(value.repository, ['rev-parse', 'HEAD']), value.revision);
+  assert.equal(git(legacyRepository, ['rev-parse', 'HEAD']), legacyRevision);
+
+  await runtime.app.close();
+  fs.rmSync(value.root, { recursive: true, force: true });
 });

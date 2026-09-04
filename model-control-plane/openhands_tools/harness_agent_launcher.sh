@@ -35,7 +35,11 @@ cd -- "$workspace_repo"
 # Execution-scoped harness state must stay isolated even when IMPLEMENT_FIX reuses
 # an earlier implementation/adoption workspace. Derive it only after the exact
 # V3/V4 path admission above so arbitrary workspace roots remain rejected.
-execution_root="${workspace_repo%/repo}"
+if [[ "$literal_worktree" == true ]]; then
+  execution_root="${workspace_repo%/repo}/.executions/$execution_id"
+else
+  execution_root="${workspace_repo%/repo}"
+fi
 harness_home="$execution_root/.agent-harness/home"
 harness_state="$execution_root/.agent-harness/state"
 harness_share="$execution_root/.agent-harness/share"

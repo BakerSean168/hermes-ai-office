@@ -6,6 +6,11 @@ import type {
 } from '../domain/projectPlanScheduling.js';
 import type { V4Repositories } from '../persistence/repositories.js';
 
+export interface ProjectPlanLifecyclePort {
+  activate(rootPlanId: string): Promise<void>;
+  retire(rootPlanId: string): Promise<void>;
+}
+
 export interface ProjectPlanQueueRuntimeResult {
   projectKey: string;
   releasedPlanId?: string;
@@ -14,7 +19,18 @@ export interface ProjectPlanQueueRuntimeResult {
 }
 
 export class ProjectPlanQueueRuntime {
-  constructor(readonly repositories: V4Repositories) {}
+  private lifecycle?: ProjectPlanLifecyclePort;
+
+  constructor(
+    readonly repositories: V4Repositories,
+    lifecycle?: ProjectPlanLifecyclePort,
+  ) {
+    this.lifecycle = lifecycle;
+  }
+
+  setLifecycle(lifecycle: ProjectPlanLifecyclePort | undefined): void {
+    this.lifecycle = lifecycle;
+  }
 
   bootstrapExistingRootPlans(): void {
     const candidates = this.repositories.plans
@@ -64,32 +80,47 @@ export class ProjectPlanQueueRuntime {
     return result;
   }
 
-  reconcile(): ProjectPlanQueueRuntimeResult[] {
+  async reconcile(): Promise<ProjectPlanQueueRuntimeResult[]> {
     const results: ProjectPlanQueueRuntimeResult[] = [];
     for (const lease of this.repositories.projectPlans.listLeases()) {
-      const activePlanId = lease.activeRootPlanId;
-      if (!activePlanId) {
-        const claimed = this.repositories.projectPlans.claimNext(lease.projectKey, lease.version);
-        if (claimed.status === 'updated' && claimed.value?.activeRootPlanId) {
-          this.ensureSupervisorActive(claimed.value.activeRootPlanId);
-          results.push({
-            projectKey: lease.projectKey,
-            activatedPlanId: claimed.value.activeRootPlanId,
-            code: 'PROJECT_PLAN_QUEUE_ACTIVATED',
-          });
+      try {
+        const activePlanId = lease.activeRootPlanId;
+        if (!activePlanId) {
+          const claimed = this.repositories.projectPlans.claimNext(lease.projectKey, lease.version);
+          if (claimed.status === 'updated' && claimed.value?.activeRootPlanId) {
+            if (this.lifecycle) await this.lifecycle.activate(claimed.value.activeRootPlanId);
+            this.ensureSupervisorActive(claimed.value.activeRootPlanId);
+            results.push({
+              projectKey: lease.projectKey,
+              activatedPlanId: claimed.value.activeRootPlanId,
+              code: 'PROJECT_PLAN_QUEUE_ACTIVATED',
+            });
+          }
+          continue;
         }
-        continue;
+        const plan = this.repositories.plans.getPlan(activePlanId);
+        if (!isTerminalPlanStatus(plan.status)) {
+          if (this.lifecycle) await this.lifecycle.activate(activePlanId);
+          continue;
+        }
+        if (this.lifecycle) await this.lifecycle.retire(activePlanId);
+        this.retireSupervisor(activePlanId);
+        const handoff = this.repositories.projectPlans.releaseAndActivateNext(
+          lease.projectKey,
+          activePlanId,
+          lease.version,
+        );
+        if (handoff.activatedPlanId) {
+          if (this.lifecycle) await this.lifecycle.activate(handoff.activatedPlanId);
+          this.ensureSupervisorActive(handoff.activatedPlanId);
+        }
+        results.push(this.handoffResult(lease.projectKey, handoff));
+      } catch (error) {
+        results.push({
+          projectKey: lease.projectKey,
+          code: error instanceof V4Error ? error.code : 'PROJECT_PLAN_LIFECYCLE_FAILED',
+        });
       }
-      const plan = this.repositories.plans.getPlan(activePlanId);
-      if (!isTerminalPlanStatus(plan.status)) continue;
-      this.retireSupervisor(activePlanId);
-      const handoff = this.repositories.projectPlans.releaseAndActivateNext(
-        lease.projectKey,
-        activePlanId,
-        lease.version,
-      );
-      if (handoff.activatedPlanId) this.ensureSupervisorActive(handoff.activatedPlanId);
-      results.push(this.handoffResult(lease.projectKey, handoff));
     }
     return results;
   }

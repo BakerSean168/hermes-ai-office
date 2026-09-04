@@ -655,6 +655,9 @@ export class ExecutionWorker {
         const sourceWorkspace = this.sourceWorkspace(execution);
         const workspace = await this.workspace.provision({
           executionId,
+          planId: plan.planId,
+          projectKey: plan.projectKey,
+          ...(execution.identity.workItemId ? { workItemId: execution.identity.workItemId } : {}),
           repositoryPath: plan.repositoryPath,
           sourceRevision: execution.identity.sourceRevision,
           phase: execution.identity.phase,

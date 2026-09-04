@@ -108,6 +108,60 @@ export class PlanWorktreeManager {
     this.setfaclBinary = options.setfaclBinary ?? '/usr/bin/setfacl';
   }
 
+  async ensurePlanActivated(rootPlanId: string): Promise<PlanWorktree> {
+    const plan = this.repositories.plans.getPlan(rootPlanId);
+    failClosed(!plan.parentPlanId, 'WORKTREE_ROOT_PLAN_REQUIRED');
+    const lease = this.repositories.projectPlans.getLease(plan.projectKey);
+    failClosed(lease?.activeRootPlanId === rootPlanId, 'WORKTREE_ACTIVE_PLAN_REQUIRED');
+    failClosed(lease.repositoryPath === plan.repositoryPath, 'WORKTREE_REPOSITORY_MISMATCH');
+    await this.ensureProtectedRefSnapshot(rootPlanId);
+    await this.assertProtectedRefsStable(rootPlanId);
+    return await this.ensureIntegration({
+      projectKey: plan.projectKey,
+      rootPlanId: plan.planId,
+      repositoryPath: plan.repositoryPath,
+      baseRevision: plan.currentRevision,
+    });
+  }
+
+  async assertPlanSafety(rootPlanId: string): Promise<void> {
+    await this.assertProtectedRefsStable(rootPlanId);
+  }
+
+  async retirePlan(rootPlanId: string, agentUid: number): Promise<void> {
+    await this.assertProtectedRefsStable(rootPlanId);
+    const records = this.repositories.planWorktrees.listByPlan(rootPlanId);
+    failClosed(
+      records.every((record) => !record.ownerExecutionId),
+      'WORKTREE_PLAN_WRITER_HELD',
+    );
+    const order: Record<PlanWorktreeRole, number> = {
+      REVIEW: 0,
+      WORK_ITEM: 1,
+      DELIVERY_REPAIR: 2,
+      INTEGRATION: 3,
+    };
+    for (const record of [...records].sort((left, right) => order[left.role] - order[right.role])) {
+      if (record.state !== 'RETIRED') await this.retire(record.worktreeId);
+    }
+    if (records.length > 0) await this.revokePlanAgentAccess(rootPlanId, agentUid);
+    const plan = this.repositories.plans.getPlan(rootPlanId);
+    await this.archivePlanFamilyRefs(plan.planId);
+    const prefix = 'refs/heads/pixel-v4/' + worktreeRefComponent(rootPlanId) + '/';
+    const refs = await this.git(plan.repositoryPath, [
+      'for-each-ref',
+      '--format=%(refname)',
+      prefix,
+    ]);
+    for (const ref of refs
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .filter(Boolean)) {
+      failClosed(ref.startsWith(prefix), 'WORKTREE_BRANCH_NAMESPACE_INVALID');
+      await this.git(plan.repositoryPath, ['update-ref', '-d', ref]);
+    }
+  }
+
   async ensureIntegration(input: WorktreeRequest): Promise<PlanWorktree> {
     const branchRef = this.planBranch(input.rootPlanId, 'integration');
     return await this.ensureBranched({
@@ -121,7 +175,10 @@ export class PlanWorktreeManager {
 
   async ensureWorkItem(input: WorkItemWorktreeRequest): Promise<PlanWorktree> {
     const item = this.repositories.plans.getWorkItem(input.workItemId);
-    failClosed(item.planId === input.rootPlanId, 'WORKTREE_WORK_ITEM_PLAN_MISMATCH');
+    failClosed(
+      this.rootPlanIdFor(item.planId) === input.rootPlanId,
+      'WORKTREE_WORK_ITEM_PLAN_MISMATCH',
+    );
     const itemComponent = worktreeRefComponent(input.workItemId);
     return await this.ensureBranched({
       ...input,
@@ -129,7 +186,7 @@ export class PlanWorktreeManager {
       identity: input.workItemId,
       workItemId: input.workItemId,
       relativePath: ['items', itemComponent, 'repo'],
-      branchRef: this.planBranch(input.rootPlanId, 'items/' + itemComponent),
+      branchRef: this.planBranch(input.rootPlanId, 'items/' + itemComponent + '/head'),
     });
   }
 
@@ -141,13 +198,15 @@ export class PlanWorktreeManager {
       role: 'DELIVERY_REPAIR',
       identity: input.repairId,
       relativePath: ['repairs', repairComponent, 'repo'],
-      branchRef: this.planBranch(input.rootPlanId, 'repairs/' + repairComponent),
+      branchRef: this.planBranch(input.rootPlanId, 'repairs/' + repairComponent + '/head'),
     });
   }
 
   async createReview(input: ReviewWorktreeRequest): Promise<PlanWorktree> {
     this.assertActivePlan(input);
     const repositoryPath = await this.repositoryRoot(input.repositoryPath);
+    await this.ensureProtectedRefSnapshot(input.rootPlanId);
+    await this.assertProtectedRefsStable(input.rootPlanId);
     const reviewComponent = worktreeRefComponent(input.reviewId);
     const paths = this.paths(input.projectKey, input.rootPlanId, [
       'reviews',
@@ -193,6 +252,7 @@ export class PlanWorktreeManager {
       'WORKTREE_AGENT_IDENTITY_INVALID',
     );
     const current = this.repositories.planWorktrees.get(worktreeIdValue);
+    await this.assertProtectedRefsStable(current.rootPlanId);
     failClosed(current.role !== 'INTEGRATION', 'WORKTREE_INTEGRATION_CONTROLLER_ONLY');
     await this.verifyRegistered(
       current,
@@ -201,21 +261,6 @@ export class PlanWorktreeManager {
       current.role === 'REVIEW',
     );
     this.chownTreeNoFollow(current.hostPath, uid, gid);
-    const sidecar = path.join(path.dirname(current.hostPath), '.agent-harness');
-    for (const directory of [
-      sidecar,
-      path.join(sidecar, 'home'),
-      path.join(sidecar, 'state'),
-      path.join(sidecar, 'share'),
-      path.join(sidecar, 'xdg'),
-    ]) {
-      if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const stat = fs.lstatSync(directory);
-      failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_AGENT_SIDECAR_UNSAFE');
-      fs.chownSync(directory, uid, gid);
-      fs.chmodSync(directory, 0o700);
-    }
-
     const common = await this.canonicalCommonDir(current.repositoryPath);
     const source = fs.statSync(common);
     if (source.uid !== uid) {
@@ -237,14 +282,216 @@ export class PlanWorktreeManager {
       await this.grantRecursiveAcl(admin, uid);
       if (current.branchRef) {
         const plan = worktreeRefComponent(current.rootPlanId);
-        const refRoot = path.join(common, 'refs', 'heads', 'pixel-v4', plan);
-        failClosed(fs.existsSync(refRoot), 'WORKTREE_PLAN_REF_NAMESPACE_MISSING');
-        await this.grantRecursiveAcl(refRoot, uid);
-        const logRoot = path.join(common, 'logs', 'refs', 'heads', 'pixel-v4', plan);
-        if (fs.existsSync(logRoot)) await this.grantRecursiveAcl(logRoot, uid);
+        const allowedPrefix = 'refs/heads/pixel-v4/' + plan + '/';
+        failClosed(
+          current.branchRef.startsWith(allowedPrefix),
+          'WORKTREE_BRANCH_NAMESPACE_INVALID',
+        );
+        const refPath = path.join(common, ...current.branchRef.split('/'));
+        const refParent = path.dirname(refPath);
+        failClosed(
+          fs.existsSync(refPath) && fs.existsSync(refParent),
+          'WORKTREE_PLAN_REF_NAMESPACE_MISSING',
+        );
+        await this.grantRecursiveAcl(refParent, uid);
+        const logPath = path.join(common, 'logs', ...current.branchRef.split('/'));
+        const logParent = path.dirname(logPath);
+        if (fs.existsSync(logParent)) await this.grantRecursiveAcl(logParent, uid);
       }
     }
     return this.repositories.planWorktrees.get(worktreeIdValue);
+  }
+
+  async prepareWriterForExecution(
+    worktreeIdValue: string,
+    executionId: string,
+    expectedRevision: string,
+    uid: number,
+    gid: number,
+  ): Promise<PlanWorktree> {
+    failClosed(expectedRevision.trim().length > 0, 'WORKTREE_CURRENT_REVISION_REQUIRED');
+    let current = this.repositories.planWorktrees.get(worktreeIdValue);
+    failClosed(
+      current.role === 'WORK_ITEM' || current.role === 'DELIVERY_REPAIR',
+      'WORKTREE_MODEL_WRITER_ROLE_INVALID',
+    );
+    await this.assertCommit(current.repositoryPath, expectedRevision);
+
+    if (current.ownerExecutionId && current.ownerExecutionId !== executionId) {
+      const previous = this.repositories.executions.get(current.ownerExecutionId);
+      const terminalFailure =
+        previous.status === 'FAILED' ||
+        previous.status === 'BLOCKED' ||
+        previous.status === 'CANCELLED';
+      const exactSucceeded =
+        previous.status === 'SUCCEEDED' && previous.resultRevision === expectedRevision;
+      failClosed(terminalFailure || exactSucceeded, 'WORKTREE_PREVIOUS_WRITER_ACTIVE');
+      await this.resetWorktreeToRevision(current, expectedRevision);
+      const released = this.repositories.planWorktrees.releaseWriter(
+        current.worktreeId,
+        current.ownerExecutionId,
+        current.version,
+        expectedRevision,
+      );
+      if (!released.value || released.status === 'rejected')
+        throw new V4Error(released.reason ?? 'WORKTREE_WRITER_RELEASE_FAILED');
+      current = released.value;
+    }
+
+    if (current.ownerExecutionId === executionId) {
+      await this.prepareAgentAccess(current.worktreeId, uid, gid);
+      return this.repositories.planWorktrees.get(current.worktreeId);
+    }
+
+    const actualHead = await this.gitInWorktree(current.repositoryPath, current.hostPath, [
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    if (actualHead !== expectedRevision) {
+      failClosed(
+        current.state === 'READY' || current.state === 'QUIESCENT',
+        'WORKTREE_RETRY_STATE_INVALID',
+      );
+      await this.resetWorktreeToRevision(current, expectedRevision);
+      current = this.repositories.planWorktrees.get(current.worktreeId);
+      const updated = this.repositories.planWorktrees.updateRevision(
+        current.worktreeId,
+        current.version,
+        expectedRevision,
+      );
+      if (!updated.value || updated.status === 'rejected')
+        throw new V4Error(updated.reason ?? 'WORKTREE_REVISION_UPDATE_FAILED');
+      current = updated.value;
+    } else if (current.currentRevision !== expectedRevision) {
+      const updated = this.repositories.planWorktrees.updateRevision(
+        current.worktreeId,
+        current.version,
+        expectedRevision,
+      );
+      if (!updated.value || updated.status === 'rejected')
+        throw new V4Error(updated.reason ?? 'WORKTREE_REVISION_UPDATE_FAILED');
+      current = updated.value;
+    }
+
+    await this.prepareAgentAccess(current.worktreeId, uid, gid);
+    return await this.attachWriter(current.worktreeId, executionId);
+  }
+
+  async integrateReviewedCandidate(input: {
+    rootPlanId: string;
+    workItemId: string;
+    candidateRevision: string;
+    expectedPlanRevision: string;
+    integrationBaseRevision: string;
+  }): Promise<{ worktree: PlanWorktree; headRevision: string }> {
+    const plan = this.repositories.plans.getPlan(input.rootPlanId);
+    await this.assertProtectedRefsStable(plan.planId);
+    const item = this.repositories.plans.getWorkItem(input.workItemId);
+    failClosed(this.rootPlanIdFor(item.planId) === plan.planId, 'WORKTREE_WORK_ITEM_PLAN_MISMATCH');
+    failClosed(
+      item.integrationBaseRevision === input.integrationBaseRevision,
+      'WORK_ITEM_WAVE_PROVENANCE_MISMATCH',
+    );
+    failClosed(
+      plan.currentRevision === input.expectedPlanRevision,
+      'WORKTREE_INTEGRATION_STALE_HEAD',
+    );
+    await this.assertCommit(plan.repositoryPath, input.candidateRevision);
+    await this.assertCommit(plan.repositoryPath, input.integrationBaseRevision);
+    const candidate = this.repositories.planWorktrees.findForWorkItem(plan.planId, item.workItemId);
+    failClosed(Boolean(candidate), 'WORKTREE_CANDIDATE_MISSING');
+    failClosed(!candidate!.ownerExecutionId, 'WORKTREE_WRITER_HELD');
+    const candidateHead = await this.gitInWorktree(plan.repositoryPath, candidate!.hostPath, [
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    failClosed(candidateHead === input.candidateRevision, 'WORKTREE_ACCEPTED_REVISION_NOT_PINNED');
+    failClosed(
+      (await this.gitStatus(plan.repositoryPath, candidate!.hostPath)).length === 0,
+      'WORKTREE_ACCEPTED_REVISION_DIRTY',
+    );
+    failClosed(
+      await this.gitSucceeds(plan.repositoryPath, [
+        'merge-base',
+        '--is-ancestor',
+        input.integrationBaseRevision,
+        input.candidateRevision,
+      ]),
+      'WORKTREE_ACCEPTED_REVISION_NOT_DESCENDANT',
+    );
+
+    let integration = await this.ensureIntegration({
+      projectKey: plan.projectKey,
+      rootPlanId: plan.planId,
+      repositoryPath: plan.repositoryPath,
+      baseRevision: plan.baseRevision,
+    });
+    failClosed(!integration.ownerExecutionId, 'WORKTREE_INTEGRATION_CONTROLLER_ONLY');
+    const status = await this.gitStatus(plan.repositoryPath, integration.hostPath);
+    failClosed(status.length === 0, 'WORKTREE_INTEGRATION_DIRTY');
+    const before = await this.gitInWorktree(plan.repositoryPath, integration.hostPath, [
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    failClosed(before === input.expectedPlanRevision, 'WORKTREE_INTEGRATION_STALE_HEAD');
+    if (
+      await this.gitSucceedsInWorktree(plan.repositoryPath, integration.hostPath, [
+        'merge-base',
+        '--is-ancestor',
+        input.candidateRevision,
+        before,
+      ])
+    ) {
+      return { worktree: integration, headRevision: before };
+    }
+
+    try {
+      await this.gitAsSourceInWorktree(plan.repositoryPath, integration.hostPath, [
+        '-c',
+        'user.name=Pixel V4 Controller',
+        '-c',
+        'user.email=pixel-v4@localhost',
+        'merge',
+        '--no-ff',
+        '--no-edit',
+        '-m',
+        'chore(pixel-v4): integrate ' + worktreeRefComponent(item.itemKey),
+        input.candidateRevision,
+      ]);
+    } catch (error) {
+      await this.gitAsSourceInWorktree(
+        plan.repositoryPath,
+        integration.hostPath,
+        ['merge', '--abort'],
+        true,
+      );
+      throw new V4Error(
+        'WORKTREE_INTEGRATION_CONFLICT',
+        'Reviewed work-item integration conflicted.',
+        error,
+      );
+    }
+    failClosed(
+      (await this.gitStatus(plan.repositoryPath, integration.hostPath)).length === 0,
+      'WORKTREE_INTEGRATION_DIRTY',
+    );
+    const headRevision = await this.gitInWorktree(plan.repositoryPath, integration.hostPath, [
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    integration = this.repositories.planWorktrees.get(integration.worktreeId);
+    const updated = this.repositories.planWorktrees.updateRevision(
+      integration.worktreeId,
+      integration.version,
+      headRevision,
+    );
+    if (!updated.value || updated.status === 'rejected')
+      throw new V4Error(updated.reason ?? 'WORKTREE_REVISION_UPDATE_FAILED');
+    return { worktree: updated.value, headRevision };
   }
 
   async revokePlanAgentAccess(rootPlanId: string, uid: number): Promise<void> {
@@ -294,6 +541,7 @@ export class PlanWorktreeManager {
 
   async releaseWriter(worktreeIdValue: string, executionId: string): Promise<PlanWorktree> {
     const current = this.repositories.planWorktrees.get(worktreeIdValue);
+    await this.assertProtectedRefsStable(current.rootPlanId);
     failClosed(current.ownerExecutionId === executionId, 'WORKTREE_WRITER_OWNER_MISMATCH');
     const head = await this.gitInWorktree(current.repositoryPath, current.hostPath, [
       'rev-parse',
@@ -331,6 +579,7 @@ export class PlanWorktreeManager {
 
   async retire(worktreeIdValue: string): Promise<PlanWorktree> {
     let current = this.repositories.planWorktrees.get(worktreeIdValue);
+    await this.assertProtectedRefsStable(current.rootPlanId);
     failClosed(!current.ownerExecutionId, 'WORKTREE_WRITER_HELD');
     if (current.state === 'RETIRED') return current;
     await this.verifyRegistered(
@@ -347,8 +596,11 @@ export class PlanWorktreeManager {
     await this.git(current.repositoryPath, ['worktree', 'remove', '--', current.hostPath]);
     await this.git(current.repositoryPath, ['worktree', 'prune', '--expire', 'now']);
     failClosed(!fs.existsSync(current.hostPath), 'WORKTREE_REMOVE_INCOMPLETE');
-    const sidecar = path.join(path.dirname(current.hostPath), '.agent-harness');
-    if (fs.existsSync(sidecar)) fs.rmSync(sidecar, { recursive: true, force: true });
+    const parent = path.dirname(current.hostPath);
+    for (const runtimeState of ['.agent-harness', '.executions', '.pixel-controller']) {
+      const candidate = path.join(parent, runtimeState);
+      if (fs.existsSync(candidate)) fs.rmSync(candidate, { recursive: true, force: true });
+    }
     current = this.repositories.planWorktrees.get(worktreeIdValue);
     const result = this.repositories.planWorktrees.transition(
       worktreeIdValue,
@@ -361,6 +613,7 @@ export class PlanWorktreeManager {
   }
 
   async reconcile(rootPlanId: string): Promise<PlanWorktree[]> {
+    await this.assertProtectedRefsStable(rootPlanId);
     const records = this.repositories.planWorktrees.listByPlan(rootPlanId);
     for (const record of records) {
       if (record.state === 'RETIRED') continue;
@@ -385,6 +638,8 @@ export class PlanWorktreeManager {
   ): Promise<PlanWorktree> {
     this.assertActivePlan(input);
     const repositoryPath = await this.repositoryRoot(input.repositoryPath);
+    await this.ensureProtectedRefSnapshot(input.rootPlanId);
+    await this.assertProtectedRefsStable(input.rootPlanId);
     await this.assertCommit(repositoryPath, input.baseRevision);
     const paths = this.paths(input.projectKey, input.rootPlanId, input.relativePath);
     const id = worktreeId(input.role, input.rootPlanId, input.identity);
@@ -419,6 +674,126 @@ export class PlanWorktreeManager {
     if (!transitioned.value || transitioned.status === 'rejected')
       throw new V4Error(transitioned.reason ?? 'WORKTREE_STATE_STALE');
     return transitioned.value;
+  }
+
+  private async ensureProtectedRefSnapshot(rootPlanId: string): Promise<void> {
+    const existing = this.repositories.planWorktrees.getProtectedRefs(rootPlanId);
+    if (existing.length > 0) return;
+    const entries = await this.currentProtectedRefs(rootPlanId);
+    this.repositories.planWorktrees.createProtectedRefs(rootPlanId, entries);
+  }
+
+  private async assertProtectedRefsStable(rootPlanId: string): Promise<void> {
+    const plan = this.repositories.plans.getPlan(rootPlanId);
+    const canonicalStatus = await this.git(plan.repositoryPath, [
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+    ]);
+    if (canonicalStatus.length > 0) {
+      this.enterSafetyHold(rootPlanId);
+      throw new V4Error(
+        'WORKTREE_CANONICAL_REPOSITORY_DIRTY',
+        'Canonical repository changed while a literal-worktree Plan owns the project.',
+      );
+    }
+    const expected = this.repositories.planWorktrees
+      .getProtectedRefs(rootPlanId)
+      .map(({ refName, revision }) => ({ refName, revision }));
+    failClosed(expected.length > 0, 'WORKTREE_PROTECTED_REF_SNAPSHOT_MISSING');
+    const actual = await this.currentProtectedRefs(rootPlanId);
+    if (JSON.stringify(expected) === JSON.stringify(actual)) return;
+    this.enterSafetyHold(rootPlanId);
+    throw new V4Error(
+      'WORKTREE_PROTECTED_REF_DRIFT',
+      'Protected Git refs changed outside the active Pixel Plan namespace.',
+    );
+  }
+
+  private enterSafetyHold(rootPlanId: string): void {
+    const plan = this.repositories.plans.getPlan(rootPlanId);
+    if (
+      plan.status === 'READY' ||
+      plan.status === 'RUNNING' ||
+      plan.status === 'WAITING_FOR_RESOURCE' ||
+      plan.status === 'WAITING_FOR_SYSTEM_REPAIR' ||
+      plan.status === 'WAITING_FOR_EXTERNAL_EVIDENCE'
+    ) {
+      try {
+        this.repositories.plans.updateStatus(rootPlanId, 'SAFETY_HOLD');
+      } catch {
+        // Preserve the primary repository safety violation.
+      }
+    }
+  }
+
+  private async archivePlanFamilyRefs(rootPlanId: string): Promise<void> {
+    const queue = [rootPlanId];
+    const visited = new Set<string>();
+    while (queue.length > 0) {
+      const planId = queue.shift()!;
+      if (visited.has(planId)) throw new V4Error('PARENT_CHILD_CYCLE');
+      visited.add(planId);
+      const plan = this.repositories.plans.getPlan(planId);
+      queue.push(...plan.childPlanIds);
+      await this.assertCommit(plan.repositoryPath, plan.currentRevision);
+      const archiveRef = 'refs/pixel-v4/archive/' + worktreeRefComponent(plan.planId);
+      const existing = await this.git(
+        plan.repositoryPath,
+        ['rev-parse', '--verify', archiveRef + '^{commit}'],
+        true,
+      );
+      if (existing) {
+        failClosed(existing === plan.currentRevision, 'WORKTREE_ARCHIVE_REF_CONFLICT');
+      } else {
+        await this.git(plan.repositoryPath, ['update-ref', archiveRef, plan.currentRevision]);
+      }
+    }
+  }
+
+  private async currentProtectedRefs(
+    rootPlanId: string,
+  ): Promise<Array<{ refName: string; revision: string }>> {
+    const plan = this.repositories.plans.getPlan(rootPlanId);
+    failClosed(!plan.parentPlanId, 'WORKTREE_ROOT_PLAN_REQUIRED');
+    const planPrefix = 'refs/heads/pixel-v4/' + worktreeRefComponent(rootPlanId) + '/';
+    const deliveryRef = plan.delivery?.branch
+      ? plan.delivery.branch.startsWith('refs/heads/')
+        ? plan.delivery.branch
+        : 'refs/heads/' + plan.delivery.branch
+      : undefined;
+    const raw = await this.git(plan.repositoryPath, [
+      'for-each-ref',
+      '--format=%(refname)%09%(objectname)',
+      'refs/heads',
+      'refs/tags',
+    ]);
+    const entries: Array<{ refName: string; revision: string }> = [];
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line) continue;
+      const separator = line.indexOf('\t');
+      failClosed(separator > 0, 'WORKTREE_PROTECTED_REF_SNAPSHOT_INVALID');
+      const refName = line.slice(0, separator);
+      const revision = line.slice(separator + 1);
+      if (refName.startsWith(planPrefix) || refName === deliveryRef) continue;
+      entries.push({ refName, revision });
+    }
+    const head = await this.git(plan.repositoryPath, ['rev-parse', '--verify', 'HEAD^{commit}']);
+    const symref = await this.git(plan.repositoryPath, ['symbolic-ref', '--quiet', 'HEAD'], true);
+    entries.push({ refName: '@HEAD', revision: head });
+    entries.push({ refName: '@HEAD_SYMREF', revision: symref || '<DETACHED>' });
+    return entries.sort((left, right) => left.refName.localeCompare(right.refName));
+  }
+
+  private rootPlanIdFor(planId: string): string {
+    let plan = this.repositories.plans.getPlan(planId);
+    const visited = new Set<string>();
+    while (plan.parentPlanId) {
+      if (visited.has(plan.planId)) throw new V4Error('PARENT_CHILD_CYCLE');
+      visited.add(plan.planId);
+      plan = this.repositories.plans.getPlan(plan.parentPlanId);
+    }
+    return plan.planId;
   }
 
   private assertActivePlan(input: WorktreeRequest): void {
@@ -706,6 +1081,58 @@ export class PlanWorktreeManager {
     } catch (error) {
       if (allowFailure) return;
       throw new V4Error('WORKTREE_ACL_FAILED', 'Unable to scope Git ACLs for the worker.', error);
+    }
+  }
+
+  private async resetWorktreeToRevision(
+    worktree: PlanWorktree,
+    expectedRevision: string,
+  ): Promise<void> {
+    const identity = this.repositoryIdentity(worktree.repositoryPath);
+    if (fs.existsSync(worktree.hostPath))
+      this.chownTreeNoFollow(worktree.hostPath, identity.uid, identity.gid);
+    await this.gitAsSourceInWorktree(worktree.repositoryPath, worktree.hostPath, [
+      'reset',
+      '--hard',
+      expectedRevision,
+    ]);
+    await this.gitAsSourceInWorktree(worktree.repositoryPath, worktree.hostPath, ['clean', '-ffd']);
+    const head = await this.gitInWorktree(worktree.repositoryPath, worktree.hostPath, [
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    failClosed(head === expectedRevision, 'WORKTREE_RESET_REVISION_MISMATCH');
+    failClosed(
+      (await this.gitStatus(worktree.repositoryPath, worktree.hostPath)).length === 0,
+      'WORKTREE_RESET_DIRTY',
+    );
+  }
+
+  private async gitAsSourceInWorktree(
+    repositoryPath: string,
+    worktreePath: string,
+    args: string[],
+    allowFailure = false,
+  ): Promise<string> {
+    return await this.git(
+      repositoryPath,
+      ['-c', 'safe.directory=' + worktreePath, '-C', worktreePath, ...args],
+      allowFailure,
+      true,
+    );
+  }
+
+  private async gitSucceedsInWorktree(
+    repositoryPath: string,
+    worktreePath: string,
+    args: string[],
+  ): Promise<boolean> {
+    try {
+      await this.gitAsSourceInWorktree(repositoryPath, worktreePath, args);
+      return true;
+    } catch {
+      return false;
     }
   }
 

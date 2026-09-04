@@ -9,11 +9,24 @@ export class WorkGraphKernel {
     planId: string;
     reason: string;
     observationCursor: number;
-    items: Array<{ itemKey: string; title: string; objective: string; dependencies: string[]; acceptanceCriteria: string[] }>;
+    items: Array<{
+      itemKey: string;
+      title: string;
+      objective: string;
+      dependencies: string[];
+      acceptanceCriteria: string[];
+      parallelSafe?: boolean;
+      writeScopes?: string[];
+      conflictKeys?: string[];
+    }>;
   }): { graphVersionId: string; items: WorkItem[] } {
     validateGraphItems(input.items);
     const old = this.repositories.plans.getActiveGraphVersion(input.planId);
-    if (old) this.repositories.plans.rejectCompletedWorkRemoval(old.graphVersionId, input.items.map((item) => item.itemKey));
+    if (old)
+      this.repositories.plans.rejectCompletedWorkRemoval(
+        old.graphVersionId,
+        input.items.map((item) => item.itemKey),
+      );
     const graph = this.repositories.plans.createGraphVersion({
       planId: input.planId,
       reason: input.reason,
@@ -25,11 +38,16 @@ export class WorkGraphKernel {
     const pending = [...input.items];
     const createdKeys = new Set<string>();
     while (pending.length > 0) {
-      const ready = pending.filter((item) => item.dependencies.every((dependency) => createdKeys.has(dependency)));
+      const ready = pending.filter((item) =>
+        item.dependencies.every((dependency) => createdKeys.has(dependency)),
+      );
       if (ready.length === 0) throw new V4Error('GRAPH_DEPENDENCY_CYCLE');
       for (const item of ready) {
         pending.splice(pending.indexOf(item), 1);
-        const created = this.repositories.plans.appendGraphWorkItem({ ...item, graphVersionId: graph.graphVersionId });
+        const created = this.repositories.plans.appendGraphWorkItem({
+          ...item,
+          graphVersionId: graph.graphVersionId,
+        });
         if (created.value) {
           items.push(created.value);
           createdKeys.add(item.itemKey);

@@ -53,6 +53,10 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
+  assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false/);
+  assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false/);
+  assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense/);
+  assert.match(service, /MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2/);
   assert.match(service, /MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false/);

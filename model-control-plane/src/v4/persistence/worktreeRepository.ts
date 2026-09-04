@@ -33,6 +33,19 @@ interface Row {
   updated_at: string;
 }
 
+export interface ProtectedRefSnapshotEntry {
+  refName: string;
+  revision: string;
+  createdAt: string;
+}
+
+interface ProtectedRefRow {
+  root_plan_id: string;
+  ref_name: string;
+  revision: string;
+  created_at: string;
+}
+
 const now = (): string => new Date().toISOString();
 
 function record(row: Row): PlanWorktree {
@@ -175,6 +188,72 @@ export class PlanWorktreeRepository {
       .prepare('SELECT * FROM plan_worktrees WHERE root_plan_id=? ORDER BY created_at,worktree_id')
       .all(rootPlanId) as unknown as Row[];
     return rows.map(record);
+  }
+
+  getProtectedRefs(rootPlanId: string): ProtectedRefSnapshotEntry[] {
+    const rows = this.db
+      .prepare(
+        'SELECT root_plan_id,ref_name,revision,created_at FROM plan_protected_refs WHERE root_plan_id=? ORDER BY ref_name',
+      )
+      .all(rootPlanId) as unknown as ProtectedRefRow[];
+    return rows.map((row) => ({
+      refName: row.ref_name,
+      revision: row.revision,
+      createdAt: row.created_at,
+    }));
+  }
+
+  createProtectedRefs(
+    rootPlanId: string,
+    entries: readonly { refName: string; revision: string }[],
+  ): MutationResult<ProtectedRefSnapshotEntry[]> {
+    failClosed(rootPlanId.trim().length > 0, 'WORKTREE_ROOT_PLAN_REQUIRED');
+    const normalized = [...entries]
+      .map((entry) => ({ refName: entry.refName.trim(), revision: entry.revision.trim() }))
+      .sort((left, right) => left.refName.localeCompare(right.refName));
+    failClosed(
+      normalized.length > 0 && normalized.length <= 20_000,
+      'WORKTREE_PROTECTED_REF_SNAPSHOT_INVALID',
+    );
+    const names = new Set<string>();
+    for (const entry of normalized) {
+      failClosed(
+        entry.refName.length > 0 &&
+          entry.refName.length <= 1_000 &&
+          entry.revision.length > 0 &&
+          entry.revision.length <= 1_000,
+        'WORKTREE_PROTECTED_REF_SNAPSHOT_INVALID',
+      );
+      failClosed(!names.has(entry.refName), 'WORKTREE_PROTECTED_REF_SNAPSHOT_INVALID');
+      names.add(entry.refName);
+    }
+    return withTransaction(this.db, () => {
+      const existing = this.getProtectedRefs(rootPlanId);
+      if (existing.length > 0) {
+        const actual = existing.map(({ refName, revision }) => ({ refName, revision }));
+        if (JSON.stringify(actual) !== JSON.stringify(normalized))
+          throw new V4Error('WORKTREE_PROTECTED_REF_SNAPSHOT_CONFLICT');
+        return { status: 'existing', value: existing };
+      }
+      const plan = this.db.prepare('SELECT plan_id FROM plans WHERE plan_id=?').get(rootPlanId);
+      if (!plan) throw new V4Error('PLAN_NOT_FOUND');
+      const at = now();
+      const insert = this.db.prepare(
+        'INSERT INTO plan_protected_refs(root_plan_id,ref_name,revision,created_at) VALUES(?,?,?,?)',
+      );
+      for (const entry of normalized) insert.run(rootPlanId, entry.refName, entry.revision, at);
+      const digest = crypto.createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
+      this.events.appendInTransaction({
+        eventId: crypto.randomUUID(),
+        aggregateId: rootPlanId,
+        aggregateType: 'PLAN',
+        type: 'PLAN_PROTECTED_REFS_SNAPSHOTTED',
+        payload: { count: normalized.length, digest },
+        occurredAt: at,
+        correlationId: rootPlanId,
+      });
+      return { status: 'created', value: this.getProtectedRefs(rootPlanId) };
+    });
   }
 
   transition(

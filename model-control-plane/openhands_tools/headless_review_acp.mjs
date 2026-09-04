@@ -128,7 +128,16 @@ function assertWorkspace(cwd) {
 
 function prepareHarness(session, host) {
   if (!fs.existsSync(HARNESS_CTL)) throw new Error('HEADLESS_REVIEW_HARNESS_MISSING');
-  const executionRoot = path.dirname(session.cwd);
+  const executionId = String(process.env.HERMES_V3_EXECUTION_ID ?? '');
+  const literal =
+    /^\/workspace\/v4\/plans\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\/(?:items|reviews|repairs)\/[A-Za-z0-9._-]+\/repo$/.test(
+      session.cwd,
+    );
+  if (literal && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(executionId))
+    throw new Error('HEADLESS_REVIEW_EXECUTION_ID_REQUIRED');
+  const executionRoot = literal
+    ? path.join(path.dirname(session.cwd), '.executions', executionId)
+    : path.dirname(session.cwd);
   const privateRoot = path.join(executionRoot, '.agent-harness');
   const home = path.join(privateRoot, 'home');
   const state = path.join(privateRoot, 'state');
@@ -349,10 +358,8 @@ function canonicalReview(value) {
       const severity = ['P0', 'P1', 'P2', 'P3'].includes(finding.severity)
         ? finding.severity
         : 'P2';
-      const title =
-        typeof finding.title === 'string' ? redact(finding.title.trim()) : 'Finding';
-      const evidence =
-        typeof finding.evidence === 'string' ? redact(finding.evidence.trim()) : '';
+      const title = typeof finding.title === 'string' ? redact(finding.title.trim()) : 'Finding';
+      const evidence = typeof finding.evidence === 'string' ? redact(finding.evidence.trim()) : '';
       lines.push(`- [${severity}] ${title}`);
       if (evidence) lines.push(`  Evidence: ${evidence}`);
     }
@@ -572,12 +579,14 @@ function writePixelV4ImplementationEvidence(session, summary, stdout) {
     sourceRevision,
     resultRevision,
     outcome,
-    summary: redact(String(
-      summary ||
-        (outcome === 'CHANGED'
-          ? 'Implementation completed.'
-          : 'Source revision already satisfies the objective.'),
-    ))
+    summary: redact(
+      String(
+        summary ||
+          (outcome === 'CHANGED'
+            ? 'Implementation completed.'
+            : 'Source revision already satisfies the objective.'),
+      ),
+    )
       .trim()
       .slice(0, 8_000),
     tests,
@@ -623,7 +632,10 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
           const severity = ['P0', 'P1', 'P2', 'P3'].includes(item.severity) ? item.severity : 'P2';
           const title = typeof item.title === 'string' ? item.title.trim() : 'Finding';
           const evidence = typeof item.evidence === 'string' ? item.evidence.trim() : '';
-          return redact(`[${severity}] ${title}${evidence ? ` — ${evidence}` : ''}`).slice(0, 4_000);
+          return redact(`[${severity}] ${title}${evidence ? ` — ${evidence}` : ''}`).slice(
+            0,
+            4_000,
+          );
         })
     : [];
   const evidence = {
@@ -634,11 +646,13 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
     verdict: value.verdict,
     findings,
     checks,
-    summary: redact(typeof value?.summary === 'string' && value.summary.trim()
-      ? value.summary.trim()
-      : value?.verdict === 'PASS'
-        ? 'No blocking findings.'
-        : 'Blocking findings exist.').slice(0, 8_000),
+    summary: redact(
+      typeof value?.summary === 'string' && value.summary.trim()
+        ? value.summary.trim()
+        : value?.verdict === 'PASS'
+          ? 'No blocking findings.'
+          : 'Blocking findings exist.',
+    ).slice(0, 8_000),
   };
   const temporary = `${target}.tmp-${process.pid}-${crypto.randomUUID()}`;
   fs.writeFileSync(temporary, `${JSON.stringify(evidence)}\n`, { mode: 0o600 });
@@ -1148,9 +1162,8 @@ class HeadlessReviewAgent {
       } else if (!IS_PLANNER) {
         writePixelV4ReviewEvidence(session, parsed, result.stdout);
       }
-      const canonical = IS_WORKER || IS_PLANNER
-        ? redact(String(parsed).trim())
-        : canonicalReview(parsed);
+      const canonical =
+        IS_WORKER || IS_PLANNER ? redact(String(parsed).trim()) : canonicalReview(parsed);
       await cx.notify(acp.methods.client.session.update, {
         sessionId: session.id,
         update: {

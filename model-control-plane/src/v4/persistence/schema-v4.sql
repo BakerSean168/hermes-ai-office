@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS work_items (
   objective TEXT NOT NULL,
   acceptance_criteria TEXT NOT NULL,
   dependencies TEXT NOT NULL,
+  parallel_safe INTEGER NOT NULL DEFAULT 0,
+  write_scopes TEXT NOT NULL DEFAULT '[]',
+  conflict_keys TEXT NOT NULL DEFAULT '[]',
+  wave INTEGER,
+  integration_base_revision TEXT,
   status TEXT NOT NULL,
   exact_accepted_revision TEXT,
   created_at TEXT NOT NULL,
@@ -313,6 +318,15 @@ CREATE TABLE IF NOT EXISTS maintenance_programs (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS plan_protected_refs (
+  root_plan_id TEXT NOT NULL REFERENCES plans(plan_id),
+  ref_name TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(root_plan_id, ref_name)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_protected_refs_plan ON plan_protected_refs(root_plan_id, ref_name);
+
 CREATE TABLE IF NOT EXISTS improvement_candidates (
   candidate_id TEXT PRIMARY KEY,
   program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id),
@@ -327,4 +341,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 8, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 10, CAST(strftime('%s','now') AS INTEGER));

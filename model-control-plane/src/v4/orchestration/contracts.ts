@@ -195,6 +195,9 @@ export interface WorkspaceCompletionSnapshot {
 
 export interface WorkspaceProvisionInput {
   executionId: string;
+  planId?: string;
+  projectKey?: string;
+  workItemId?: string;
   repositoryPath: string;
   sourceRevision: string;
   phase?: ExecutionPhase;
@@ -202,6 +205,13 @@ export interface WorkspaceProvisionInput {
 }
 
 export interface WorkspaceProviderPort {
+  readonly integrationStrategy?: 'CANONICAL_FAST_FORWARD' | 'PLAN_WORKTREE';
+  integrationStrategyFor?(
+    planId: string,
+    projectKey: string,
+  ): 'CANONICAL_FAST_FORWARD' | 'PLAN_WORKTREE';
+  assertPlanSafety?(planId: string): Promise<void>;
+  deliveryWorkspace?(planId: string): Promise<string | undefined>;
   observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
   provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
   /** Cheap signal used by the worker before attempting evidence-verified finalization. */
@@ -222,6 +232,9 @@ export interface WorkspaceProviderPort {
     expectedRevision: string;
     acceptedRevision: string;
     candidateWorkspace: WorkspaceDescriptor;
+    planId?: string;
+    workItemId?: string;
+    integrationBaseRevision?: string;
   }): Promise<RepositoryObservation>;
 }
 
@@ -242,5 +255,9 @@ export interface ReviewProviderPort extends ExecutionProviderPort {
 }
 
 export interface DeliveryAutomationPort {
-  advance(plan: Plan, delivery: PlanDelivery): Promise<DeliveryObservation>;
+  advance(
+    plan: Plan,
+    delivery: PlanDelivery,
+    context?: { workspacePath?: string },
+  ): Promise<DeliveryObservation>;
 }

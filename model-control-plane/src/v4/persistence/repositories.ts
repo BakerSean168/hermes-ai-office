@@ -76,6 +76,7 @@ import {
 import {
   transitionWorkItem,
   validateGraphItems,
+  normalizeParallelMetadata,
   type GraphVersion,
   type WorkItem,
   type WorkItemStatus,
@@ -252,6 +253,11 @@ interface WorkRow {
   objective: string;
   acceptance_criteria: string;
   dependencies: string;
+  parallel_safe: number;
+  write_scopes: string;
+  conflict_keys: string;
+  wave: number | null;
+  integration_base_revision: string | null;
   status: WorkItemStatus;
   exact_accepted_revision: string | null;
   created_at: string;
@@ -267,6 +273,11 @@ function workFrom(row: WorkRow): WorkItem {
     objective: row.objective,
     acceptanceCriteria: decode<string[]>(row.acceptance_criteria),
     dependencies: decode<string[]>(row.dependencies),
+    parallelSafe: row.parallel_safe === 1,
+    writeScopes: decode<string[]>(row.write_scopes),
+    conflictKeys: decode<string[]>(row.conflict_keys),
+    wave: row.wave ?? undefined,
+    integrationBaseRevision: row.integration_base_revision ?? undefined,
     status: row.status,
     exactAcceptedRevision: row.exact_accepted_revision ?? undefined,
     createdAt: row.created_at,
@@ -996,6 +1007,9 @@ export class PlanRepository {
     objective: string;
     acceptanceCriteria: string[];
     dependencies: string[];
+    parallelSafe?: boolean;
+    writeScopes?: string[];
+    conflictKeys?: string[];
   }): MutationResult<WorkItem> {
     failClosed(input.itemKey.trim().length > 0, 'GRAPH_ITEM_KEY_REQUIRED');
     failClosed(input.objective.trim().length > 0, 'GRAPH_ITEM_OBJECTIVE_REQUIRED');
@@ -1006,9 +1020,22 @@ export class PlanRepository {
         .prepare('SELECT * FROM work_items WHERE graph_version_id=? AND item_key=?')
         .get(input.graphVersionId, input.itemKey) as WorkRow | undefined;
       if (duplicate) {
-        if (duplicate.title !== input.title || duplicate.objective !== input.objective)
+        const existingItem = workFrom(duplicate);
+        const requestedParallel = normalizeParallelMetadata(input);
+        if (
+          duplicate.title !== input.title ||
+          duplicate.objective !== input.objective ||
+          JSON.stringify(existingItem.acceptanceCriteria) !==
+            JSON.stringify(input.acceptanceCriteria) ||
+          JSON.stringify(existingItem.dependencies) !== JSON.stringify(input.dependencies) ||
+          existingItem.parallelSafe !== requestedParallel.parallelSafe ||
+          JSON.stringify(existingItem.writeScopes) !==
+            JSON.stringify(requestedParallel.writeScopes) ||
+          JSON.stringify(existingItem.conflictKeys) !==
+            JSON.stringify(requestedParallel.conflictKeys)
+        )
           throw new DuplicateKeyError(input.itemKey);
-        return { status: 'existing', value: workFrom(duplicate) };
+        return { status: 'existing', value: existingItem };
       }
       const existing = this.listWorkItems(graph.planId, graph.graphVersionId);
       validateGraphItems([
@@ -1016,6 +1043,7 @@ export class PlanRepository {
         { itemKey: input.itemKey, dependencies: input.dependencies },
       ]);
       const createdAt = iso();
+      const parallel = normalizeParallelMetadata(input);
       const item: WorkItem = {
         workItemId: id('work'),
         planId: graph.planId,
@@ -1025,13 +1053,14 @@ export class PlanRepository {
         objective: input.objective,
         acceptanceCriteria: input.acceptanceCriteria,
         dependencies: input.dependencies,
+        ...parallel,
         status: 'PENDING',
         createdAt,
         updatedAt: createdAt,
       };
       this.db
         .prepare(
-          'INSERT INTO work_items(work_item_id,plan_id,graph_version_id,item_key,title,objective,acceptance_criteria,dependencies,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO work_items(work_item_id,plan_id,graph_version_id,item_key,title,objective,acceptance_criteria,dependencies,parallel_safe,write_scopes,conflict_keys,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           item.workItemId,
@@ -1042,6 +1071,9 @@ export class PlanRepository {
           item.objective,
           encode(item.acceptanceCriteria),
           encode(item.dependencies),
+          item.parallelSafe ? 1 : 0,
+          encode(item.writeScopes),
+          encode(item.conflictKeys),
           item.status,
           item.createdAt,
           item.updatedAt,
@@ -1054,6 +1086,42 @@ export class PlanRepository {
         }),
       );
       return { status: 'created', value: item };
+    });
+  }
+
+  assignWorkItemWave(
+    workItemId: string,
+    wave: number,
+    integrationBaseRevision: string,
+  ): MutationResult<WorkItem> {
+    failClosed(Number.isInteger(wave) && wave >= 1, 'WORK_ITEM_WAVE_INVALID');
+    failClosed(integrationBaseRevision.trim().length > 0, 'WORK_ITEM_WAVE_BASE_REQUIRED');
+    return withTransaction(this.db, () => {
+      const current = this.getWorkItem(workItemId);
+      if (current.wave !== undefined || current.integrationBaseRevision !== undefined) {
+        return current.wave === wave && current.integrationBaseRevision === integrationBaseRevision
+          ? { status: 'existing', value: current }
+          : { status: 'rejected', value: current, reason: 'WORK_ITEM_WAVE_PROVENANCE_MISMATCH' };
+      }
+      const at = iso();
+      const result = this.db
+        .prepare(
+          'UPDATE work_items SET wave=?,integration_base_revision=?,updated_at=? WHERE work_item_id=? AND wave IS NULL AND integration_base_revision IS NULL',
+        )
+        .run(wave, integrationBaseRevision, at, workItemId);
+      if (Number(result.changes) !== 1)
+        return {
+          status: 'rejected',
+          value: this.getWorkItem(workItemId),
+          reason: 'STALE_WORK_ITEM_WAVE',
+        };
+      this.events.appendInTransaction(
+        makeEvent(workItemId, 'WORK_ITEM', 'WORK_ITEM_WAVE_ASSIGNED', {
+          wave,
+          integrationBaseRevision,
+        }),
+      );
+      return { status: 'updated', value: this.getWorkItem(workItemId) };
     });
   }
 
@@ -1147,8 +1215,13 @@ export class PlanRepository {
     });
   }
 
-  acceptWorkItemRevision(workItemId: string, revision: string): MutationResult<WorkItem> {
+  acceptWorkItemRevision(
+    workItemId: string,
+    revision: string,
+    expectedPlanRevision = revision,
+  ): MutationResult<WorkItem> {
     failClosed(revision.trim().length > 0, 'WORK_ITEM_ACCEPTED_REVISION_REQUIRED');
+    failClosed(expectedPlanRevision.trim().length > 0, 'PLAN_REVISION_REQUIRED');
     return withTransaction(this.db, () => {
       const current = this.getWorkItem(workItemId);
       if (current.status === 'SUCCEEDED') {
@@ -1158,8 +1231,8 @@ export class PlanRepository {
       }
       if (current.status !== 'RUNNING') throw new V4Error('WORK_ITEM_NOT_RUNNING');
       const plan = this.getPlan(current.planId);
-      if (plan.currentRevision !== revision)
-        throw new V4Error('WORK_ITEM_REVISION_NOT_PLAN_CURRENT');
+      if (plan.currentRevision !== expectedPlanRevision)
+        throw new V4Error('WORK_ITEM_PLAN_REVISION_NOT_CURRENT');
       const updated = transitionWorkItem(current, 'SUCCEEDED', iso());
       const result = this.db
         .prepare(
@@ -1172,6 +1245,7 @@ export class PlanRepository {
         makeEvent(workItemId, 'WORK_ITEM', 'WORK_ITEM_REVISION_ACCEPTED', {
           planId: current.planId,
           revision,
+          planRevision: expectedPlanRevision,
         }),
       );
       return { status: 'updated', value: this.getWorkItem(workItemId) };

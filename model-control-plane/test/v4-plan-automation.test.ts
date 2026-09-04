@@ -24,7 +24,13 @@ function now(offset = 0): string {
 }
 
 function seed(
-  items: Array<{ itemKey: string; dependencies?: string[] }> = [{ itemKey: 'first' }],
+  items: Array<{
+    itemKey: string;
+    dependencies?: string[];
+    parallelSafe?: boolean;
+    writeScopes?: string[];
+    conflictKeys?: string[];
+  }> = [{ itemKey: 'first' }],
   delivery?: PlanDeliveryConfig,
 ) {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
@@ -49,6 +55,9 @@ function seed(
       objective: 'complete ' + item.itemKey,
       acceptanceCriteria: ['tests pass', 'independent review passes'],
       dependencies: item.dependencies ?? [],
+      parallelSafe: item.parallelSafe ?? false,
+      writeScopes: item.writeScopes ?? [],
+      conflictKeys: item.conflictKeys ?? [],
     });
   }
   repositories.plans.updateStatus(plan.planId, 'READY');
@@ -1069,5 +1078,56 @@ test('plan reconcile reuses the latest PASS reviewed candidate after an integrat
     seeded.repositories.plans.getWorkItem(item.workItemId).exactAcceptedRevision,
     candidate.resultRevision,
   );
+  seeded.db.close();
+});
+
+test('parallel wave queues and runs two non-conflicting implementations from the same integration base before review', async () => {
+  const seeded = seed([
+    { itemKey: 'a', parallelSafe: true, writeScopes: ['src/a'] },
+    { itemKey: 'b', parallelSafe: true, writeScopes: ['src/b'] },
+  ]);
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = new PlanAutomationRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      implementationRoutes: ['gpt-5.6-luna'],
+      reviewRoutes: ['gpt-5.6-sol'],
+      maxImplementationAttempts: 3,
+      maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
+      maxRepairCycles: 2,
+      maxParallelWorkItems: 2,
+      requireDelivery: false,
+    }),
+  );
+
+  const queued = await automation.runPlan(seeded.plan.planId);
+  assert.equal(queued.code, 'IMPLEMENTATION_WAVE_QUEUED');
+  const initial = seeded.repositories.executions
+    .listByPlan(seeded.plan.planId)
+    .filter((execution) => execution.identity.phase === 'IMPLEMENT');
+  assert.equal(initial.length, 2);
+  assert.deepEqual(
+    new Set(initial.map((execution) => execution.identity.sourceRevision)),
+    new Set(['base-sha']),
+  );
+  const items = seeded.repositories.plans.listWorkItems(seeded.plan.planId);
+  assert.deepEqual(new Set(items.map((item) => item.wave)), new Set([1]));
+  assert.deepEqual(
+    new Set(items.map((item) => item.integrationBaseRevision)),
+    new Set(['base-sha']),
+  );
+
+  const advanced = await automation.runPlan(seeded.plan.planId);
+  assert.equal(advanced.code, 'REVIEW_QUEUED');
+  for (const execution of initial)
+    assert.equal(runner.runCounts.get(execution.identity.executionId), 1);
+  const durable = initial.map((execution) =>
+    seeded.repositories.executions.get(execution.identity.executionId),
+  );
+  assert.ok(durable.every((execution) => execution.status === 'SUCCEEDED'));
   seeded.db.close();
 });

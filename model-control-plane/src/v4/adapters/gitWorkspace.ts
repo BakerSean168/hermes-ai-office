@@ -113,7 +113,7 @@ function decodeTest(value: unknown): TestCommandEvidence {
   };
 }
 
-function decodeImplementationEvidence(value: unknown): ImplementationCompletionEvidence {
+export function decodeImplementationEvidence(value: unknown): ImplementationCompletionEvidence {
   const root = record(value, 'WORKSPACE_EVIDENCE_INVALID');
   if (root.version !== 1 || (root.phase !== 'IMPLEMENT' && root.phase !== 'IMPLEMENT_FIX'))
     throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_INVALID');
@@ -146,7 +146,7 @@ function decodeImplementationEvidence(value: unknown): ImplementationCompletionE
   };
 }
 
-function decodeReviewEvidence(value: unknown): ReviewCompletionEvidence {
+export function decodeReviewEvidence(value: unknown): ReviewCompletionEvidence {
   const root = record(value, 'WORKSPACE_EVIDENCE_INVALID');
   if (root.version !== 1 || root.phase !== 'REVIEW')
     throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_INVALID');

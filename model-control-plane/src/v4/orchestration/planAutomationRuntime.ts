@@ -15,6 +15,7 @@ import type { WorkItem } from '../domain/workGraph.js';
 import type { V4Repositories } from '../persistence/repositories.js';
 import type { ExecutionWorkerResult } from './executionWorker.js';
 import type { DeliveryAutomationPort, WorkspaceProviderPort } from './contracts.js';
+import { selectWorkItemWave } from './workItemWaves.js';
 import type {
   ResourceSelectionExclusion,
   ResourceSelectionPolicy,
@@ -43,6 +44,7 @@ export interface PlanAutomationPolicy {
   maxReviewAttempts?: number;
   maxInfrastructureAttempts?: number;
   maxRepairCycles?: number;
+  maxParallelWorkItems?: number;
   requireDelivery?: boolean;
 }
 
@@ -73,6 +75,7 @@ interface NormalizedPolicy {
   maxReviewAttempts: number;
   maxInfrastructureAttempts: number;
   maxRepairCycles: number;
+  maxParallelWorkItems: number;
   requireDelivery: boolean;
 }
 
@@ -95,12 +98,14 @@ function normalizePolicy(
   const maxReviewAttempts = policy.maxReviewAttempts ?? Math.max(reviewRoutes.length, 2);
   const maxInfrastructureAttempts = policy.maxInfrastructureAttempts ?? 8;
   const maxRepairCycles = policy.maxRepairCycles ?? 3;
+  const maxParallelWorkItems = policy.maxParallelWorkItems ?? 1;
   const requireDelivery = policy.requireDelivery ?? false;
   for (const [name, value] of Object.entries({
     maxImplementationAttempts,
     maxReviewAttempts,
     maxInfrastructureAttempts,
     maxRepairCycles,
+    maxParallelWorkItems,
   })) {
     if (!Number.isInteger(value) || value < 1 || value > 20)
       throw new V4Error('PLAN_AUTOMATION_LIMIT_INVALID', name);
@@ -113,6 +118,7 @@ function normalizePolicy(
     maxReviewAttempts,
     maxInfrastructureAttempts,
     maxRepairCycles,
+    maxParallelWorkItems,
     requireDelivery,
   };
 }
@@ -435,27 +441,41 @@ export class PlanAutomationRuntime {
       return await this.completePlan(plan, policy);
     }
 
-    const running = items.find((item) => item.status === 'RUNNING');
-    if (running) return await this.reconcileRunningItem(plan, running, policy);
+    const runningItems = items.filter((item) => item.status === 'RUNNING');
+    if (runningItems.length > 0)
+      return await this.reconcileRunningItem(plan, runningItems[0]!, policy);
     const failed = items.find((item) => item.status === 'FAILED' || item.status === 'BLOCKED');
     if (failed) return this.failPlan(plan, failed, 'WORK_ITEM_TERMINAL_FAILURE');
 
-    const byKey = new Map(items.map((item) => [item.itemKey, item]));
-    const runnable = items.find(
-      (item) =>
-        (item.status === 'PENDING' || item.status === 'READY') &&
-        item.dependencies.every((dependency) => byKey.get(dependency)?.status === 'SUCCEEDED'),
-    );
-    if (!runnable) return this.failPlan(plan, undefined, 'WORK_GRAPH_DEADLOCK');
-    if (runnable.status !== 'RUNNING')
-      this.repositories.plans.updateWorkItemStatus(runnable.workItemId, 'RUNNING');
-    const execution = this.createInitialExecution(plan, runnable, policy);
+    const wave = selectWorkItemWave(items, plan.currentRevision, policy.maxParallelWorkItems);
+    if (!wave) return this.failPlan(plan, undefined, 'WORK_GRAPH_DEADLOCK');
+    const created: Execution[] = [];
+    for (const candidate of wave.items) {
+      const assigned = this.repositories.plans.assignWorkItemWave(
+        candidate.workItemId,
+        wave.wave,
+        wave.baseRevision,
+      );
+      if (!assigned.value || assigned.status === 'rejected')
+        throw new V4Error(assigned.reason ?? 'WORK_ITEM_WAVE_ASSIGNMENT_FAILED');
+      const item = assigned.value;
+      if (item.status !== 'RUNNING')
+        this.repositories.plans.updateWorkItemStatus(item.workItemId, 'RUNNING');
+      created.push(
+        this.createInitialExecution(
+          plan,
+          this.repositories.plans.getWorkItem(item.workItemId),
+          policy,
+        ),
+      );
+    }
+    const first = created[0]!;
     return {
       planId,
-      workItemId: runnable.workItemId,
-      executionId: execution.identity.executionId,
+      workItemId: first.identity.workItemId,
+      executionId: first.identity.executionId,
       status: 'RUNNING',
-      code: 'IMPLEMENTATION_QUEUED',
+      code: created.length > 1 ? 'IMPLEMENTATION_WAVE_QUEUED' : 'IMPLEMENTATION_QUEUED',
     };
   }
 
@@ -786,7 +806,7 @@ export class PlanAutomationRuntime {
         item: workItem,
         phase: 'IMPLEMENT',
         attempt: 1,
-        sourceRevision: plan.currentRevision,
+        sourceRevision: workItem.integrationBaseRevision ?? plan.currentRevision,
         objective: workItem.objective,
       },
       policy,
@@ -1252,40 +1272,60 @@ export class PlanAutomationRuntime {
     // Do not re-impose providerStatus=SUCCEEDED here: operator/evidence adoption
     // intentionally preserves PAUSED provider truth while accepting exact repo facts.
     if (!session) return this.failPlan(plan, item, 'IMPLEMENTATION_SESSION_NOT_SUCCEEDED');
-    const observation = await this.workspace.observeRepository(
-      plan.repositoryPath,
-      candidate.resultRevision,
-    );
-    if (observation.headRevision === plan.currentRevision) {
-      if (!observation.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
-      await this.workspace.integrateAcceptedRevision({
+    let integratedRevision = candidate.resultRevision;
+    const integrationStrategy =
+      this.workspace.integrationStrategyFor?.(plan.planId, plan.projectKey) ??
+      this.workspace.integrationStrategy;
+    if (integrationStrategy === 'PLAN_WORKTREE') {
+      if (!item.integrationBaseRevision)
+        return this.failPlan(plan, item, 'WORK_ITEM_WAVE_BASE_REQUIRED');
+      const integrated = await this.workspace.integrateAcceptedRevision({
         repositoryPath: plan.repositoryPath,
         expectedRevision: plan.currentRevision,
         acceptedRevision: candidate.resultRevision,
         candidateWorkspace: session.workspace,
+        planId: plan.planId,
+        workItemId: item.workItemId,
+        integrationBaseRevision: item.integrationBaseRevision,
       });
-    } else if (observation.headRevision === candidate.resultRevision) {
-      if (!observation.clean) {
+      if (!integrated.clean) return this.failPlan(plan, item, 'PLAN_INTEGRATION_WORKTREE_DIRTY');
+      integratedRevision = integrated.headRevision;
+    } else {
+      const observation = await this.workspace.observeRepository(
+        plan.repositoryPath,
+        candidate.resultRevision,
+      );
+      if (observation.headRevision === plan.currentRevision) {
+        if (!observation.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
         await this.workspace.integrateAcceptedRevision({
           repositoryPath: plan.repositoryPath,
           expectedRevision: plan.currentRevision,
           acceptedRevision: candidate.resultRevision,
           candidateWorkspace: session.workspace,
         });
+      } else if (observation.headRevision === candidate.resultRevision) {
+        if (!observation.clean) {
+          await this.workspace.integrateAcceptedRevision({
+            repositoryPath: plan.repositoryPath,
+            expectedRevision: plan.currentRevision,
+            acceptedRevision: candidate.resultRevision,
+            candidateWorkspace: session.workspace,
+          });
+        }
+      } else {
+        return this.failPlan(
+          plan,
+          item,
+          observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY',
+        );
       }
-    } else {
-      return this.failPlan(
-        plan,
-        item,
-        observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY',
-      );
     }
     const current = this.repositories.plans.getPlan(plan.planId);
-    if (current.currentRevision !== candidate.resultRevision) {
+    if (current.currentRevision !== integratedRevision) {
       const advanced = this.repositories.plans.advanceAcceptedRevision(
         plan.planId,
         current.currentRevision,
-        candidate.resultRevision,
+        integratedRevision,
         'independent review ' + review.reviewId + ' passed',
       );
       if (advanced.status === 'rejected')
@@ -1299,6 +1339,7 @@ export class PlanAutomationRuntime {
     const accepted = this.repositories.plans.acceptWorkItemRevision(
       item.workItemId,
       candidate.resultRevision,
+      integratedRevision,
     );
     if (accepted.status === 'rejected')
       return {
@@ -1322,7 +1363,7 @@ export class PlanAutomationRuntime {
       planId: plan.planId,
       workItemId: item.workItemId,
       reviewId: review.reviewId,
-      revision: candidate.resultRevision,
+      revision: integratedRevision,
       status: 'RUNNING',
       code: 'WORK_ITEM_ACCEPTED',
     };
@@ -1334,6 +1375,7 @@ export class PlanAutomationRuntime {
     context: { workItemId?: string; reviewId?: string } = {},
   ): Promise<PlanAutomationResult> {
     let current = this.repositories.plans.getPlan(plan.planId);
+    if (this.workspace.assertPlanSafety) await this.workspace.assertPlanSafety(current.planId);
     current = this.supersedeDeliveryFromVerifiedChild(current);
     if (current.delivery?.status === 'SUPERSEDED_PENDING_CHILD') {
       return {
@@ -1365,7 +1407,13 @@ export class PlanAutomationRuntime {
         };
       }
       try {
-        const observation = await this.delivery.advance(current, current.delivery);
+        if (this.workspace.assertPlanSafety) await this.workspace.assertPlanSafety(current.planId);
+        const deliveryWorkspace = this.workspace.deliveryWorkspace
+          ? await this.workspace.deliveryWorkspace(current.planId)
+          : undefined;
+        const observation = await this.delivery.advance(current, current.delivery, {
+          ...(deliveryWorkspace ? { workspacePath: deliveryWorkspace } : {}),
+        });
         const durable = this.repositories.plans.recordDeliveryObservation(
           current.planId,
           observation,

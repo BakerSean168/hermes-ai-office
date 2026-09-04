@@ -32,6 +32,9 @@ export class PlanKernel {
       objective: string;
       dependencies?: string[];
       acceptanceCriteria?: string[];
+      parallelSafe?: boolean;
+      writeScopes?: string[];
+      conflictKeys?: string[];
     }[],
     options: { activate?: boolean } = {},
   ): { graphVersionId: string; items: WorkItem[] } {
@@ -51,6 +54,9 @@ export class PlanKernel {
       objective: item.objective,
       dependencies: item.dependencies ?? [],
       acceptanceCriteria: item.acceptanceCriteria ?? [],
+      parallelSafe: item.parallelSafe ?? false,
+      writeScopes: item.writeScopes ?? [],
+      conflictKeys: item.conflictKeys ?? [],
     }));
     validateGraphItems(normalized);
     const graph = this.repositories.plans.createGraphVersion({
@@ -76,6 +82,9 @@ export class PlanKernel {
           objective: item.objective,
           dependencies: item.dependencies,
           acceptanceCriteria: item.acceptanceCriteria,
+          parallelSafe: item.parallelSafe,
+          writeScopes: item.writeScopes,
+          conflictKeys: item.conflictKeys,
         });
         if (result.value) created.push(result.value);
       }

@@ -15,6 +15,21 @@ if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
 fi
 command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is required for literal V4 worktree ACLs" >&2; exit 1; }
 
+expected_single_active=false
+expected_literal=false
+if grep -q '^Environment=MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true$' \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service"; then
+  expected_single_active=true
+fi
+if grep -q '^Environment=MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true$' \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service"; then
+  expected_literal=true
+fi
+if [[ "$expected_literal" == true && "$expected_single_active" != true ]]; then
+  echo "refusing release: literal worktrees require single-active Plan scheduling" >&2
+  exit 1
+fi
+
 source_sha="$(git -C "$repo_root" rev-parse HEAD)"
 target_sha="$(git -C "$target_root" rev-parse HEAD)"
 if [[ "$source_sha" != "$target_sha" ]]; then
@@ -23,8 +38,7 @@ if [[ "$source_sha" != "$target_sha" ]]; then
 fi
 
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
-if grep -q '^Environment=MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true$' \
-  "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service"; then
+if [[ "$expected_literal" == true ]]; then
   sudo /usr/bin/node "$repo_root/model-control-plane/scripts/smoke-v4-literal-worktree.mjs"
 fi
 openhands_compose="$repo_root/model-control-plane/deploy/openhands-v3/docker-compose.yml"
@@ -168,9 +182,10 @@ sudo systemctl restart "$service"
 
 for _ in $(seq 1 30); do
   if health="$(curl -fsS --max-time 2 "$health_url" 2>/dev/null)"; then
-    if HEALTH_JSON="$health" /usr/bin/node - <<'NODE'
+    if HEALTH_JSON="$health" EXPECTED_SINGLE_ACTIVE="$expected_single_active" EXPECTED_LITERAL="$expected_literal" /usr/bin/node - <<'NODE'
 const payload = JSON.parse(process.env.HEALTH_JSON ?? '{}');
 const runtime = payload.executionRuntime ?? {};
+const scheduling = payload.planScheduling ?? {};
 const storage = payload.workspaceStorage ?? {};
 if (payload.status !== 'ok' || payload.apiVersion !== 4) process.exit(1);
 if (storage.lowCapacity !== false) process.exit(1);
@@ -182,6 +197,12 @@ if (Array.isArray(runtime.compatibilityReviewRoutes) && runtime.compatibilityRev
 if (Array.isArray(runtime.reviewRoutes) && runtime.reviewRoutes.includes('codex-auto-review')) process.exit(1);
 if (runtime.requireDelivery !== true) process.exit(1);
 if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense'])) process.exit(1);
+const expectedSingle = process.env.EXPECTED_SINGLE_ACTIVE === 'true';
+const expectedLiteral = process.env.EXPECTED_LITERAL === 'true';
+if (Boolean(scheduling.singleActivePlanEnabled) !== expectedSingle) process.exit(1);
+if (Boolean(scheduling.literalWorktreesEnabled) !== expectedLiteral) process.exit(1);
+const expectedLiteralProjects = expectedLiteral ? ['bodysense'] : [];
+if (JSON.stringify(runtime.literalWorktreeProjectKeys) !== JSON.stringify(expectedLiteralProjects)) process.exit(1);
 NODE
     then
       openhands="$(curl -fsS --max-time 2 http://127.0.0.1:18000/health)"

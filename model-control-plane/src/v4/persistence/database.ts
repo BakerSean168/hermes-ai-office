@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DataResetRequiredError, V4Error } from '../domain/errors.js';
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 10;
 
 const CREATE_EXECUTION_SESSIONS_SQL = `
 CREATE TABLE IF NOT EXISTS execution_sessions (
@@ -134,6 +134,17 @@ CREATE TABLE IF NOT EXISTS resource_state_overrides (
 );
 `;
 
+const CREATE_PROTECTED_REF_SNAPSHOT_SQL = `
+CREATE TABLE IF NOT EXISTS plan_protected_refs (
+  root_plan_id TEXT NOT NULL REFERENCES plans(plan_id),
+  ref_name TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(root_plan_id, ref_name)
+);
+CREATE INDEX IF NOT EXISTS idx_plan_protected_refs_plan ON plan_protected_refs(root_plan_id, ref_name);
+`;
+
 export const SCHEMA_V4_SQL = [
   'PRAGMA journal_mode = WAL;',
   'PRAGMA foreign_keys = ON;',
@@ -148,7 +159,7 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS plans (plan_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, project_key TEXT NOT NULL, objective TEXT NOT NULL, repository_path TEXT NOT NULL, base_revision TEXT NOT NULL, current_revision TEXT NOT NULL, status TEXT NOT NULL, active_graph_version_id TEXT, parent_plan_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS plan_deliveries (plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id), remote TEXT NOT NULL, branch TEXT NOT NULL, target_branch TEXT NOT NULL, auto_merge INTEGER NOT NULL, merge_method TEXT NOT NULL, required_checks TEXT NOT NULL, status TEXT NOT NULL, head_sha TEXT, pull_request_number INTEGER, pull_request_url TEXT, merge_sha TEXT, error_code TEXT, superseded_by_plan_id TEXT REFERENCES plans(plan_id), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS graph_versions (graph_version_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(plan_id), version INTEGER NOT NULL, parent_graph_version_id TEXT, reason TEXT NOT NULL, triggering_observation_cursor INTEGER, status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(plan_id, version));',
-  'CREATE TABLE IF NOT EXISTS work_items (work_item_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(plan_id), graph_version_id TEXT NOT NULL REFERENCES graph_versions(graph_version_id), item_key TEXT NOT NULL, title TEXT NOT NULL, objective TEXT NOT NULL, acceptance_criteria TEXT NOT NULL, dependencies TEXT NOT NULL, status TEXT NOT NULL, exact_accepted_revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(graph_version_id, item_key));',
+  "CREATE TABLE IF NOT EXISTS work_items (work_item_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL REFERENCES plans(plan_id), graph_version_id TEXT NOT NULL REFERENCES graph_versions(graph_version_id), item_key TEXT NOT NULL, title TEXT NOT NULL, objective TEXT NOT NULL, acceptance_criteria TEXT NOT NULL, dependencies TEXT NOT NULL, parallel_safe INTEGER NOT NULL DEFAULT 0, write_scopes TEXT NOT NULL DEFAULT '[]', conflict_keys TEXT NOT NULL DEFAULT '[]', wave INTEGER, integration_base_revision TEXT, status TEXT NOT NULL, exact_accepted_revision TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(graph_version_id, item_key));",
   'CREATE TABLE IF NOT EXISTS executions (execution_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, plan_id TEXT NOT NULL REFERENCES plans(plan_id), work_item_id TEXT REFERENCES work_items(work_item_id), phase TEXT NOT NULL, parent_execution_id TEXT REFERENCES executions(execution_id), attempt INTEGER NOT NULL, route TEXT NOT NULL, source_revision TEXT, objective TEXT NOT NULL, status TEXT NOT NULL, result_revision TEXT, result_summary TEXT, error_code TEXT, retryable INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   CREATE_EXECUTION_SESSIONS_SQL,
   'CREATE TABLE IF NOT EXISTS reviews (review_id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, plan_id TEXT NOT NULL REFERENCES plans(plan_id), work_item_id TEXT REFERENCES work_items(work_item_id), implementation_execution_id TEXT NOT NULL REFERENCES executions(execution_id), reviewer_execution_id TEXT, source_revision TEXT NOT NULL, reviewed_sha TEXT NOT NULL, status TEXT NOT NULL, verdict TEXT, findings TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
@@ -160,11 +171,12 @@ export const SCHEMA_V4_SQL = [
   CREATE_RESOURCE_ROUTING_SQL,
   CREATE_PROJECT_PLAN_SCHEDULING_SQL,
   CREATE_PLAN_WORKTREES_SQL,
+  CREATE_PROTECTED_REF_SNAPSHOT_SQL,
   'CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT REFERENCES plans(plan_id), pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
-  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 8, CAST(strftime('%s','now') AS INTEGER));",
+  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 10, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
 const V1_REQUIRED_COLUMNS = {
@@ -505,6 +517,23 @@ const V8_REQUIRED_COLUMNS = {
   ],
 } as const satisfies Record<string, readonly string[]>;
 
+const V9_REQUIRED_COLUMNS = {
+  ...V8_REQUIRED_COLUMNS,
+  work_items: [
+    ...V8_REQUIRED_COLUMNS.work_items,
+    'parallel_safe',
+    'write_scopes',
+    'conflict_keys',
+    'wave',
+    'integration_base_revision',
+  ],
+} as const satisfies Record<string, readonly string[]>;
+
+const V10_REQUIRED_COLUMNS = {
+  ...V9_REQUIRED_COLUMNS,
+  plan_protected_refs: ['root_plan_id', 'ref_name', 'revision', 'created_at'],
+} as const satisfies Record<string, readonly string[]>;
+
 export interface V4DatabaseOptions {
   env?: NodeJS.ProcessEnv;
   environment?: 'test' | 'development' | 'staging' | 'production';
@@ -541,6 +570,17 @@ function assertVersion(value: unknown): asserts value is number {
       'Unsupported V4 schema version: ' + String(value),
     );
   }
+}
+
+function tableColumns(db: DatabaseSync, table: string): Set<string> {
+  const escaped = table.replaceAll('\"', '\"\"');
+  return new Set(
+    (
+      db.prepare('PRAGMA table_info(\"' + escaped + '\")').all() as unknown as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name),
+  );
 }
 
 function assertSchemaColumns(db: DatabaseSync, required: Record<string, readonly string[]>): void {
@@ -662,6 +702,20 @@ function assertV8Relationships(db: DatabaseSync): void {
     throw new V4Error(
       'V4_SCHEMA_INCOMPLETE',
       'Missing foreign key: plan_worktrees.owner_execution_id -> executions.execution_id',
+    );
+  }
+}
+
+function assertV9Relationships(db: DatabaseSync): void {
+  assertV8Relationships(db);
+}
+
+function assertV10Relationships(db: DatabaseSync): void {
+  assertV9Relationships(db);
+  if (!hasForeignKey(db, 'plan_protected_refs', 'root_plan_id', 'plans', 'plan_id')) {
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: plan_protected_refs.root_plan_id -> plans.plan_id',
     );
   }
 }
@@ -964,10 +1018,81 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
     }
   }
 
+  const afterV8 = schemaVersion(db);
+  if (afterV8 === 8) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const lockedVersion = schemaVersion(db);
+      if (lockedVersion !== 8) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      assertSchemaColumns(db, V8_REQUIRED_COLUMNS);
+      assertV8Relationships(db);
+      const columns = tableColumns(db, 'work_items');
+      if (!columns.has('parallel_safe'))
+        db.exec('ALTER TABLE work_items ADD COLUMN parallel_safe INTEGER NOT NULL DEFAULT 0');
+      if (!columns.has('write_scopes'))
+        db.exec("ALTER TABLE work_items ADD COLUMN write_scopes TEXT NOT NULL DEFAULT '[]'");
+      if (!columns.has('conflict_keys'))
+        db.exec("ALTER TABLE work_items ADD COLUMN conflict_keys TEXT NOT NULL DEFAULT '[]'");
+      if (!columns.has('wave')) db.exec('ALTER TABLE work_items ADD COLUMN wave INTEGER');
+      if (!columns.has('integration_base_revision'))
+        db.exec('ALTER TABLE work_items ADD COLUMN integration_base_revision TEXT');
+      assertSchemaColumns(db, V9_REQUIRED_COLUMNS);
+      assertV9Relationships(db);
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=9 WHERE schema_id='pixel-v4' AND schema_version=8",
+        )
+        .run();
+      if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
+      throw error;
+    }
+  }
+
+  const afterV9 = schemaVersion(db);
+  if (afterV9 === 9) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const lockedVersion = schemaVersion(db);
+      if (lockedVersion !== 9) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      assertSchemaColumns(db, V9_REQUIRED_COLUMNS);
+      assertV9Relationships(db);
+      const existingTables = tableNames(db);
+      if (existingTables.has('plan_protected_refs')) {
+        assertSchemaColumns(db, {
+          plan_protected_refs: V10_REQUIRED_COLUMNS.plan_protected_refs,
+        });
+      }
+      db.exec(CREATE_PROTECTED_REF_SNAPSHOT_SQL);
+      assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
+      assertV10Relationships(db);
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=10 WHERE schema_id='pixel-v4' AND schema_version=9",
+        )
+        .run();
+      if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
+      throw error;
+    }
+  }
+
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V8_REQUIRED_COLUMNS);
-  assertV8Relationships(db);
+  assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
+  assertV10Relationships(db);
 }
 
 function dropAllTables(db: DatabaseSync): void {
@@ -985,10 +1110,44 @@ function createSchema(db: DatabaseSync): void {
 }
 
 export function assertCurrentV4Schema(db: DatabaseSync): void {
+  const afterV9 = schemaVersion(db);
+  if (afterV9 === 9) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const lockedVersion = schemaVersion(db);
+      if (lockedVersion !== 9) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      assertSchemaColumns(db, V9_REQUIRED_COLUMNS);
+      assertV9Relationships(db);
+      const existingTables = tableNames(db);
+      if (existingTables.has('plan_protected_refs')) {
+        assertSchemaColumns(db, {
+          plan_protected_refs: V10_REQUIRED_COLUMNS.plan_protected_refs,
+        });
+      }
+      db.exec(CREATE_PROTECTED_REF_SNAPSHOT_SQL);
+      assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
+      assertV10Relationships(db);
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=10 WHERE schema_id='pixel-v4' AND schema_version=9",
+        )
+        .run();
+      if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
+      throw error;
+    }
+  }
+
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V8_REQUIRED_COLUMNS);
-  assertV8Relationships(db);
+  assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
+  assertV10Relationships(db);
 }
 
 export function openV4Database(file: string, options: V4DatabaseOptions = {}): DatabaseSync {

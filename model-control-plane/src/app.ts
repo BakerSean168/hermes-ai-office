@@ -10,6 +10,9 @@ import {
   AntigravityReviewProvider,
 } from './v4/adapters/antigravity.js';
 import { LocalGitWorkspaceAdapter } from './v4/adapters/gitWorkspace.js';
+import { LiteralWorktreeWorkspaceAdapter } from './v4/adapters/literalWorktreeWorkspace.js';
+import { PlanWorktreeManager } from './v4/adapters/planWorktrees.js';
+import { ProjectScopedWorkspaceAdapter } from './v4/adapters/projectScopedWorkspace.js';
 import { LiteLlmExecutionTelemetry } from './v4/adapters/liteLlmTelemetry.js';
 import { GitHubCliDeliveryAdapter } from './v4/adapters/githubDelivery.js';
 import {
@@ -55,7 +58,7 @@ import {
 } from './v4/kernel/index.js';
 import { ExecutionWorker, type ExecutionWorkerRoute } from './v4/orchestration/executionWorker.js';
 import { ProjectPlanQueueRuntime } from './v4/orchestration/projectPlanQueueRuntime.js';
-import type { ExecutionProviderPort } from './v4/orchestration/contracts.js';
+import type { ExecutionProviderPort, WorkspaceProviderPort } from './v4/orchestration/contracts.js';
 import {
   ResourceSelector,
   selectExecutableProfile,
@@ -92,13 +95,16 @@ export interface BuildControlPlaneOptions {
 }
 
 export interface ExecutionAutomationRuntime {
-  workspace: LocalGitWorkspaceAdapter;
+  workspace: WorkspaceProviderPort;
+  planWorktreeManager?: PlanWorktreeManager;
+  workspaceUid: number;
   worker: ExecutionWorker;
   plans: PlanAutomationRuntime;
   policy: StaticPlanAutomationPolicyResolver;
   implementationRoutes: string[];
   reviewRoutes: string[];
   automationProjectKeys: string[];
+  literalWorktreeProjectKeys: string[];
   requireDelivery: boolean;
   routeModels: Record<string, string>;
   resourceSelectorEnabled: boolean;
@@ -261,6 +267,18 @@ async function buildExecutionAutomation(
     env.MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT ?? '/workspace',
     'WORKSPACE_EXECUTION_ROOT_REQUIRED',
   );
+  const automationProjectKeys = commaList(env.MODEL_CP_V4_AUTOMATION_PROJECTS);
+  const literalWorktreesEnabled = env.MODEL_CP_V4_LITERAL_WORKTREES_ENABLED === 'true';
+  const literalWorktreeProjectKeys = literalWorktreesEnabled
+    ? commaList(env.MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS)
+    : [];
+  if (literalWorktreesEnabled && literalWorktreeProjectKeys.length === 0)
+    throw new V4Error('LITERAL_WORKTREE_PROJECTS_REQUIRED');
+  if (
+    automationProjectKeys.length > 0 &&
+    literalWorktreeProjectKeys.some((projectKey) => !automationProjectKeys.includes(projectKey))
+  )
+    throw new V4Error('LITERAL_WORKTREE_PROJECT_NOT_AUTOMATED');
   // Resource-selected executions bypass this map and resolve their provider from
   // the immutable ExecutionResourceSelection. Keep only same-family emergency
   // compatibility routes for selector-disabled recovery; task aliases and
@@ -453,34 +471,69 @@ async function buildExecutionAutomation(
     2 ** 31 - 1,
     'WORKSPACE_OWNER_INVALID',
   );
-  const workspace = new LocalGitWorkspaceAdapter({
+  const gitTimeoutMs = integerValue(
+    env.MODEL_CP_V4_GIT_TIMEOUT_MS,
+    120_000,
+    1_000,
+    15 * 60_000,
+    'WORKSPACE_GIT_TIMEOUT_INVALID',
+  );
+  const gitMaxBufferBytes = integerValue(
+    env.MODEL_CP_V4_GIT_MAX_BUFFER_BYTES,
+    8 * 1024 * 1024,
+    64 * 1024,
+    64 * 1024 * 1024,
+    'WORKSPACE_GIT_BUFFER_INVALID',
+  );
+  const workspaceMinimumFreeBytes = integerValue(
+    env.MODEL_CP_V4_WORKSPACE_MIN_FREE_BYTES,
+    8 * 1024 * 1024 * 1024,
+    0,
+    1024 ** 5,
+    'WORKSPACE_CAPACITY_THRESHOLD_INVALID',
+  );
+  const legacyWorkspace = new LocalGitWorkspaceAdapter({
     allowedRepositoryRoots,
     managedHostRoot,
     executionRoot,
-    commandTimeoutMs: integerValue(
-      env.MODEL_CP_V4_GIT_TIMEOUT_MS,
-      120_000,
-      1_000,
-      15 * 60_000,
-      'WORKSPACE_GIT_TIMEOUT_INVALID',
-    ),
-    maxBufferBytes: integerValue(
-      env.MODEL_CP_V4_GIT_MAX_BUFFER_BYTES,
-      8 * 1024 * 1024,
-      64 * 1024,
-      64 * 1024 * 1024,
-      'WORKSPACE_GIT_BUFFER_INVALID',
-    ),
-    minimumFreeBytes: integerValue(
-      env.MODEL_CP_V4_WORKSPACE_MIN_FREE_BYTES,
-      8 * 1024 * 1024 * 1024,
-      0,
-      1024 ** 5,
-      'WORKSPACE_CAPACITY_THRESHOLD_INVALID',
-    ),
+    commandTimeoutMs: gitTimeoutMs,
+    maxBufferBytes: gitMaxBufferBytes,
+    minimumFreeBytes: workspaceMinimumFreeBytes,
     workspaceUid,
     workspaceGid,
   });
+  const planWorktreeManager =
+    literalWorktreeProjectKeys.length > 0
+      ? new PlanWorktreeManager({
+          repositories,
+          allowedRepositoryRoots,
+          managedHostRoot,
+          executionRoot,
+          commandTimeoutMs: gitTimeoutMs,
+          maxBufferBytes: gitMaxBufferBytes,
+        })
+      : undefined;
+  const literalWorkspace = planWorktreeManager
+    ? new LiteralWorktreeWorkspaceAdapter({
+        repositories,
+        manager: planWorktreeManager,
+        managedHostRoot,
+        executionRoot,
+        workspaceUid,
+        workspaceGid,
+        minimumFreeBytes: workspaceMinimumFreeBytes,
+        commandTimeoutMs: gitTimeoutMs,
+        maxBufferBytes: gitMaxBufferBytes,
+      })
+    : undefined;
+  const workspace: WorkspaceProviderPort = literalWorkspace
+    ? new ProjectScopedWorkspaceAdapter({
+        repositories,
+        legacy: legacyWorkspace,
+        literal: literalWorkspace,
+        literalProjects: literalWorktreeProjectKeys,
+      })
+    : legacyWorkspace;
   const openHandsProviderFactory = createOpenHandsProviderFactory(common);
   const antigravityBase = {
     binary: antigravityBinary,
@@ -710,6 +763,13 @@ async function buildExecutionAutomation(
     ),
     ...(resourceSelectorEnabled ? { providerFactory, resourceFeedback: resourceState } : {}),
   });
+  const maxParallelWorkItems = integerValue(
+    env.MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS,
+    1,
+    1,
+    32,
+    'PLAN_AUTOMATION_LIMIT_INVALID',
+  );
   const defaultPolicy: PlanAutomationPolicy = {
     implementationRoutes,
     reviewRoutes,
@@ -738,22 +798,32 @@ async function buildExecutionAutomation(
       20,
       'PLAN_AUTOMATION_LIMIT_INVALID',
     ),
+    maxParallelWorkItems: 1,
   };
-  const automationProjectKeys = commaList(env.MODEL_CP_V4_AUTOMATION_PROJECTS);
   const antigravityProjectKeys = new Set(
     commaList(env.MODEL_CP_V4_ANTIGRAVITY_PROJECTS ?? 'digital-biome'),
   );
+  const literalProjectSet = new Set(literalWorktreeProjectKeys);
   const policyOverrides = Object.fromEntries(
     automationProjectKeys
-      .filter((projectKey) => antigravityEnabled && antigravityProjectKeys.has(projectKey))
+      .filter(
+        (projectKey) =>
+          literalProjectSet.has(projectKey) ||
+          (antigravityEnabled && antigravityProjectKeys.has(projectKey)),
+      )
       .map((projectKey) => [
         projectKey,
         {
           ...defaultPolicy,
-          resourceSelection: {
-            includeProviderNativeProfiles: true,
-            allowedPolicyKeys: ['provider-native-trusted-input'],
-          },
+          maxParallelWorkItems: literalProjectSet.has(projectKey) ? maxParallelWorkItems : 1,
+          ...(antigravityEnabled && antigravityProjectKeys.has(projectKey)
+            ? {
+                resourceSelection: {
+                  includeProviderNativeProfiles: true,
+                  allowedPolicyKeys: ['provider-native-trusted-input'],
+                },
+              }
+            : {}),
         } satisfies PlanAutomationPolicy,
       ]),
   );
@@ -764,6 +834,7 @@ async function buildExecutionAutomation(
   );
   const delivery = new GitHubCliDeliveryAdapter({
     allowedRepositoryRoots,
+    allowedWorkspaceRoots: [managedHostRoot],
     commandTimeoutMs: integerValue(
       env.MODEL_CP_V4_DELIVERY_TIMEOUT_MS,
       120_000,
@@ -789,12 +860,15 @@ async function buildExecutionAutomation(
   );
   return {
     workspace,
+    ...(planWorktreeManager ? { planWorktreeManager } : {}),
+    workspaceUid,
     worker,
     plans,
     policy,
     implementationRoutes,
     reviewRoutes,
     automationProjectKeys,
+    literalWorktreeProjectKeys,
     requireDelivery: defaultPolicy.requireDelivery === true,
     routeModels: Object.fromEntries(
       [...implementationSpecs, ...reviewSpecs].map(({ route, model }) => [route, model]),
@@ -831,7 +905,6 @@ export async function buildControlPlane(
   const projectPlanQueue = singleActivePlanEnabled
     ? new ProjectPlanQueueRuntime(repositories)
     : undefined;
-  projectPlanQueue?.bootstrapExistingRootPlans();
   const executionTelemetry = new LiteLlmExecutionTelemetry({
     baseUrl: requiredText(
       env.MODEL_CP_V3_LITELLM_URL ??
@@ -859,6 +932,30 @@ export async function buildControlPlane(
     delivery: new DeliveryKernel(),
   };
   const automation = await buildExecutionAutomation(env, repositories, options.fetchImpl ?? fetch);
+  if (projectPlanQueue) {
+    projectPlanQueue.bootstrapExistingRootPlans();
+    if (automation?.planWorktreeManager) {
+      const literalProjects = new Set(automation.literalWorktreeProjectKeys);
+      projectPlanQueue.setLifecycle({
+        activate: async (rootPlanId) => {
+          const plan = repositories.plans.getPlan(rootPlanId);
+          if (literalProjects.has(plan.projectKey))
+            await automation.planWorktreeManager!.ensurePlanActivated(rootPlanId);
+        },
+        retire: async (rootPlanId) => {
+          const plan = repositories.plans.getPlan(rootPlanId);
+          if (literalProjects.has(plan.projectKey))
+            await automation.planWorktreeManager!.retirePlan(rootPlanId, automation.workspaceUid);
+        },
+      });
+      for (const lease of repositories.projectPlans.listLeases()) {
+        if (!lease.activeRootPlanId) continue;
+        const plan = repositories.plans.getPlan(lease.activeRootPlanId);
+        if (literalProjects.has(plan.projectKey))
+          await automation.planWorktreeManager.ensurePlanActivated(lease.activeRootPlanId);
+      }
+    }
+  }
   const requireAutomation = (): ExecutionAutomationRuntime => {
     if (!automation) throw new V4Error('EXECUTION_RUNTIME_DISABLED');
     return automation;
@@ -1106,6 +1203,7 @@ export async function buildControlPlane(
       implementationRoutes: automation?.implementationRoutes ?? [],
       reviewRoutes: automation?.reviewRoutes ?? [],
       automationProjectKeys: automation?.automationProjectKeys ?? [],
+      literalWorktreeProjectKeys: automation?.literalWorktreeProjectKeys ?? [],
       requireDelivery: automation?.requireDelivery ?? false,
     },
   }));
@@ -1323,6 +1421,17 @@ export async function buildControlPlane(
                 requiredText(entry, 'GRAPH_ACCEPTANCE_INVALID'),
               )
             : [],
+          parallelSafe: value.parallelSafe === true,
+          writeScopes: Array.isArray(value.writeScopes)
+            ? value.writeScopes.map((entry) =>
+                requiredText(entry, 'WORK_ITEM_WRITE_SCOPES_INVALID'),
+              )
+            : [],
+          conflictKeys: Array.isArray(value.conflictKeys)
+            ? value.conflictKeys.map((entry) =>
+                requiredText(entry, 'WORK_ITEM_CONFLICT_KEYS_INVALID'),
+              )
+            : [],
         };
       }),
       { activate: !singleActivePlanEnabled },
@@ -1339,6 +1448,12 @@ export async function buildControlPlane(
                 })(),
         )
       : undefined;
+    if (
+      scheduling?.status === 'ACTIVE' &&
+      automation?.planWorktreeManager &&
+      automation.literalWorktreeProjectKeys.includes(plan.projectKey)
+    )
+      await automation.planWorktreeManager.ensurePlanActivated(plan.planId);
     let supervisor = repositories.supervisors.getByPlanId(plan.planId);
     if (!projectPlanQueue) {
       supervisor = supervisor ?? repositories.supervisors.create({ planId: plan.planId }).value;
@@ -1407,6 +1522,17 @@ export async function buildControlPlane(
           acceptanceCriteria: Array.isArray(value.acceptanceCriteria)
             ? value.acceptanceCriteria.map((entry) =>
                 requiredText(entry, 'GRAPH_ACCEPTANCE_INVALID'),
+              )
+            : [],
+          parallelSafe: value.parallelSafe === true,
+          writeScopes: Array.isArray(value.writeScopes)
+            ? value.writeScopes.map((entry) =>
+                requiredText(entry, 'WORK_ITEM_WRITE_SCOPES_INVALID'),
+              )
+            : [],
+          conflictKeys: Array.isArray(value.conflictKeys)
+            ? value.conflictKeys.map((entry) =>
+                requiredText(entry, 'WORK_ITEM_CONFLICT_KEYS_INVALID'),
               )
             : [],
         };
@@ -1739,9 +1865,9 @@ export async function buildControlPlane(
             if (automationCycleRunning) return;
             automationCycleRunning = true;
             void runWorkspaceStorageMaintenance()
-              .then(() => {
-                projectPlanQueue?.reconcile();
-                return automation.plans.runOnce();
+              .then(async () => {
+                if (projectPlanQueue) await projectPlanQueue.reconcile();
+                return await automation.plans.runOnce();
               })
               .then((results) => {
                 for (const result of results)
