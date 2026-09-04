@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -453,6 +453,52 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     const descriptor = this.validateWorkspace(workspace);
     const stat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
     return Boolean(stat?.isFile() && !stat.isSymbolicLink() && stat.size > 0);
+  }
+
+  async progressFingerprint(workspace: WorkspaceDescriptor): Promise<string> {
+    const descriptor = this.validateWorkspace(workspace);
+    const head = await this.runGit([
+      '-C',
+      descriptor.hostPath,
+      'rev-parse',
+      '--verify',
+      'HEAD^{commit}',
+    ]);
+    const status = await this.runGit(['-C', descriptor.hostPath, 'status', '--porcelain=v1', '-z']);
+    const unstaged = await this.runGit([
+      '-C',
+      descriptor.hostPath,
+      'diff',
+      '--no-ext-diff',
+      '--numstat',
+      'HEAD',
+    ]);
+    const staged = await this.runGit([
+      '-C',
+      descriptor.hostPath,
+      'diff',
+      '--no-ext-diff',
+      '--cached',
+      '--numstat',
+      'HEAD',
+    ]);
+    let evidenceHash = '';
+    const stat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (stat?.isFile() && !stat.isSymbolicLink())
+      evidenceHash = createHash('sha256')
+        .update(fs.readFileSync(descriptor.evidenceHostPath))
+        .digest('hex');
+    return createHash('sha256')
+      .update(head)
+      .update('\0')
+      .update(status)
+      .update('\0')
+      .update(unstaged)
+      .update('\0')
+      .update(staged)
+      .update('\0')
+      .update(evidenceHash)
+      .digest('hex');
   }
 
   storageStatus(): WorkspaceStorageStatus {

@@ -90,11 +90,18 @@ class FakeWorkspace implements WorkspaceProviderPort {
   readonly completions = new Map<string, WorkspaceCompletionSnapshot>();
   readonly implementationFailures = new Map<string, V4Error[]>();
   readonly completionEvidence = new Set<string>();
+  readonly progressFingerprints = new Map<string, string>();
   provisionError?: V4Error;
   provisionCalls = 0;
 
   hasCompletionEvidence(workspace: WorkspaceDescriptor): boolean {
     return this.completionEvidence.has(workspace.executionId);
+  }
+
+  async progressFingerprint(workspace: WorkspaceDescriptor): Promise<string> {
+    return (
+      this.progressFingerprints.get(workspace.executionId) ?? 'workspace:' + workspace.executionId
+    );
   }
 
   async observeRepository(repositoryPath: string, revision: string) {
@@ -170,6 +177,7 @@ class FakeProvider implements ExecutionProviderPort {
   inspectCalls = 0;
   continueCalls = 0;
   interruptCalls = 0;
+  continueObservedOffset = 50;
   replaceCalls = 0;
   launchSnapshot: ProviderSessionSnapshot = {
     provider: this.provider,
@@ -230,12 +238,15 @@ class FakeProvider implements ExecutionProviderPort {
   ): Promise<ProviderSessionSnapshot> {
     this.continueCalls += 1;
     this.lastContinueInstruction = instruction;
-    return { ...this.continueSnapshot, observedAt: now(50 + this.continueCalls) };
+    return {
+      ...this.continueSnapshot,
+      observedAt: now(this.continueObservedOffset + this.continueCalls),
+    };
   }
 
   async interrupt(_providerSessionId: string): Promise<ProviderSessionSnapshot> {
     this.interruptCalls += 1;
-    return { ...this.interruptSnapshot, observedAt: now(40 + this.interruptCalls) };
+    return { ...this.interruptSnapshot, observedAt: now(500 + this.interruptCalls) };
   }
 
   async replace(input: ProviderSessionReplacementInput): Promise<ProviderSessionSnapshot> {
@@ -1011,6 +1022,7 @@ test('execution worker can interrupt a stuck provider turn and continue the same
   });
   const workspace = new FakeWorkspace();
   const provider = new FakeProvider();
+  provider.continueObservedOffset = 600;
   const worker = new ExecutionWorker(
     seeded.repositories,
     workspace,
@@ -1033,6 +1045,135 @@ test('execution worker can interrupt a stuck provider turn and continue the same
     seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
     'RUNNING',
   );
+  seeded.db.close();
+});
+
+test('execution worker separates liveness heartbeats from meaningful progress and auto-replaces a stalled provider turn', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-auto-meaningful-stall',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.progressFingerprints.set(execution.identity.executionId, 'workspace-1');
+  const provider = new FakeProvider();
+  provider.launchSnapshot = {
+    ...provider.launchSnapshot,
+    progressFingerprint: 'event-1',
+  };
+  provider.inspectSnapshot = {
+    ...provider.inspectSnapshot,
+    progressFingerprint: 'event-1',
+  };
+  let clock = Date.now();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    {
+      ownerId: 'worker-auto-meaningful-stall',
+      meaningfulProgressTimeoutMs: 30_000,
+      maxStallRecoveries: 1,
+      now: () => new Date(clock),
+    },
+  );
+
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  clock += 10_000;
+  const heartbeatOnly = await worker.runExecution(execution.identity.executionId);
+  assert.equal(heartbeatOnly.status, 'RUNNING');
+  assert.equal(provider.replaceCalls, 0);
+  clock += 21_000;
+  const recovered = await worker.runExecution(execution.identity.executionId);
+  assert.equal(recovered.code, 'PROVIDER_MEANINGFUL_PROGRESS_RECOVERED_RUNNING');
+  assert.equal(provider.interruptCalls, 1);
+  assert.equal(provider.replaceCalls, 1);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
+    'provider-session-2',
+  );
+  const evidence = seeded.repositories.evidence.listByExecution(execution.identity.executionId);
+  assert.equal(evidence.filter((item) => item.name.startsWith('meaningful-progress-')).length, 1);
+  assert.equal(
+    evidence.filter((item) => item.name.startsWith('meaningful-stall-recovery-')).length,
+    1,
+  );
+  seeded.db.close();
+});
+
+test('execution worker fails a meaningfully stalled turn retryably after the automatic recovery budget is exhausted', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-meaningful-stall-exhausted',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.progressFingerprints.set(execution.identity.executionId, 'workspace-static');
+  const provider = new FakeProvider();
+  provider.launchSnapshot = { ...provider.launchSnapshot, progressFingerprint: 'event-static' };
+  provider.inspectSnapshot = { ...provider.inspectSnapshot, progressFingerprint: 'event-static' };
+  let clock = Date.now();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    {
+      ownerId: 'worker-meaningful-stall-exhausted',
+      meaningfulProgressTimeoutMs: 30_000,
+      maxStallRecoveries: 0,
+      now: () => new Date(clock),
+    },
+  );
+  await worker.runExecution(execution.identity.executionId);
+  clock += 31_000;
+  const failed = await worker.runExecution(execution.identity.executionId);
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(failed.code, 'PROVIDER_MEANINGFUL_PROGRESS_STALLED');
+  assert.equal(provider.replaceCalls, 0);
+  assert.equal(provider.interruptCalls, 1);
+  const durable = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(durable.status, 'FAILED');
+  assert.equal(durable.retryable, true);
+  seeded.db.close();
+});
+
+test('execution worker resets the stall window only when provider or workspace progress fingerprint advances', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-progress-advance',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.progressFingerprints.set(execution.identity.executionId, 'workspace-1');
+  const provider = new FakeProvider();
+  provider.launchSnapshot = { ...provider.launchSnapshot, progressFingerprint: 'event-1' };
+  provider.inspectSnapshot = { ...provider.inspectSnapshot, progressFingerprint: 'event-2' };
+  let clock = Date.now();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    {
+      ownerId: 'worker-progress-advance',
+      meaningfulProgressTimeoutMs: 30_000,
+      maxStallRecoveries: 1,
+      now: () => new Date(clock),
+    },
+  );
+  await worker.runExecution(execution.identity.executionId);
+  clock += 31_000;
+  const advanced = await worker.runExecution(execution.identity.executionId);
+  assert.equal(advanced.status, 'RUNNING');
+  assert.equal(provider.replaceCalls, 0);
+  const progress = seeded.repositories.evidence
+    .listByExecution(execution.identity.executionId)
+    .filter((item) => item.name.startsWith('meaningful-progress-'));
+  assert.equal(progress.length, 2);
+  assert.notEqual(progress[0]?.payload.fingerprint, progress[1]?.payload.fingerprint);
   seeded.db.close();
 });
 

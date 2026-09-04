@@ -106,6 +106,8 @@ export interface ProviderSessionSnapshot {
   finalResponse?: string;
   errorCode?: string;
   retryable?: boolean;
+  /** Opaque hash/cursor that changes only when provider-side work advances. */
+  progressFingerprint?: string;
   observedAt: string;
 }
 
@@ -151,6 +153,20 @@ export interface ProviderLaunchInput {
   reviewFindings?: string[];
 }
 
+export interface ProviderRuntimeProbeInput {
+  probeId: string;
+  workspace: WorkspaceDescriptor;
+  sourceRevision: string;
+}
+
+export interface ProviderRuntimeProbeResult {
+  provider: string;
+  providerSessionId: string;
+  status: ProviderSessionStatus;
+  ready: boolean;
+  observedAt: string;
+}
+
 export interface ProviderRecoveryInput {
   executionId: string;
   createdAt: string;
@@ -190,6 +206,8 @@ export interface WorkspaceProviderPort {
   provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
   /** Cheap signal used by the worker before attempting evidence-verified finalization. */
   hasCompletionEvidence?(workspace: WorkspaceDescriptor): boolean;
+  /** Opaque repository-state hash; raw paths/content are never persisted by the worker. */
+  progressFingerprint?(workspace: WorkspaceDescriptor): Promise<string>;
   storageStatus?(): WorkspaceStorageStatus;
   pruneTerminalCaches?(
     workspaces: readonly WorkspaceDescriptor[],
@@ -209,6 +227,7 @@ export interface WorkspaceProviderPort {
 
 export interface ExecutionProviderPort {
   readonly provider: string;
+  probeRuntime?(input: ProviderRuntimeProbeInput): Promise<ProviderRuntimeProbeResult>;
   launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot>;
   recover(input: ProviderRecoveryInput): Promise<ProviderSessionSnapshot | undefined>;
   inspect(providerSessionId: string): Promise<ProviderSessionSnapshot>;

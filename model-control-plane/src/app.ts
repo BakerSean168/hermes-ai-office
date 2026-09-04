@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -38,6 +40,7 @@ import { EXECUTION_STATUSES, type ExecutionStatus } from './v4/domain/execution.
 import { PLAN_STATUSES, type PlanStatus } from './v4/domain/plan.js';
 import {
   DEFAULT_AFFINITY_POLICY,
+  createExecutionResourceSelection,
   type ExecutionResource,
   type ExecutionResourceSelection,
   type ResourceState,
@@ -51,7 +54,17 @@ import {
   WorkGraphKernel,
 } from './v4/kernel/index.js';
 import { ExecutionWorker, type ExecutionWorkerRoute } from './v4/orchestration/executionWorker.js';
-import { ResourceSelector } from './v4/orchestration/resourceSelector.js';
+import type { ExecutionProviderPort } from './v4/orchestration/contracts.js';
+import {
+  ResourceSelector,
+  selectExecutableProfile,
+  type ResourceSelectionCandidate,
+} from './v4/orchestration/resourceSelector.js';
+import {
+  RuntimeAdmissionRegistry,
+  requiresAcpRuntimeAdmission,
+  runtimeAdmissionKey,
+} from './v4/orchestration/runtimeAdmission.js';
 import {
   PlanAutomationRuntime,
   StaticPlanAutomationPolicyResolver,
@@ -94,6 +107,9 @@ export interface ExecutionAutomationRuntime {
   resourceState: ResourceStateService;
   resourceStateEffect: LiteLlmResourceStateEffect;
   resourceLifecycle: ResourceLifecycleManager;
+  runtimeAdmissionEnabled: boolean;
+  runtimeAdmission: RuntimeAdmissionRegistry;
+  reconcileRuntimeAdmission: () => Promise<void>;
 }
 
 export interface ControlPlaneRuntime {
@@ -337,7 +353,18 @@ async function buildExecutionAutomation(
     [liteLlmResources, nativeResources],
     repositories.resourceStateOverrides,
   );
-  const resourceSelector = new ResourceSelector(resources);
+  const runtimeAdmissionEnabled =
+    resourceSelectorEnabled &&
+    (env.MODEL_CP_V4_RUNTIME_ADMISSION_ENABLED === 'true' ||
+      (env.MODEL_CP_V4_RUNTIME_ADMISSION_ENABLED !== 'false' && env.NODE_ENV !== 'test'));
+  const runtimeAdmissionTtlMs = integerValue(
+    env.MODEL_CP_V4_RUNTIME_ADMISSION_TTL_MS,
+    15 * 60_000,
+    60_000,
+    24 * 60 * 60_000,
+    'RUNTIME_ADMISSION_TTL_INVALID',
+  );
+  const runtimeAdmission = new RuntimeAdmissionRegistry();
   const resourceStateEffect = new LiteLlmResourceStateEffect({
     baseUrl: liteLlmAdminBaseUrl,
     envFile: env.MODEL_CP_LITELLM_ADMIN_ENV_FILE ?? '/srv/hermes-personal/secrets/litellm.env',
@@ -484,7 +511,7 @@ async function buildExecutionAutomation(
     systemdUnitTemplate:
       env.MODEL_CP_V4_ANTIGRAVITY_SYSTEMD_UNIT ?? 'hermes-antigravity-v4@%i.service',
   };
-  const providerFactory = (selection: ExecutionResourceSelection) => {
+  const providerFactory = (selection: ExecutionResourceSelection): ExecutionProviderPort => {
     if (
       selection.agentBackend === 'antigravity-worker' ||
       selection.agentBackend === 'antigravity-review'
@@ -505,6 +532,149 @@ async function buildExecutionAutomation(
       resourceId: selection.resourceId,
     });
   };
+  const admissionCandidates = (): ResourceSelectionCandidate[] => {
+    const selected = new Map<string, ResourceSelectionCandidate>();
+    for (const phase of ['IMPLEMENT', 'REVIEW'] as const) {
+      const priorAttempts: Array<{ resourceId: string; bindingId?: string; modelFamily?: string }> =
+        [];
+      for (let index = 0; index < 100; index += 1) {
+        const result = selectExecutableProfile(resources, {
+          phase,
+          includeProviderNativeProfiles: true,
+          policy: {
+            allowProviderNative: true,
+            allowedPolicyKeys: ['provider-native-trusted-input'],
+          },
+          priorAttempts,
+        });
+        if (result.status !== 'SELECTED') break;
+        selected.set(runtimeAdmissionKey(result.candidate), result.candidate);
+        priorAttempts.push({
+          resourceId: result.profile.resourceId,
+          ...(result.profile.bindingId ? { bindingId: result.profile.bindingId } : {}),
+          modelFamily: result.profile.modelFamily,
+        });
+      }
+    }
+    return [...selected.values()].filter(requiresAcpRuntimeAdmission);
+  };
+
+  const createAdmissionWorkspace = (candidate: ResourceSelectionCandidate, probeId: string) => {
+    const suffix = createHash('sha256')
+      .update(runtimeAdmissionKey(candidate))
+      .digest('hex')
+      .slice(0, 16);
+    const root = path.join(managedHostRoot, 'v4', '.runtime-admission', suffix);
+    const repository = path.join(root, 'repo');
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.mkdirSync(repository, { recursive: true, mode: 0o750 });
+    fs.chownSync(root, workspaceUid, workspaceGid);
+    fs.chownSync(repository, workspaceUid, workspaceGid);
+    const git = (args: string[]) =>
+      execFileSync('/usr/bin/git', ['-C', repository, ...args], {
+        encoding: 'utf8',
+        uid: workspaceUid,
+        gid: workspaceGid,
+        env: { ...process.env, HOME: '/tmp' },
+      }).trim();
+    git(['init', '-q', '-b', 'main']);
+    const readme = path.join(repository, 'README.md');
+    fs.writeFileSync(readme, '# Pixel runtime admission probe\n');
+    fs.chownSync(readme, workspaceUid, workspaceGid);
+    git(['add', 'README.md']);
+    git([
+      '-c',
+      'user.name=Pixel Runtime Probe',
+      '-c',
+      'user.email=pixel-runtime-probe@localhost',
+      'commit',
+      '-q',
+      '-m',
+      'chore: runtime admission probe',
+    ]);
+    const sourceRevision = git(['rev-parse', '--verify', 'HEAD^{commit}']);
+    const executionPath = path.join(executionRoot, 'v4', '.runtime-admission', suffix, 'repo');
+    return {
+      root,
+      sourceRevision,
+      workspace: {
+        executionId: probeId,
+        hostPath: repository,
+        executionPath,
+        evidenceHostPath: path.join(root, 'completion-evidence.json'),
+        evidenceExecutionPath: path.join(
+          executionRoot,
+          'v4',
+          '.runtime-admission',
+          suffix,
+          'completion-evidence.json',
+        ),
+        sourceRepositoryPath: repository,
+        sourceRevision,
+        createdAt: new Date().toISOString(),
+      },
+      git,
+    };
+  };
+
+  const probeAdmissionCandidate = async (candidate: ResourceSelectionCandidate): Promise<void> => {
+    const key = runtimeAdmissionKey(candidate);
+    const probeId =
+      'runtime-admission-' + createHash('sha256').update(key).digest('hex').slice(0, 20);
+    let probeRoot: string | undefined;
+    try {
+      const prepared = createAdmissionWorkspace(candidate, probeId);
+      probeRoot = prepared.root;
+      const provider = providerFactory(
+        createExecutionResourceSelection(probeId, candidate.profile, new Date().toISOString()),
+      );
+      if (!provider.probeRuntime) throw new V4Error('RUNTIME_ADMISSION_PROBE_UNSUPPORTED');
+      const result = await provider.probeRuntime({
+        probeId,
+        workspace: prepared.workspace,
+        sourceRevision: prepared.sourceRevision,
+      });
+      const clean = prepared.git(['status', '--porcelain=v1']) === '';
+      const head = prepared.git(['rev-parse', '--verify', 'HEAD^{commit}']);
+      runtimeAdmission.record(candidate, {
+        ready: result.ready && clean && head === prepared.sourceRevision,
+        ...(!result.ready || !clean || head !== prepared.sourceRevision
+          ? { errorCode: 'RUNTIME_ADMISSION_PROBE_FAILED' }
+          : {}),
+      });
+    } catch (error) {
+      runtimeAdmission.record(candidate, {
+        ready: false,
+        errorCode: error instanceof V4Error ? error.code : 'RUNTIME_ADMISSION_PROBE_FAILED',
+      });
+    } finally {
+      if (probeRoot) fs.rmSync(probeRoot, { recursive: true, force: true });
+    }
+  };
+
+  const reconcileRuntimeAdmission = async (): Promise<void> => {
+    if (!runtimeAdmissionEnabled) return;
+    const now = Date.now();
+    const queue = admissionCandidates().filter((candidate) =>
+      runtimeAdmission.isStale(candidate, now, runtimeAdmissionTtlMs),
+    );
+    let cursor = 0;
+    const workerCount = Math.min(2, queue.length);
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (cursor < queue.length) {
+          const candidate = queue[cursor++];
+          if (candidate) await probeAdmissionCandidate(candidate);
+        }
+      }),
+    );
+  };
+  await reconcileRuntimeAdmission();
+  const resourceSelector = new ResourceSelector(
+    resources,
+    DEFAULT_AFFINITY_POLICY,
+    runtimeAdmissionEnabled ? runtimeAdmission : undefined,
+  );
   const worker = new ExecutionWorker(repositories, workspace, routes, {
     leaseTtlMs: integerValue(
       env.MODEL_CP_V4_EXECUTION_LEASE_TTL_MS,
@@ -519,6 +689,20 @@ async function buildExecutionAutomation(
       1,
       1_000,
       'EXECUTION_CYCLE_LIMIT_INVALID',
+    ),
+    meaningfulProgressTimeoutMs: integerValue(
+      env.MODEL_CP_V4_MEANINGFUL_PROGRESS_TIMEOUT_MS,
+      15 * 60_000,
+      30_000,
+      24 * 60 * 60_000,
+      'EXECUTION_MEANINGFUL_PROGRESS_TIMEOUT_INVALID',
+    ),
+    maxStallRecoveries: integerValue(
+      env.MODEL_CP_V4_MAX_STALL_RECOVERIES,
+      2,
+      0,
+      10,
+      'EXECUTION_STALL_RECOVERY_LIMIT_INVALID',
     ),
     ...(resourceSelectorEnabled ? { providerFactory, resourceFeedback: resourceState } : {}),
   });
@@ -618,6 +802,9 @@ async function buildExecutionAutomation(
     resourceState,
     resourceStateEffect,
     resourceLifecycle,
+    runtimeAdmissionEnabled,
+    runtimeAdmission,
+    reconcileRuntimeAdmission,
   };
 }
 
@@ -875,6 +1062,19 @@ export async function buildControlPlane(
       autonomousPolling: Boolean(automation && env.MODEL_CP_AUTOMATION_RUNTIME_ENABLED === 'true'),
       resourceSelectorEnabled: automation?.resourceSelectorEnabled ?? false,
       resourceCount: automation?.resources.listResources().length ?? 0,
+      runtimeAdmission: automation
+        ? {
+            enabled: automation.runtimeAdmissionEnabled,
+            ...automation.runtimeAdmission.summary(),
+          }
+        : {
+            enabled: false,
+            checked: 0,
+            ready: 0,
+            unready: 0,
+            implementationReady: 0,
+            reviewReady: 0,
+          },
       compatibilityImplementationRoutes: automation?.implementationRoutes ?? [],
       compatibilityReviewRoutes: automation?.reviewRoutes ?? [],
       implementationRoutes: automation?.implementationRoutes ?? [],
@@ -1428,6 +1628,7 @@ export async function buildControlPlane(
           void automation.liteLlmResources
             .refresh()
             .then(() => automation.resourceLifecycle.reconcileOnce())
+            .then(() => automation.reconcileRuntimeAdmission())
             .catch((error) =>
               app.log.error(
                 { error: error instanceof Error ? error.message : String(error) },

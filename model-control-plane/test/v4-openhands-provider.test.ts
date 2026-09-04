@@ -393,6 +393,63 @@ test('model-native factory resolves selected backend, model and transport withou
   }
 });
 
+test('model-native ACP runtime probe performs a real bounded turn with probe-only secrets', async () => {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    requests.push({ url: value, init });
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(
+        JSON.stringify({
+          id: 'runtime-probe-session',
+          execution_status: 'finished',
+          workspace: body.workspace,
+          tags: body.tags,
+        }),
+        { status: 201 },
+      );
+    }
+    if (value.endsWith('/api/conversations/runtime-probe-session/agent_final_response'))
+      return new Response(JSON.stringify({ response: 'READY' }), { status: 200 });
+    if (value.includes('/api/conversations/runtime-probe-session/events/search'))
+      return new Response(JSON.stringify({ items: [{ id: 'probe-event', kind: 'ActionEvent' }] }), {
+        status: 200,
+      });
+    if (value.endsWith('/api/conversations/runtime-probe-session') && init.method === 'DELETE')
+      return new Response('', { status: 204 });
+    throw new Error('unexpected request ' + value + ' ' + String(init.method));
+  }) as typeof fetch;
+  const provider = createOpenHandsProviderForSelection(options(fake), {
+    backend: 'codex-acp',
+    model: 'route-orcai-gpt-5.6-luna',
+    role: 'IMPLEMENTATION',
+    transport: 'LITELLM_MANAGED',
+  });
+  const input = launchInput('IMPLEMENT');
+  const result = await provider.probeRuntime!({
+    probeId: 'runtime-probe-1',
+    sourceRevision: input.sourceRevision,
+    workspace: { ...input.workspace, executionId: 'runtime-probe-1' },
+  });
+  assert.equal(result.ready, true);
+  assert.equal(result.status, 'SUCCEEDED');
+  const create = requests.find(
+    (request) => request.url.endsWith('/api/conversations') && request.init.method === 'POST',
+  )!;
+  const body = JSON.parse(String(create.init.body)) as Record<string, any>;
+  assert.equal(body.agent.kind, 'ACPAgent');
+  assert.equal(body.agent.acp_model, 'route-orcai-gpt-5.6-luna');
+  assert.equal(body.max_iterations, 1);
+  assert.equal(body.tags.role, 'runtimeprobe');
+  assert.match(String(body.initial_message.content[0].text), /git status --short/);
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'planner');
+  assert.equal(body.secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT.value, 'low');
+  assert.equal(body.secrets.PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH, undefined);
+  assert.equal(body.secrets.PIXEL_V4_SOURCE_SHA, undefined);
+  assert.ok(requests.some((request) => request.init.method === 'DELETE'));
+});
+
 test('provider-native Codex does not require LiteLLM credentials and builtin fallback is explicit', async () => {
   const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
     const body = JSON.parse(String(init.body)) as Record<string, any>;
@@ -476,6 +533,7 @@ test('OpenHands launch explicitly runs an idle initial conversation before retur
       ['POST', '/api/conversations'],
       ['POST', '/api/conversations/idle-session/run'],
       ['GET', '/api/conversations/idle-session'],
+      ['GET', '/api/conversations/idle-session/events/search?limit=1&sort_order=TIMESTAMP_DESC'],
     ],
   );
 });
@@ -521,6 +579,7 @@ test('OpenHands launch never interrupts an initial turn that is already running'
       ['POST', '/api/conversations'],
       ['POST', '/api/conversations/race-session/run'],
       ['GET', '/api/conversations/race-session'],
+      ['GET', '/api/conversations/race-session/events/search?limit=1&sort_order=TIMESTAMP_DESC'],
     ],
   );
 });
@@ -636,6 +695,47 @@ test('OpenHands replacement conversation is crash-safe and excluded from initial
     expectedWorkspacePath: '/workspace/executions/exec-1/repo',
   });
   assert.equal(recovered?.providerSessionId, 'original-session');
+});
+
+test('OpenHands exposes only an opaque provider progress fingerprint derived from the latest event cursor', async () => {
+  let eventId = 'event-1';
+  const fake = (async (url: string | URL | Request) => {
+    const value = String(url);
+    if (value.endsWith('/api/conversations/progress-session'))
+      return new Response(
+        JSON.stringify({
+          id: 'progress-session',
+          execution_status: 'running',
+          updated_at: '2026-09-04T01:00:00.000Z',
+        }),
+        { status: 200 },
+      );
+    if (value.includes('/api/conversations/progress-session/events/search'))
+      return new Response(
+        JSON.stringify({
+          items: [
+            {
+              id: eventId,
+              kind: 'ActionEvent',
+              timestamp:
+                eventId === 'event-1' ? '2026-09-04T01:00:01.000Z' : '2026-09-04T01:00:02.000Z',
+              content: 'must-not-enter-progress-state',
+            },
+          ],
+        }),
+        { status: 200 },
+      );
+    throw new Error('unexpected request ' + value);
+  }) as typeof fetch;
+  const provider = new OpenHandsExecutionProvider(options(fake));
+  const first = await provider.inspect('progress-session');
+  eventId = 'event-2';
+  const second = await provider.inspect('progress-session');
+  assert.equal(first.status, 'RUNNING');
+  assert.equal(typeof first.progressFingerprint, 'string');
+  assert.equal(first.progressFingerprint?.length, 64);
+  assert.notEqual(first.progressFingerprint, second.progressFingerprint);
+  assert.equal(JSON.stringify(first).includes('must-not-enter-progress-state'), false);
 });
 
 test('OpenHands inspect, continue and cancel sanitize terminal provider evidence', async () => {

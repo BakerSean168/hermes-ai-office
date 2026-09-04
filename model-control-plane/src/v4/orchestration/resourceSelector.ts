@@ -31,6 +31,10 @@ export interface ResourceSelectionCandidate {
   readonly profile: ExecutableProfile;
 }
 
+export interface ResourceCandidateReadinessPort {
+  isReady(candidate: ResourceSelectionCandidate): boolean;
+}
+
 export interface ResourceSelectionPolicy {
   readonly allowProviderNative?: boolean;
   readonly allowedResourceIds?: Iterable<string>;
@@ -134,6 +138,7 @@ export function selectExecutableProfile(
   directory: ResourceDirectory,
   request: ResourceSelectionRequest,
   affinityPolicy: AffinityPolicy = DEFAULT_AFFINITY_POLICY,
+  readiness?: ResourceCandidateReadinessPort,
 ): ResourceSelectionResult {
   validateAffinityPolicy(affinityPolicy);
   const capability = capabilityForPhase(request.phase);
@@ -214,6 +219,7 @@ export function selectExecutableProfile(
         } satisfies ResourceSelectionCandidate;
         if (excluded(candidate, exclusions)) continue;
         if (selectionPolicy.isAllowed && !selectionPolicy.isAllowed(candidate)) continue;
+        if (readiness && !readiness.isReady(candidate)) continue;
         candidates.push(candidate);
       }
     }
@@ -244,12 +250,13 @@ export class ResourceSelector {
   constructor(
     readonly directory: ResourceDirectory,
     readonly affinityPolicy: AffinityPolicy = DEFAULT_AFFINITY_POLICY,
+    readonly readiness?: ResourceCandidateReadinessPort,
   ) {
     if (!this.affinityPolicy) throw new V4Error('AFFINITY_POLICY_REQUIRED');
   }
 
   select(request: ResourceSelectionRequest): ResourceSelectionResult {
-    return selectExecutableProfile(this.directory, request, this.affinityPolicy);
+    return selectExecutableProfile(this.directory, request, this.affinityPolicy, this.readiness);
   }
 }
 

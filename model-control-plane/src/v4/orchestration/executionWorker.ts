@@ -38,6 +38,9 @@ export interface ExecutionWorkerOptions {
   providerFactory?: ExecutionProviderFactory;
   resourceFeedback?: ExecutionResourceFeedbackPort;
   requireResourceSelection?: boolean;
+  meaningfulProgressTimeoutMs?: number;
+  maxStallRecoveries?: number;
+  now?: () => Date;
 }
 
 export interface ExecutionWorkerResult {
@@ -59,6 +62,8 @@ const FINALIZABLE_IMPLEMENTATION_CODES = new Set([
 ]);
 const RETRYABLE_RESOURCE_QUALITY_CODES = new Set(['WORKSPACE_IMPLEMENTATION_NOOP']);
 const EVIDENCE_FINALIZATION_NAME = 'evidence-verified-provider-finalization';
+const MEANINGFUL_PROGRESS_PREFIX = 'meaningful-progress-';
+const MEANINGFUL_STALL_RECOVERY_PREFIX = 'meaningful-stall-recovery-';
 
 function errorCode(error: unknown): string {
   if (error instanceof V4Error) return error.code;
@@ -98,6 +103,9 @@ export class ExecutionWorker {
   readonly providerFactory?: ExecutionProviderFactory;
   readonly resourceFeedback?: ExecutionResourceFeedbackPort;
   readonly requireResourceSelection: boolean;
+  readonly meaningfulProgressTimeoutMs: number;
+  readonly maxStallRecoveries: number;
+  readonly now: () => Date;
 
   constructor(
     readonly repositories: V4Repositories,
@@ -118,6 +126,9 @@ export class ExecutionWorker {
     this.ownerId = options.ownerId ?? 'execution-worker-' + randomUUID();
     this.leaseTtlMs = options.leaseTtlMs ?? 30_000;
     this.maxExecutionsPerCycle = options.maxExecutionsPerCycle ?? 20;
+    this.meaningfulProgressTimeoutMs = options.meaningfulProgressTimeoutMs ?? 15 * 60_000;
+    this.maxStallRecoveries = options.maxStallRecoveries ?? 2;
+    this.now = options.now ?? (() => new Date());
     if (this.leaseTtlMs < 1_000 || this.leaseTtlMs > 5 * 60_000)
       throw new V4Error('EXECUTION_LEASE_TTL_INVALID');
     if (
@@ -129,6 +140,18 @@ export class ExecutionWorker {
     }
     if (this.requireResourceSelection && !this.providerFactory)
       throw new V4Error('EXECUTION_PROVIDER_FACTORY_REQUIRED');
+    if (
+      !Number.isInteger(this.meaningfulProgressTimeoutMs) ||
+      this.meaningfulProgressTimeoutMs < 30_000 ||
+      this.meaningfulProgressTimeoutMs > 24 * 60 * 60_000
+    )
+      throw new V4Error('EXECUTION_MEANINGFUL_PROGRESS_TIMEOUT_INVALID');
+    if (
+      !Number.isInteger(this.maxStallRecoveries) ||
+      this.maxStallRecoveries < 0 ||
+      this.maxStallRecoveries > 10
+    )
+      throw new V4Error('EXECUTION_STALL_RECOVERY_LIMIT_INVALID');
   }
 
   private resolveProvider(
@@ -684,6 +707,14 @@ export class ExecutionWorker {
           selectedResource,
         );
         if (finalized) return finalized;
+        const stalled = await this.handleMeaningfulProgress(
+          provider,
+          execution,
+          session,
+          snapshot,
+          selectedResource,
+        );
+        if (stalled) return stalled;
         this.recordActiveProviderStatus(executionId, session, snapshot);
         return {
           executionId,
@@ -907,6 +938,251 @@ export class ExecutionWorker {
           : 'IMPLEMENTATION_EVIDENCE_FINALIZED',
       providerSessionId: stopped.providerSessionId,
       resultRevision: completion.headRevision,
+    };
+  }
+
+  private progressEvidence(executionId: string) {
+    return this.repositories.evidence
+      .listByExecution(executionId)
+      .filter(
+        (item) => item.kind === 'RECOVERY' && item.name.startsWith(MEANINGFUL_PROGRESS_PREFIX),
+      );
+  }
+
+  private stallRecoveryEvidence(executionId: string) {
+    return this.repositories.evidence
+      .listByExecution(executionId)
+      .filter(
+        (item) =>
+          item.kind === 'RECOVERY' && item.name.startsWith(MEANINGFUL_STALL_RECOVERY_PREFIX),
+      );
+  }
+
+  private async handleMeaningfulProgress(
+    provider: ExecutionProviderPort,
+    execution: Execution,
+    session: ExecutionSession,
+    snapshot: ProviderSessionSnapshot,
+    selectedResource: ExecutionResourceSelection | undefined,
+  ): Promise<ExecutionWorkerResult | undefined> {
+    if (!['CREATED', 'QUEUED', 'RUNNING', 'UNKNOWN'].includes(snapshot.status)) return undefined;
+    const workspaceFingerprint = this.workspace.progressFingerprint
+      ? await this.workspace.progressFingerprint(session.workspace)
+      : createHash('sha256')
+          .update(session.workspace.sourceRevision)
+          .update('|')
+          .update(String(this.workspace.hasCompletionEvidence?.(session.workspace) === true))
+          .digest('hex');
+    const providerFingerprint =
+      snapshot.progressFingerprint ??
+      createHash('sha256')
+        .update(snapshot.providerSessionId)
+        .update('|')
+        .update(snapshot.status)
+        .digest('hex');
+    const fingerprint = createHash('sha256')
+      .update(snapshot.providerSessionId)
+      .update('|')
+      .update(workspaceFingerprint)
+      .update('|')
+      .update(providerFingerprint)
+      .digest('hex');
+    const existing = this.progressEvidence(execution.identity.executionId);
+    const latest = existing.at(-1);
+    if (
+      !latest ||
+      latest.payload.fingerprint !== fingerprint ||
+      latest.payload.providerSessionId !== snapshot.providerSessionId
+    ) {
+      const sequence = existing.length + 1;
+      this.repositories.evidence.append({
+        executionId: execution.identity.executionId,
+        kind: 'RECOVERY',
+        name: MEANINGFUL_PROGRESS_PREFIX + String(sequence).padStart(6, '0'),
+        sourceRevision: execution.identity.sourceRevision,
+        payload: {
+          sequence,
+          fingerprint,
+          workspaceFingerprint,
+          providerFingerprint,
+          providerSessionId: snapshot.providerSessionId,
+          providerStatus: snapshot.status,
+          observedAt: this.now().toISOString(),
+        },
+      });
+      return undefined;
+    }
+    const lastProgressAt = Date.parse(
+      typeof latest.payload.observedAt === 'string' ? latest.payload.observedAt : latest.createdAt,
+    );
+    const now = this.now().getTime();
+    if (!Number.isFinite(lastProgressAt) || now - lastProgressAt < this.meaningfulProgressTimeoutMs)
+      return undefined;
+    return await this.recoverMeaningfulProgressStall(
+      provider,
+      execution,
+      session,
+      snapshot,
+      selectedResource,
+      fingerprint,
+      latest.createdAt,
+    );
+  }
+
+  private async recoverMeaningfulProgressStall(
+    provider: ExecutionProviderPort,
+    execution: Execution,
+    session: ExecutionSession,
+    snapshot: ProviderSessionSnapshot,
+    selectedResource: ExecutionResourceSelection | undefined,
+    fingerprint: string,
+    stalledSince: string,
+  ): Promise<ExecutionWorkerResult> {
+    const previousProviderSessionId = session.providerSessionId;
+    if (!previousProviderSessionId) throw new V4Error('PROVIDER_SESSION_ID_REQUIRED');
+    const recoveries = this.stallRecoveryEvidence(execution.identity.executionId);
+    const recoveryNumber = recoveries.length + 1;
+    const evidenceName = MEANINGFUL_STALL_RECOVERY_PREFIX + String(recoveryNumber).padStart(4, '0');
+    const basePayload = {
+      recoveryNumber,
+      fingerprint,
+      stalledSince,
+      previousProviderSessionId,
+      providerStatus: snapshot.status,
+      timeoutMs: this.meaningfulProgressTimeoutMs,
+    };
+
+    if (recoveries.length < this.maxStallRecoveries && provider.replace && provider.interrupt) {
+      let stopped = snapshot;
+      if (snapshot.status !== 'PAUSED')
+        stopped = await provider.interrupt(previousProviderSessionId);
+      if (TERMINAL_PROVIDER_STATUSES.has(stopped.status)) {
+        this.recordTerminalProviderStatus(execution.identity.executionId, session, stopped);
+        this.repositories.evidence.append({
+          executionId: execution.identity.executionId,
+          kind: 'RECOVERY',
+          name: evidenceName,
+          sourceRevision: execution.identity.sourceRevision,
+          payload: { ...basePayload, action: 'terminal-race', terminalStatus: stopped.status },
+        });
+        return {
+          executionId: execution.identity.executionId,
+          status: 'WAITING',
+          code: 'PROVIDER_MEANINGFUL_PROGRESS_TERMINAL_RACE',
+          providerSessionId: stopped.providerSessionId,
+        };
+      }
+      this.recordActiveProviderStatus(execution.identity.executionId, session, stopped);
+      const currentSession = this.repositories.sessions.get(execution.identity.executionId);
+      const plan = this.repositories.plans.getPlan(execution.identity.planId);
+      const workItem = execution.identity.workItemId
+        ? this.repositories.plans.getWorkItem(execution.identity.workItemId)
+        : undefined;
+      const replacement = await provider.replace({
+        executionId: execution.identity.executionId,
+        planId: execution.identity.planId,
+        projectKey: plan.projectKey,
+        workItemId: execution.identity.workItemId,
+        phase: execution.identity.phase,
+        objective: execution.objective,
+        acceptanceCriteria: workItem?.acceptanceCriteria ?? [],
+        sourceRevision: execution.identity.sourceRevision!,
+        route: execution.identity.route,
+        workspace: currentSession.workspace,
+        ...(execution.identity.phase === 'IMPLEMENT_FIX'
+          ? { reviewFindings: this.reviewFindings(execution) }
+          : {}),
+        previousProviderSessionId,
+        recoveryKey:
+          'meaningful-progress-stall:' +
+          execution.identity.executionId +
+          ':' +
+          recoveryNumber +
+          ':' +
+          createHash('sha256').update(stalledSince).digest('hex').slice(0, 16),
+        instruction:
+          'The prior provider turn was alive but made no meaningful provider-event or repository progress for the bounded stall window. Continue the same objective from the existing durable workspace. Preserve any valid work, run the required verification, commit intended changes, and finish.',
+      });
+      if (replacement.providerSessionId === previousProviderSessionId)
+        throw new V4Error('PROVIDER_REPLACEMENT_SESSION_UNCHANGED');
+      this.repositories.evidence.append({
+        executionId: execution.identity.executionId,
+        kind: 'RECOVERY',
+        name: evidenceName,
+        sourceRevision: execution.identity.sourceRevision,
+        payload: {
+          ...basePayload,
+          action: 'replace',
+          providerSessionId: replacement.providerSessionId,
+          observedStatus: replacement.status,
+        },
+      });
+      const swapped = this.repositories.sessions.replaceProviderSession(
+        execution.identity.executionId,
+        previousProviderSessionId,
+        replacement.providerSessionId,
+        'automatic meaningful-progress stall recovery',
+      );
+      if (swapped.status === 'rejected' || !swapped.value)
+        throw new V4Error(swapped.reason ?? 'STALE_PROVIDER_SESSION');
+      const current = await provider.inspect(replacement.providerSessionId);
+      const replacedSession = this.repositories.sessions.get(execution.identity.executionId);
+      if (TERMINAL_PROVIDER_STATUSES.has(current.status))
+        this.recordTerminalProviderStatus(execution.identity.executionId, replacedSession, current);
+      else
+        this.recordActiveProviderStatus(execution.identity.executionId, replacedSession, current);
+      return {
+        executionId: execution.identity.executionId,
+        status:
+          current.status === 'FAILED' ||
+          current.status === 'STUCK' ||
+          current.status === 'CANCELLED'
+            ? 'FAILED'
+            : current.status === 'SUCCEEDED'
+              ? 'SUCCEEDED'
+              : current.status === 'PAUSED' || current.status === 'WAITING_FOR_CONFIRMATION'
+                ? 'WAITING'
+                : 'RUNNING',
+        code: 'PROVIDER_MEANINGFUL_PROGRESS_RECOVERED_' + current.status,
+        providerSessionId: current.providerSessionId,
+      };
+    }
+
+    let stopped: ProviderSessionSnapshot | undefined;
+    if (provider.interrupt) stopped = await provider.interrupt(previousProviderSessionId);
+    else if (provider.cancel) stopped = await provider.cancel(previousProviderSessionId);
+    if (stopped) {
+      if (TERMINAL_PROVIDER_STATUSES.has(stopped.status))
+        this.recordTerminalProviderStatus(execution.identity.executionId, session, stopped);
+      else this.recordActiveProviderStatus(execution.identity.executionId, session, stopped);
+    }
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'RECOVERY',
+      name: evidenceName,
+      sourceRevision: execution.identity.sourceRevision,
+      payload: {
+        ...basePayload,
+        action: 'fail-retryable',
+        ...(stopped ? { stoppedStatus: stopped.status } : {}),
+      },
+    });
+    const failure = new V4Error(
+      'PROVIDER_MEANINGFUL_PROGRESS_STALLED',
+      'Provider liveness continued without meaningful provider-event or repository progress.',
+    );
+    this.reportResourceFailure(selectedResource, failure);
+    this.repositories.executions.recordResult(execution.identity.executionId, {
+      status: 'FAILED',
+      errorCode: failure.code,
+      retryable: true,
+      resultSummary: 'Meaningful progress stalled since ' + stalledSince + '.',
+    });
+    return {
+      executionId: execution.identity.executionId,
+      status: 'FAILED',
+      code: failure.code,
+      providerSessionId: previousProviderSessionId,
     };
   }
 

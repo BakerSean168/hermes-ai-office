@@ -7,6 +7,8 @@ import type {
   ExecutionProviderPort,
   ProviderLaunchInput,
   ProviderRecoveryInput,
+  ProviderRuntimeProbeInput,
+  ProviderRuntimeProbeResult,
   ProviderSessionReplacementInput,
   ProviderSessionSnapshot,
   ProviderSessionStatus,
@@ -15,6 +17,12 @@ import type {
 
 interface JsonRecord {
   [key: string]: unknown;
+}
+
+interface ConversationCreateOptions {
+  maxIterations?: number;
+  secrets?: JsonRecord;
+  roleTag?: string;
 }
 
 export interface OpenHandsProviderOptions {
@@ -530,10 +538,11 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     failClosed(input.workspace.executionPath.trim().length > 0, 'OPENHANDS_WORKSPACE_REQUIRED');
   }
 
-  private async createConversation(
+  protected async createConversation(
     input: ProviderLaunchInput,
     initialText: string,
     extraTags: Record<string, string> = {},
+    options: ConversationCreateOptions = {},
   ): Promise<ProviderSessionSnapshot> {
     const tools =
       this.mode === 'REVIEW'
@@ -555,7 +564,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       agent: this.conversationAgent(input, tools),
       tool_module_qualnames: toolModuleQualnames,
       initial_message: { role: 'user', content: [{ type: 'text', text: initialText }], run: true },
-      max_iterations: this.options.maxIterations,
+      max_iterations: options.maxIterations ?? this.options.maxIterations,
       stuck_detection: true,
       autotitle: false,
       tags: {
@@ -564,10 +573,10 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         phase: input.phase.toLowerCase().replace(/_/g, ''),
         plan: tagValue(input.planId),
         ...(input.workItemId ? { workitem: tagValue(input.workItemId) } : {}),
-        role: this.mode === 'REVIEW' ? 'independentreview' : 'implementation',
+        role: options.roleTag ?? (this.mode === 'REVIEW' ? 'independentreview' : 'implementation'),
         ...extraTags,
       },
-      secrets: this.conversationSecrets(input),
+      secrets: options.secrets ?? this.conversationSecrets(input),
       observability_metadata: {
         executionId: input.executionId,
         planId: input.planId,
@@ -588,8 +597,14 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       phase: input.phase,
       expectedWorkspacePath: input.workspace.executionPath,
     });
-    const initial = await this.snapshot(response, conversationId);
+    const initial = await this.snapshot(response, conversationId, false);
     return await this.ensureRunning(conversationId, initial);
+  }
+
+  protected async deleteConversation(providerSessionId: string): Promise<void> {
+    await this.request('/api/conversations/' + encodeURIComponent(providerSessionId), {
+      method: 'DELETE',
+    });
   }
 
   private async findReplacement(
@@ -698,6 +713,7 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   private async snapshot(
     payload: JsonRecord,
     conversationId: string,
+    includeProgress = true,
   ): Promise<ProviderSessionSnapshot> {
     let status = mapOpenHandsStatus(payload.execution_status);
     let finalResponse: string | undefined;
@@ -752,6 +768,9 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
         if (!(error instanceof V4Error) || !error.code.startsWith('OPENHANDS_HTTP_')) throw error;
       }
     }
+    const progressFingerprint = includeProgress
+      ? await this.providerProgressFingerprint(payload, conversationId, status)
+      : undefined;
     return {
       provider: this.provider,
       providerSessionId: conversationId,
@@ -759,8 +778,40 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
       ...(finalResponse ? { finalResponse } : {}),
       ...(errorCode ? { errorCode } : {}),
       ...(retryable === undefined ? {} : { retryable }),
+      ...(progressFingerprint ? { progressFingerprint } : {}),
       observedAt: new Date().toISOString(),
     };
+  }
+
+  private async providerProgressFingerprint(
+    conversation: JsonRecord,
+    conversationId: string,
+    status: ProviderSessionStatus,
+  ): Promise<string> {
+    let latest: JsonRecord = {};
+    try {
+      const events = await this.json(
+        '/api/conversations/' +
+          encodeURIComponent(conversationId) +
+          '/events/search?limit=1&sort_order=TIMESTAMP_DESC',
+      );
+      const items = Array.isArray(events.items) ? events.items : [];
+      latest = items.length > 0 ? record(items[0]) : {};
+    } catch {
+      // Progress telemetry is advisory. Provider status inspection remains the
+      // authoritative liveness path when an older OpenHands lacks event search.
+    }
+    const safeCursor = {
+      status,
+      conversationUpdatedAt: boundedText(
+        conversation.updated_at ?? conversation.updatedAt ?? conversation.last_updated_at,
+        200,
+      ),
+      eventId: boundedText(latest.id ?? latest.event_id, 300),
+      eventKind: boundedText(latest.kind, 200),
+      eventTimestamp: boundedText(latest.timestamp ?? latest.created_at ?? latest.updated_at, 200),
+    };
+    return createHash('sha256').update(JSON.stringify(safeCursor)).digest('hex');
   }
 
   private sanitize(value: string | undefined, maximum: number): string | undefined {
@@ -936,6 +987,89 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
     this.driver = config.driver;
     this.authHome = config.authHome;
     this.binary = config.binary;
+  }
+
+  async probeRuntime(input: ProviderRuntimeProbeInput): Promise<ProviderRuntimeProbeResult> {
+    failClosed(input.probeId.trim().length > 0, 'RUNTIME_PROBE_ID_REQUIRED');
+    failClosed(input.sourceRevision.trim().length > 0, 'RUNTIME_PROBE_REVISION_REQUIRED');
+    const phase: ExecutionPhase = this.mode === 'REVIEW' ? 'REVIEW' : 'IMPLEMENT';
+    const launchInput: ProviderLaunchInput = {
+      executionId: input.probeId,
+      planId: 'runtime-admission',
+      projectKey: 'pixel-runtime-admission',
+      phase,
+      objective: 'Verify model-native ACP runtime admission without product changes.',
+      acceptanceCriteria: ['Run git status --short without editing files', 'Reply READY'],
+      sourceRevision: input.sourceRevision,
+      route: 'runtime-admission',
+      workspace: input.workspace,
+    };
+    const secrets = this.runtimeProbeSecrets(launchInput);
+    const prompt = [
+      'Pixel runtime admission probe.',
+      'Do not modify, create, delete, stage, or commit repository files.',
+      'Run exactly one harmless repository inspection command: git status --short.',
+      'Then reply with READY and nothing else.',
+    ].join('\n');
+    let providerSessionId = '';
+    try {
+      let snapshot = await this.createConversation(
+        launchInput,
+        prompt,
+        { runtimeprobe: tagValue(input.probeId) },
+        { maxIterations: 1, secrets, roleTag: 'runtimeprobe' },
+      );
+      providerSessionId = snapshot.providerSessionId;
+      const deadline = Date.now() + Math.min(90_000, (this.acp.startupTimeoutSeconds + 60) * 1000);
+      while (!TERMINAL_STATUSES.has(snapshot.status) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        snapshot = await this.inspect(providerSessionId);
+      }
+      const response = snapshot.finalResponse?.trim() ?? '';
+      const ready =
+        snapshot.status === 'SUCCEEDED' &&
+        /(?:^|\b)READY(?:\b|$)/i.test(response) &&
+        !/TRANSPORT_ERROR|ACP error|runtime error/i.test(response);
+      return {
+        provider: this.provider,
+        providerSessionId,
+        status: snapshot.status,
+        ready,
+        observedAt: snapshot.observedAt,
+      };
+    } finally {
+      if (providerSessionId) {
+        try {
+          const current = await this.inspect(providerSessionId);
+          if (!TERMINAL_STATUSES.has(current.status)) await this.interrupt(providerSessionId);
+        } catch {
+          // The disposable probe is already unusable; deletion below remains best effort.
+        }
+        try {
+          await this.deleteConversation(providerSessionId);
+        } catch {
+          // OpenHands idle eviction is the fallback cleanup path.
+        }
+      }
+    }
+  }
+
+  private runtimeProbeSecrets(input: ProviderLaunchInput): JsonRecord {
+    const secrets = { ...this.conversationSecrets(input) };
+    for (const key of [
+      'PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH',
+      'PIXEL_V4_REVIEW_EVIDENCE_PATH',
+      'PIXEL_V4_SOURCE_SHA',
+      'PIXEL_V4_REVIEWED_SHA',
+      'PIXEL_V4_IMPLEMENTATION_PHASE',
+    ])
+      delete secrets[key];
+    if (this.driver === 'codex' || this.driver === 'claude') {
+      secrets.AI_OFFICE_HEADLESS_ROLE = { kind: 'StaticSecret', value: 'planner' };
+      secrets.AI_OFFICE_HEADLESS_REASONING_EFFORT = { kind: 'StaticSecret', value: 'low' };
+      secrets.AI_OFFICE_HEADLESS_TIMEOUT_SECONDS = { kind: 'StaticSecret', value: '60' };
+    }
+    return secrets;
   }
 
   protected override evidencePath(input: ProviderLaunchInput): string {

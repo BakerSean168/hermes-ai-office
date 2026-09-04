@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -753,8 +754,24 @@ abstract class AntigravityProviderBase implements ExecutionProviderPort {
       ...(finalResponse ? { finalResponse: sanitize(finalResponse) } : {}),
       ...(errorCode ? { errorCode: sanitize(errorCode, 500) } : {}),
       ...(retryable === undefined ? {} : { retryable }),
+      progressFingerprint: this.progressFingerprint(meta, status),
       observedAt,
     };
+  }
+
+  private progressFingerprint(
+    meta: AntigravityExecutionMeta,
+    status: ProviderSessionStatus,
+  ): string {
+    const directory = this.executionDirectory(meta.executionId);
+    const parts: string[] = [status];
+    for (const name of ['stdout.ndjson', 'stderr.log']) {
+      const stat = fs.statSync(path.join(directory, name), { throwIfNoEntry: false });
+      parts.push(
+        stat?.isFile() ? `${name}:${stat.size}:${Math.trunc(stat.mtimeMs)}` : `${name}:missing`,
+      );
+    }
+    return createHash('sha256').update(parts.join('|')).digest('hex');
   }
 
   private systemdUnit(executionId: string): string {

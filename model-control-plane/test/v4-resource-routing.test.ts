@@ -275,6 +275,50 @@ test('selector uses tier, model rank, sequence and hard filters deterministicall
   );
 });
 
+test('selector hard-gates executable profiles on runtime admission readiness', () => {
+  const resources = [
+    resource({
+      resourceId: 'cheap-deepseek',
+      resourceTier: 'FREE',
+      resourceSequence: 1,
+      bindings: [binding('cheap-deepseek-binding', 'deepseek-v4-flash')],
+    }),
+    resource({
+      resourceId: 'later-glm',
+      resourceTier: 'FREE',
+      resourceSequence: 2,
+      bindings: [binding('later-glm-binding', 'glm-current')],
+    }),
+  ];
+  const readiness = {
+    isReady(
+      candidate: import('../src/v4/orchestration/resourceSelector.js').ResourceSelectionCandidate,
+    ) {
+      return candidate.profile.agentBackend === 'zcode-acp';
+    },
+  };
+  const selected = selectExecutableProfile(
+    resources,
+    { phase: 'IMPLEMENT' },
+    DEFAULT_AFFINITY_POLICY,
+    readiness,
+  );
+  assert.equal(selected.status, 'SELECTED');
+  if (selected.status === 'SELECTED') {
+    assert.equal(selected.profile.resourceId, 'later-glm');
+    assert.equal(selected.profile.agentBackend, 'zcode-acp');
+  }
+
+  const blocked = new ResourceSelector(resources, DEFAULT_AFFINITY_POLICY, {
+    isReady: () => false,
+  }).select({ phase: 'IMPLEMENT' });
+  assert.deepEqual(blocked, {
+    status: 'WAITING_FOR_RESOURCE',
+    capability: 'IMPLEMENTATION',
+    reason: 'NO_ELIGIBLE_RESOURCE',
+  });
+});
+
 test('selector admits provider-native Business normally and Gemini only with explicit trust policy', () => {
   const business = resource({
     resourceId: 'business',
