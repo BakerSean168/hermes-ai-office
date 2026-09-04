@@ -64,6 +64,7 @@ const RETRYABLE_RESOURCE_QUALITY_CODES = new Set(['WORKSPACE_IMPLEMENTATION_NOOP
 const EVIDENCE_FINALIZATION_NAME = 'evidence-verified-provider-finalization';
 const MEANINGFUL_PROGRESS_PREFIX = 'meaningful-progress-';
 const MEANINGFUL_STALL_RECOVERY_PREFIX = 'meaningful-stall-recovery-';
+const WORKSPACE_PROGRESS_DEGRADED_NAME = 'workspace-progress-probe-degraded';
 
 function errorCode(error: unknown): string {
   if (error instanceof V4Error) return error.code;
@@ -969,13 +970,46 @@ export class ExecutionWorker {
     selectedResource: ExecutionResourceSelection | undefined,
   ): Promise<ExecutionWorkerResult | undefined> {
     if (!['CREATED', 'QUEUED', 'RUNNING', 'UNKNOWN'].includes(snapshot.status)) return undefined;
-    const workspaceFingerprint = this.workspace.progressFingerprint
-      ? await this.workspace.progressFingerprint(session.workspace)
-      : createHash('sha256')
-          .update(session.workspace.sourceRevision)
-          .update('|')
-          .update(String(this.workspace.hasCompletionEvidence?.(session.workspace) === true))
-          .digest('hex');
+    const existing = this.progressEvidence(execution.identity.executionId);
+    let workspaceFingerprint: string;
+    try {
+      workspaceFingerprint = this.workspace.progressFingerprint
+        ? await this.workspace.progressFingerprint(session.workspace)
+        : createHash('sha256')
+            .update(session.workspace.sourceRevision)
+            .update('|')
+            .update(String(this.workspace.hasCompletionEvidence?.(session.workspace) === true))
+            .digest('hex');
+    } catch (error) {
+      if (!(error instanceof V4Error) || error.code !== 'WORKSPACE_GIT_COMMAND_FAILED') throw error;
+      const previous = existing.at(-1)?.payload.workspaceFingerprint;
+      workspaceFingerprint =
+        typeof previous === 'string' && previous.length > 0
+          ? previous
+          : createHash('sha256')
+              .update(session.workspace.sourceRevision)
+              .update('|')
+              .update(String(this.workspace.hasCompletionEvidence?.(session.workspace) === true))
+              .digest('hex');
+      if (
+        !this.repositories.evidence.find(
+          execution.identity.executionId,
+          'RECOVERY',
+          WORKSPACE_PROGRESS_DEGRADED_NAME,
+        )
+      )
+        this.repositories.evidence.append({
+          executionId: execution.identity.executionId,
+          kind: 'RECOVERY',
+          name: WORKSPACE_PROGRESS_DEGRADED_NAME,
+          sourceRevision: execution.identity.sourceRevision,
+          payload: {
+            code: error.code,
+            providerSessionId: snapshot.providerSessionId,
+            observedAt: this.now().toISOString(),
+          },
+        });
+    }
     const providerFingerprint =
       snapshot.progressFingerprint ??
       createHash('sha256')
@@ -990,7 +1024,6 @@ export class ExecutionWorker {
       .update('|')
       .update(providerFingerprint)
       .digest('hex');
-    const existing = this.progressEvidence(execution.identity.executionId);
     const latest = existing.at(-1);
     if (
       !latest ||

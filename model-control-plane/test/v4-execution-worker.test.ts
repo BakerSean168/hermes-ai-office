@@ -91,6 +91,7 @@ class FakeWorkspace implements WorkspaceProviderPort {
   readonly implementationFailures = new Map<string, V4Error[]>();
   readonly completionEvidence = new Set<string>();
   readonly progressFingerprints = new Map<string, string>();
+  readonly progressFailures = new Map<string, V4Error[]>();
   provisionError?: V4Error;
   provisionCalls = 0;
 
@@ -99,6 +100,8 @@ class FakeWorkspace implements WorkspaceProviderPort {
   }
 
   async progressFingerprint(workspace: WorkspaceDescriptor): Promise<string> {
+    const failure = this.progressFailures.get(workspace.executionId)?.shift();
+    if (failure) throw failure;
     return (
       this.progressFingerprints.get(workspace.executionId) ?? 'workspace:' + workspace.executionId
     );
@@ -1044,6 +1047,54 @@ test('execution worker can interrupt a stuck provider turn and continue the same
   assert.equal(
     seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
     'RUNNING',
+  );
+  seeded.db.close();
+});
+
+test('execution worker treats transient workspace Git progress probe failure as advisory while provider stays running', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-progress-git-advisory',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.progressFailures.set(execution.identity.executionId, [
+    new V4Error('WORKSPACE_GIT_COMMAND_FAILED'),
+  ]);
+  const provider = new FakeProvider();
+  provider.launchSnapshot = { ...provider.launchSnapshot, progressFingerprint: 'event-1' };
+  provider.inspectSnapshot = { ...provider.inspectSnapshot, progressFingerprint: 'event-1' };
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-progress-git-advisory' },
+  );
+
+  const first = await worker.runExecution(execution.identity.executionId);
+  assert.equal(first.status, 'RUNNING');
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).status,
+    'RUNNING',
+  );
+  assert.equal(
+    seeded.repositories.evidence
+      .listByExecution(execution.identity.executionId)
+      .filter((item) => item.name === 'workspace-progress-probe-degraded').length,
+    1,
+  );
+  const second = await worker.runExecution(execution.identity.executionId);
+  assert.equal(second.status, 'RUNNING');
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).status,
+    'RUNNING',
+  );
+  assert.equal(
+    seeded.repositories.evidence
+      .listByExecution(execution.identity.executionId)
+      .filter((item) => item.name === 'workspace-progress-probe-degraded').length,
+    1,
   );
   seeded.db.close();
 });
