@@ -57,6 +57,10 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense/);
   assert.match(service, /MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2/);
+  assert.match(
+    service,
+    /MODEL_CP_AGENT_HARNESS_CTL=\/home\/dev\/projects\/agent-harness\/bin\/harnessctl\.py/,
+  );
   assert.match(service, /MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false/);
@@ -113,16 +117,22 @@ test('OpenHands literal-worktree mounts expose only managed workspaces and allow
     openHandsCompose,
     /\/opt\/data\/hermes-ai-office-v3\/workspaces:\/opt\/data\/hermes-ai-office-v3\/workspaces/,
   );
-  for (const project of ['bodysense', 'digital-biome', 'memoflow'])
+  for (const project of ['bodysense', 'digital-biome', 'memoflow', 'ai-office-smoke'])
     assert.ok(
       openHandsCompose.includes(
         `/home/dev/projects/${project}/.git:/home/dev/projects/${project}/.git`,
       ),
     );
   assert.doesNotMatch(openHandsCompose, /\/home\/dev\/projects:\/home\/dev\/projects(?:\s|$)/);
+  assert.doesNotMatch(
+    openHandsCompose,
+    /\/home\/dev\/projects\/ai-office-smoke:\/home\/dev\/projects\/ai-office-smoke(?:\s|$)/,
+  );
   assert.match(installer, /apt-get install -y -qq acl/);
   assert.match(installer, /command -v setfacl/);
   assert.match(release, /setfacl is required for literal V4 worktree ACLs/);
+  assert.match(release, /Agent Harness resolver is missing/);
+  assert.match(release, /python3 .*harnessctl.*--help/);
 });
 
 test('V4 installer takes a SQLite backup and requires V4 execution health', () => {

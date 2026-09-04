@@ -43,6 +43,8 @@ services:
       - /home/dev/projects/bodysense/.git:/home/dev/projects/bodysense/.git
       - /home/dev/projects/digital-biome/.git:/home/dev/projects/digital-biome/.git
       - /home/dev/projects/memoflow/.git:/home/dev/projects/memoflow/.git
+      # Dedicated infrastructure canary: Git metadata only; canonical source remains unmounted.
+      - /home/dev/projects/ai-office-smoke/.git:/home/dev/projects/ai-office-smoke/.git
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state
       - ./opencode-v3.json:/etc/hermes-ai-office-v3/opencode.json:ro
       - ./dsh-acp-v3.patch.yml:/etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml:ro

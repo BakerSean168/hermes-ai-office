@@ -14,6 +14,9 @@ if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
   exit 1
 fi
 command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is required for literal V4 worktree ACLs" >&2; exit 1; }
+harnessctl=/home/dev/projects/agent-harness/bin/harnessctl.py
+[[ -f "$harnessctl" ]] || { echo "refusing release: Agent Harness resolver is missing" >&2; exit 1; }
+/usr/bin/python3 "$harnessctl" --help >/dev/null
 
 expected_single_active=false
 expected_literal=false
