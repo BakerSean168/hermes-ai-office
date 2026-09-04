@@ -323,6 +323,83 @@ async function drive(runtime: PlanAutomationRuntime, planId: string, limit = 20)
   throw new Error('plan did not reach a terminal state');
 }
 
+test('resource wait resumes a RUNNING work item that has no execution once a resource becomes eligible', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  let available = false;
+  const selector = {
+    select() {
+      if (!available)
+        return {
+          status: 'WAITING_FOR_RESOURCE',
+          capability: 'IMPLEMENTATION',
+          reason: 'NO_ELIGIBLE_RESOURCE',
+        } as const;
+      const profile = {
+        capability: 'IMPLEMENTATION',
+        phase: 'IMPLEMENT',
+        modelFamily: 'gpt-5.6-luna',
+        agentBackend: 'codex-acp',
+        transport: 'PROVIDER_NATIVE',
+        resourceId: 'chatgpt-business-primary',
+        resourceTier: 'SUBSCRIPTION',
+        modelRank: 30,
+        resourceSequence: 120,
+        resourceState: 'ACTIVE',
+        selectionReason: 'STATIC_POLICY',
+        bindingId: 'chatgpt-business-luna',
+      } as const;
+      return {
+        status: 'SELECTED',
+        capability: 'IMPLEMENTATION',
+        profile,
+        candidate: { profile, resource: {} as never, binding: {} as never },
+      } as const;
+    },
+  };
+  const automation = new PlanAutomationRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      resourceSelection: { includeProviderNativeProfiles: true },
+      maxImplementationAttempts: 3,
+      maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
+      maxRepairCycles: 3,
+    }),
+    undefined,
+    selector,
+  );
+
+  const waiting = await automation.runPlan(seeded.plan.planId);
+  assert.equal(waiting.code, 'WAITING_FOR_RESOURCE');
+  assert.equal(
+    seeded.repositories.plans.getPlan(seeded.plan.planId).status,
+    'WAITING_FOR_RESOURCE',
+  );
+  assert.equal(seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.status, 'RUNNING');
+  assert.equal(seeded.repositories.executions.listByPlan(seeded.plan.planId).length, 0);
+
+  available = true;
+  const resumed = await automation.runPlan(seeded.plan.planId);
+  assert.equal(resumed.code, 'IMPLEMENTATION_QUEUED');
+  assert.equal(resumed.status, 'RUNNING');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'RUNNING');
+  const executions = seeded.repositories.executions.listByPlan(seeded.plan.planId);
+  assert.equal(executions.length, 1);
+  assert.equal(
+    executions[0]?.identity.workItemId,
+    seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.workItemId,
+  );
+  assert.equal(
+    seeded.repositories.resourceSelections.get(executions[0]!.identity.executionId)?.resourceId,
+    'chatgpt-business-primary',
+  );
+  seeded.db.close();
+});
+
 test('plan automation creates one stable first execution and completes only after exact independent review', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();

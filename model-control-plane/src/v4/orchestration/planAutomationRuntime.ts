@@ -446,7 +446,8 @@ export class PlanAutomationRuntime {
       let result: PlanAutomationResult | undefined;
       for (const runningItem of runningItems) {
         const currentPlan = this.repositories.plans.getPlan(planId);
-        if (currentPlan.status !== 'RUNNING') break;
+        if (currentPlan.status !== 'RUNNING' && currentPlan.status !== 'WAITING_FOR_RESOURCE')
+          break;
         const currentItem = this.repositories.plans.getWorkItem(runningItem.workItemId);
         if (currentItem.status !== 'RUNNING') continue;
         result = await this.reconcileRunningItem(currentPlan, currentItem, policy);
