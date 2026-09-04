@@ -26,6 +26,8 @@ interface PullRequestView {
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   url: string;
   headRefOid: string;
+  headRefName?: string;
+  baseRefName?: string;
   mergeStateStatus?: string;
   mergeCommit?: { oid?: string } | null;
   statusCheckRollup?: Array<{
@@ -80,6 +82,37 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
   ): Promise<DeliveryObservation> {
     const sourceRepository = this.repositoryRoot(plan.repositoryPath);
     const identity = this.repositoryIdentity(sourceRepository);
+
+    // Once a PR number is durable, GitHub is the authoritative delivery surface.
+    // Reconcile that exact PR before consulting the mutable canonical checkout:
+    // the checkout can legitimately advance after this Plan's exact SHA was pushed
+    // or even after the PR was merged.
+    if (delivery.pullRequestNumber !== undefined) {
+      this.assertBranch(delivery.branch, sourceRepository, identity);
+      this.assertBranch(delivery.targetBranch, sourceRepository, identity);
+      const repositoryName = this.githubRepository(sourceRepository, identity, delivery.remote);
+      const durablePullRequest = this.viewPullRequest(
+        sourceRepository,
+        identity,
+        repositoryName,
+        delivery.pullRequestNumber,
+      );
+      this.assertPullRequestIdentity(durablePullRequest, delivery);
+      if (durablePullRequest.headRefOid === plan.currentRevision) {
+        return this.observeExactPullRequest(
+          sourceRepository,
+          identity,
+          repositoryName,
+          plan,
+          delivery,
+          durablePullRequest,
+        );
+      }
+      if (durablePullRequest.state === 'MERGED') throw new V4Error('DELIVERY_PR_HEAD_STALE');
+      // An open durable PR can legitimately lag a newly reviewed Plan head. Fall
+      // through to the exact-local mutation path to fast-forward its delivery ref.
+    }
+
     if (this.git(sourceRepository, identity, ['status', '--porcelain=v1', '-z']).length !== 0)
       throw new V4Error('DELIVERY_LOCAL_REPOSITORY_DIRTY');
     const repository = context.workspacePath
@@ -149,9 +182,38 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       pullRequest = this.findPullRequest(repository, identity, repositoryName, delivery);
       if (!pullRequest) throw new V4Error('DELIVERY_PR_CREATE_NOT_OBSERVED');
     }
+    return this.observeExactPullRequest(
+      repository,
+      identity,
+      repositoryName,
+      plan,
+      delivery,
+      pullRequest,
+    );
+  }
+
+  private observeExactPullRequest(
+    repository: string,
+    identity: { uid: number; gid: number; home: string },
+    repositoryName: string,
+    plan: Plan,
+    delivery: PlanDelivery,
+    initial: PullRequestView,
+  ): DeliveryObservation {
+    let pullRequest = initial;
+    this.assertPullRequestIdentity(pullRequest, delivery);
     if (pullRequest.headRefOid !== plan.currentRevision)
       throw new V4Error('DELIVERY_PR_HEAD_STALE');
     if (pullRequest.state === 'CLOSED') throw new V4Error('DELIVERY_PR_CLOSED_UNMERGED');
+
+    const base = {
+      headSha: plan.currentRevision,
+      pullRequestNumber: pullRequest.number,
+      pullRequestUrl: pullRequest.url,
+    };
+    if (pullRequest.state === 'MERGED')
+      return this.verifyMerged(repository, identity, repositoryName, delivery, pullRequest, base);
+
     if (delivery.requiredChecks.includes(GOVERNANCE_CONTEXT)) {
       this.ensureGovernanceStatus(
         repository,
@@ -161,17 +223,13 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
         pullRequest.url,
       );
       pullRequest = this.viewPullRequest(repository, identity, repositoryName, pullRequest.number);
+      this.assertPullRequestIdentity(pullRequest, delivery);
       if (pullRequest.headRefOid !== plan.currentRevision)
         throw new V4Error('DELIVERY_PR_HEAD_STALE');
+      if (pullRequest.state === 'MERGED')
+        return this.verifyMerged(repository, identity, repositoryName, delivery, pullRequest, base);
+      if (pullRequest.state === 'CLOSED') throw new V4Error('DELIVERY_PR_CLOSED_UNMERGED');
     }
-
-    const base = {
-      headSha: plan.currentRevision,
-      pullRequestNumber: pullRequest.number,
-      pullRequestUrl: pullRequest.url,
-    };
-    if (pullRequest.state === 'MERGED')
-      return this.verifyMerged(repository, identity, delivery, pullRequest, base);
 
     const checks = pullRequest.statusCheckRollup ?? [];
     const checkState = this.checkState(checks, delivery.requiredChecks);
@@ -202,13 +260,23 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       plan.currentRevision,
     ]);
     const merged = this.viewPullRequest(repository, identity, repositoryName, pullRequest.number);
+    this.assertPullRequestIdentity(merged, delivery);
+    if (merged.headRefOid !== plan.currentRevision) throw new V4Error('DELIVERY_PR_HEAD_STALE');
     if (merged.state !== 'MERGED') throw new V4Error('DELIVERY_MERGE_NOT_OBSERVED');
-    return this.verifyMerged(repository, identity, delivery, merged, base);
+    return this.verifyMerged(repository, identity, repositoryName, delivery, merged, base);
+  }
+
+  private assertPullRequestIdentity(pullRequest: PullRequestView, delivery: PlanDelivery): void {
+    if (pullRequest.headRefName !== undefined && pullRequest.headRefName !== delivery.branch)
+      throw new V4Error('DELIVERY_PR_BRANCH_MISMATCH');
+    if (pullRequest.baseRefName !== undefined && pullRequest.baseRefName !== delivery.targetBranch)
+      throw new V4Error('DELIVERY_PR_BASE_MISMATCH');
   }
 
   private verifyMerged(
     repository: string,
     identity: { uid: number; gid: number; home: string },
+    repositoryName: string,
     delivery: PlanDelivery,
     pullRequest: PullRequestView,
     base: { headSha: string; pullRequestNumber: number; pullRequestUrl: string },
@@ -221,8 +289,27 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       delivery.remote,
       delivery.targetBranch,
     );
-    if (!targetHead || targetHead !== mergeSha)
-      throw new V4Error('DELIVERY_POST_MERGE_HEAD_MISMATCH');
+    if (!targetHead) throw new V4Error('DELIVERY_POST_MERGE_HEAD_MISMATCH');
+    if (targetHead !== mergeSha) {
+      const localAncestor = this.gitSucceeds(repository, identity, [
+        'merge-base',
+        '--is-ancestor',
+        mergeSha,
+        targetHead,
+      ]);
+      if (!localAncestor) {
+        const status = this.gh(repository, identity, [
+          'api',
+          'repos/' + repositoryName + '/compare/' + mergeSha + '...' + targetHead,
+          '--jq',
+          '.status',
+        ])
+          .stdout.trim()
+          .toLowerCase();
+        if (status !== 'ahead' && status !== 'identical')
+          throw new V4Error('DELIVERY_POST_MERGE_HEAD_MISMATCH');
+      }
+    }
     return { status: 'VERIFIED', ...base, mergeSha };
   }
 
@@ -331,7 +418,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       '--limit',
       '5',
       '--json',
-      'number,state,url,headRefOid,mergeCommit,statusCheckRollup,mergeStateStatus',
+      'number,state,url,headRefOid,headRefName,baseRefName,mergeCommit,statusCheckRollup,mergeStateStatus',
     ]).stdout;
     const parsed = this.parseJson<unknown>(output, 'DELIVERY_PR_LIST_INVALID');
     if (!Array.isArray(parsed)) throw new V4Error('DELIVERY_PR_LIST_INVALID');
@@ -352,7 +439,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       '--repo',
       repositoryName,
       '--json',
-      'number,state,url,headRefOid,mergeCommit,statusCheckRollup,mergeStateStatus',
+      'number,state,url,headRefOid,headRefName,baseRefName,mergeCommit,statusCheckRollup,mergeStateStatus',
     ]).stdout;
     return this.parseJson<PullRequestView>(output, 'DELIVERY_PR_VIEW_INVALID');
   }
