@@ -766,7 +766,19 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         ['rev-parse', '--verify', 'HEAD^{commit}'],
         repositoryIdentity,
       );
-      if (current !== input.expectedRevision && current !== input.acceptedRevision)
+      const alreadyContained =
+        current !== input.expectedRevision &&
+        current !== input.acceptedRevision &&
+        (await this.gitSucceeds(
+          repositoryRoot,
+          ['merge-base', '--is-ancestor', input.acceptedRevision, current],
+          repositoryIdentity,
+        ));
+      if (
+        current !== input.expectedRevision &&
+        current !== input.acceptedRevision &&
+        !alreadyContained
+      )
         throw new V4Error('WORKSPACE_INTEGRATION_STALE_HEAD');
 
       const repositoryStatus = await this.git(
@@ -774,7 +786,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         ['status', '--porcelain=v1', '-z'],
         repositoryIdentity,
       );
-      if (current === input.expectedRevision && repositoryStatus.length !== 0)
+      if ((current === input.expectedRevision || alreadyContained) && repositoryStatus.length !== 0)
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
       if (current === input.acceptedRevision && repositoryStatus.length !== 0)
         await this.assertReplayDirtinessRepairable(
@@ -783,6 +795,15 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
           repositoryStatus,
           repositoryIdentity,
         );
+
+      if (alreadyContained) {
+        // External history can legitimately advance after the reviewed candidate was
+        // produced (for example an already-merged historical delivery). Never move
+        // the canonical checkout backwards. The ancestry proof above means the exact
+        // accepted revision is already part of the current repository history.
+        const observed = await this.observeRepository(repositoryRoot, input.acceptedRevision);
+        return { ...observed, integratedRevision: input.acceptedRevision };
+      }
 
       if (current === input.expectedRevision) {
         // A direct local-path fetch starts git-upload-pack in the worker-owned clone. That
@@ -844,7 +865,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
           .length !== 0
       )
         throw new V4Error('WORKSPACE_INTEGRATION_DIRTY');
-      return await this.observeRepository(repositoryRoot, input.acceptedRevision);
+      const observed = await this.observeRepository(repositoryRoot, input.acceptedRevision);
+      return { ...observed, integratedRevision: input.acceptedRevision };
     } finally {
       if (lock !== undefined) fs.closeSync(lock);
       fs.rmSync(transferBundle, { force: true });

@@ -36,6 +36,8 @@ export interface RepositoryObservation {
   repositoryPath: string;
   rootPath: string;
   headRevision: string;
+  /** Exact independently-reviewed revision integrated or already contained in headRevision. */
+  integratedRevision?: string;
   branch?: string;
   clean: boolean;
   commitExists: boolean;

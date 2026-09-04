@@ -129,6 +129,41 @@ class AutomationWorkspace implements WorkspaceProviderPort {
   }
 }
 
+class AlreadyContainedAutomationWorkspace extends AutomationWorkspace {
+  repositoryHead = 'later-canonical-sha';
+
+  override async observeRepository(repositoryPath: string, revision: string) {
+    return {
+      repositoryPath,
+      rootPath: repositoryPath,
+      headRevision: this.repositoryHead,
+      clean: true,
+      commitExists: revision === 'result-sha-1',
+      observedAt: now(),
+    };
+  }
+
+  override async integrateAcceptedRevision(input: {
+    repositoryPath: string;
+    expectedRevision: string;
+    acceptedRevision: string;
+    candidateWorkspace: WorkspaceDescriptor;
+  }) {
+    assert.equal(input.expectedRevision, 'base-sha');
+    assert.equal(input.acceptedRevision, 'result-sha-1');
+    this.integrateCalls += 1;
+    return {
+      repositoryPath: input.repositoryPath,
+      rootPath: input.repositoryPath,
+      headRevision: this.repositoryHead,
+      integratedRevision: input.acceptedRevision,
+      clean: true,
+      commitExists: true,
+      observedAt: now(),
+    };
+  }
+}
+
 class ScriptedRunner implements ExecutionRunnerPort {
   readonly runCounts = new Map<string, number>();
   readonly implementationRoutes: string[] = [];
@@ -318,6 +353,26 @@ test('plan automation creates one stable first execution and completes only afte
     ['IMPLEMENT', 'REVIEW'],
   );
   assert.equal(seeded.repositories.reviews.listByPlan(seeded.plan.planId)[0]?.status, 'PASSED');
+  seeded.db.close();
+});
+
+test('plan automation adopts a reviewed SHA already contained in a later canonical head without overwriting repository truth', async () => {
+  const seeded = seed();
+  const workspace = new AlreadyContainedAutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = runtime(seeded.repositories, runner, workspace);
+  const results = await drive(automation, seeded.plan.planId);
+  assert.equal(results.at(-1)?.code, 'PLAN_SUCCEEDED_LOCAL_ONLY');
+  assert.equal(
+    seeded.repositories.plans.getPlan(seeded.plan.planId).currentRevision,
+    'result-sha-1',
+  );
+  assert.equal(workspace.repositoryHead, 'later-canonical-sha');
+  assert.equal(workspace.integrateCalls, 1);
+  assert.equal(
+    seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]?.exactAcceptedRevision,
+    'result-sha-1',
+  );
   seeded.db.close();
 });
 

@@ -677,6 +677,40 @@ test('LocalGitWorkspace integration rejects stale, dirty and non-descendant cand
   );
 });
 
+test('LocalGitWorkspace adopts an exact reviewed revision already contained by a later clean canonical head without moving HEAD backwards', async () => {
+  const value = fixture();
+  const candidate = await value.adapter.provision({
+    executionId: 'exec-already-contained',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(candidate);
+  write(path.join(candidate.hostPath, 'accepted.txt'), 'accepted\n');
+  const acceptedRevision = commit(candidate.hostPath, 'feat: accepted historical change');
+
+  git(value.repositoryPath, ['fetch', candidate.hostPath, acceptedRevision]);
+  git(value.repositoryPath, ['merge', '--ff-only', acceptedRevision]);
+  write(path.join(value.repositoryPath, 'later.txt'), 'later\n');
+  const laterHead = commit(value.repositoryPath, 'feat: later canonical change');
+  assert.equal(git(value.repositoryPath, ['rev-parse', 'HEAD']), laterHead);
+
+  const integrated = await value.adapter.integrateAcceptedRevision({
+    repositoryPath: value.repositoryPath,
+    expectedRevision: value.baseRevision,
+    acceptedRevision,
+    candidateWorkspace: candidate,
+  });
+  assert.equal(integrated.headRevision, laterHead);
+  assert.equal(integrated.integratedRevision, acceptedRevision);
+  assert.equal(integrated.clean, true);
+  assert.equal(integrated.commitExists, true);
+  assert.equal(git(value.repositoryPath, ['rev-parse', 'HEAD']), laterHead);
+  assert.equal(fs.readFileSync(path.join(value.repositoryPath, 'later.txt'), 'utf8'), 'later\n');
+
+  fs.rmSync(value.directory, { recursive: true, force: true });
+});
+
 test('LocalGitWorkspace integration aligns initialized submodules and replays a post-fast-forward submodule checkout crash safely', async () => {
   const value = fixture();
   const childRoot = path.join(value.allowedRoot, 'integration-child-source');

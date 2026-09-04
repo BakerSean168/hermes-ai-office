@@ -1305,29 +1305,29 @@ export class PlanAutomationRuntime {
         plan.repositoryPath,
         candidate.resultRevision,
       );
-      if (observation.headRevision === plan.currentRevision) {
-        if (!observation.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
-        await this.workspace.integrateAcceptedRevision({
-          repositoryPath: plan.repositoryPath,
-          expectedRevision: plan.currentRevision,
-          acceptedRevision: candidate.resultRevision,
-          candidateWorkspace: session.workspace,
-        });
-      } else if (observation.headRevision === candidate.resultRevision) {
-        if (!observation.clean) {
-          await this.workspace.integrateAcceptedRevision({
+      if (observation.headRevision === candidate.resultRevision && observation.clean) {
+        integratedRevision = candidate.resultRevision;
+      } else {
+        if (observation.headRevision === plan.currentRevision && !observation.clean)
+          return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
+        try {
+          const integrated = await this.workspace.integrateAcceptedRevision({
             repositoryPath: plan.repositoryPath,
             expectedRevision: plan.currentRevision,
             acceptedRevision: candidate.resultRevision,
             candidateWorkspace: session.workspace,
           });
+          if (!integrated.clean) return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIRTY');
+          integratedRevision = integrated.integratedRevision ?? candidate.resultRevision;
+        } catch (error) {
+          if (
+            error instanceof V4Error &&
+            (error.code === 'WORKSPACE_INTEGRATION_STALE_HEAD' ||
+              error.code === 'WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT')
+          )
+            return this.failPlan(plan, item, 'PLAN_REPOSITORY_DIVERGED');
+          throw error;
         }
-      } else {
-        return this.failPlan(
-          plan,
-          item,
-          observation.clean ? 'PLAN_REPOSITORY_DIVERGED' : 'PLAN_REPOSITORY_DIRTY',
-        );
       }
     }
     const current = this.repositories.plans.getPlan(plan.planId);
