@@ -442,8 +442,18 @@ export class PlanAutomationRuntime {
     }
 
     const runningItems = items.filter((item) => item.status === 'RUNNING');
-    if (runningItems.length > 0)
-      return await this.reconcileRunningItem(plan, runningItems[0]!, policy);
+    if (runningItems.length > 0) {
+      let result: PlanAutomationResult | undefined;
+      for (const runningItem of runningItems) {
+        const currentPlan = this.repositories.plans.getPlan(planId);
+        if (currentPlan.status !== 'RUNNING') break;
+        const currentItem = this.repositories.plans.getWorkItem(runningItem.workItemId);
+        if (currentItem.status !== 'RUNNING') continue;
+        result = await this.reconcileRunningItem(currentPlan, currentItem, policy);
+      }
+      if (result) return result;
+      plan = this.repositories.plans.getPlan(planId);
+    }
     const failed = items.find((item) => item.status === 'FAILED' || item.status === 'BLOCKED');
     if (failed) return this.failPlan(plan, failed, 'WORK_ITEM_TERMINAL_FAILURE');
 
@@ -1588,8 +1598,23 @@ export class PlanAutomationRuntime {
     if (item?.status === 'RUNNING')
       this.repositories.plans.updateWorkItemStatus(item.workItemId, 'FAILED');
     const current = this.repositories.plans.getPlan(plan.planId);
-    if (current.status === 'RUNNING')
+    if (current.status === 'RUNNING') {
+      const graph = this.repositories.plans.getActiveGraphVersion(plan.planId);
+      const siblings = graph
+        ? this.repositories.plans
+            .listWorkItems(plan.planId, graph.graphVersionId)
+            .filter((candidate) => candidate.status === 'RUNNING')
+        : [];
+      if (siblings.length > 0) {
+        return {
+          planId: plan.planId,
+          workItemId: item?.workItemId,
+          status: 'WAITING',
+          code: code + '_WAVE_DRAINING',
+        };
+      }
       this.repositories.plans.compareAndSetStatus(plan.planId, 'RUNNING', 'FAILED');
+    }
     return { planId: plan.planId, workItemId: item?.workItemId, status: 'FAILED', code };
   }
 

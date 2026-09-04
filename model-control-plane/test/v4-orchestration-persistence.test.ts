@@ -99,7 +99,10 @@ function seed(db: DatabaseSync, key = 'orchestration-seed') {
     repositoryPath: '/srv/repos/example',
     baseRevision: 'base-sha',
   }).value!;
-  const graph = repositories.plans.createGraphVersion({ planId: plan.planId, reason: 'initial graph' }).value!;
+  const graph = repositories.plans.createGraphVersion({
+    planId: plan.planId,
+    reason: 'initial graph',
+  }).value!;
   const workItem = repositories.plans.appendGraphWorkItem({
     graphVersionId: graph.graphVersionId,
     itemKey: 'implementation',
@@ -151,22 +154,56 @@ function downgradeFixtureToV1(file: string): void {
 }
 
 function schemaDescriptor(db: DatabaseSync): Record<string, unknown> {
-  const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as unknown as Array<{ name: string }>).map((row) => row.name);
+  const tables = (
+    db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      )
+      .all() as unknown as Array<{ name: string }>
+  ).map((row) => row.name);
   const descriptor: Record<string, unknown> = {};
   for (const table of tables) {
     const quoted = '"' + table.replaceAll('"', '""') + '"';
-    const columns = (db.prepare('PRAGMA table_info(' + quoted + ')').all() as unknown as Array<Record<string, unknown>>)
+    const columns = (
+      db.prepare('PRAGMA table_info(' + quoted + ')').all() as unknown as Array<
+        Record<string, unknown>
+      >
+    )
       .map(({ name, type, notnull, dflt_value, pk }) => ({ name, type, notnull, dflt_value, pk }))
       .sort((left, right) => String(left.name).localeCompare(String(right.name)));
-    const foreignKeys = (db.prepare('PRAGMA foreign_key_list(' + quoted + ')').all() as unknown as Array<Record<string, unknown>>)
-      .map(({ table: target, from, to, on_update, on_delete, match }) => ({ target, from, to, on_update, on_delete, match }))
+    const foreignKeys = (
+      db.prepare('PRAGMA foreign_key_list(' + quoted + ')').all() as unknown as Array<
+        Record<string, unknown>
+      >
+    )
+      .map(({ table: target, from, to, on_update, on_delete, match }) => ({
+        target,
+        from,
+        to,
+        on_update,
+        on_delete,
+        match,
+      }))
       .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
-    const indexes = (db.prepare('PRAGMA index_list(' + quoted + ')').all() as unknown as Array<{ name: string; unique: number; origin: string; partial: number }>)
+    const indexes = (
+      db.prepare('PRAGMA index_list(' + quoted + ')').all() as unknown as Array<{
+        name: string;
+        unique: number;
+        origin: string;
+        partial: number;
+      }>
+    )
       .map((index) => ({
         unique: index.unique,
         origin: index.origin,
         partial: index.partial,
-        columns: (db.prepare('PRAGMA index_info("' + index.name.replaceAll('"', '""') + '")').all() as unknown as Array<{ seqno: number; name: string }>).sort((a, b) => a.seqno - b.seqno).map((column) => column.name),
+        columns: (
+          db
+            .prepare('PRAGMA index_info("' + index.name.replaceAll('"', '""') + '")')
+            .all() as unknown as Array<{ seqno: number; name: string }>
+        )
+          .sort((a, b) => a.seqno - b.seqno)
+          .map((column) => column.name),
       }))
       .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
     descriptor[table] = { columns, foreignKeys, indexes };
@@ -178,11 +215,22 @@ test('runtime schema and checked-in schema-v4.sql remain semantically synchroniz
   const runtime = new DatabaseSync(':memory:');
   runtime.exec(SCHEMA_V4_SQL);
   const fileSchema = new DatabaseSync(':memory:');
-  const sqlFile = fs.readFileSync(new URL('../src/v4/persistence/schema-v4.sql', import.meta.url), 'utf8');
+  const sqlFile = fs.readFileSync(
+    new URL('../src/v4/persistence/schema-v4.sql', import.meta.url),
+    'utf8',
+  );
   fileSchema.exec(sqlFile);
   assert.deepEqual(schemaDescriptor(fileSchema), schemaDescriptor(runtime));
-  assert.equal(fileSchema.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
-  assert.equal(runtime.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
+  assert.equal(
+    fileSchema.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
+  assert.equal(
+    runtime.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
   runtime.close();
   fileSchema.close();
 });
@@ -197,7 +245,10 @@ test('adapters require the centralized current V4 schema and never create privat
     () => new MaintenanceCandidateRegistry(raw),
     (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_VERSION_INVALID',
   );
-  assert.equal(raw.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table'").get()?.count, 0);
+  assert.equal(
+    raw.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type='table'").get()?.count,
+    0,
+  );
   raw.close();
 });
 
@@ -205,7 +256,10 @@ test('schema v1 migrates in place through v5 and preserves durable production st
   const file = tempDatabase('pixel-v4-migrate-');
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'migration-plan');
-  seeded.repositories.supervisors.attachConversation(seeded.supervisor.supervisorId, 'conversation-before-migration');
+  seeded.repositories.supervisors.attachConversation(
+    seeded.supervisor.supervisorId,
+    'conversation-before-migration',
+  );
   const before = {
     plan: seeded.repositories.plans.getPlan(seeded.plan.planId),
     graph: seeded.repositories.plans.getActiveGraphVersion(seeded.plan.planId),
@@ -218,12 +272,38 @@ test('schema v1 migrates in place through v5 and preserves durable production st
   downgradeFixtureToV1(file);
   db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const migrated = createRepositories(db);
-  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
-  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_sessions'").get());
-  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_evidence'").get());
-  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='v4_jules_sessions'").get());
-  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='plan_deliveries'").get());
-  assert.ok((db.prepare('PRAGMA table_info(improvement_candidates)').all() as unknown as Array<{ name: string }>).some((column) => column.name === 'risk'));
+  assert.equal(
+    db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
+  assert.ok(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_sessions'")
+      .get(),
+  );
+  assert.ok(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_evidence'")
+      .get(),
+  );
+  assert.ok(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='v4_jules_sessions'")
+      .get(),
+  );
+  assert.ok(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='plan_deliveries'")
+      .get(),
+  );
+  assert.ok(
+    (
+      db.prepare('PRAGMA table_info(improvement_candidates)').all() as unknown as Array<{
+        name: string;
+      }>
+    ).some((column) => column.name === 'risk'),
+  );
   assert.deepEqual(migrated.plans.getPlan(before.plan.planId), before.plan);
   assert.deepEqual(migrated.plans.getActiveGraphVersion(before.plan.planId), before.graph);
   assert.deepEqual(migrated.plans.getWorkItem(before.workItem.workItemId), before.workItem);
@@ -233,7 +313,11 @@ test('schema v1 migrates in place through v5 and preserves durable production st
 
   db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const restarted = createRepositories(db);
-  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
+  assert.equal(
+    db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
   assert.deepEqual(restarted.plans.getPlan(before.plan.planId), before.plan);
   assert.equal(restarted.events.listAfterCursor(0, 1000).events.length, before.events.length);
   db.close();
@@ -265,7 +349,11 @@ test('schema v2 migrates execution phase lineage through v5 without losing queue
   db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const repositories = createRepositories(db);
   const recovered = repositories.executions.get(execution.identity.executionId);
-  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
+  assert.equal(
+    db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
   assert.equal(recovered.identity.phase, 'IMPLEMENT');
   assert.equal(recovered.identity.parentExecutionId, undefined);
   assert.equal(recovered.status, 'QUEUED');
@@ -286,7 +374,11 @@ test('schema v2 migrates execution phase lineage through v5 without losing queue
     (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_INCOMPLETE',
   );
   const untouched = new DatabaseSync(partialFile, { readOnly: true });
-  assert.equal(untouched.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, 2);
+  assert.equal(
+    untouched.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    2,
+  );
   assert.equal(untouched.prepare('SELECT count(*) AS count FROM plans').get()?.count, 1);
   untouched.close();
 });
@@ -296,12 +388,18 @@ test('schema v4 migrates delivery supersession metadata to v5 without losing exi
   let db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const seeded = seed(db, 'v4-delivery-plan');
   const config = {
-    remote: 'origin', branch: 'pixel/existing', targetBranch: 'main', autoMerge: true,
-    mergeMethod: 'merge' as const, requiredChecks: ['CI'],
+    remote: 'origin',
+    branch: 'pixel/existing',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge' as const,
+    requiredChecks: ['CI'],
   };
   seeded.repositories.plans.attachDelivery(seeded.plan.planId, config);
   seeded.repositories.plans.recordDeliveryObservation(seeded.plan.planId, {
-    status: 'CHECKS_PENDING', headSha: 'base-sha', pullRequestNumber: 77,
+    status: 'CHECKS_PENDING',
+    headSha: 'base-sha',
+    pullRequestNumber: 77,
     pullRequestUrl: 'https://example.test/pull/77',
   });
   const before = seeded.repositories.plans.getPlan(seeded.plan.planId).delivery;
@@ -310,15 +408,26 @@ test('schema v4 migrates delivery supersession metadata to v5 without losing exi
   downgradeDeliveryToV4(file);
   db = openV4Database(file, { environment: 'production', env: { NODE_ENV: 'production' } });
   const repositories = createRepositories(db);
-  assert.equal(db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()?.schema_version, SCHEMA_VERSION);
-  assert.ok((db.prepare('PRAGMA table_info(plan_deliveries)').all() as unknown as Array<{ name: string }>).some((column) => column.name === 'superseded_by_plan_id'));
+  assert.equal(
+    db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
+  assert.ok(
+    (
+      db.prepare('PRAGMA table_info(plan_deliveries)').all() as unknown as Array<{ name: string }>
+    ).some((column) => column.name === 'superseded_by_plan_id'),
+  );
   assert.deepEqual(repositories.plans.getPlan(seeded.plan.planId).delivery, before);
   db.close();
 });
 
 test('unknown newer and incomplete V4 schemas fail closed without resetting durable rows', () => {
   const newerFile = tempDatabase('pixel-v4-newer-schema-');
-  let db = openV4Database(newerFile, { environment: 'production', env: { NODE_ENV: 'production' } });
+  let db = openV4Database(newerFile, {
+    environment: 'production',
+    env: { NODE_ENV: 'production' },
+  });
   seed(db, 'newer-schema-plan');
   db.close();
   let raw = new DatabaseSync(newerFile);
@@ -333,7 +442,10 @@ test('unknown newer and incomplete V4 schemas fail closed without resetting dura
   raw.close();
 
   const incompleteFile = tempDatabase('pixel-v4-incomplete-schema-');
-  db = openV4Database(incompleteFile, { environment: 'production', env: { NODE_ENV: 'production' } });
+  db = openV4Database(incompleteFile, {
+    environment: 'production',
+    env: { NODE_ENV: 'production' },
+  });
   seed(db, 'incomplete-schema-plan');
   db.close();
   raw = new DatabaseSync(incompleteFile);
@@ -347,7 +459,11 @@ test('unknown newer and incomplete V4 schemas fail closed without resetting dura
   `);
   raw.close();
   assert.throws(
-    () => openV4Database(incompleteFile, { environment: 'production', env: { NODE_ENV: 'production' } }),
+    () =>
+      openV4Database(incompleteFile, {
+        environment: 'production',
+        env: { NODE_ENV: 'production' },
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_INCOMPLETE',
   );
   raw = new DatabaseSync(incompleteFile, { readOnly: true });
@@ -355,7 +471,10 @@ test('unknown newer and incomplete V4 schemas fail closed without resetting dura
   raw.close();
 
   const missingColumnFile = tempDatabase('pixel-v4-missing-column-');
-  db = openV4Database(missingColumnFile, { environment: 'production', env: { NODE_ENV: 'production' } });
+  db = openV4Database(missingColumnFile, {
+    environment: 'production',
+    env: { NODE_ENV: 'production' },
+  });
   seed(db, 'missing-column-plan');
   db.close();
   raw = new DatabaseSync(missingColumnFile);
@@ -369,7 +488,11 @@ test('unknown newer and incomplete V4 schemas fail closed without resetting dura
   `);
   raw.close();
   assert.throws(
-    () => openV4Database(missingColumnFile, { environment: 'production', env: { NODE_ENV: 'production' } }),
+    () =>
+      openV4Database(missingColumnFile, {
+        environment: 'production',
+        env: { NODE_ENV: 'production' },
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_INCOMPLETE',
   );
   raw = new DatabaseSync(missingColumnFile, { readOnly: true });
@@ -384,7 +507,12 @@ test('unknown newer and incomplete V4 schemas fail closed without resetting dura
   raw.prepare("DELETE FROM schema_meta WHERE schema_id='pixel-v4'").run();
   raw.close();
   assert.throws(
-    () => openV4Database(malformedFile, { environment: 'test', allowDataReset: true, env: { NODE_ENV: 'test', PIXEL_V4_ALLOW_DATA_RESET: 'true' } }),
+    () =>
+      openV4Database(malformedFile, {
+        environment: 'test',
+        allowDataReset: true,
+        env: { NODE_ENV: 'test', PIXEL_V4_ALLOW_DATA_RESET: 'true' },
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'V4_SCHEMA_META_MISSING',
   );
   raw = new DatabaseSync(malformedFile, { readOnly: true });
@@ -422,15 +550,37 @@ test('execution sessions and evidence are durable, idempotent, correlated, and i
   };
 
   assert.throws(
-    () => seeded.repositories.sessions.create({ executionId: execution.identity.executionId, phase: 'IMPLEMENT', provider: 'openhands', workspace: { ...workspace, sourceRevision: 'other-sha' }, sourceRevision: 'base-sha' }),
-    (error: unknown) => error instanceof V4Error && error.code === 'SESSION_WORKSPACE_REVISION_MISMATCH',
+    () =>
+      seeded.repositories.sessions.create({
+        executionId: execution.identity.executionId,
+        phase: 'IMPLEMENT',
+        provider: 'openhands',
+        workspace: { ...workspace, sourceRevision: 'other-sha' },
+        sourceRevision: 'base-sha',
+      }),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'SESSION_WORKSPACE_REVISION_MISMATCH',
   );
   assert.throws(
-    () => seeded.repositories.sessions.create({ executionId: execution.identity.executionId, phase: 'IMPLEMENT', provider: 'openhands', workspace: { ...workspace, createdAt: 'not-a-time' }, sourceRevision: 'base-sha' }),
+    () =>
+      seeded.repositories.sessions.create({
+        executionId: execution.identity.executionId,
+        phase: 'IMPLEMENT',
+        provider: 'openhands',
+        workspace: { ...workspace, createdAt: 'not-a-time' },
+        sourceRevision: 'base-sha',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'SESSION_WORKSPACE_TIME_INVALID',
   );
   assert.throws(
-    () => seeded.repositories.sessions.create({ executionId: execution.identity.executionId, phase: 'IMPLEMENT', provider: 'openhands', workspace: { ...workspace, sourceRepositoryPath: '/srv/repos/other' }, sourceRevision: 'base-sha' }),
+    () =>
+      seeded.repositories.sessions.create({
+        executionId: execution.identity.executionId,
+        phase: 'IMPLEMENT',
+        provider: 'openhands',
+        workspace: { ...workspace, sourceRepositoryPath: '/srv/repos/other' },
+        sourceRevision: 'base-sha',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'SESSION_REPOSITORY_MISMATCH',
   );
   const created = seeded.repositories.sessions.create({
@@ -442,28 +592,110 @@ test('execution sessions and evidence are durable, idempotent, correlated, and i
   });
   assert.equal(created.status, 'created');
   assert.equal(created.value?.workspace.createdAt, workspace.createdAt);
-  assert.equal(seeded.repositories.sessions.create({ executionId: execution.identity.executionId, phase: 'IMPLEMENT', provider: 'openhands', workspace, sourceRevision: 'base-sha' }).status, 'existing');
+  assert.equal(
+    seeded.repositories.sessions.create({
+      executionId: execution.identity.executionId,
+      phase: 'IMPLEMENT',
+      provider: 'openhands',
+      workspace,
+      sourceRevision: 'base-sha',
+    }).status,
+    'existing',
+  );
   assert.throws(
-    () => seeded.repositories.sessions.create({ executionId: execution.identity.executionId, phase: 'IMPLEMENT', provider: 'openhands', workspace: { ...workspace, hostPath: '/other' }, sourceRevision: 'base-sha' }),
+    () =>
+      seeded.repositories.sessions.create({
+        executionId: execution.identity.executionId,
+        phase: 'IMPLEMENT',
+        provider: 'openhands',
+        workspace: { ...workspace, hostPath: '/other' },
+        sourceRevision: 'base-sha',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'EXECUTION_SESSION_IMMUTABLE',
   );
 
-  assert.equal(seeded.repositories.sessions.attachProviderSession(execution.identity.executionId, 'openhands-session-1').status, 'updated');
-  assert.equal(seeded.repositories.sessions.attachProviderSession(execution.identity.executionId, 'openhands-session-1').status, 'existing');
+  assert.equal(
+    seeded.repositories.sessions.attachProviderSession(
+      execution.identity.executionId,
+      'openhands-session-1',
+    ).status,
+    'updated',
+  );
+  assert.equal(
+    seeded.repositories.sessions.attachProviderSession(
+      execution.identity.executionId,
+      'openhands-session-1',
+    ).status,
+    'existing',
+  );
   assert.throws(
-    () => seeded.repositories.sessions.attachProviderSession(execution.identity.executionId, 'openhands-session-2'),
+    () =>
+      seeded.repositories.sessions.attachProviderSession(
+        execution.identity.executionId,
+        'openhands-session-2',
+      ),
     (error: unknown) => error instanceof V4Error && error.code === 'PROVIDER_SESSION_IMMUTABLE',
   );
-  assert.equal(seeded.repositories.sessions.replaceProviderSession(execution.identity.executionId, 'openhands-session-1', 'openhands-session-2', 'remote session disappeared').status, 'updated');
-  assert.equal(seeded.repositories.sessions.get(execution.identity.executionId).providerStatus, 'CREATED');
-  assert.equal(seeded.repositories.sessions.replaceProviderSession(execution.identity.executionId, 'openhands-session-1', 'openhands-session-2', 'retry after persisted result').status, 'existing');
-  assert.throws(
-    () => seeded.repositories.sessions.updateProviderStatus(execution.identity.executionId, 'RUNNING', 'not-a-time'),
-    (error: unknown) => error instanceof V4Error && error.code === 'PROVIDER_OBSERVATION_TIME_INVALID',
+  assert.equal(
+    seeded.repositories.sessions.replaceProviderSession(
+      execution.identity.executionId,
+      'openhands-session-1',
+      'openhands-session-2',
+      'remote session disappeared',
+    ).status,
+    'updated',
   );
-  assert.equal(seeded.repositories.sessions.updateProviderStatus(execution.identity.executionId, 'RUNNING', '2099-08-31T00:00:01.000Z').status, 'updated');
-  assert.equal(seeded.repositories.sessions.heartbeat(execution.identity.executionId, 'RUNNING', '2099-08-31T00:00:02.000Z').value?.lastHeartbeatAt, '2099-08-31T00:00:02.000Z');
-  assert.equal(seeded.repositories.sessions.heartbeat(execution.identity.executionId, 'RUNNING', '2099-08-31T00:00:01.500Z').reason, 'STALE_PROVIDER_HEARTBEAT');
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'CREATED',
+  );
+  assert.equal(
+    seeded.repositories.sessions.replaceProviderSession(
+      execution.identity.executionId,
+      'openhands-session-1',
+      'openhands-session-2',
+      'retry after persisted result',
+    ).status,
+    'existing',
+  );
+  assert.throws(
+    () =>
+      seeded.repositories.sessions.updateProviderStatus(
+        execution.identity.executionId,
+        'RUNNING',
+        'not-a-time',
+      ),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'PROVIDER_OBSERVATION_TIME_INVALID',
+  );
+  assert.equal(
+    seeded.repositories.sessions.updateProviderStatus(
+      execution.identity.executionId,
+      'RUNNING',
+      '2099-08-31T00:00:01.000Z',
+    ).status,
+    'updated',
+  );
+  assert.equal(
+    seeded.repositories.sessions.heartbeat(
+      execution.identity.executionId,
+      'RUNNING',
+      '2099-08-31T00:00:02.000Z',
+    ).value?.lastHeartbeatAt,
+    '2099-08-31T00:00:02.000Z',
+  );
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).lastProviderObservedAt,
+    '2099-08-31T00:00:02.000Z',
+  );
+  assert.equal(
+    seeded.repositories.sessions.heartbeat(
+      execution.identity.executionId,
+      'RUNNING',
+      '2099-08-31T00:00:01.500Z',
+    ).reason,
+    'STALE_PROVIDER_HEARTBEAT',
+  );
 
   const evidence = seeded.repositories.evidence.append({
     executionId: execution.identity.executionId,
@@ -473,36 +705,163 @@ test('execution sessions and evidence are durable, idempotent, correlated, and i
     payload: { command: 'npm test', status: 'PASS', exitCode: 0 },
   });
   assert.equal(evidence.status, 'created');
-  assert.equal(seeded.repositories.evidence.append({ executionId: execution.identity.executionId, kind: 'TEST', name: 'unit-tests', sourceRevision: 'result-sha', payload: { exitCode: 0, status: 'PASS', command: 'npm test' } }).status, 'existing');
+  assert.equal(
+    seeded.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'TEST',
+      name: 'unit-tests',
+      sourceRevision: 'result-sha',
+      payload: { exitCode: 0, status: 'PASS', command: 'npm test' },
+    }).status,
+    'existing',
+  );
   assert.throws(
-    () => seeded.repositories.evidence.append({ executionId: execution.identity.executionId, kind: 'TEST', name: 'unit-tests', sourceRevision: 'result-sha', payload: { command: 'npm test', status: 'FAIL', exitCode: 1 } }),
+    () =>
+      seeded.repositories.evidence.append({
+        executionId: execution.identity.executionId,
+        kind: 'TEST',
+        name: 'unit-tests',
+        sourceRevision: 'result-sha',
+        payload: { command: 'npm test', status: 'FAIL', exitCode: 1 },
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'DURABLE_EVIDENCE_IMMUTABLE',
   );
 
-  assert.equal(seeded.repositories.sessions.complete(execution.identity.executionId, { status: 'SUCCEEDED', finalResponse: 'too early', completedAt: '2099-08-31T00:00:01.500Z' }).reason, 'STALE_PROVIDER_COMPLETION');
-  assert.equal(seeded.repositories.sessions.complete(execution.identity.executionId, { status: 'SUCCEEDED', finalResponse: 'implementation complete', completedAt: '2099-08-31T00:00:03.000Z' }).status, 'updated');
-  assert.equal(seeded.repositories.sessions.complete(execution.identity.executionId, { status: 'SUCCEEDED', finalResponse: 'implementation complete', completedAt: '2099-08-31T00:00:04.000Z' }).status, 'existing');
-  assert.equal(seeded.repositories.sessions.heartbeat(execution.identity.executionId, 'SUCCEEDED', '2099-08-31T00:00:05.000Z').value?.completedAt, '2099-08-31T00:00:03.000Z');
+  assert.equal(
+    seeded.repositories.sessions.complete(execution.identity.executionId, {
+      status: 'SUCCEEDED',
+      finalResponse: 'too early',
+      completedAt: '2099-08-31T00:00:01.500Z',
+    }).reason,
+    'STALE_PROVIDER_COMPLETION',
+  );
+  assert.equal(
+    seeded.repositories.sessions.complete(execution.identity.executionId, {
+      status: 'SUCCEEDED',
+      finalResponse: 'implementation complete',
+      completedAt: '2099-08-31T00:00:03.000Z',
+    }).status,
+    'updated',
+  );
+  assert.equal(
+    seeded.repositories.sessions.complete(execution.identity.executionId, {
+      status: 'SUCCEEDED',
+      finalResponse: 'implementation complete',
+      completedAt: '2099-08-31T00:00:04.000Z',
+    }).status,
+    'existing',
+  );
+  assert.equal(
+    seeded.repositories.sessions.heartbeat(
+      execution.identity.executionId,
+      'SUCCEEDED',
+      '2099-08-31T00:00:05.000Z',
+    ).value?.completedAt,
+    '2099-08-31T00:00:03.000Z',
+  );
   assert.throws(
-    () => seeded.repositories.sessions.replaceProviderSession(execution.identity.executionId, 'openhands-session-2', 'openhands-session-3', 'too late'),
+    () =>
+      seeded.repositories.sessions.replaceProviderSession(
+        execution.identity.executionId,
+        'openhands-session-2',
+        'openhands-session-3',
+        'too late',
+      ),
     (error: unknown) => error instanceof V4Error && error.code === 'EXECUTION_SESSION_TERMINAL',
   );
   assert.throws(
-    () => seeded.repositories.sessions.complete(execution.identity.executionId, { status: 'FAILED', errorCode: 'LATE_FAILURE' }),
-    (error: unknown) => error instanceof V4Error && error.code === 'EXECUTION_SESSION_RESULT_IMMUTABLE',
+    () =>
+      seeded.repositories.sessions.complete(execution.identity.executionId, {
+        status: 'FAILED',
+        errorCode: 'LATE_FAILURE',
+      }),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'EXECUTION_SESSION_RESULT_IMMUTABLE',
   );
   assert.equal(seeded.repositories.sessions.listByPlan(seeded.plan.planId).length, 1);
-  assert.equal(seeded.repositories.evidence.listByExecution(execution.identity.executionId).length, 1);
-  db.prepare('UPDATE execution_sessions SET provider=? WHERE execution_id=?').run('', execution.identity.executionId);
+  assert.equal(
+    seeded.repositories.evidence.listByExecution(execution.identity.executionId).length,
+    1,
+  );
+  db.prepare('UPDATE execution_sessions SET provider=? WHERE execution_id=?').run(
+    '',
+    execution.identity.executionId,
+  );
   assert.throws(
     () => seeded.repositories.sessions.get(execution.identity.executionId),
-    (error: unknown) => error instanceof V4Error && error.code === 'CORRUPTED_EXECUTION_SESSION_IDENTITY',
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'CORRUPTED_EXECUTION_SESSION_IDENTITY',
   );
-  db.prepare('UPDATE execution_sessions SET provider=?,workspace_host_path=? WHERE execution_id=?').run('openhands', '', execution.identity.executionId);
+  db.prepare(
+    'UPDATE execution_sessions SET provider=?,workspace_host_path=? WHERE execution_id=?',
+  ).run('openhands', '', execution.identity.executionId);
   assert.throws(
     () => seeded.repositories.sessions.get(execution.identity.executionId),
-    (error: unknown) => error instanceof V4Error && error.code === 'CORRUPTED_EXECUTION_SESSION_WORKSPACE',
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'CORRUPTED_EXECUTION_SESSION_WORKSPACE',
   );
+  db.close();
+});
+
+test('provider completion ordering ignores later local metadata mutations but rejects older provider observations', async () => {
+  const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
+  const seeded = seed(db, 'provider-watermark-plan');
+  const item = seeded.repositories.plans.listWorkItems(seeded.plan.planId)[0]!;
+  const execution = seeded.repositories.executions.create({
+    idempotencyKey: 'provider-watermark-execution',
+    identity: {
+      executionId: 'execution-provider-watermark-1',
+      planId: seeded.plan.planId,
+      workItemId: item.workItemId,
+      phase: 'IMPLEMENT',
+      attempt: 1,
+      route: 'test-provider',
+      sourceRevision: 'base-sha',
+    },
+    objective: 'exercise provider watermark',
+  }).value!;
+  const workspace = {
+    executionId: execution.identity.executionId,
+    hostPath: '/tmp/provider-watermark/repo',
+    executionPath: '/workspace/provider-watermark/repo',
+    evidenceHostPath: '/tmp/provider-watermark/completion-evidence.json',
+    evidenceExecutionPath: '/workspace/provider-watermark/completion-evidence.json',
+    sourceRepositoryPath: seeded.plan.repositoryPath,
+    sourceRevision: 'base-sha',
+    createdAt: '2099-09-01T00:00:00.000Z',
+  };
+  seeded.repositories.sessions.create({
+    executionId: execution.identity.executionId,
+    phase: 'IMPLEMENT',
+    provider: 'openhands',
+    workspace,
+    sourceRevision: 'base-sha',
+  });
+  seeded.repositories.sessions.updateProviderStatus(
+    execution.identity.executionId,
+    'RUNNING',
+    '2099-09-01T00:00:01.000Z',
+  );
+  const terminalObservedAt = '2099-09-01T00:00:02.000Z';
+  // Attaching local correlation data after the provider snapshot must not advance
+  // the provider observation watermark.
+  seeded.repositories.sessions.attachProviderSession(
+    execution.identity.executionId,
+    'provider-watermark-session',
+  );
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).lastProviderObservedAt,
+    '2099-09-01T00:00:01.000Z',
+  );
+  assert.equal(
+    seeded.repositories.sessions.complete(execution.identity.executionId, {
+      status: 'SUCCEEDED',
+      finalResponse: 'done',
+      completedAt: terminalObservedAt,
+    }).status,
+    'updated',
+  );
+
   db.close();
 });
 
@@ -511,53 +870,143 @@ test('execution leases allow takeover only after expiry', () => {
   const seeded = seed(db, 'execution-lease-plan');
   const execution = seeded.repositories.executions.create({
     idempotencyKey: 'leased-execution',
-    identity: { executionId: 'leased-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'IMPLEMENT', attempt: 1, route: 'openhands', sourceRevision: 'base-sha' },
+    identity: {
+      executionId: 'leased-execution',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      phase: 'IMPLEMENT',
+      attempt: 1,
+      route: 'openhands',
+      sourceRevision: 'base-sha',
+    },
     objective: 'lease me',
   }).value!;
-  assert.equal(seeded.repositories.executions.create({ idempotencyKey: 'leased-execution', identity: execution.identity, objective: 'lease me' }).status, 'existing');
+  assert.equal(
+    seeded.repositories.executions.create({
+      idempotencyKey: 'leased-execution',
+      identity: execution.identity,
+      objective: 'lease me',
+    }).status,
+    'existing',
+  );
   assert.throws(
-    () => seeded.repositories.executions.create({ idempotencyKey: 'leased-execution', identity: { ...execution.identity, route: 'different-route' }, objective: 'lease me' }),
+    () =>
+      seeded.repositories.executions.create({
+        idempotencyKey: 'leased-execution',
+        identity: { ...execution.identity, route: 'different-route' },
+        objective: 'lease me',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'DUPLICATE_KEY',
   );
   assert.throws(
-    () => seeded.repositories.executions.create({ idempotencyKey: 'different-key', identity: execution.identity, objective: 'lease me' }),
+    () =>
+      seeded.repositories.executions.create({
+        idempotencyKey: 'different-key',
+        identity: execution.identity,
+        objective: 'lease me',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'DUPLICATE_KEY',
   );
-  const first = seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-a', 10, 1000);
+  const first = seeded.repositories.executions.claimLease(
+    execution.identity.executionId,
+    'worker-a',
+    10,
+    1000,
+  );
   assert.equal(first.status, 'created');
-  assert.equal(seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-b', 10, 1001).status, 'rejected');
-  assert.equal(seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-b', 10, 1011).status, 'updated');
+  assert.equal(
+    seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-b', 10, 1001)
+      .status,
+    'rejected',
+  );
+  assert.equal(
+    seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-b', 10, 1011)
+      .status,
+    'updated',
+  );
   db.close();
 });
 
 test('plan revision reconciliation and exact work-item acceptance are CAS guarded and audited', () => {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const seeded = seed(db, 'revision-plan');
-  const reconciled = seeded.repositories.plans.reconcileCurrentRevision(seeded.plan.planId, 'base-sha', 'observed-sha', 'verified repository head');
+  const reconciled = seeded.repositories.plans.reconcileCurrentRevision(
+    seeded.plan.planId,
+    'base-sha',
+    'observed-sha',
+    'verified repository head',
+  );
   assert.equal(reconciled.status, 'updated');
   assert.equal(reconciled.value?.currentRevision, 'observed-sha');
-  assert.equal(seeded.repositories.plans.reconcileCurrentRevision(seeded.plan.planId, 'base-sha', 'observed-sha', 'retry after response loss').status, 'existing');
-  assert.equal(seeded.repositories.plans.reconcileCurrentRevision(seeded.plan.planId, 'base-sha', 'stale-sha', 'stale observer').status, 'rejected');
-  assert.equal(seeded.repositories.plans.listPlans({ status: 'READY' }).some((plan) => plan.planId === seeded.plan.planId), true);
+  assert.equal(
+    seeded.repositories.plans.reconcileCurrentRevision(
+      seeded.plan.planId,
+      'base-sha',
+      'observed-sha',
+      'retry after response loss',
+    ).status,
+    'existing',
+  );
+  assert.equal(
+    seeded.repositories.plans.reconcileCurrentRevision(
+      seeded.plan.planId,
+      'base-sha',
+      'stale-sha',
+      'stale observer',
+    ).status,
+    'rejected',
+  );
+  assert.equal(
+    seeded.repositories.plans
+      .listPlans({ status: 'READY' })
+      .some((plan) => plan.planId === seeded.plan.planId),
+    true,
+  );
 
   seeded.repositories.plans.compareAndSetStatus(seeded.plan.planId, 'READY', 'RUNNING');
   seeded.repositories.plans.updateWorkItemStatus(seeded.workItem.workItemId, 'RUNNING');
-  const advanced = seeded.repositories.plans.advanceAcceptedRevision(seeded.plan.planId, 'observed-sha', 'accepted-sha', 'review passed');
+  const advanced = seeded.repositories.plans.advanceAcceptedRevision(
+    seeded.plan.planId,
+    'observed-sha',
+    'accepted-sha',
+    'review passed',
+  );
   assert.equal(advanced.status, 'updated');
   assert.equal(advanced.value?.currentRevision, 'accepted-sha');
-  assert.equal(seeded.repositories.plans.advanceAcceptedRevision(seeded.plan.planId, 'observed-sha', 'accepted-sha', 'retry after response loss').status, 'existing');
-  const accepted = seeded.repositories.plans.acceptWorkItemRevision(seeded.workItem.workItemId, 'accepted-sha');
+  assert.equal(
+    seeded.repositories.plans.advanceAcceptedRevision(
+      seeded.plan.planId,
+      'observed-sha',
+      'accepted-sha',
+      'retry after response loss',
+    ).status,
+    'existing',
+  );
+  const accepted = seeded.repositories.plans.acceptWorkItemRevision(
+    seeded.workItem.workItemId,
+    'accepted-sha',
+  );
   assert.equal(accepted.value?.status, 'SUCCEEDED');
   assert.equal(accepted.value?.exactAcceptedRevision, 'accepted-sha');
-  assert.equal(seeded.repositories.plans.acceptWorkItemRevision(seeded.workItem.workItemId, 'accepted-sha').status, 'existing');
-  assert.throws(
-    () => seeded.repositories.plans.acceptWorkItemRevision(seeded.workItem.workItemId, 'different-sha'),
-    (error: unknown) => error instanceof V4Error && error.code === 'WORK_ITEM_ACCEPTED_REVISION_IMMUTABLE',
+  assert.equal(
+    seeded.repositories.plans.acceptWorkItemRevision(seeded.workItem.workItemId, 'accepted-sha')
+      .status,
+    'existing',
   );
-  const planEvents = seeded.repositories.events.listByAggregate(seeded.plan.planId).map((event) => event.type);
+  assert.throws(
+    () =>
+      seeded.repositories.plans.acceptWorkItemRevision(seeded.workItem.workItemId, 'different-sha'),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORK_ITEM_ACCEPTED_REVISION_IMMUTABLE',
+  );
+  const planEvents = seeded.repositories.events
+    .listByAggregate(seeded.plan.planId)
+    .map((event) => event.type);
   assert.ok(planEvents.includes('PLAN_REVISION_RECONCILED'));
   assert.ok(planEvents.includes('PLAN_ACCEPTED_REVISION_ADVANCED'));
-  const workEvents = seeded.repositories.events.listByAggregate(seeded.workItem.workItemId).map((event) => event.type);
+  const workEvents = seeded.repositories.events
+    .listByAggregate(seeded.workItem.workItemId)
+    .map((event) => event.type);
   assert.ok(workEvents.includes('WORK_ITEM_REVISION_ACCEPTED'));
   db.close();
 });
@@ -569,10 +1018,22 @@ test('review binding requires a distinct reviewer execution for the same plan an
   seeded.repositories.plans.updateWorkItemStatus(seeded.workItem.workItemId, 'RUNNING');
   const implementation = seeded.repositories.executions.create({
     idempotencyKey: 'implementation-for-review',
-    identity: { executionId: 'implementation-for-review', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'IMPLEMENT', attempt: 1, route: 'luna', sourceRevision: 'base-sha' },
+    identity: {
+      executionId: 'implementation-for-review',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      phase: 'IMPLEMENT',
+      attempt: 1,
+      route: 'luna',
+      sourceRevision: 'base-sha',
+    },
     objective: 'implement',
   }).value!;
-  const workspaceFor = (executionId: string, sourceRevision: string, suffix: string): WorkspaceDescriptor => ({
+  const workspaceFor = (
+    executionId: string,
+    sourceRevision: string,
+    suffix: string,
+  ): WorkspaceDescriptor => ({
     executionId,
     hostPath: '/host/review/' + suffix,
     executionPath: '/workspace/review/' + suffix,
@@ -589,11 +1050,20 @@ test('review binding requires a distinct reviewer execution for the same plan an
     workspace: workspaceFor(implementation.identity.executionId, 'base-sha', 'implementation'),
     sourceRevision: 'base-sha',
   });
-  seeded.repositories.sessions.attachProviderSession(implementation.identity.executionId, 'implementation-provider-session');
+  seeded.repositories.sessions.attachProviderSession(
+    implementation.identity.executionId,
+    'implementation-provider-session',
+  );
   seeded.repositories.sessions.updateProviderStatus(implementation.identity.executionId, 'RUNNING');
   seeded.repositories.executions.updateStatus(implementation.identity.executionId, 'RUNNING');
-  seeded.repositories.sessions.complete(implementation.identity.executionId, { status: 'SUCCEEDED', finalResponse: 'implementation complete' });
-  seeded.repositories.executions.recordResult(implementation.identity.executionId, { status: 'SUCCEEDED', resultRevision: 'result-sha' });
+  seeded.repositories.sessions.complete(implementation.identity.executionId, {
+    status: 'SUCCEEDED',
+    finalResponse: 'implementation complete',
+  });
+  seeded.repositories.executions.recordResult(implementation.identity.executionId, {
+    status: 'SUCCEEDED',
+    resultRevision: 'result-sha',
+  });
   const review = seeded.repositories.reviews.create({
     idempotencyKey: 'review-result-sha',
     planId: seeded.plan.planId,
@@ -603,23 +1073,51 @@ test('review binding requires a distinct reviewer execution for the same plan an
   }).value!;
   const reviewer = seeded.repositories.executions.create({
     idempotencyKey: 'reviewer-execution',
-    identity: { executionId: 'reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 1, route: 'sol-review', sourceRevision: 'result-sha' },
+    identity: {
+      executionId: 'reviewer-execution',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      phase: 'REVIEW',
+      parentExecutionId: implementation.identity.executionId,
+      attempt: 1,
+      route: 'sol-review',
+      sourceRevision: 'result-sha',
+    },
     objective: 'independently review result-sha',
   }).value!;
   assert.throws(
-    () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, implementation.identity.executionId),
+    () =>
+      seeded.repositories.reviews.attachReviewerExecution(
+        review.reviewId,
+        implementation.identity.executionId,
+      ),
     (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_NOT_INDEPENDENT',
   );
   assert.throws(
-    () => seeded.repositories.executions.create({
-      idempotencyKey: 'wrong-source-reviewer',
-      identity: { executionId: 'wrong-source-reviewer', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 1, route: 'sol-review', sourceRevision: 'other-sha' },
-      objective: 'review the wrong source',
-    }),
-    (error: unknown) => error instanceof V4Error && error.code === 'EXECUTION_PARENT_REVISION_MISMATCH',
+    () =>
+      seeded.repositories.executions.create({
+        idempotencyKey: 'wrong-source-reviewer',
+        identity: {
+          executionId: 'wrong-source-reviewer',
+          planId: seeded.plan.planId,
+          workItemId: seeded.workItem.workItemId,
+          phase: 'REVIEW',
+          parentExecutionId: implementation.identity.executionId,
+          attempt: 1,
+          route: 'sol-review',
+          sourceRevision: 'other-sha',
+        },
+        objective: 'review the wrong source',
+      }),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'EXECUTION_PARENT_REVISION_MISMATCH',
   );
   assert.throws(
-    () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, reviewer.identity.executionId),
+    () =>
+      seeded.repositories.reviews.attachReviewerExecution(
+        review.reviewId,
+        reviewer.identity.executionId,
+      ),
     (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_SESSION_INVALID',
   );
   seeded.repositories.sessions.create({
@@ -629,46 +1127,109 @@ test('review binding requires a distinct reviewer execution for the same plan an
     workspace: workspaceFor(reviewer.identity.executionId, 'result-sha', 'reviewer'),
     sourceRevision: 'result-sha',
   });
-  seeded.repositories.sessions.attachProviderSession(reviewer.identity.executionId, 'review-provider-session');
-  assert.equal(seeded.repositories.reviews.attachReviewerExecution(review.reviewId, reviewer.identity.executionId).status, 'updated');
-  assert.equal(seeded.repositories.reviews.attachReviewerExecution(review.reviewId, reviewer.identity.executionId).status, 'existing');
+  seeded.repositories.sessions.attachProviderSession(
+    reviewer.identity.executionId,
+    'review-provider-session',
+  );
+  assert.equal(
+    seeded.repositories.reviews.attachReviewerExecution(
+      review.reviewId,
+      reviewer.identity.executionId,
+    ).status,
+    'updated',
+  );
+  assert.equal(
+    seeded.repositories.reviews.attachReviewerExecution(
+      review.reviewId,
+      reviewer.identity.executionId,
+    ).status,
+    'existing',
+  );
   assert.throws(
     () => seeded.repositories.reviews.recordVerdict(review.reviewId, 'PASS'),
-    (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_EXECUTION_NOT_SUCCEEDED',
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'REVIEWER_EXECUTION_NOT_SUCCEEDED',
   );
   seeded.repositories.sessions.updateProviderStatus(reviewer.identity.executionId, 'RUNNING');
   seeded.repositories.executions.updateStatus(reviewer.identity.executionId, 'RUNNING');
-  seeded.repositories.sessions.complete(reviewer.identity.executionId, { status: 'SUCCEEDED', finalResponse: 'review complete' });
-  seeded.repositories.executions.recordResult(reviewer.identity.executionId, { status: 'SUCCEEDED', resultRevision: 'result-sha' });
+  seeded.repositories.sessions.complete(reviewer.identity.executionId, {
+    status: 'SUCCEEDED',
+    finalResponse: 'review complete',
+  });
+  seeded.repositories.executions.recordResult(reviewer.identity.executionId, {
+    status: 'SUCCEEDED',
+    resultRevision: 'result-sha',
+  });
   seeded.repositories.reviews.updateStatus(review.reviewId, 'RUNNING');
-  assert.equal(seeded.repositories.reviews.recordVerdict(review.reviewId, 'PASS').value?.status, 'PASSED');
-  assert.equal(seeded.repositories.reviews.create({ idempotencyKey: 'review-result-sha', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, implementationExecutionId: implementation.identity.executionId, sourceRevision: 'result-sha' }).status, 'existing');
+  assert.equal(
+    seeded.repositories.reviews.recordVerdict(review.reviewId, 'PASS').value?.status,
+    'PASSED',
+  );
+  assert.equal(
+    seeded.repositories.reviews.create({
+      idempotencyKey: 'review-result-sha',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      implementationExecutionId: implementation.identity.executionId,
+      sourceRevision: 'result-sha',
+    }).status,
+    'existing',
+  );
   const secondReviewer = seeded.repositories.executions.create({
     idempotencyKey: 'second-reviewer-execution',
-    identity: { executionId: 'second-reviewer-execution', planId: seeded.plan.planId, workItemId: seeded.workItem.workItemId, phase: 'REVIEW', parentExecutionId: implementation.identity.executionId, attempt: 2, route: 'opus-review', sourceRevision: 'result-sha' },
+    identity: {
+      executionId: 'second-reviewer-execution',
+      planId: seeded.plan.planId,
+      workItemId: seeded.workItem.workItemId,
+      phase: 'REVIEW',
+      parentExecutionId: implementation.identity.executionId,
+      attempt: 2,
+      route: 'opus-review',
+      sourceRevision: 'result-sha',
+    },
     objective: 'second independent review',
   }).value!;
   assert.throws(
-    () => seeded.repositories.reviews.attachReviewerExecution(review.reviewId, secondReviewer.identity.executionId),
+    () =>
+      seeded.repositories.reviews.attachReviewerExecution(
+        review.reviewId,
+        secondReviewer.identity.executionId,
+      ),
     (error: unknown) => error instanceof V4Error && error.code === 'REVIEWER_EXECUTION_IMMUTABLE',
   );
-  assert.equal(seeded.repositories.reviews.findByImplementationExecution(implementation.identity.executionId)?.reviewerExecutionId, reviewer.identity.executionId);
+  assert.equal(
+    seeded.repositories.reviews.findByImplementationExecution(implementation.identity.executionId)
+      ?.reviewerExecutionId,
+    reviewer.identity.executionId,
+  );
   db.close();
 });
 
-
-
 test('Jules correlation preserves immutable session lineage and validates remote refresh provenance', () => {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
-  const request = { idempotencyKey: 'jules-digital-biome-1', repository: 'owner/digital-biome', baseRevision: 'base-sha', objective: 'Refactor the rendering boundary' };
+  const request = {
+    idempotencyKey: 'jules-digital-biome-1',
+    repository: 'owner/digital-biome',
+    baseRevision: 'base-sha',
+    objective: 'Refactor the rendering boundary',
+  };
   let remote: import('../src/v4/adapters/jules.js').JulesTaskResult = {
-    sessionId: 'jules-session-1', repository: request.repository, baseRevision: request.baseRevision, status: 'RUNNING',
+    sessionId: 'jules-session-1',
+    repository: request.repository,
+    baseRevision: request.baseRevision,
+    status: 'RUNNING',
   };
   let getCalls = 0;
-  const adapter = new JulesAdapter({
-    submit: () => remote,
-    getResult: () => { getCalls += 1; return remote; },
-  }, db);
+  const adapter = new JulesAdapter(
+    {
+      submit: () => remote,
+      getResult: () => {
+        getCalls += 1;
+        return remote;
+      },
+    },
+    db,
+  );
   assert.equal(adapter.submit(request).sessionId, 'jules-session-1');
   assert.equal(adapter.submit(request).sessionId, 'jules-session-1');
   assert.throws(
@@ -689,13 +1250,29 @@ test('Jules correlation preserves immutable session lineage and validates remote
     () => adapter.correlate(request, { ...remote, status: 'RUNNING' }),
     (error: unknown) => error instanceof V4Error && error.code === 'JULES_RESULT_IMMUTABLE',
   );
-  remote = { sessionId: 'jules-session-1', repository: 'attacker/repo', baseRevision: request.baseRevision, status: 'RUNNING' };
+  remote = {
+    sessionId: 'jules-session-1',
+    repository: 'attacker/repo',
+    baseRevision: request.baseRevision,
+    status: 'RUNNING',
+  };
   assert.equal(adapter.getResult('jules-session-1').status, 'SUCCEEDED');
   assert.equal(getCalls, 1, 'terminal durable results must not be refreshed or replaced');
 
   const secondRequest = { ...request, idempotencyKey: 'jules-digital-biome-2' };
-  let mismatched = { sessionId: 'jules-session-3', repository: 'attacker/repo', baseRevision: request.baseRevision, status: 'RUNNING' as const };
-  const mismatchedAdapter = new JulesAdapter({ submit: () => ({ ...mismatched, repository: secondRequest.repository }), getResult: () => mismatched }, db);
+  let mismatched = {
+    sessionId: 'jules-session-3',
+    repository: 'attacker/repo',
+    baseRevision: request.baseRevision,
+    status: 'RUNNING' as const,
+  };
+  const mismatchedAdapter = new JulesAdapter(
+    {
+      submit: () => ({ ...mismatched, repository: secondRequest.repository }),
+      getResult: () => mismatched,
+    },
+    db,
+  );
   mismatchedAdapter.submit(secondRequest);
   assert.throws(
     () => mismatchedAdapter.getResult('jules-session-3'),
@@ -708,18 +1285,39 @@ test('maintenance candidate decoding fails closed on corrupted durable evidence'
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const repositories = createRepositories(db);
   const plan = repositories.plans.createPlan({
-    idempotencyKey: 'candidate-corruption-plan', projectKey: 'digital-biome', objective: 'repair a candidate', repositoryPath: '/srv/repos/digital-biome', baseRevision: 'base-sha',
+    idempotencyKey: 'candidate-corruption-plan',
+    projectKey: 'digital-biome',
+    objective: 'repair a candidate',
+    repositoryPath: '/srv/repos/digital-biome',
+    baseRevision: 'base-sha',
   }).value!;
   const program = {
-    programId: 'digital-biome-program', projectKey: 'digital-biome', implementationRoutes: ['jules'], reviewRoutes: ['sol-review'],
-    autonomousScope: 'CONSERVATIVE' as const, autoMerge: false, enabled: true,
+    programId: 'digital-biome-program',
+    projectKey: 'digital-biome',
+    implementationRoutes: ['jules'],
+    reviewRoutes: ['sol-review'],
+    autonomousScope: 'CONSERVATIVE' as const,
+    autoMerge: false,
+    enabled: true,
   };
   const registry = new MaintenanceCandidateRegistry(db);
-  const created = registry.create(program, { title: 'Improve rendering', evidence: ['metric:slow'], risk: 'LOW' });
+  const created = registry.create(program, {
+    title: 'Improve rendering',
+    evidence: ['metric:slow'],
+    risk: 'LOW',
+  });
   registry.attachPlan(created.candidate.candidateId, plan.planId);
-  db.prepare('UPDATE improvement_candidates SET evidence=? WHERE candidate_id=?').run('{}', created.candidate.candidateId);
+  db.prepare('UPDATE improvement_candidates SET evidence=? WHERE candidate_id=?').run(
+    '{}',
+    created.candidate.candidateId,
+  );
   assert.throws(
-    () => registry.create(program, { title: 'Improve rendering', evidence: ['metric:slow'], risk: 'LOW' }),
+    () =>
+      registry.create(program, {
+        title: 'Improve rendering',
+        evidence: ['metric:slow'],
+        risk: 'LOW',
+      }),
     (error: unknown) => error instanceof V4Error && error.code === 'CORRUPTED_CANDIDATE_EVIDENCE',
   );
   db.close();
@@ -728,16 +1326,56 @@ test('maintenance candidate decoding fails closed on corrupted durable evidence'
 test('supervisor conversation replacement uses expected-old CAS and emits durable audit evidence', () => {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const seeded = seed(db, 'supervisor-correlation-plan');
-  assert.equal(seeded.repositories.supervisors.attachConversation(seeded.supervisor.supervisorId, 'conversation-1').status, 'updated');
-  assert.equal(seeded.repositories.supervisors.replaceConversation(seeded.supervisor.supervisorId, 'stale-conversation', 'conversation-2', 'remote session missing').status, 'rejected');
-  assert.equal(seeded.repositories.supervisors.replaceConversation(seeded.supervisor.supervisorId, 'conversation-1', 'conversation-2', 'remote session missing').status, 'updated');
-  assert.equal(seeded.repositories.supervisors.replaceConversation(seeded.supervisor.supervisorId, 'conversation-1', 'conversation-2', 'retry after response loss').status, 'existing');
-  assert.equal(seeded.repositories.supervisors.getById(seeded.supervisor.supervisorId).conversationId, 'conversation-2');
-  assert.throws(
-    () => seeded.repositories.supervisors.attachConversation(seeded.supervisor.supervisorId, 'conversation-3'),
-    (error: unknown) => error instanceof V4Error && error.code === 'SUPERVISOR_CONVERSATION_IMMUTABLE',
+  assert.equal(
+    seeded.repositories.supervisors.attachConversation(
+      seeded.supervisor.supervisorId,
+      'conversation-1',
+    ).status,
+    'updated',
   );
-  const events = seeded.repositories.events.listByAggregate(seeded.supervisor.supervisorId).map((event) => event.type);
+  assert.equal(
+    seeded.repositories.supervisors.replaceConversation(
+      seeded.supervisor.supervisorId,
+      'stale-conversation',
+      'conversation-2',
+      'remote session missing',
+    ).status,
+    'rejected',
+  );
+  assert.equal(
+    seeded.repositories.supervisors.replaceConversation(
+      seeded.supervisor.supervisorId,
+      'conversation-1',
+      'conversation-2',
+      'remote session missing',
+    ).status,
+    'updated',
+  );
+  assert.equal(
+    seeded.repositories.supervisors.replaceConversation(
+      seeded.supervisor.supervisorId,
+      'conversation-1',
+      'conversation-2',
+      'retry after response loss',
+    ).status,
+    'existing',
+  );
+  assert.equal(
+    seeded.repositories.supervisors.getById(seeded.supervisor.supervisorId).conversationId,
+    'conversation-2',
+  );
+  assert.throws(
+    () =>
+      seeded.repositories.supervisors.attachConversation(
+        seeded.supervisor.supervisorId,
+        'conversation-3',
+      ),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'SUPERVISOR_CONVERSATION_IMMUTABLE',
+  );
+  const events = seeded.repositories.events
+    .listByAggregate(seeded.supervisor.supervisorId)
+    .map((event) => event.type);
   assert.ok(events.includes('SUPERVISOR_CONVERSATION_ATTACHED'));
   assert.ok(events.includes('SUPERVISOR_CONVERSATION_REPLACED'));
   db.close();

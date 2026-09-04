@@ -120,6 +120,7 @@ export interface ExecutionSession {
   sourceRevision: string;
   providerStatus: ProviderSessionStatus;
   lastHeartbeatAt?: string;
+  lastProviderObservedAt?: string;
   startedAt?: string;
   completedAt?: string;
   finalResponse?: string;

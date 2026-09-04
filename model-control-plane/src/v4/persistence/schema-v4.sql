@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS execution_sessions (
   source_revision TEXT NOT NULL,
   provider_status TEXT NOT NULL,
   last_heartbeat_at TEXT,
+  last_provider_observed_at TEXT,
   started_at TEXT,
   completed_at TEXT,
   final_response TEXT,
@@ -341,4 +342,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 10, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 11, CAST(strftime('%s','now') AS INTEGER));

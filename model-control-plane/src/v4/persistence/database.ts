@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DataResetRequiredError, V4Error } from '../domain/errors.js';
 
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 const CREATE_EXECUTION_SESSIONS_SQL = `
 CREATE TABLE IF NOT EXISTS execution_sessions (
@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS execution_sessions (
   source_revision TEXT NOT NULL,
   provider_status TEXT NOT NULL,
   last_heartbeat_at TEXT,
+  last_provider_observed_at TEXT,
   started_at TEXT,
   completed_at TEXT,
   final_response TEXT,
@@ -176,7 +177,7 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT REFERENCES plans(plan_id), pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
-  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 10, CAST(strftime('%s','now') AS INTEGER));",
+  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 11, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
 const V1_REQUIRED_COLUMNS = {
@@ -534,6 +535,11 @@ const V10_REQUIRED_COLUMNS = {
   plan_protected_refs: ['root_plan_id', 'ref_name', 'revision', 'created_at'],
 } as const satisfies Record<string, readonly string[]>;
 
+const V11_REQUIRED_COLUMNS = {
+  ...V10_REQUIRED_COLUMNS,
+  execution_sessions: [...V10_REQUIRED_COLUMNS.execution_sessions, 'last_provider_observed_at'],
+} as const satisfies Record<string, readonly string[]>;
+
 export interface V4DatabaseOptions {
   env?: NodeJS.ProcessEnv;
   environment?: 'test' | 'development' | 'staging' | 'production';
@@ -717,6 +723,43 @@ function assertV10Relationships(db: DatabaseSync): void {
       'V4_SCHEMA_INCOMPLETE',
       'Missing foreign key: plan_protected_refs.root_plan_id -> plans.plan_id',
     );
+  }
+}
+
+function assertV11Relationships(db: DatabaseSync): void {
+  assertV10Relationships(db);
+}
+
+function migrateV10ToV11(db: DatabaseSync): void {
+  if (schemaVersion(db) !== 10) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const lockedVersion = schemaVersion(db);
+    if (lockedVersion !== 10) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+    assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
+    assertV10Relationships(db);
+    const columns = tableColumns(db, 'execution_sessions');
+    if (!columns.has('last_provider_observed_at'))
+      db.exec('ALTER TABLE execution_sessions ADD COLUMN last_provider_observed_at TEXT');
+    db.exec(`UPDATE execution_sessions
+      SET last_provider_observed_at=COALESCE(completed_at,last_heartbeat_at,started_at)
+      WHERE last_provider_observed_at IS NULL`);
+    assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+    assertV11Relationships(db);
+    const result = db
+      .prepare(
+        "UPDATE schema_meta SET schema_version=11 WHERE schema_id='pixel-v4' AND schema_version=10",
+      )
+      .run();
+    if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+    db.exec('COMMIT');
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* preserve original migration failure */
+    }
+    throw error;
   }
 }
 
@@ -1089,10 +1132,11 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
     }
   }
 
+  migrateV10ToV11(db);
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
-  assertV10Relationships(db);
+  assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+  assertV11Relationships(db);
 }
 
 function dropAllTables(db: DatabaseSync): void {
@@ -1144,10 +1188,11 @@ export function assertCurrentV4Schema(db: DatabaseSync): void {
     }
   }
 
+  migrateV10ToV11(db);
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V10_REQUIRED_COLUMNS);
-  assertV10Relationships(db);
+  assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+  assertV11Relationships(db);
 }
 
 export function openV4Database(file: string, options: V4DatabaseOptions = {}): DatabaseSync {

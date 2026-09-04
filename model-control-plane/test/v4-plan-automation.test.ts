@@ -1131,3 +1131,51 @@ test('parallel wave queues and runs two non-conflicting implementations from the
   assert.ok(durable.every((execution) => execution.status === 'SUCCEEDED'));
   seeded.db.close();
 });
+
+test('parallel wave drains every failed sibling before failing the Plan', async () => {
+  const seeded = seed([
+    { itemKey: 'a', parallelSafe: true, writeScopes: ['src/a'] },
+    { itemKey: 'b', parallelSafe: true, writeScopes: ['src/b'] },
+  ]);
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const automation = new PlanAutomationRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      implementationRoutes: ['gpt-5.6-luna'],
+      reviewRoutes: ['gpt-5.6-sol'],
+      maxImplementationAttempts: 3,
+      maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
+      maxRepairCycles: 2,
+      maxParallelWorkItems: 2,
+      requireDelivery: false,
+    }),
+  );
+
+  const queued = await automation.runPlan(seeded.plan.planId);
+  assert.equal(queued.code, 'IMPLEMENTATION_WAVE_QUEUED');
+  const executions = seeded.repositories.executions
+    .listByPlan(seeded.plan.planId)
+    .filter((execution) => execution.identity.phase === 'IMPLEMENT');
+  assert.equal(executions.length, 2);
+  for (const execution of executions) {
+    seeded.repositories.executions.updateStatus(execution.identity.executionId, 'RUNNING');
+    seeded.repositories.executions.recordResult(execution.identity.executionId, {
+      status: 'FAILED',
+      errorCode: 'PRODUCT_FAILURE',
+      retryable: false,
+    });
+  }
+
+  const failed = await automation.runPlan(seeded.plan.planId);
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'FAILED');
+  assert.deepEqual(
+    new Set(seeded.repositories.plans.listWorkItems(seeded.plan.planId).map((item) => item.status)),
+    new Set(['FAILED']),
+  );
+  seeded.db.close();
+});
