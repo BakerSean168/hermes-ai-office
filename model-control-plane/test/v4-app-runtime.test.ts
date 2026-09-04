@@ -642,6 +642,30 @@ test('single-active-plan API queues later root tasks without supervisor or execu
 
 test('literal worktree canary is project-scoped and keeps legacy projects on isolated clones', async () => {
   const value = fixture();
+  const harnessctl = path.join(value.root, 'fake-harnessctl.py');
+  fs.writeFileSync(
+    harnessctl,
+    [
+      'import pathlib, sys',
+      'project = pathlib.Path(sys.argv[2])',
+      "manifest = project / '.agent-harness.json'",
+      'sys.exit(0 if manifest.is_file() else 3)',
+      '',
+    ].join('\n'),
+  );
+  fs.writeFileSync(
+    path.join(value.repository, '.agent-harness.json'),
+    JSON.stringify({
+      version: 1,
+      id: 'literal-project',
+      sharedMcpProfile: 'common',
+      packs: [],
+      capabilities: [],
+    }) + '\n',
+  );
+  git(value.repository, ['add', '.agent-harness.json']);
+  git(value.repository, ['commit', '-m', 'chore: register literal harness']);
+  const literalRevision = git(value.repository, ['rev-parse', 'HEAD']);
   const legacyRepository = path.join(value.allowed, 'legacy-project');
   fs.mkdirSync(legacyRepository, { recursive: true });
   execFileSync('git', ['init', '-q', '-b', 'main', legacyRepository]);
@@ -666,6 +690,7 @@ test('literal worktree canary is project-scoped and keeps legacy projects on iso
       MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED: 'true',
       MODEL_CP_V4_LITERAL_WORKTREES_ENABLED: 'true',
       MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS: 'literal-project',
+      MODEL_CP_AGENT_HARNESS_CTL: harnessctl,
       MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS: '2',
       MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
       SESSION_API_KEY: 'test-session-key',
@@ -712,7 +737,12 @@ test('literal worktree canary is project-scoped and keeps legacy projects on iso
     return response.json();
   };
 
-  const literal = await create('literal-plan', 'literal-project', value.repository, value.revision);
+  const literal = await create(
+    'literal-plan',
+    'literal-project',
+    value.repository,
+    literalRevision,
+  );
   const legacy = await create('legacy-plan', 'legacy-project', legacyRepository, legacyRevision);
   assert.deepEqual(runtime.automation?.literalWorktreeProjectKeys, ['literal-project']);
   assert.equal(runtime.automation?.policy.resolve('literal-project')?.maxParallelWorkItems, 2);
@@ -745,11 +775,11 @@ test('literal worktree canary is project-scoped and keeps legacy projects on iso
       phase: 'IMPLEMENT',
     });
   };
-  const literalWorkspace = await provision(literal, 'exec-literal-canary', value.revision);
+  const literalWorkspace = await provision(literal, 'exec-literal-canary', literalRevision);
   const legacyWorkspace = await provision(legacy, 'exec-legacy-canary', legacyRevision);
   assert.match(literalWorkspace.executionPath, /^\/workspace\/v4\/plans\/literal-project\//);
   assert.equal(legacyWorkspace.executionPath, '/workspace/v4/executions/exec-legacy-canary/repo');
-  assert.equal(git(value.repository, ['rev-parse', 'HEAD']), value.revision);
+  assert.equal(git(value.repository, ['rev-parse', 'HEAD']), literalRevision);
   assert.equal(git(legacyRepository, ['rev-parse', 'HEAD']), legacyRevision);
 
   await runtime.app.close();

@@ -511,6 +511,30 @@ async function buildExecutionAutomation(
           executionRoot,
           commandTimeoutMs: gitTimeoutMs,
           maxBufferBytes: gitMaxBufferBytes,
+          projectAdmission: (repositoryPath) => {
+            const harnessctl =
+              env.MODEL_CP_AGENT_HARNESS_CTL ??
+              '/home/dev/projects/agent-harness/bin/harnessctl.py';
+            try {
+              execFileSync(
+                '/usr/bin/python3',
+                [harnessctl, 'plan', repositoryPath, '--profile', 'openhands', '--json'],
+                {
+                  cwd: repositoryPath,
+                  encoding: 'utf8',
+                  timeout: gitTimeoutMs,
+                  maxBuffer: gitMaxBufferBytes,
+                  stdio: ['ignore', 'pipe', 'pipe'],
+                },
+              );
+            } catch (error) {
+              throw new V4Error(
+                'WORKTREE_AGENT_HARNESS_PROJECT_UNREGISTERED',
+                'Literal worktree projects must resolve through Agent Harness before activation.',
+                error,
+              );
+            }
+          },
         })
       : undefined;
   const literalWorkspace = planWorktreeManager

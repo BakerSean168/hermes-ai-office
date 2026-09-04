@@ -31,6 +31,7 @@ export interface PlanWorktreeManagerOptions {
   commandTimeoutMs?: number;
   maxBufferBytes?: number;
   setfaclBinary?: string;
+  projectAdmission?: (repositoryPath: string) => void | Promise<void>;
 }
 
 interface WorktreeRequest {
@@ -94,6 +95,7 @@ export class PlanWorktreeManager {
   readonly commandTimeoutMs: number;
   readonly maxBufferBytes: number;
   readonly setfaclBinary: string;
+  readonly projectAdmission?: (repositoryPath: string) => void | Promise<void>;
 
   constructor(options: PlanWorktreeManagerOptions) {
     failClosed(options.allowedRepositoryRoots.length > 0, 'WORKTREE_ALLOWED_ROOT_REQUIRED');
@@ -106,6 +108,7 @@ export class PlanWorktreeManager {
     this.commandTimeoutMs = options.commandTimeoutMs ?? 120_000;
     this.maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
     this.setfaclBinary = options.setfaclBinary ?? '/usr/bin/setfacl';
+    this.projectAdmission = options.projectAdmission;
   }
 
   async ensurePlanActivated(rootPlanId: string): Promise<PlanWorktree> {
@@ -114,6 +117,7 @@ export class PlanWorktreeManager {
     const lease = this.repositories.projectPlans.getLease(plan.projectKey);
     failClosed(lease?.activeRootPlanId === rootPlanId, 'WORKTREE_ACTIVE_PLAN_REQUIRED');
     failClosed(lease.repositoryPath === plan.repositoryPath, 'WORKTREE_REPOSITORY_MISMATCH');
+    if (this.projectAdmission) await this.projectAdmission(plan.repositoryPath);
     await this.ensureProtectedRefSnapshot(rootPlanId);
     await this.assertProtectedRefsStable(rootPlanId);
     return await this.ensureIntegration({
