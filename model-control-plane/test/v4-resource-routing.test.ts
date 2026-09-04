@@ -660,7 +660,7 @@ test('selection and state repositories enforce immutability, CAS, event safety, 
   db.close();
 });
 
-test('v5 databases migrate additively to v6 and malformed routing tables fail closed', () => {
+test('v5 databases migrate routing additively through the current schema and malformed routing tables fail closed', () => {
   const file = databaseFile('pixel-v4-routing-migration-');
   let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
   const executionId = seedExecution(db);
@@ -673,7 +673,7 @@ test('v5 databases migrate additively to v6 and malformed routing tables fail cl
   assert.equal(
     db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
       ?.schema_version,
-    6,
+    SCHEMA_VERSION,
   );
   assert.equal(db.prepare('SELECT count(*) AS count FROM plans').get()?.count, planCount);
   assert.ok(

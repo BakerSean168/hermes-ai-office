@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DataResetRequiredError, V4Error } from '../domain/errors.js';
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 const CREATE_EXECUTION_SESSIONS_SQL = `
 CREATE TABLE IF NOT EXISTS execution_sessions (
@@ -52,6 +52,30 @@ CREATE TABLE IF NOT EXISTS v4_jules_sessions (
   result TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+`;
+
+const CREATE_PROJECT_PLAN_SCHEDULING_SQL = `
+CREATE TABLE IF NOT EXISTS project_plan_leases (
+  project_key TEXT PRIMARY KEY,
+  repository_path TEXT NOT NULL,
+  active_root_plan_id TEXT UNIQUE REFERENCES plans(plan_id),
+  version INTEGER NOT NULL,
+  acquired_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_plan_queue (
+  plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id),
+  project_key TEXT NOT NULL,
+  repository_path TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enqueued_at TEXT NOT NULL,
+  activated_at TEXT,
+  cancelled_at TEXT,
+  UNIQUE(project_key, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_project_plan_queue_ready
+  ON project_plan_queue(project_key, cancelled_at, activated_at, priority DESC, sequence ASC);
 `;
 
 const CREATE_RESOURCE_ROUTING_SQL = `
@@ -111,38 +135,243 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS leases (aggregate_type TEXT NOT NULL, aggregate_id TEXT NOT NULL, owner_id TEXT NOT NULL, lease_token TEXT NOT NULL, claimed_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY (aggregate_type, aggregate_id));',
   'CREATE TABLE IF NOT EXISTS resources (resource_id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL, capabilities TEXT NOT NULL, quota_remaining REAL, observation TEXT NOT NULL, updated_at TEXT NOT NULL, observed_at TEXT NOT NULL);',
   CREATE_RESOURCE_ROUTING_SQL,
+  CREATE_PROJECT_PLAN_SCHEDULING_SQL,
   'CREATE TABLE IF NOT EXISTS external_changes (external_change_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, repository TEXT NOT NULL, base_sha TEXT NOT NULL, head_sha TEXT NOT NULL, source_ref TEXT NOT NULL, status TEXT NOT NULL, evidence TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT REFERENCES plans(plan_id), pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
-  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 6, CAST(strftime('%s','now') AS INTEGER));",
+  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 7, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
 const V1_REQUIRED_COLUMNS = {
   supervisor_wakes: ['wake_key', 'supervisor_id', 'observation_cursor', 'reason', 'requested_at'],
-  events: ['event_order', 'event_id', 'aggregate_id', 'aggregate_type', 'sequence', 'type', 'payload', 'occurred_at', 'correlation_id'],
-  plans: ['plan_id', 'idempotency_key', 'project_key', 'objective', 'repository_path', 'base_revision', 'current_revision', 'status', 'active_graph_version_id', 'parent_plan_id', 'created_at', 'updated_at'],
-  graph_versions: ['graph_version_id', 'plan_id', 'version', 'parent_graph_version_id', 'reason', 'triggering_observation_cursor', 'status', 'created_at'],
-  work_items: ['work_item_id', 'plan_id', 'graph_version_id', 'item_key', 'title', 'objective', 'acceptance_criteria', 'dependencies', 'status', 'exact_accepted_revision', 'created_at', 'updated_at'],
-  executions: ['execution_id', 'idempotency_key', 'plan_id', 'work_item_id', 'attempt', 'route', 'source_revision', 'objective', 'status', 'result_revision', 'result_summary', 'error_code', 'retryable', 'created_at', 'updated_at'],
-  reviews: ['review_id', 'idempotency_key', 'plan_id', 'work_item_id', 'implementation_execution_id', 'reviewer_execution_id', 'source_revision', 'reviewed_sha', 'status', 'verdict', 'findings', 'created_at', 'updated_at'],
-  supervisors: ['supervisor_id', 'plan_id', 'conversation_id', 'status', 'observation_cursor', 'projection_digest', 'policy_id', 'budget_id', 'last_decision_at', 'next_wake_at', 'created_at', 'updated_at'],
-  supervisor_decisions: ['decision_id', 'supervisor_id', 'idempotency_key', 'plan_id', 'version', 'observation_cursor', 'projection_digest', 'precondition_snapshot', 'action_payload', 'validator_result', 'created_at'],
-  supervisor_actions: ['action_id', 'supervisor_id', 'plan_id', 'version', 'type', 'idempotency_key', 'observation_cursor', 'projection_digest', 'precondition_snapshot', 'payload', 'status', 'validation', 'result', 'execution_id', 'child_plan_id', 'pull_request_id', 'created_at', 'updated_at'],
+  events: [
+    'event_order',
+    'event_id',
+    'aggregate_id',
+    'aggregate_type',
+    'sequence',
+    'type',
+    'payload',
+    'occurred_at',
+    'correlation_id',
+  ],
+  plans: [
+    'plan_id',
+    'idempotency_key',
+    'project_key',
+    'objective',
+    'repository_path',
+    'base_revision',
+    'current_revision',
+    'status',
+    'active_graph_version_id',
+    'parent_plan_id',
+    'created_at',
+    'updated_at',
+  ],
+  graph_versions: [
+    'graph_version_id',
+    'plan_id',
+    'version',
+    'parent_graph_version_id',
+    'reason',
+    'triggering_observation_cursor',
+    'status',
+    'created_at',
+  ],
+  work_items: [
+    'work_item_id',
+    'plan_id',
+    'graph_version_id',
+    'item_key',
+    'title',
+    'objective',
+    'acceptance_criteria',
+    'dependencies',
+    'status',
+    'exact_accepted_revision',
+    'created_at',
+    'updated_at',
+  ],
+  executions: [
+    'execution_id',
+    'idempotency_key',
+    'plan_id',
+    'work_item_id',
+    'attempt',
+    'route',
+    'source_revision',
+    'objective',
+    'status',
+    'result_revision',
+    'result_summary',
+    'error_code',
+    'retryable',
+    'created_at',
+    'updated_at',
+  ],
+  reviews: [
+    'review_id',
+    'idempotency_key',
+    'plan_id',
+    'work_item_id',
+    'implementation_execution_id',
+    'reviewer_execution_id',
+    'source_revision',
+    'reviewed_sha',
+    'status',
+    'verdict',
+    'findings',
+    'created_at',
+    'updated_at',
+  ],
+  supervisors: [
+    'supervisor_id',
+    'plan_id',
+    'conversation_id',
+    'status',
+    'observation_cursor',
+    'projection_digest',
+    'policy_id',
+    'budget_id',
+    'last_decision_at',
+    'next_wake_at',
+    'created_at',
+    'updated_at',
+  ],
+  supervisor_decisions: [
+    'decision_id',
+    'supervisor_id',
+    'idempotency_key',
+    'plan_id',
+    'version',
+    'observation_cursor',
+    'projection_digest',
+    'precondition_snapshot',
+    'action_payload',
+    'validator_result',
+    'created_at',
+  ],
+  supervisor_actions: [
+    'action_id',
+    'supervisor_id',
+    'plan_id',
+    'version',
+    'type',
+    'idempotency_key',
+    'observation_cursor',
+    'projection_digest',
+    'precondition_snapshot',
+    'payload',
+    'status',
+    'validation',
+    'result',
+    'execution_id',
+    'child_plan_id',
+    'pull_request_id',
+    'created_at',
+    'updated_at',
+  ],
   leases: ['aggregate_type', 'aggregate_id', 'owner_id', 'lease_token', 'claimed_at', 'expires_at'],
-  resources: ['resource_id', 'kind', 'status', 'capabilities', 'quota_remaining', 'observation', 'updated_at', 'observed_at'],
-  external_changes: ['external_change_id', 'fingerprint', 'repository', 'base_sha', 'head_sha', 'source_ref', 'status', 'evidence', 'created_at', 'updated_at'],
+  resources: [
+    'resource_id',
+    'kind',
+    'status',
+    'capabilities',
+    'quota_remaining',
+    'observation',
+    'updated_at',
+    'observed_at',
+  ],
+  external_changes: [
+    'external_change_id',
+    'fingerprint',
+    'repository',
+    'base_sha',
+    'head_sha',
+    'source_ref',
+    'status',
+    'evidence',
+    'created_at',
+    'updated_at',
+  ],
   plan_relationships: ['relationship_id', 'parent_plan_id', 'child_plan_id', 'kind', 'created_at'],
-  maintenance_programs: ['program_id', 'project_key', 'policy', 'status', 'created_at', 'updated_at'],
-  improvement_candidates: ['candidate_id', 'program_id', 'fingerprint', 'title', 'evidence', 'status', 'plan_id', 'pull_request_id', 'created_at', 'updated_at'],
+  maintenance_programs: [
+    'program_id',
+    'project_key',
+    'policy',
+    'status',
+    'created_at',
+    'updated_at',
+  ],
+  improvement_candidates: [
+    'candidate_id',
+    'program_id',
+    'fingerprint',
+    'title',
+    'evidence',
+    'status',
+    'plan_id',
+    'pull_request_id',
+    'created_at',
+    'updated_at',
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 const V2_REQUIRED_COLUMNS = {
   ...V1_REQUIRED_COLUMNS,
-  v4_jules_sessions: ['idempotency_key', 'session_id', 'repository', 'base_revision', 'result', 'updated_at'],
-  improvement_candidates: ['candidate_id', 'program_id', 'fingerprint', 'title', 'evidence', 'status', 'plan_id', 'pull_request_id', 'risk', 'created_at', 'updated_at'],
-  execution_sessions: ['execution_id', 'phase', 'provider', 'provider_session_id', 'workspace_host_path', 'workspace_execution_path', 'evidence_host_path', 'evidence_execution_path', 'workspace_created_at', 'source_repository_path', 'source_revision', 'provider_status', 'last_heartbeat_at', 'started_at', 'completed_at', 'final_response', 'error_code', 'created_at', 'updated_at'],
-  execution_evidence: ['evidence_id', 'execution_id', 'kind', 'name', 'source_revision', 'payload', 'created_at'],
+  v4_jules_sessions: [
+    'idempotency_key',
+    'session_id',
+    'repository',
+    'base_revision',
+    'result',
+    'updated_at',
+  ],
+  improvement_candidates: [
+    'candidate_id',
+    'program_id',
+    'fingerprint',
+    'title',
+    'evidence',
+    'status',
+    'plan_id',
+    'pull_request_id',
+    'risk',
+    'created_at',
+    'updated_at',
+  ],
+  execution_sessions: [
+    'execution_id',
+    'phase',
+    'provider',
+    'provider_session_id',
+    'workspace_host_path',
+    'workspace_execution_path',
+    'evidence_host_path',
+    'evidence_execution_path',
+    'workspace_created_at',
+    'source_repository_path',
+    'source_revision',
+    'provider_status',
+    'last_heartbeat_at',
+    'started_at',
+    'completed_at',
+    'final_response',
+    'error_code',
+    'created_at',
+    'updated_at',
+  ],
+  execution_evidence: [
+    'evidence_id',
+    'execution_id',
+    'kind',
+    'name',
+    'source_revision',
+    'payload',
+    'created_at',
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 const V3_REQUIRED_COLUMNS = {
@@ -152,7 +381,23 @@ const V3_REQUIRED_COLUMNS = {
 
 const V4_REQUIRED_COLUMNS = {
   ...V3_REQUIRED_COLUMNS,
-  plan_deliveries: ['plan_id', 'remote', 'branch', 'target_branch', 'auto_merge', 'merge_method', 'required_checks', 'status', 'head_sha', 'pull_request_number', 'pull_request_url', 'merge_sha', 'error_code', 'created_at', 'updated_at'],
+  plan_deliveries: [
+    'plan_id',
+    'remote',
+    'branch',
+    'target_branch',
+    'auto_merge',
+    'merge_method',
+    'required_checks',
+    'status',
+    'head_sha',
+    'pull_request_number',
+    'pull_request_url',
+    'merge_sha',
+    'error_code',
+    'created_at',
+    'updated_at',
+  ],
 } as const satisfies Record<string, readonly string[]>;
 
 const V5_REQUIRED_COLUMNS = {
@@ -192,6 +437,28 @@ const V6_REQUIRED_COLUMNS = {
   ],
 } as const satisfies Record<string, readonly string[]>;
 
+const V7_REQUIRED_COLUMNS = {
+  ...V6_REQUIRED_COLUMNS,
+  project_plan_leases: [
+    'project_key',
+    'repository_path',
+    'active_root_plan_id',
+    'version',
+    'acquired_at',
+    'updated_at',
+  ],
+  project_plan_queue: [
+    'plan_id',
+    'project_key',
+    'repository_path',
+    'sequence',
+    'priority',
+    'enqueued_at',
+    'activated_at',
+    'cancelled_at',
+  ],
+} as const satisfies Record<string, readonly string[]>;
+
 export interface V4DatabaseOptions {
   env?: NodeJS.ProcessEnv;
   environment?: 'test' | 'development' | 'staging' | 'production';
@@ -203,58 +470,97 @@ function configure(db: DatabaseSync): void {
 }
 
 function tableNames(db: DatabaseSync): Set<string> {
-  return new Set((db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as Array<{ name: string }>).map((item) => item.name));
+  return new Set(
+    (
+      db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as unknown as Array<{
+        name: string;
+      }>
+    ).map((item) => item.name),
+  );
 }
 
 function schemaVersion(db: DatabaseSync): unknown {
   const tables = tableNames(db);
   if (!tables.has('schema_meta')) return undefined;
-  const row = db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get() as { schema_version?: unknown } | undefined;
+  const row = db
+    .prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'")
+    .get() as { schema_version?: unknown } | undefined;
   return row?.schema_version;
 }
 
 function assertVersion(value: unknown): asserts value is number {
   if (!Number.isInteger(value) || Number(value) < 1 || Number(value) > SCHEMA_VERSION) {
-    throw new V4Error('V4_SCHEMA_VERSION_INVALID', 'Unsupported V4 schema version: ' + String(value));
+    throw new V4Error(
+      'V4_SCHEMA_VERSION_INVALID',
+      'Unsupported V4 schema version: ' + String(value),
+    );
   }
 }
 
 function assertSchemaColumns(db: DatabaseSync, required: Record<string, readonly string[]>): void {
   const tables = tableNames(db);
   const missingTables = Object.keys(required).filter((name) => !tables.has(name));
-  if (missingTables.length > 0) throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing tables: ' + missingTables.join(','));
+  if (missingTables.length > 0)
+    throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing tables: ' + missingTables.join(','));
   const missingColumns: string[] = [];
   for (const [table, expected] of Object.entries(required)) {
     const escaped = table.replaceAll('"', '""');
-    const actual = new Set((db.prepare('PRAGMA table_info("' + escaped + '")').all() as unknown as Array<{ name: string }>).map((row) => row.name));
-    for (const column of expected) if (!actual.has(column)) missingColumns.push(table + '.' + column);
+    const actual = new Set(
+      (
+        db.prepare('PRAGMA table_info("' + escaped + '")').all() as unknown as Array<{
+          name: string;
+        }>
+      ).map((row) => row.name),
+    );
+    for (const column of expected)
+      if (!actual.has(column)) missingColumns.push(table + '.' + column);
   }
-  if (missingColumns.length > 0) throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing columns: ' + missingColumns.join(','));
+  if (missingColumns.length > 0)
+    throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing columns: ' + missingColumns.join(','));
 }
 
-function hasForeignKey(db: DatabaseSync, table: string, from: string, target: string, to: string): boolean {
+function hasForeignKey(
+  db: DatabaseSync,
+  table: string,
+  from: string,
+  target: string,
+  to: string,
+): boolean {
   const escaped = table.replaceAll('"', '""');
-  const rows = db.prepare('PRAGMA foreign_key_list("' + escaped + '")').all() as unknown as Array<{ table: string; from: string; to: string }>;
+  const rows = db.prepare('PRAGMA foreign_key_list("' + escaped + '")').all() as unknown as Array<{
+    table: string;
+    from: string;
+    to: string;
+  }>;
   return rows.some((row) => row.table === target && row.from === from && row.to === to);
 }
 
 function assertV2Relationships(db: DatabaseSync): void {
   if (!hasForeignKey(db, 'improvement_candidates', 'plan_id', 'plans', 'plan_id')) {
-    throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing foreign key: improvement_candidates.plan_id -> plans.plan_id');
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: improvement_candidates.plan_id -> plans.plan_id',
+    );
   }
 }
 
 function assertV3Relationships(db: DatabaseSync): void {
   assertV2Relationships(db);
   if (!hasForeignKey(db, 'executions', 'parent_execution_id', 'executions', 'execution_id')) {
-    throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing foreign key: executions.parent_execution_id -> executions.execution_id');
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: executions.parent_execution_id -> executions.execution_id',
+    );
   }
 }
 
 function assertV5Relationships(db: DatabaseSync): void {
   assertV3Relationships(db);
   if (!hasForeignKey(db, 'plan_deliveries', 'superseded_by_plan_id', 'plans', 'plan_id')) {
-    throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Missing foreign key: plan_deliveries.superseded_by_plan_id -> plans.plan_id');
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: plan_deliveries.superseded_by_plan_id -> plans.plan_id',
+    );
   }
 }
 
@@ -276,15 +582,50 @@ function assertV6Relationships(db: DatabaseSync): void {
   }
 }
 
+function assertV7Relationships(db: DatabaseSync): void {
+  assertV6Relationships(db);
+  if (!hasForeignKey(db, 'project_plan_leases', 'active_root_plan_id', 'plans', 'plan_id')) {
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: project_plan_leases.active_root_plan_id -> plans.plan_id',
+    );
+  }
+  if (!hasForeignKey(db, 'project_plan_queue', 'plan_id', 'plans', 'plan_id')) {
+    throw new V4Error(
+      'V4_SCHEMA_INCOMPLETE',
+      'Missing foreign key: project_plan_queue.plan_id -> plans.plan_id',
+    );
+  }
+}
+
 function migrateImprovementCandidates(db: DatabaseSync): void {
-  const columns = new Set((db.prepare('PRAGMA table_info(improvement_candidates)').all() as unknown as Array<{ name: string }>).map((row) => row.name));
-  if (columns.has('risk') && hasForeignKey(db, 'improvement_candidates', 'plan_id', 'plans', 'plan_id')) return;
-  const orphan = db.prepare(`SELECT candidate_id FROM improvement_candidates candidate
+  const columns = new Set(
+    (
+      db.prepare('PRAGMA table_info(improvement_candidates)').all() as unknown as Array<{
+        name: string;
+      }>
+    ).map((row) => row.name),
+  );
+  if (
+    columns.has('risk') &&
+    hasForeignKey(db, 'improvement_candidates', 'plan_id', 'plans', 'plan_id')
+  )
+    return;
+  const orphan = db
+    .prepare(
+      `SELECT candidate_id FROM improvement_candidates candidate
     WHERE candidate.plan_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM plans WHERE plans.plan_id=candidate.plan_id)
-    LIMIT 1`).get() as { candidate_id: string } | undefined;
-  if (orphan) throw new V4Error('V4_SCHEMA_CANDIDATE_PLAN_ORPHANED', 'Candidate references a missing plan: ' + orphan.candidate_id);
-  if (tableNames(db).has('improvement_candidates_v2')) throw new V4Error('V4_SCHEMA_MIGRATION_TEMP_TABLE_EXISTS');
+    LIMIT 1`,
+    )
+    .get() as { candidate_id: string } | undefined;
+  if (orphan)
+    throw new V4Error(
+      'V4_SCHEMA_CANDIDATE_PLAN_ORPHANED',
+      'Candidate references a missing plan: ' + orphan.candidate_id,
+    );
+  if (tableNames(db).has('improvement_candidates_v2'))
+    throw new V4Error('V4_SCHEMA_MIGRATION_TEMP_TABLE_EXISTS');
   db.exec(`CREATE TABLE improvement_candidates_v2 (
     candidate_id TEXT PRIMARY KEY,
     program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id),
@@ -323,11 +664,19 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
       db.exec(CREATE_EXECUTION_SESSIONS_SQL);
       assertSchemaColumns(db, V2_REQUIRED_COLUMNS);
       assertV2Relationships(db);
-      const result = db.prepare("UPDATE schema_meta SET schema_version=2 WHERE schema_id='pixel-v4' AND schema_version=1").run();
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=2 WHERE schema_id='pixel-v4' AND schema_version=1",
+        )
+        .run();
       if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       db.exec('COMMIT');
     } catch (error) {
-      try { db.exec('ROLLBACK'); } catch { /* preserve original migration failure */ }
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
       throw error;
     }
   }
@@ -340,21 +689,36 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
       if (lockedVersion !== 2) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       assertSchemaColumns(db, V2_REQUIRED_COLUMNS);
       assertV2Relationships(db);
-      const executionColumns = new Set((db.prepare('PRAGMA table_info(executions)').all() as unknown as Array<{ name: string }>).map((row) => row.name));
+      const executionColumns = new Set(
+        (
+          db.prepare('PRAGMA table_info(executions)').all() as unknown as Array<{ name: string }>
+        ).map((row) => row.name),
+      );
       const hasPhase = executionColumns.has('phase');
       const hasParent = executionColumns.has('parent_execution_id');
-      if (hasPhase !== hasParent) throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Partial V3 execution columns detected.');
+      if (hasPhase !== hasParent)
+        throw new V4Error('V4_SCHEMA_INCOMPLETE', 'Partial V3 execution columns detected.');
       if (!hasPhase) {
         db.exec("ALTER TABLE executions ADD COLUMN phase TEXT NOT NULL DEFAULT 'IMPLEMENT'");
-        db.exec('ALTER TABLE executions ADD COLUMN parent_execution_id TEXT REFERENCES executions(execution_id)');
+        db.exec(
+          'ALTER TABLE executions ADD COLUMN parent_execution_id TEXT REFERENCES executions(execution_id)',
+        );
       }
       assertSchemaColumns(db, V3_REQUIRED_COLUMNS);
       assertV3Relationships(db);
-      const result = db.prepare("UPDATE schema_meta SET schema_version=3 WHERE schema_id='pixel-v4' AND schema_version=2").run();
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=3 WHERE schema_id='pixel-v4' AND schema_version=2",
+        )
+        .run();
       if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       db.exec('COMMIT');
     } catch (error) {
-      try { db.exec('ROLLBACK'); } catch { /* preserve original migration failure */ }
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
       throw error;
     }
   }
@@ -367,13 +731,23 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
       if (lockedVersion !== 3) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       assertSchemaColumns(db, V3_REQUIRED_COLUMNS);
       assertV3Relationships(db);
-      db.exec("CREATE TABLE IF NOT EXISTS plan_deliveries (plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id), remote TEXT NOT NULL, branch TEXT NOT NULL, target_branch TEXT NOT NULL, auto_merge INTEGER NOT NULL, merge_method TEXT NOT NULL, required_checks TEXT NOT NULL, status TEXT NOT NULL, head_sha TEXT, pull_request_number INTEGER, pull_request_url TEXT, merge_sha TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
+      db.exec(
+        'CREATE TABLE IF NOT EXISTS plan_deliveries (plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id), remote TEXT NOT NULL, branch TEXT NOT NULL, target_branch TEXT NOT NULL, auto_merge INTEGER NOT NULL, merge_method TEXT NOT NULL, required_checks TEXT NOT NULL, status TEXT NOT NULL, head_sha TEXT, pull_request_number INTEGER, pull_request_url TEXT, merge_sha TEXT, error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)',
+      );
       assertSchemaColumns(db, V4_REQUIRED_COLUMNS);
-      const result = db.prepare("UPDATE schema_meta SET schema_version=4 WHERE schema_id='pixel-v4' AND schema_version=3").run();
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=4 WHERE schema_id='pixel-v4' AND schema_version=3",
+        )
+        .run();
       if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       db.exec('COMMIT');
     } catch (error) {
-      try { db.exec('ROLLBACK'); } catch { /* preserve original migration failure */ }
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
       throw error;
     }
   }
@@ -386,17 +760,33 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
       if (lockedVersion !== 4) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       assertSchemaColumns(db, V4_REQUIRED_COLUMNS);
       assertV3Relationships(db);
-      const deliveryColumns = new Set((db.prepare('PRAGMA table_info(plan_deliveries)').all() as unknown as Array<{ name: string }>).map((row) => row.name));
+      const deliveryColumns = new Set(
+        (
+          db.prepare('PRAGMA table_info(plan_deliveries)').all() as unknown as Array<{
+            name: string;
+          }>
+        ).map((row) => row.name),
+      );
       if (!deliveryColumns.has('superseded_by_plan_id')) {
-        db.exec('ALTER TABLE plan_deliveries ADD COLUMN superseded_by_plan_id TEXT REFERENCES plans(plan_id)');
+        db.exec(
+          'ALTER TABLE plan_deliveries ADD COLUMN superseded_by_plan_id TEXT REFERENCES plans(plan_id)',
+        );
       }
       assertSchemaColumns(db, V5_REQUIRED_COLUMNS);
       assertV5Relationships(db);
-      const result = db.prepare("UPDATE schema_meta SET schema_version=5 WHERE schema_id='pixel-v4' AND schema_version=4").run();
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=5 WHERE schema_id='pixel-v4' AND schema_version=4",
+        )
+        .run();
       if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
       db.exec('COMMIT');
     } catch (error) {
-      try { db.exec('ROLLBACK'); } catch { /* preserve original migration failure */ }
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
       throw error;
     }
   }
@@ -440,15 +830,52 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
     }
   }
 
+  const afterV6 = schemaVersion(db);
+  if (afterV6 === 6) {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const lockedVersion = schemaVersion(db);
+      if (lockedVersion !== 6) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
+      assertV6Relationships(db);
+      const existingTables = tableNames(db);
+      if (existingTables.has('project_plan_leases')) {
+        assertSchemaColumns(db, { project_plan_leases: V7_REQUIRED_COLUMNS.project_plan_leases });
+      }
+      if (existingTables.has('project_plan_queue')) {
+        assertSchemaColumns(db, { project_plan_queue: V7_REQUIRED_COLUMNS.project_plan_queue });
+      }
+      db.exec(CREATE_PROJECT_PLAN_SCHEDULING_SQL);
+      assertSchemaColumns(db, V7_REQUIRED_COLUMNS);
+      assertV7Relationships(db);
+      const result = db
+        .prepare(
+          "UPDATE schema_meta SET schema_version=7 WHERE schema_id='pixel-v4' AND schema_version=6",
+        )
+        .run();
+      if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+      db.exec('COMMIT');
+    } catch (error) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* preserve original migration failure */
+      }
+      throw error;
+    }
+  }
+
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
-  assertV6Relationships(db);
+  assertSchemaColumns(db, V7_REQUIRED_COLUMNS);
+  assertV7Relationships(db);
 }
 
 function dropAllTables(db: DatabaseSync): void {
   db.exec('PRAGMA foreign_keys = OFF;');
-  const rows = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all() as unknown as Array<{ name: string }>;
+  const rows = db
+    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+    .all() as unknown as Array<{ name: string }>;
   for (const row of rows) db.exec('DROP TABLE IF EXISTS "' + row.name.replaceAll('"', '""') + '"');
   db.exec('PRAGMA foreign_keys = ON;');
 }
@@ -461,13 +888,14 @@ function createSchema(db: DatabaseSync): void {
 export function assertCurrentV4Schema(db: DatabaseSync): void {
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V6_REQUIRED_COLUMNS);
-  assertV6Relationships(db);
+  assertSchemaColumns(db, V7_REQUIRED_COLUMNS);
+  assertV7Relationships(db);
 }
 
 export function openV4Database(file: string, options: V4DatabaseOptions = {}): DatabaseSync {
   const env = options.env ?? process.env;
-  const environment = options.environment ?? (env.NODE_ENV as V4DatabaseOptions['environment']) ?? 'development';
+  const environment =
+    options.environment ?? (env.NODE_ENV as V4DatabaseOptions['environment']) ?? 'development';
   const isMemory = file === ':memory:';
   if (!isMemory) fs.mkdirSync(path.dirname(file), { recursive: true });
   const existed = !isMemory && fs.existsSync(file) && fs.statSync(file).size > 0;
@@ -492,7 +920,10 @@ export function openV4Database(file: string, options: V4DatabaseOptions = {}): D
     }
     if (environment === 'production') {
       db.close();
-      throw new V4Error('PRODUCTION_RESET_FORBIDDEN', 'Production database reset is disabled by default.');
+      throw new V4Error(
+        'PRODUCTION_RESET_FORBIDDEN',
+        'Production database reset is disabled by default.',
+      );
     }
     dropAllTables(db);
   }
@@ -513,7 +944,11 @@ export function withTransaction<T>(db: DatabaseSync, operation: () => T): T {
     db.exec('COMMIT');
     return result;
   } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* preserve original failure */ }
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* preserve original failure */
+    }
     throw error;
   }
 }

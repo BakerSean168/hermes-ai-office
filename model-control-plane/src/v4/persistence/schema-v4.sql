@@ -243,6 +243,27 @@ CREATE TABLE IF NOT EXISTS resource_state_overrides (
   version INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS project_plan_leases (
+  project_key TEXT PRIMARY KEY,
+  repository_path TEXT NOT NULL,
+  active_root_plan_id TEXT UNIQUE REFERENCES plans(plan_id),
+  version INTEGER NOT NULL,
+  acquired_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_plan_queue (
+  plan_id TEXT PRIMARY KEY REFERENCES plans(plan_id),
+  project_key TEXT NOT NULL,
+  repository_path TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enqueued_at TEXT NOT NULL,
+  activated_at TEXT,
+  cancelled_at TEXT,
+  UNIQUE(project_key, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_project_plan_queue_ready ON project_plan_queue(project_key, cancelled_at, activated_at, priority DESC, sequence ASC);
+
 CREATE TABLE IF NOT EXISTS external_changes (
   external_change_id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL UNIQUE,
@@ -285,4 +306,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 6, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 7, CAST(strftime('%s','now') AS INTEGER));

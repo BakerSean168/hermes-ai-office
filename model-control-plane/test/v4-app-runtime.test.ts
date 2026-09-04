@@ -439,3 +439,93 @@ test('V4 resource selector creates immutable execution provenance and resource c
   assert.equal(waitingState.json().plan.status, 'WAITING_FOR_RESOURCE');
   await runtime.app.close();
 });
+
+test('single-active-plan API queues later root tasks without supervisor or execution activity and hands off atomically', async () => {
+  const value = fixture();
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    environment: 'test',
+    logger: false,
+    env: {
+      NODE_ENV: 'test',
+      MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'false',
+      MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED: 'true',
+      MODEL_CP_V4_LITERAL_WORKTREES_ENABLED: 'false',
+    },
+  });
+
+  const createRoot = async (key: string, objective: string) => {
+    const response = await runtime.app.inject({
+      method: 'POST',
+      url: '/api/v4/plans',
+      headers: { 'idempotency-key': key },
+      payload: {
+        projectKey: 'bodysense',
+        objective,
+        repositoryPath: value.repository,
+        baseRevision: value.revision,
+        workItems: [
+          {
+            itemKey: 'objective',
+            title: objective,
+            objective,
+            dependencies: [],
+            acceptanceCriteria: ['complete safely'],
+          },
+        ],
+      },
+    });
+    assert.equal(response.statusCode, 201);
+    return response.json();
+  };
+
+  const first = await createRoot('single-active-a', 'active root task');
+  const second = await createRoot('single-active-b', 'queued root task');
+  const firstPlanId = first.plan.planId as string;
+  const secondPlanId = second.plan.planId as string;
+
+  assert.equal(first.plan.status, 'READY');
+  assert.equal(first.scheduling.status, 'ACTIVE');
+  assert.equal(first.supervisor.status, 'ACTIVE');
+  assert.equal(second.plan.status, 'QUEUED');
+  assert.equal(second.scheduling.status, 'QUEUED');
+  assert.equal(second.supervisor, null);
+  assert.equal(runtime.repositories.executions.listByPlan(secondPlanId).length, 0);
+  assert.equal(runtime.repositories.supervisors.getByPlanId(secondPlanId), undefined);
+
+  const health = await runtime.app.inject({ method: 'GET', url: '/api/health' });
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.json().planScheduling.singleActivePlanEnabled, true);
+  assert.equal(health.json().planScheduling.literalWorktreesEnabled, false);
+  assert.equal(health.json().planScheduling.leases[0].activeRootPlanId, firstPlanId);
+  assert.equal(health.json().planScheduling.leases[0].queuedPlans, 1);
+
+  const queue = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/projects/bodysense/plan-queue',
+  });
+  assert.equal(queue.statusCode, 200);
+  assert.equal(queue.json().lease.activeRootPlanId, firstPlanId);
+  assert.deepEqual(
+    queue.json().items.map((item: { planId: string }) => item.planId),
+    [secondPlanId],
+  );
+
+  runtime.repositories.plans.updateStatus(firstPlanId, 'RUNNING');
+  runtime.repositories.plans.updateStatus(firstPlanId, 'SUCCEEDED');
+  const handoff = runtime.projectPlanQueue!.reconcile();
+  assert.equal(handoff[0]?.releasedPlanId, firstPlanId);
+  assert.equal(handoff[0]?.activatedPlanId, secondPlanId);
+  assert.equal(runtime.repositories.plans.getPlan(secondPlanId).status, 'READY');
+  assert.equal(runtime.repositories.supervisors.getByPlanId(firstPlanId)?.status, 'CANCELLED');
+  assert.equal(runtime.repositories.supervisors.getByPlanId(secondPlanId)?.status, 'ACTIVE');
+  assert.equal(runtime.repositories.executions.listByPlan(secondPlanId).length, 0);
+
+  const after = await runtime.app.inject({
+    method: 'GET',
+    url: '/api/v4/projects/bodysense/plan-queue',
+  });
+  assert.equal(after.json().lease.activeRootPlanId, secondPlanId);
+  assert.equal(after.json().items.length, 0);
+  await runtime.app.close();
+});

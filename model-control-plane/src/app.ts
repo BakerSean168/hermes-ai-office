@@ -54,6 +54,7 @@ import {
   WorkGraphKernel,
 } from './v4/kernel/index.js';
 import { ExecutionWorker, type ExecutionWorkerRoute } from './v4/orchestration/executionWorker.js';
+import { ProjectPlanQueueRuntime } from './v4/orchestration/projectPlanQueueRuntime.js';
 import type { ExecutionProviderPort } from './v4/orchestration/contracts.js';
 import {
   ResourceSelector,
@@ -134,6 +135,9 @@ export interface ControlPlaneRuntime {
     runtime: SupervisorRuntime;
   };
   automation?: ExecutionAutomationRuntime;
+  projectPlanQueue?: ProjectPlanQueueRuntime;
+  singleActivePlanEnabled: boolean;
+  literalWorktreesEnabled: boolean;
 }
 
 function bodyRecord(value: unknown): Record<string, unknown> {
@@ -820,6 +824,14 @@ export async function buildControlPlane(
   });
   const db = boot.db;
   const repositories = createRepositories(db);
+  const singleActivePlanEnabled = env.MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED === 'true';
+  const literalWorktreesEnabled = env.MODEL_CP_V4_LITERAL_WORKTREES_ENABLED === 'true';
+  if (literalWorktreesEnabled && !singleActivePlanEnabled)
+    throw new V4Error('LITERAL_WORKTREES_REQUIRE_SINGLE_ACTIVE_PLAN');
+  const projectPlanQueue = singleActivePlanEnabled
+    ? new ProjectPlanQueueRuntime(repositories)
+    : undefined;
+  projectPlanQueue?.bootstrapExistingRootPlans();
   const executionTelemetry = new LiteLlmExecutionTelemetry({
     baseUrl: requiredText(
       env.MODEL_CP_V3_LITELLM_URL ??
@@ -850,6 +862,10 @@ export async function buildControlPlane(
   const requireAutomation = (): ExecutionAutomationRuntime => {
     if (!automation) throw new V4Error('EXECUTION_RUNTIME_DISABLED');
     return automation;
+  };
+  const requireProjectPlanQueue = (): ProjectPlanQueueRuntime => {
+    if (!projectPlanQueue) throw new V4Error('PROJECT_PLAN_QUEUE_DISABLED');
+    return projectPlanQueue;
   };
   const supervisorKernel: SupervisorKernelPort = {
     createExecution: async (payload, planId) => {
@@ -1057,6 +1073,16 @@ export async function buildControlPlane(
     mode: 'greenfield',
     database: boot.dbFile,
     workspaceStorage: workspaceStorage(),
+    planScheduling: {
+      singleActivePlanEnabled,
+      literalWorktreesEnabled,
+      leases: projectPlanQueue
+        ? repositories.projectPlans.listLeases().map((lease) => ({
+            ...lease,
+            queuedPlans: repositories.projectPlans.listQueue(lease.projectKey).length,
+          }))
+        : [],
+    },
     executionRuntime: {
       enabled: Boolean(automation),
       autonomousPolling: Boolean(automation && env.MODEL_CP_AUTOMATION_RUNTIME_ENABLED === 'true'),
@@ -1217,6 +1243,42 @@ export async function buildControlPlane(
     return { items, count: items.length };
   });
 
+  app.get('/api/v4/projects/:projectKey/plan-queue', async (request) => {
+    requireProjectPlanQueue();
+    const projectKey = requiredText(
+      (request.params as { projectKey?: string }).projectKey,
+      'PLAN_PROJECT_REQUIRED',
+    );
+    return {
+      projectKey,
+      lease: repositories.projectPlans.getLease(projectKey) ?? null,
+      items: repositories.projectPlans.listQueue(projectKey),
+    };
+  });
+
+  app.post('/api/v4/plans/:planId/reprioritize', async (request) => {
+    requireProjectPlanQueue();
+    const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    const body = bodyRecord(request.body);
+    const priority = body.priority;
+    if (typeof priority !== 'number' || !Number.isInteger(priority))
+      throw new V4Error('PROJECT_PLAN_PRIORITY_INVALID');
+    const result = repositories.projectPlans.reprioritize(planId, priority);
+    if (result.status === 'rejected')
+      throw new V4Error(result.reason ?? 'PROJECT_PLAN_REPRIORITIZE_FAILED');
+    return { queueEntry: result.value, mutation: result.status };
+  });
+
+  app.post('/api/v4/plans/:planId/cancel-queued', async (request) => {
+    const runtime = requireProjectPlanQueue();
+    const planId = requiredText((request.params as { planId?: string }).planId, 'PLAN_ID_REQUIRED');
+    runtime.cancelQueued(planId);
+    return {
+      plan: repositories.plans.getPlan(planId),
+      queueEntry: repositories.projectPlans.getQueueEntry(planId) ?? null,
+    };
+  });
+
   app.post('/api/v4/plans', async (request, reply) => {
     const body = bodyRecord(request.body);
     const idempotencyKey = requiredText(
@@ -1263,16 +1325,36 @@ export async function buildControlPlane(
             : [],
         };
       }),
+      { activate: !singleActivePlanEnabled },
     );
-    const supervisor = repositories.supervisors.create({ planId: plan.planId }).value;
-    if (!supervisor) throw new V4Error('SUPERVISOR_CREATE_FAILED');
-    if (supervisor.status === 'CREATED')
-      repositories.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
+    const scheduling = projectPlanQueue
+      ? projectPlanQueue.scheduleRootPlan(
+          plan.planId,
+          body.priority === undefined
+            ? 0
+            : typeof body.priority === 'number' && Number.isInteger(body.priority)
+              ? body.priority
+              : (() => {
+                  throw new V4Error('PROJECT_PLAN_PRIORITY_INVALID');
+                })(),
+        )
+      : undefined;
+    let supervisor = repositories.supervisors.getByPlanId(plan.planId);
+    if (!projectPlanQueue) {
+      supervisor = supervisor ?? repositories.supervisors.create({ planId: plan.planId }).value;
+      if (!supervisor) throw new V4Error('SUPERVISOR_CREATE_FAILED');
+      if (supervisor.status === 'CREATED')
+        repositories.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
+      supervisor = repositories.supervisors.getById(supervisor.supervisorId);
+    } else if (scheduling?.status === 'ACTIVE') {
+      supervisor = repositories.supervisors.getByPlanId(plan.planId);
+    }
     reply.code(planResult.status === 'created' ? 201 : 200);
     return {
       plan: repositories.plans.getPlan(plan.planId),
       graph,
-      supervisor: repositories.supervisors.getById(supervisor.supervisorId),
+      supervisor: supervisor ?? null,
+      ...(scheduling ? { scheduling } : {}),
     };
   });
 
@@ -1657,7 +1739,10 @@ export async function buildControlPlane(
             if (automationCycleRunning) return;
             automationCycleRunning = true;
             void runWorkspaceStorageMaintenance()
-              .then(() => automation.plans.runOnce())
+              .then(() => {
+                projectPlanQueue?.reconcile();
+                return automation.plans.runOnce();
+              })
               .then((results) => {
                 for (const result of results)
                   if (result.status !== 'SKIPPED')
@@ -1711,5 +1796,8 @@ export async function buildControlPlane(
     kernels,
     supervisor: { actions: supervisorActions, openHands, scheduler, runtime: supervisorRuntime },
     ...(automation ? { automation } : {}),
+    ...(projectPlanQueue ? { projectPlanQueue } : {}),
+    singleActivePlanEnabled,
+    literalWorktreesEnabled,
   };
 }
