@@ -426,11 +426,14 @@ export class PlanWorktreeManager {
       'WORKTREE_ACCEPTED_REVISION_NOT_DESCENDANT',
     );
 
+    const existingIntegration = this.repositories.planWorktrees
+      .listByPlan(plan.planId)
+      .find((record) => record.role === 'INTEGRATION' && record.state !== 'RETIRED');
     let integration = await this.ensureIntegration({
       projectKey: plan.projectKey,
       rootPlanId: plan.planId,
       repositoryPath: plan.repositoryPath,
-      baseRevision: plan.baseRevision,
+      baseRevision: existingIntegration?.baseRevision ?? input.expectedPlanRevision,
     });
     failClosed(!integration.ownerExecutionId, 'WORKTREE_INTEGRATION_CONTROLLER_ONLY');
     const status = await this.gitStatus(plan.repositoryPath, integration.hostPath);

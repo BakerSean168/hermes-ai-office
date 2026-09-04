@@ -68,26 +68,53 @@ test('single-active-plan scheduler keeps later root plans queued and hands off F
   runtime = new ProjectPlanQueueRuntime(repositories);
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-a');
 
+  const advancedA = repositories.plans.reconcileCurrentRevision(
+    'plan-a',
+    'base-sha',
+    'head-a',
+    'test accepted integration head',
+  );
+  assert.equal(advancedA.status, 'updated');
   finish(repositories, 'plan-a');
   const firstHandoff = await runtime.reconcile();
   assert.equal(firstHandoff[0]?.activatedPlanId, 'plan-b');
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-b');
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.committedRevision, 'head-a');
   assert.equal(repositories.plans.getPlan('plan-b').status, 'READY');
+  assert.equal(repositories.plans.getPlan('plan-b').baseRevision, 'base-sha');
+  assert.equal(repositories.plans.getPlan('plan-b').currentRevision, 'head-a');
   assert.equal(repositories.supervisors.getByPlanId('plan-a')?.status, 'CANCELLED');
   assert.equal(repositories.supervisors.getByPlanId('plan-b')?.status, 'ACTIVE');
   assert.equal(repositories.supervisors.getByPlanId('plan-c'), undefined);
 
+  repositories.plans.reconcileCurrentRevision(
+    'plan-b',
+    'head-a',
+    'head-b',
+    'test second accepted integration head',
+  );
   finish(repositories, 'plan-b');
   await runtime.reconcile();
   assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-c');
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.committedRevision, 'head-b');
   assert.equal(repositories.plans.getPlan('plan-c').status, 'READY');
+  assert.equal(repositories.plans.getPlan('plan-c').baseRevision, 'base-sha');
+  assert.equal(repositories.plans.getPlan('plan-c').currentRevision, 'head-b');
   assert.equal(repositories.supervisors.getByPlanId('plan-c')?.status, 'ACTIVE');
 
   finish(repositories, 'plan-c');
   await runtime.reconcile();
   const emptyLease = repositories.projectPlans.getLease('bodysense')!;
   assert.equal(emptyLease.activeRootPlanId, undefined);
+  assert.equal(emptyLease.committedRevision, 'head-b');
   assert.equal(repositories.projectPlans.listQueue('bodysense').length, 0);
+
+  createRoot(repositories, 'plan-d');
+  const resumed = runtime.scheduleRootPlan('plan-d');
+  assert.equal(resumed.status, 'ACTIVE');
+  assert.equal(repositories.plans.getPlan('plan-d').baseRevision, 'base-sha');
+  assert.equal(repositories.plans.getPlan('plan-d').currentRevision, 'head-b');
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.committedRevision, 'head-b');
   db.close();
   fs.rmSync(root, { recursive: true, force: true });
 });
@@ -151,6 +178,41 @@ test('queued plan reprioritization is deterministic and cancellation provisions 
     ['plan-b'],
   );
   db.close();
+});
+
+test('schema v11 migrates the active logical project head into the durable lease', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-plan-v11-head-'));
+  const dbFile = path.join(root, 'pixel.sqlite');
+  let db = openV4Database(dbFile, { environment: 'test' });
+  let repositories = createRepositories(db);
+  createRoot(repositories, 'plan-a');
+  const runtime = new ProjectPlanQueueRuntime(repositories);
+  runtime.scheduleRootPlan('plan-a');
+  repositories.plans.reconcileCurrentRevision(
+    'plan-a',
+    'base-sha',
+    'head-before-v12',
+    'migration fixture',
+  );
+  db.exec('ALTER TABLE project_plan_leases DROP COLUMN committed_revision');
+  db.prepare("UPDATE schema_meta SET schema_version=11 WHERE schema_id='pixel-v4'").run();
+  db.close();
+
+  db = openV4Database(dbFile, { environment: 'production', env: { NODE_ENV: 'production' } });
+  repositories = createRepositories(db);
+  assert.equal(
+    db.prepare("SELECT schema_version FROM schema_meta WHERE schema_id='pixel-v4'").get()
+      ?.schema_version,
+    SCHEMA_VERSION,
+  );
+  assert.equal(repositories.projectPlans.getLease('bodysense')?.activeRootPlanId, 'plan-a');
+  assert.equal(
+    repositories.projectPlans.getLease('bodysense')?.committedRevision,
+    'head-before-v12',
+  );
+  assert.equal(repositories.plans.getPlan('plan-a').currentRevision, 'head-before-v12');
+  db.close();
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('schema v6 migrates additively to the single-active-plan scheduling schema', () => {

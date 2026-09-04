@@ -3322,6 +3322,7 @@ interface ProjectPlanLeaseRow {
   project_key: string;
   repository_path: string;
   active_root_plan_id: string | null;
+  committed_revision: string | null;
   version: number;
   acquired_at: string | null;
   updated_at: string;
@@ -3343,6 +3344,7 @@ function projectPlanLeaseFrom(row: ProjectPlanLeaseRow): ProjectPlanLease {
     projectKey: row.project_key,
     repositoryPath: row.repository_path,
     ...(row.active_root_plan_id ? { activeRootPlanId: row.active_root_plan_id } : {}),
+    ...(row.committed_revision ? { committedRevision: row.committed_revision } : {}),
     version: Number(row.version),
     ...(row.acquired_at ? { acquiredAt: row.acquired_at } : {}),
     updatedAt: row.updated_at,
@@ -3369,6 +3371,33 @@ export class ProjectPlanSchedulerRepository {
     readonly db: DatabaseSync,
     readonly events = new EventStore(db),
   ) {}
+
+  private reconcileActivationRevision(
+    plan: Plan,
+    committedRevision: string | undefined,
+    source: string,
+  ): Plan {
+    const target = committedRevision?.trim();
+    if (!target || plan.currentRevision === target) return plan;
+    if (plan.status !== 'DRAFT' && plan.status !== 'QUEUED')
+      throw new V4Error('PROJECT_PLAN_ACTIVATION_REVISION_CONFLICT');
+    const updatedAt = iso();
+    const result = this.db
+      .prepare(
+        'UPDATE plans SET current_revision=?,updated_at=? WHERE plan_id=? AND current_revision=? AND status=?',
+      )
+      .run(target, updatedAt, plan.planId, plan.currentRevision, plan.status);
+    if (Number(result.changes) !== 1) throw new V4Error('PROJECT_PLAN_ACTIVATION_REVISION_STALE');
+    this.events.appendInTransaction(
+      makeEvent(plan.planId, 'PLAN', 'PROJECT_PLAN_ACTIVATION_BASE_RECONCILED', {
+        from: plan.currentRevision,
+        to: target,
+        requestBaseRevision: plan.baseRevision,
+        source,
+      }),
+    );
+    return { ...plan, currentRevision: target, updatedAt };
+  }
 
   getLease(projectKey: string): ProjectPlanLease | undefined {
     failClosed(projectKey.trim().length > 0, 'PROJECT_PLAN_PROJECT_REQUIRED');
@@ -3421,20 +3450,26 @@ export class ProjectPlanSchedulerRepository {
         throw new V4Error('PROJECT_PLAN_REPOSITORY_MISMATCH');
 
       if (!row || row.active_root_plan_id === null) {
+        const committedRevision = row?.committed_revision?.trim() || plan.currentRevision;
+        plan = this.reconcileActivationRevision(
+          plan,
+          committedRevision,
+          row ? 'existing-project-head' : 'initial-project-head',
+        );
         const version = row ? Number(row.version) + 1 : 1;
         if (row) {
           const updated = this.db
             .prepare(
-              'UPDATE project_plan_leases SET active_root_plan_id=?,version=?,acquired_at=?,updated_at=? WHERE project_key=? AND version=? AND active_root_plan_id IS NULL',
+              'UPDATE project_plan_leases SET active_root_plan_id=?,committed_revision=COALESCE(committed_revision,?),version=?,acquired_at=?,updated_at=? WHERE project_key=? AND version=? AND active_root_plan_id IS NULL',
             )
-            .run(planId, version, at, at, plan.projectKey, row.version);
+            .run(planId, committedRevision, version, at, at, plan.projectKey, row.version);
           if (Number(updated.changes) !== 1) throw new V4Error('PROJECT_PLAN_LEASE_STALE');
         } else {
           this.db
             .prepare(
-              'INSERT INTO project_plan_leases(project_key,repository_path,active_root_plan_id,version,acquired_at,updated_at) VALUES(?,?,?,?,?,?)',
+              'INSERT INTO project_plan_leases(project_key,repository_path,active_root_plan_id,committed_revision,version,acquired_at,updated_at) VALUES(?,?,?,?,?,?,?)',
             )
-            .run(plan.projectKey, plan.repositoryPath, planId, version, at, at);
+            .run(plan.projectKey, plan.repositoryPath, planId, committedRevision, version, at, at);
         }
         if (plan.status === 'DRAFT' || plan.status === 'QUEUED') {
           const next = transitionPlan(plan, 'READY', at);
@@ -3461,6 +3496,8 @@ export class ProjectPlanSchedulerRepository {
             projectKey: plan.projectKey,
             repositoryPath: plan.repositoryPath,
             leaseVersion: version,
+            committedRevision:
+              this.getLease(plan.projectKey)?.committedRevision ?? plan.currentRevision,
           }),
         );
         return { status: 'ACTIVE', lease: this.getLease(plan.projectKey)! };
@@ -3557,9 +3594,9 @@ export class ProjectPlanSchedulerRepository {
         const at = iso();
         this.db
           .prepare(
-            'INSERT INTO project_plan_leases(project_key,repository_path,active_root_plan_id,version,acquired_at,updated_at) VALUES(?,?,?,?,?,?)',
+            'INSERT INTO project_plan_leases(project_key,repository_path,active_root_plan_id,committed_revision,version,acquired_at,updated_at) VALUES(?,?,?,?,?,?,?)',
           )
-          .run(projectKey, plan.repositoryPath, rootPlanId, 1, at, at);
+          .run(projectKey, plan.repositoryPath, rootPlanId, plan.currentRevision, 1, at, at);
         return { status: 'created', value: this.getLease(projectKey)! };
       }
       if (current.repositoryPath !== plan.repositoryPath)
@@ -3571,12 +3608,18 @@ export class ProjectPlanSchedulerRepository {
           ? { status: 'existing', value: current }
           : { status: 'rejected', value: current, reason: 'PROJECT_PLAN_LEASE_HELD' };
       }
+      const activationPlan = this.reconcileActivationRevision(
+        plan,
+        current.committedRevision,
+        'lease-reacquire-project-head',
+      );
+      const committedRevision = current.committedRevision ?? activationPlan.currentRevision;
       const at = iso();
       const result = this.db
         .prepare(
-          'UPDATE project_plan_leases SET active_root_plan_id=?,version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND version=? AND active_root_plan_id IS NULL',
+          'UPDATE project_plan_leases SET active_root_plan_id=?,committed_revision=COALESCE(committed_revision,?),version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND version=? AND active_root_plan_id IS NULL',
         )
-        .run(rootPlanId, at, at, projectKey, expectedVersion);
+        .run(rootPlanId, committedRevision, at, at, projectKey, expectedVersion);
       if (Number(result.changes) !== 1)
         return { status: 'rejected', value: this.getLease(projectKey), reason: 'STALE_VERSION' };
       return { status: 'updated', value: this.getLease(projectKey)! };
@@ -3686,28 +3729,42 @@ export class ProjectPlanSchedulerRepository {
       if (!next) {
         const result = this.db
           .prepare(
-            'UPDATE project_plan_leases SET active_root_plan_id=NULL,version=version+1,acquired_at=NULL,updated_at=? WHERE project_key=? AND active_root_plan_id=? AND version=?',
+            'UPDATE project_plan_leases SET active_root_plan_id=NULL,committed_revision=?,version=version+1,acquired_at=NULL,updated_at=? WHERE project_key=? AND active_root_plan_id=? AND version=?',
           )
-          .run(at, projectKey, rootPlanId, expectedVersion);
+          .run(released.currentRevision, at, projectKey, rootPlanId, expectedVersion);
         if (Number(result.changes) !== 1) throw new V4Error('PROJECT_PLAN_LEASE_STALE');
         this.events.appendInTransaction(
           makeEvent(rootPlanId, 'PLAN', 'PROJECT_PLAN_LEASE_RELEASED', {
             projectKey,
             leaseVersion: expectedVersion + 1,
+            committedRevision: released.currentRevision,
           }),
         );
         return { releasedPlanId: rootPlanId, lease: this.getLease(projectKey)! };
       }
       if (next.repositoryPath !== current.repositoryPath)
         throw new V4Error('PROJECT_PLAN_REPOSITORY_MISMATCH');
+      let nextPlan = new PlanRepository(this.db, this.events).getPlan(next.planId);
+      if (nextPlan.status !== 'QUEUED') throw new V4Error('PROJECT_PLAN_QUEUE_STATE_INVALID');
+      nextPlan = this.reconcileActivationRevision(
+        nextPlan,
+        released.currentRevision,
+        'previous-plan:' + rootPlanId,
+      );
       const result = this.db
         .prepare(
-          'UPDATE project_plan_leases SET active_root_plan_id=?,version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND active_root_plan_id=? AND version=?',
+          'UPDATE project_plan_leases SET active_root_plan_id=?,committed_revision=?,version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND active_root_plan_id=? AND version=?',
         )
-        .run(next.planId, at, at, projectKey, rootPlanId, expectedVersion);
+        .run(
+          next.planId,
+          released.currentRevision,
+          at,
+          at,
+          projectKey,
+          rootPlanId,
+          expectedVersion,
+        );
       if (Number(result.changes) !== 1) throw new V4Error('PROJECT_PLAN_LEASE_STALE');
-      const nextPlan = new PlanRepository(this.db, this.events).getPlan(next.planId);
-      if (nextPlan.status !== 'QUEUED') throw new V4Error('PROJECT_PLAN_QUEUE_STATE_INVALID');
       transitionPlan(nextPlan, 'READY', at);
       this.db
         .prepare('UPDATE plans SET status=?,updated_at=? WHERE plan_id=? AND status=?')
@@ -3722,6 +3779,7 @@ export class ProjectPlanSchedulerRepository {
           projectKey,
           leaseVersion: expectedVersion + 1,
           nextPlanId: next.planId,
+          committedRevision: released.currentRevision,
         }),
       );
       this.events.appendInTransaction(
@@ -3732,6 +3790,7 @@ export class ProjectPlanSchedulerRepository {
           projectKey,
           previousPlanId: rootPlanId,
           leaseVersion: expectedVersion + 1,
+          activationRevision: nextPlan.currentRevision,
         }),
       );
       return {
@@ -3758,19 +3817,21 @@ export class ProjectPlanSchedulerRepository {
     if (next.repositoryPath !== current.repositoryPath)
       throw new V4Error('PROJECT_PLAN_REPOSITORY_MISMATCH');
     const at = iso();
+    let plan = new PlanRepository(this.db, this.events).getPlan(next.planId);
+    if (plan.status !== 'QUEUED') throw new V4Error('PROJECT_PLAN_QUEUE_STATE_INVALID');
+    const committedRevision = current.committedRevision ?? plan.currentRevision;
+    plan = this.reconcileActivationRevision(plan, committedRevision, 'queued-project-head');
     const result = this.db
       .prepare(
-        'UPDATE project_plan_leases SET active_root_plan_id=?,version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND active_root_plan_id IS NULL AND version=?',
+        'UPDATE project_plan_leases SET active_root_plan_id=?,committed_revision=COALESCE(committed_revision,?),version=version+1,acquired_at=?,updated_at=? WHERE project_key=? AND active_root_plan_id IS NULL AND version=?',
       )
-      .run(next.planId, at, at, current.projectKey, current.version);
+      .run(next.planId, committedRevision, at, at, current.projectKey, current.version);
     if (Number(result.changes) !== 1)
       return {
         status: 'rejected',
         value: this.getLease(current.projectKey),
         reason: 'STALE_VERSION',
       };
-    const plan = new PlanRepository(this.db, this.events).getPlan(next.planId);
-    if (plan.status !== 'QUEUED') throw new V4Error('PROJECT_PLAN_QUEUE_STATE_INVALID');
     transitionPlan(plan, 'READY', at);
     this.db
       .prepare('UPDATE plans SET status=?,updated_at=? WHERE plan_id=? AND status=?')
@@ -3787,6 +3848,7 @@ export class ProjectPlanSchedulerRepository {
       makeEvent(next.planId, 'PLAN', 'PROJECT_PLAN_ACTIVATED', {
         projectKey: current.projectKey,
         leaseVersion: current.version + 1,
+        activationRevision: plan.currentRevision,
       }),
     );
     return { status: 'updated', value: this.getLease(current.projectKey)! };

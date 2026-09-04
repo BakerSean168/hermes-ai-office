@@ -365,6 +365,80 @@ test('failed implementation retry reuses the same WorkItem worktree and resets o
   fs.rmSync(value.root, { recursive: true, force: true });
 });
 
+test('reviewed integration reuses the durable activation base after a queued Plan inherits a newer project head', async () => {
+  const value = fixture();
+  const requestBase = value.revision;
+  fs.writeFileSync(path.join(value.repository, 'inherited.txt'), 'from previous plan\n');
+  git(value.repository, ['add', 'inherited.txt']);
+  git(value.repository, ['commit', '-m', 'feat: previous plan head']);
+  const inheritedHead = git(value.repository, ['rev-parse', 'HEAD']);
+  git(value.repository, ['reset', '--hard', requestBase]);
+  assert.equal(git(value.repository, ['rev-parse', 'HEAD']), requestBase);
+
+  const reconciled = value.repositories.plans.reconcileCurrentRevision(
+    value.plan.planId,
+    requestBase,
+    inheritedHead,
+    'queued plan inherited prior project head',
+  );
+  assert.equal(reconciled.status, 'updated');
+  value.repositories.plans.assignWorkItemWave(value.itemA.workItemId, 1, inheritedHead);
+  value.repositories.plans.compareAndSetStatus(value.plan.planId, 'READY', 'RUNNING');
+
+  const integration = await value.manager.ensureIntegration({
+    projectKey: 'bodysense',
+    rootPlanId: value.plan.planId,
+    repositoryPath: value.repository,
+    baseRevision: inheritedHead,
+  });
+  assert.equal(integration.baseRevision, inheritedHead);
+  assert.equal(value.repositories.plans.getPlan(value.plan.planId).baseRevision, requestBase);
+  assert.equal(value.repositories.plans.getPlan(value.plan.planId).currentRevision, inheritedHead);
+
+  const worktree = await value.manager.ensureWorkItem({
+    projectKey: 'bodysense',
+    rootPlanId: value.plan.planId,
+    workItemId: value.itemA.workItemId,
+    repositoryPath: value.repository,
+    baseRevision: inheritedHead,
+  });
+  createExecution(
+    value.repositories,
+    value.plan.planId,
+    value.itemA.workItemId,
+    'exec-inherited-head',
+    inheritedHead,
+  );
+  await value.manager.attachWriter(worktree.worktreeId, 'exec-inherited-head');
+  fs.writeFileSync(path.join(worktree.hostPath, 'next.txt'), 'next plan\n');
+  git(worktree.hostPath, ['add', 'next.txt']);
+  git(worktree.hostPath, ['commit', '-m', 'feat: next plan change']);
+  const candidate = git(worktree.hostPath, ['rev-parse', 'HEAD']);
+  await value.manager.releaseWriter(worktree.worktreeId, 'exec-inherited-head');
+
+  const integrated = await value.manager.integrateReviewedCandidate({
+    rootPlanId: value.plan.planId,
+    workItemId: value.itemA.workItemId,
+    candidateRevision: candidate,
+    expectedPlanRevision: inheritedHead,
+    integrationBaseRevision: inheritedHead,
+  });
+  assert.equal(integrated.worktree.baseRevision, inheritedHead);
+  assert.notEqual(integrated.headRevision, inheritedHead);
+  assert.equal(
+    fs.readFileSync(path.join(integrated.worktree.hostPath, 'inherited.txt'), 'utf8'),
+    'from previous plan\n',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(integrated.worktree.hostPath, 'next.txt'), 'utf8'),
+    'next plan\n',
+  );
+  assert.equal(git(value.repository, ['rev-parse', 'HEAD']), requestBase);
+
+  value.db.close();
+  fs.rmSync(value.root, { recursive: true, force: true });
+});
+
 test('parallel reviewed candidates integrate serially in the Plan integration worktree without mutating canonical checkout', async () => {
   const value = fixture();
   value.repositories.plans.assignWorkItemWave(value.itemA.workItemId, 1, value.revision);

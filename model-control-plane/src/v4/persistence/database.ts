@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { DataResetRequiredError, V4Error } from '../domain/errors.js';
 
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 12;
 
 const CREATE_EXECUTION_SESSIONS_SQL = `
 CREATE TABLE IF NOT EXISTS execution_sessions (
@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS project_plan_leases (
   project_key TEXT PRIMARY KEY,
   repository_path TEXT NOT NULL,
   active_root_plan_id TEXT UNIQUE REFERENCES plans(plan_id),
+  committed_revision TEXT,
   version INTEGER NOT NULL,
   acquired_at TEXT,
   updated_at TEXT NOT NULL
@@ -177,7 +178,7 @@ export const SCHEMA_V4_SQL = [
   'CREATE TABLE IF NOT EXISTS plan_relationships (relationship_id TEXT PRIMARY KEY, parent_plan_id TEXT NOT NULL REFERENCES plans(plan_id), child_plan_id TEXT NOT NULL UNIQUE REFERENCES plans(plan_id), kind TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(parent_plan_id, child_plan_id, kind));',
   'CREATE TABLE IF NOT EXISTS maintenance_programs (program_id TEXT PRIMARY KEY, project_key TEXT NOT NULL, policy TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);',
   "CREATE TABLE IF NOT EXISTS improvement_candidates (candidate_id TEXT PRIMARY KEY, program_id TEXT NOT NULL REFERENCES maintenance_programs(program_id), fingerprint TEXT NOT NULL UNIQUE, title TEXT NOT NULL, evidence TEXT NOT NULL, status TEXT NOT NULL, plan_id TEXT REFERENCES plans(plan_id), pull_request_id TEXT, risk TEXT NOT NULL DEFAULT 'LOW', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
-  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 11, CAST(strftime('%s','now') AS INTEGER));",
+  "INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at) VALUES ('pixel-v4', 12, CAST(strftime('%s','now') AS INTEGER));",
 ].join('\n');
 
 const V1_REQUIRED_COLUMNS = {
@@ -540,6 +541,11 @@ const V11_REQUIRED_COLUMNS = {
   execution_sessions: [...V10_REQUIRED_COLUMNS.execution_sessions, 'last_provider_observed_at'],
 } as const satisfies Record<string, readonly string[]>;
 
+const V12_REQUIRED_COLUMNS = {
+  ...V11_REQUIRED_COLUMNS,
+  project_plan_leases: [...V11_REQUIRED_COLUMNS.project_plan_leases, 'committed_revision'],
+} as const satisfies Record<string, readonly string[]>;
+
 export interface V4DatabaseOptions {
   env?: NodeJS.ProcessEnv;
   environment?: 'test' | 'development' | 'staging' | 'production';
@@ -749,6 +755,75 @@ function migrateV10ToV11(db: DatabaseSync): void {
     const result = db
       .prepare(
         "UPDATE schema_meta SET schema_version=11 WHERE schema_id='pixel-v4' AND schema_version=10",
+      )
+      .run();
+    if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+    db.exec('COMMIT');
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* preserve original migration failure */
+    }
+    throw error;
+  }
+}
+
+function migrateV11ToV12(db: DatabaseSync): void {
+  if (schemaVersion(db) !== 11) return;
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const lockedVersion = schemaVersion(db);
+    if (lockedVersion !== 11) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
+    assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+    assertV11Relationships(db);
+    const columns = tableColumns(db, 'project_plan_leases');
+    if (!columns.has('committed_revision'))
+      db.exec('ALTER TABLE project_plan_leases ADD COLUMN committed_revision TEXT');
+    db.exec(`UPDATE project_plan_leases
+      SET committed_revision=(
+        SELECT plans.current_revision FROM plans
+        WHERE plans.plan_id=project_plan_leases.active_root_plan_id
+      )
+      WHERE committed_revision IS NULL AND active_root_plan_id IS NOT NULL`);
+
+    const inactive = db
+      .prepare(
+        'SELECT project_key,repository_path FROM project_plan_leases WHERE committed_revision IS NULL AND active_root_plan_id IS NULL',
+      )
+      .all() as unknown as Array<{ project_key: string; repository_path: string }>;
+    const releases = db
+      .prepare(
+        "SELECT aggregate_id,payload FROM events WHERE type='PROJECT_PLAN_LEASE_RELEASED' ORDER BY event_order DESC",
+      )
+      .all() as unknown as Array<{ aggregate_id: string; payload: string }>;
+    for (const lease of inactive) {
+      const released = releases.find((row) => {
+        try {
+          const payload = JSON.parse(row.payload) as Record<string, unknown>;
+          return payload.projectKey === lease.project_key;
+        } catch {
+          return false;
+        }
+      });
+      if (!released) continue;
+      const plan = db
+        .prepare(
+          'SELECT current_revision,repository_path FROM plans WHERE plan_id=? AND parent_plan_id IS NULL',
+        )
+        .get(released.aggregate_id) as
+        { current_revision: string; repository_path: string } | undefined;
+      if (!plan || plan.repository_path !== lease.repository_path || !plan.current_revision.trim())
+        continue;
+      db.prepare(
+        'UPDATE project_plan_leases SET committed_revision=? WHERE project_key=? AND committed_revision IS NULL',
+      ).run(plan.current_revision, lease.project_key);
+    }
+    assertSchemaColumns(db, V12_REQUIRED_COLUMNS);
+    assertV11Relationships(db);
+    const result = db
+      .prepare(
+        "UPDATE schema_meta SET schema_version=12 WHERE schema_id='pixel-v4' AND schema_version=11",
       )
       .run();
     if (Number(result.changes) !== 1) throw new V4Error('V4_SCHEMA_MIGRATION_STALE');
@@ -1133,9 +1208,10 @@ function migrateKnownV4Schema(db: DatabaseSync): void {
   }
 
   migrateV10ToV11(db);
+  migrateV11ToV12(db);
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+  assertSchemaColumns(db, V12_REQUIRED_COLUMNS);
   assertV11Relationships(db);
 }
 
@@ -1189,9 +1265,10 @@ export function assertCurrentV4Schema(db: DatabaseSync): void {
   }
 
   migrateV10ToV11(db);
+  migrateV11ToV12(db);
   const current = schemaVersion(db);
   if (current !== SCHEMA_VERSION) throw new V4Error('V4_SCHEMA_VERSION_INVALID');
-  assertSchemaColumns(db, V11_REQUIRED_COLUMNS);
+  assertSchemaColumns(db, V12_REQUIRED_COLUMNS);
   assertV11Relationships(db);
 }
 

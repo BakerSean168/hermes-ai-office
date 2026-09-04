@@ -253,6 +253,7 @@ CREATE TABLE IF NOT EXISTS project_plan_leases (
   project_key TEXT PRIMARY KEY,
   repository_path TEXT NOT NULL,
   active_root_plan_id TEXT UNIQUE REFERENCES plans(plan_id),
+  committed_revision TEXT,
   version INTEGER NOT NULL,
   acquired_at TEXT,
   updated_at TEXT NOT NULL
@@ -342,4 +343,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 11, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 12, CAST(strftime('%s','now') AS INTEGER));
