@@ -35,8 +35,8 @@ ProtectHostname=true
 RestrictRealtime=true
 LockPersonality=true
 RestrictSUIDSGID=true
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
-AmbientCapabilities=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_KILL
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL
+AmbientCapabilities=CAP_SYS_ADMIN CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_KILL
 ReadWritePaths=/srv/hermes-personal/data/model-control-plane/antigravity-v4
 ReadWritePaths=/opt/data/hermes-ai-office-v3/workspaces
 

@@ -86,6 +86,10 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.doesNotMatch(service, /CAP_SYS_ADMIN/);
   assert.match(antigravityUnit, /CapabilityBoundingSet=.*CAP_SYS_ADMIN/);
+  // The root-only mount wrapper needs CAP_SETPCAP solely to drop the final
+  // capability bounding set before execing Antigravity as the unprivileged user.
+  assert.match(antigravityUnit, /CapabilityBoundingSet=.*CAP_SETPCAP/);
+  assert.match(antigravityUnit, /AmbientCapabilities=.*CAP_SETPCAP/);
   assert.match(
     antigravityUnit,
     /ExecStart=\/usr\/bin\/node \/usr\/local\/libexec\/hermes-antigravity-v4-unit\.mjs %i/,
