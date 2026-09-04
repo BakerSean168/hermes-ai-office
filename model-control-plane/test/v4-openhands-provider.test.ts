@@ -932,3 +932,49 @@ test('OpenHands status and transport failures fail closed', async () => {
     (error: unknown) => error instanceof V4Error && error.code === 'OPENHANDS_TIMEOUT',
   );
 });
+
+test('model-native runtime probe classifies finished ACP transport errors without exposing response text', async () => {
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(
+        JSON.stringify({
+          id: 'runtime-probe-transport-error',
+          execution_status: 'finished',
+          workspace: body.workspace,
+          tags: body.tags,
+        }),
+        { status: 201 },
+      );
+    }
+    if (value.endsWith('/api/conversations/runtime-probe-transport-error/agent_final_response'))
+      return new Response(JSON.stringify({ response: 'ACP error: Connection closed' }), {
+        status: 200,
+      });
+    if (value.includes('/api/conversations/runtime-probe-transport-error/events/search'))
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (
+      value.endsWith('/api/conversations/runtime-probe-transport-error') &&
+      init.method === 'DELETE'
+    )
+      return new Response('', { status: 204 });
+    throw new Error('unexpected request ' + value + ' ' + String(init.method));
+  }) as typeof fetch;
+  const provider = createOpenHandsProviderForSelection(options(fake), {
+    backend: 'codex-acp',
+    model: 'route-orcai-gpt-5.6-luna',
+    role: 'IMPLEMENTATION',
+    transport: 'LITELLM_MANAGED',
+  });
+  const input = launchInput('IMPLEMENT');
+  const result = await provider.probeRuntime!({
+    probeId: 'runtime-probe-error',
+    sourceRevision: input.sourceRevision,
+    workspace: { ...input.workspace, executionId: 'runtime-probe-error' },
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.errorCode, 'RUNTIME_PROBE_TRANSPORT_ERROR');
+  assert.equal('finalResponse' in result, false);
+});

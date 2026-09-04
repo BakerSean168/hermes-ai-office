@@ -164,6 +164,7 @@ export interface ProviderRuntimeProbeResult {
   providerSessionId: string;
   status: ProviderSessionStatus;
   ready: boolean;
+  errorCode?: string;
   observedAt: string;
 }
 

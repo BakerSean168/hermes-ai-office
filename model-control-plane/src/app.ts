@@ -697,10 +697,19 @@ async function buildExecutionAutomation(
       });
       const clean = prepared.git(['status', '--porcelain=v1']) === '';
       const head = prepared.git(['rev-parse', '--verify', 'HEAD^{commit}']);
+      const ready = result.ready && clean && head === prepared.sourceRevision;
       runtimeAdmission.record(candidate, {
-        ready: result.ready && clean && head === prepared.sourceRevision,
-        ...(!result.ready || !clean || head !== prepared.sourceRevision
-          ? { errorCode: 'RUNTIME_ADMISSION_PROBE_FAILED' }
+        ready,
+        ...(!ready
+          ? {
+              errorCode:
+                result.errorCode ??
+                (!clean
+                  ? 'RUNTIME_PROBE_WORKSPACE_DIRTY'
+                  : head !== prepared.sourceRevision
+                    ? 'RUNTIME_PROBE_HEAD_DRIFT'
+                    : 'RUNTIME_ADMISSION_PROBE_FAILED'),
+            }
           : {}),
       });
     } catch (error) {
@@ -1220,6 +1229,25 @@ export async function buildControlPlane(
     storage: workspaceStorage(),
     cleanup: await runWorkspaceStorageMaintenance(),
   }));
+
+  app.get('/api/v4/runtime-admission', async () => {
+    const runtime = requireAutomation();
+    return {
+      enabled: runtime.runtimeAdmissionEnabled,
+      summary: runtime.runtimeAdmission.summary(),
+      items: runtime.runtimeAdmission.list().map((item) => ({
+        agentBackend: item.agentBackend,
+        transport: item.transport,
+        resourceId: item.resourceId,
+        bindingId: item.bindingId,
+        modelFamily: item.modelFamily,
+        routeModel: item.routeModel ?? null,
+        ready: item.ready,
+        checkedAt: item.checkedAt,
+        errorCode: item.errorCode ?? null,
+      })),
+    };
+  });
 
   app.get('/api/v4/resources', async () => {
     const runtime = requireAutomation();

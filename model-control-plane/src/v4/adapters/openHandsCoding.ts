@@ -1044,15 +1044,22 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
         snapshot = await this.inspect(providerSessionId);
       }
       const response = snapshot.finalResponse?.trim() ?? '';
-      const ready =
-        snapshot.status === 'SUCCEEDED' &&
-        /(?:^|\b)READY(?:\b|$)/i.test(response) &&
-        !/TRANSPORT_ERROR|ACP error|runtime error/i.test(response);
+      const transportError = /TRANSPORT_ERROR|ACP error|runtime error/i.test(response);
+      const hasReadyToken = /(?:^|\b)READY(?:\b|$)/i.test(response);
+      const ready = snapshot.status === 'SUCCEEDED' && hasReadyToken && !transportError;
+      const errorCode = ready
+        ? undefined
+        : transportError
+          ? 'RUNTIME_PROBE_TRANSPORT_ERROR'
+          : snapshot.status !== 'SUCCEEDED'
+            ? 'RUNTIME_PROBE_STATUS_' + snapshot.status
+            : 'RUNTIME_PROBE_READY_TOKEN_MISSING';
       return {
         provider: this.provider,
         providerSessionId,
         status: snapshot.status,
         ready,
+        ...(errorCode ? { errorCode } : {}),
         observedAt: snapshot.observedAt,
       };
     } finally {
