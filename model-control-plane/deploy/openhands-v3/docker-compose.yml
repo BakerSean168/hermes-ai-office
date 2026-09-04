@@ -35,6 +35,14 @@ services:
       GOTOOLCHAIN: local
     volumes:
       - /opt/data/hermes-ai-office-v3/workspaces:/workspace
+      # Literal V4 worktrees contain host-absolute Git administrative links. Keep
+      # the model-friendly /workspace alias and expose the same managed root at
+      # its host identity. Only allowlisted Git common dirs are mounted; project
+      # working trees remain outside the worker container.
+      - /opt/data/hermes-ai-office-v3/workspaces:/opt/data/hermes-ai-office-v3/workspaces
+      - /home/dev/projects/bodysense/.git:/home/dev/projects/bodysense/.git
+      - /home/dev/projects/digital-biome/.git:/home/dev/projects/digital-biome/.git
+      - /home/dev/projects/memoflow/.git:/home/dev/projects/memoflow/.git
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state
       - ./opencode-v3.json:/etc/hermes-ai-office-v3/opencode.json:ro
       - ./dsh-acp-v3.patch.yml:/etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml:ro

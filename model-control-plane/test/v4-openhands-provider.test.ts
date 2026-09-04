@@ -106,6 +106,28 @@ test('OpenHands implementation and review launches use distinct models, tools an
     ['terminal', 'task_tracker'],
   );
   assert.equal(implementationBody.initial_message.run, true);
+  assert.equal(
+    implementationBody.secrets.HOME.value,
+    '/workspace/executions/exec-1/.agent-harness/home',
+  );
+  assert.equal(
+    implementationBody.secrets.XDG_CONFIG_HOME.value,
+    '/workspace/executions/exec-1/.agent-harness/xdg',
+  );
+  assert.equal(implementationBody.secrets.GIT_CONFIG_NOSYSTEM.value, '1');
+  assert.equal(implementationBody.secrets.GIT_OPTIONAL_LOCKS.value, '0');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_COUNT.value, '4');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_KEY_0.value, 'safe.directory');
+  assert.equal(
+    implementationBody.secrets.GIT_CONFIG_VALUE_0.value,
+    '/workspace/executions/exec-1/repo',
+  );
+  assert.equal(implementationBody.secrets.GIT_CONFIG_KEY_1.value, 'safe.directory');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_VALUE_1.value, '/host/executions/exec-1/repo');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_KEY_2.value, 'gc.auto');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_VALUE_2.value, '0');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_KEY_3.value, 'maintenance.auto');
+  assert.equal(implementationBody.secrets.GIT_CONFIG_VALUE_3.value, 'false');
   assert.match(
     implementationBody.initial_message.content[0].text,
     /\/workspace\/executions\/exec-1\/repo\/\.pixel-v4-completion-evidence\.json/,

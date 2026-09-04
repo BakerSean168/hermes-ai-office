@@ -13,6 +13,8 @@ if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
   echo "refusing release from dirty worktree" >&2
   exit 1
 fi
+command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is required for literal V4 worktree ACLs" >&2; exit 1; }
+
 source_sha="$(git -C "$repo_root" rev-parse HEAD)"
 target_sha="$(git -C "$target_root" rev-parse HEAD)"
 if [[ "$source_sha" != "$target_sha" ]]; then
@@ -21,6 +23,10 @@ if [[ "$source_sha" != "$target_sha" ]]; then
 fi
 
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
+if grep -q '^Environment=MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true$' \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service"; then
+  sudo /usr/bin/node "$repo_root/model-control-plane/scripts/smoke-v4-literal-worktree.mjs"
+fi
 openhands_compose="$repo_root/model-control-plane/deploy/openhands-v3/docker-compose.yml"
 sudo docker compose -f "$openhands_compose" up -d --remove-orphans --wait --wait-timeout 120
 sudo "$repo_root/model-control-plane/scripts/install-openhands-v3-tooling.sh"

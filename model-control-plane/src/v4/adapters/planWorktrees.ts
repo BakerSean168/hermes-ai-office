@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -18,6 +18,11 @@ interface GitWorktreeRecord {
   lockedReason?: string;
 }
 
+interface RepositoryIdentity {
+  uid: number;
+  gid: number;
+}
+
 export interface PlanWorktreeManagerOptions {
   repositories: V4Repositories;
   allowedRepositoryRoots: string[];
@@ -25,6 +30,7 @@ export interface PlanWorktreeManagerOptions {
   executionRoot: string;
   commandTimeoutMs?: number;
   maxBufferBytes?: number;
+  setfaclBinary?: string;
 }
 
 interface WorktreeRequest {
@@ -87,6 +93,7 @@ export class PlanWorktreeManager {
   readonly executionRoot: string;
   readonly commandTimeoutMs: number;
   readonly maxBufferBytes: number;
+  readonly setfaclBinary: string;
 
   constructor(options: PlanWorktreeManagerOptions) {
     failClosed(options.allowedRepositoryRoots.length > 0, 'WORKTREE_ALLOWED_ROOT_REQUIRED');
@@ -98,6 +105,7 @@ export class PlanWorktreeManager {
     this.executionRoot = path.posix.resolve('/', options.executionRoot);
     this.commandTimeoutMs = options.commandTimeoutMs ?? 120_000;
     this.maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
+    this.setfaclBinary = options.setfaclBinary ?? '/usr/bin/setfacl';
   }
 
   async ensureIntegration(input: WorktreeRequest): Promise<PlanWorktree> {
@@ -147,7 +155,7 @@ export class PlanWorktreeManager {
       'repo',
     ]);
     const id = worktreeId('REVIEW', input.rootPlanId, input.reviewId);
-    this.assertCommit(repositoryPath, input.reviewedSha);
+    await this.assertCommit(repositoryPath, input.reviewedSha);
     const record = this.repositories.planWorktrees.create({
       worktreeId: id,
       projectKey: input.projectKey,
@@ -173,6 +181,96 @@ export class PlanWorktreeManager {
     if (!transitioned.value || transitioned.status === 'rejected')
       throw new V4Error(transitioned.reason ?? 'WORKTREE_STATE_STALE');
     return transitioned.value;
+  }
+
+  async prepareAgentAccess(
+    worktreeIdValue: string,
+    uid: number,
+    gid: number,
+  ): Promise<PlanWorktree> {
+    failClosed(
+      Number.isInteger(uid) && uid > 0 && Number.isInteger(gid) && gid > 0,
+      'WORKTREE_AGENT_IDENTITY_INVALID',
+    );
+    const current = this.repositories.planWorktrees.get(worktreeIdValue);
+    failClosed(current.role !== 'INTEGRATION', 'WORKTREE_INTEGRATION_CONTROLLER_ONLY');
+    await this.verifyRegistered(
+      current,
+      current.currentRevision,
+      current.branchRef,
+      current.role === 'REVIEW',
+    );
+    this.chownTreeNoFollow(current.hostPath, uid, gid);
+    const sidecar = path.join(path.dirname(current.hostPath), '.agent-harness');
+    for (const directory of [
+      sidecar,
+      path.join(sidecar, 'home'),
+      path.join(sidecar, 'state'),
+      path.join(sidecar, 'share'),
+      path.join(sidecar, 'xdg'),
+    ]) {
+      if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+      const stat = fs.lstatSync(directory);
+      failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_AGENT_SIDECAR_UNSAFE');
+      fs.chownSync(directory, uid, gid);
+      fs.chmodSync(directory, 0o700);
+    }
+
+    const common = await this.canonicalCommonDir(current.repositoryPath);
+    const source = fs.statSync(common);
+    if (source.uid !== uid) {
+      failClosed(fs.existsSync(this.setfaclBinary), 'WORKTREE_ACL_TOOL_MISSING');
+      const commonMode = fs.statSync(common).mode & 0o7777;
+      fs.chmodSync(common, commonMode | 0o1000);
+      await this.execAcl(['-m', `u:${uid}:rwx`, '--', common]);
+      const objects = path.join(common, 'objects');
+      this.ensureObjectDirectories(objects, source.uid, source.gid);
+      await this.grantDirectoryAcl(this.objectDirectories(objects), uid, true);
+      const adminRaw = await this.gitInWorktree(current.repositoryPath, current.hostPath, [
+        'rev-parse',
+        '--git-dir',
+      ]);
+      const admin = fs.realpathSync(
+        path.isAbsolute(adminRaw) ? adminRaw : path.resolve(current.hostPath, adminRaw),
+      );
+      failClosed(inside(admin, common), 'WORKTREE_ADMIN_DIR_UNSAFE');
+      await this.grantRecursiveAcl(admin, uid);
+      if (current.branchRef) {
+        const plan = worktreeRefComponent(current.rootPlanId);
+        const refRoot = path.join(common, 'refs', 'heads', 'pixel-v4', plan);
+        failClosed(fs.existsSync(refRoot), 'WORKTREE_PLAN_REF_NAMESPACE_MISSING');
+        await this.grantRecursiveAcl(refRoot, uid);
+        const logRoot = path.join(common, 'logs', 'refs', 'heads', 'pixel-v4', plan);
+        if (fs.existsSync(logRoot)) await this.grantRecursiveAcl(logRoot, uid);
+      }
+    }
+    return this.repositories.planWorktrees.get(worktreeIdValue);
+  }
+
+  async revokePlanAgentAccess(rootPlanId: string, uid: number): Promise<void> {
+    const records = this.repositories.planWorktrees.listByPlan(rootPlanId);
+    failClosed(records.length > 0, 'WORKTREE_PLAN_REGISTRY_EMPTY');
+    failClosed(
+      records.every((record) => record.state === 'RETIRED'),
+      'WORKTREE_PLAN_STILL_ACTIVE',
+    );
+    const repositoryPath = records[0]!.repositoryPath;
+    failClosed(
+      records.every((record) => record.repositoryPath === repositoryPath),
+      'WORKTREE_REPOSITORY_MISMATCH',
+    );
+    const common = await this.canonicalCommonDir(repositoryPath);
+    const source = fs.statSync(common);
+    if (source.uid === uid || !fs.existsSync(this.setfaclBinary)) return;
+    await this.execAcl(['-x', `u:${uid}`, '--', common], true);
+    await this.revokeDirectoryAcl(this.objectDirectories(path.join(common, 'objects')), uid);
+    const plan = worktreeRefComponent(rootPlanId);
+    for (const candidate of [
+      path.join(common, 'refs', 'heads', 'pixel-v4', plan),
+      path.join(common, 'logs', 'refs', 'heads', 'pixel-v4', plan),
+    ]) {
+      if (fs.existsSync(candidate)) await this.revokeRecursiveAcl(candidate, uid);
+    }
   }
 
   async attachWriter(worktreeIdValue: string, executionId: string): Promise<PlanWorktree> {
@@ -242,10 +340,15 @@ export class PlanWorktreeManager {
       current.role === 'REVIEW',
       false,
     );
+    const sourceIdentity = this.repositoryIdentity(current.repositoryPath);
+    if (fs.existsSync(current.hostPath))
+      this.chownTreeNoFollow(current.hostPath, sourceIdentity.uid, sourceIdentity.gid);
     await this.git(current.repositoryPath, ['worktree', 'unlock', '--', current.hostPath], true);
     await this.git(current.repositoryPath, ['worktree', 'remove', '--', current.hostPath]);
     await this.git(current.repositoryPath, ['worktree', 'prune', '--expire', 'now']);
     failClosed(!fs.existsSync(current.hostPath), 'WORKTREE_REMOVE_INCOMPLETE');
+    const sidecar = path.join(path.dirname(current.hostPath), '.agent-harness');
+    if (fs.existsSync(sidecar)) fs.rmSync(sidecar, { recursive: true, force: true });
     current = this.repositories.planWorktrees.get(worktreeIdValue);
     const result = this.repositories.planWorktrees.transition(
       worktreeIdValue,
@@ -282,7 +385,7 @@ export class PlanWorktreeManager {
   ): Promise<PlanWorktree> {
     this.assertActivePlan(input);
     const repositoryPath = await this.repositoryRoot(input.repositoryPath);
-    this.assertCommit(repositoryPath, input.baseRevision);
+    await this.assertCommit(repositoryPath, input.baseRevision);
     const paths = this.paths(input.projectKey, input.rootPlanId, input.relativePath);
     const id = worktreeId(input.role, input.rootPlanId, input.identity);
     const existingByPath = this.repositories.planWorktrees.findByPath(paths.hostPath);
@@ -339,18 +442,10 @@ export class PlanWorktreeManager {
     return canonical;
   }
 
-  private assertCommit(repositoryPath: string, revision: string): void {
+  private async assertCommit(repositoryPath: string, revision: string): Promise<void> {
     failClosed(revision.trim().length > 0 && revision.length <= 200, 'WORKTREE_REVISION_REQUIRED');
-    try {
-      execFileSyncSafe(
-        'git',
-        this.gitArgs(repositoryPath, ['cat-file', '-e', revision + '^{commit}']),
-        this.commandTimeoutMs,
-        this.maxBufferBytes,
-      );
-    } catch (error) {
-      throw new V4Error('WORKTREE_REVISION_MISSING', 'Git revision is unavailable.', error);
-    }
+    if (!(await this.gitSucceeds(repositoryPath, ['cat-file', '-e', revision + '^{commit}'])))
+      throw new V4Error('WORKTREE_REVISION_MISSING', 'Git revision is unavailable.');
   }
 
   private paths(projectKey: string, rootPlanId: string, relativePath: string[]) {
@@ -373,7 +468,7 @@ export class PlanWorktreeManager {
     branchRef: string | undefined,
     detached: boolean,
   ): Promise<void> {
-    this.ensurePlanDirectory(record);
+    await this.ensurePlanDirectory(record);
     const listed = await this.worktreeAt(record.repositoryPath, record.hostPath);
     if (listed) {
       await this.verifyRegistered(record, revision, branchRef, detached);
@@ -435,9 +530,14 @@ export class PlanWorktreeManager {
     await this.verifyRegistered(record, revision, branchRef, detached);
   }
 
-  private ensurePlanDirectory(record: PlanWorktree): void {
+  private async ensurePlanDirectory(record: PlanWorktree): Promise<void> {
     const roleRoot = path.dirname(record.hostPath);
     fs.mkdirSync(roleRoot, { recursive: true, mode: 0o755 });
+    const identity = this.repositoryIdentity(record.repositoryPath);
+    const stat = fs.lstatSync(roleRoot);
+    failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_PARENT_UNSAFE');
+    fs.chownSync(roleRoot, identity.uid, identity.gid);
+    fs.chmodSync(roleRoot, 0o755);
   }
 
   private async verifyRegistered(
@@ -486,6 +586,129 @@ export class PlanWorktreeManager {
     return records.find((item) => path.resolve(item.path) === target);
   }
 
+  private async canonicalCommonDir(repositoryPath: string): Promise<string> {
+    const raw = await this.git(repositoryPath, ['rev-parse', '--git-common-dir']);
+    const resolved = fs.realpathSync(
+      path.isAbsolute(raw) ? raw : path.resolve(repositoryPath, raw),
+    );
+    failClosed(
+      this.allowedRepositoryRoots.some((root) => inside(resolved, root)) &&
+        path.basename(resolved) === '.git',
+      'WORKTREE_COMMON_DIR_UNSAFE',
+    );
+    return resolved;
+  }
+
+  private ensureObjectDirectories(objects: string, uid: number, gid: number): void {
+    failClosed(
+      fs.existsSync(objects) && fs.lstatSync(objects).isDirectory(),
+      'WORKTREE_OBJECT_STORE_UNSAFE',
+    );
+    for (let value = 0; value < 256; value += 1) {
+      const directory = path.join(objects, value.toString(16).padStart(2, '0'));
+      if (!fs.existsSync(directory)) {
+        fs.mkdirSync(directory, { mode: 0o775 });
+        fs.chownSync(directory, uid, gid);
+        fs.chmodSync(directory, 0o775);
+      } else {
+        const stat = fs.lstatSync(directory);
+        failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_OBJECT_STORE_UNSAFE');
+      }
+    }
+  }
+
+  private objectDirectories(objects: string): string[] {
+    const result: string[] = [];
+    const visit = (directory: string): void => {
+      const stat = fs.lstatSync(directory);
+      failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_OBJECT_STORE_UNSAFE');
+      result.push(directory);
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) throw new V4Error('WORKTREE_OBJECT_STORE_UNSAFE');
+        if (entry.isDirectory()) visit(path.join(directory, entry.name));
+      }
+    };
+    visit(objects);
+    return result;
+  }
+
+  private chownTreeNoFollow(target: string, uid: number, gid: number): void {
+    const stat = fs.lstatSync(target);
+    fs.lchownSync(target, uid, gid);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+    for (const entry of fs.readdirSync(target))
+      this.chownTreeNoFollow(path.join(target, entry), uid, gid);
+  }
+
+  private async grantRecursiveAcl(target: string, uid: number): Promise<void> {
+    await this.execAcl(['-R', '-m', `u:${uid}:rwX`, '--', target]);
+    const directories: string[] = [];
+    const visit = (directory: string): void => {
+      const stat = fs.lstatSync(directory);
+      failClosed(stat.isDirectory() && !stat.isSymbolicLink(), 'WORKTREE_ACL_TARGET_UNSAFE');
+      directories.push(directory);
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) throw new V4Error('WORKTREE_ACL_TARGET_UNSAFE');
+        if (entry.isDirectory()) visit(path.join(directory, entry.name));
+      }
+    };
+    visit(target);
+    await this.grantDirectoryAcl(directories, uid, true);
+  }
+
+  private async grantDirectoryAcl(
+    directories: string[],
+    uid: number,
+    includeAccess = true,
+  ): Promise<void> {
+    for (let index = 0; index < directories.length; index += 80) {
+      const chunk = directories.slice(index, index + 80);
+      if (includeAccess) await this.execAcl(['-m', `u:${uid}:rwx`, '--', ...chunk]);
+      await this.execAcl(['-m', `d:u:${uid}:rwx`, '--', ...chunk]);
+    }
+  }
+
+  private async revokeRecursiveAcl(target: string, uid: number): Promise<void> {
+    await this.execAcl(['-R', '-x', `u:${uid}`, '--', target], true);
+    const directories = this.directoryTree(target);
+    await this.revokeDirectoryAcl(directories, uid);
+  }
+
+  private async revokeDirectoryAcl(directories: string[], uid: number): Promise<void> {
+    for (let index = 0; index < directories.length; index += 80) {
+      const chunk = directories.slice(index, index + 80);
+      await this.execAcl(['-x', `u:${uid}`, '--', ...chunk], true);
+      await this.execAcl(['-x', `d:u:${uid}`, '--', ...chunk], true);
+    }
+  }
+
+  private directoryTree(target: string): string[] {
+    const result: string[] = [];
+    const visit = (directory: string): void => {
+      const stat = fs.lstatSync(directory);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return;
+      result.push(directory);
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (entry.isDirectory() && !entry.isSymbolicLink()) visit(path.join(directory, entry.name));
+      }
+    };
+    visit(target);
+    return result;
+  }
+
+  private async execAcl(args: string[], allowFailure = false): Promise<void> {
+    try {
+      await execFileAsync(this.setfaclBinary, args, {
+        encoding: 'utf8',
+        timeout: this.commandTimeoutMs,
+        maxBuffer: this.maxBufferBytes,
+      });
+    } catch (error) {
+      if (allowFailure) return;
+      throw new V4Error('WORKTREE_ACL_FAILED', 'Unable to scope Git ACLs for the worker.', error);
+    }
+  }
+
   private async gitStatus(repositoryPath: string, worktreePath: string): Promise<string> {
     return await this.gitInWorktree(repositoryPath, worktreePath, [
       'status',
@@ -499,7 +722,13 @@ export class PlanWorktreeManager {
     worktreePath: string,
     args: string[],
   ): Promise<string> {
-    return await this.git(repositoryPath, ['-C', worktreePath, ...args], false, true);
+    return await this.git(repositoryPath, ['-C', worktreePath, ...args], false, true, worktreePath);
+  }
+
+  private repositoryIdentity(repositoryPath: string): RepositoryIdentity {
+    const stat = fs.statSync(repositoryPath);
+    failClosed(stat.isDirectory(), 'WORKTREE_REPOSITORY_PATH_INVALID');
+    return { uid: stat.uid, gid: stat.gid };
   }
 
   private gitArgs(repositoryPath: string, args: string[]): string[] {
@@ -521,11 +750,13 @@ export class PlanWorktreeManager {
     args: string[],
     allowFailure = false,
     argsContainCwd = false,
+    safeWorktreePath?: string,
   ): Promise<string> {
     const invocation = argsContainCwd
       ? [
           '-c',
           'safe.directory=' + repositoryPath,
+          ...(safeWorktreePath ? ['-c', 'safe.directory=' + safeWorktreePath] : []),
           '-c',
           'core.hooksPath=/dev/null',
           '-c',
@@ -533,11 +764,23 @@ export class PlanWorktreeManager {
           ...args,
         ]
       : this.gitArgs(repositoryPath, args);
+    const identity = this.repositoryIdentity(repositoryPath);
+    const runAsSource = safeWorktreePath === undefined;
     try {
       const { stdout } = await execFileAsync('git', invocation, {
         encoding: 'utf8',
         timeout: this.commandTimeoutMs,
         maxBuffer: this.maxBufferBytes,
+        ...(runAsSource && typeof process.getuid === 'function' && process.getuid() === 0
+          ? { uid: identity.uid, gid: identity.gid }
+          : {}),
+        env: {
+          PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+          HOME: '/nonexistent',
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_TERMINAL_PROMPT: '0',
+          LC_ALL: 'C.UTF-8',
+        },
       });
       return stdout.trim();
     } catch (error) {
@@ -554,21 +797,6 @@ export class PlanWorktreeManager {
       return false;
     }
   }
-}
-
-function execFileSyncSafe(
-  command: string,
-  args: string[],
-  timeout: number,
-  maxBuffer: number,
-): void {
-  const result = spawnSync(command, args, {
-    encoding: 'utf8',
-    timeout,
-    maxBuffer,
-  });
-  if (result.status !== 0)
-    throw new Error(String(result.stderr || result.error || 'command failed'));
 }
 
 export function parseWorktreeList(output: string): GitWorktreeRecord[] {

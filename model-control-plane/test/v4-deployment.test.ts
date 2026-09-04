@@ -54,6 +54,8 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
   assert.match(service, /MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED=true/);
+  assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false/);
+  assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false/);
   assert.match(service, /MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_ANTIGRAVITY_RESOURCE_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_ANTIGRAVITY_PROJECTS=digital-biome/);
@@ -101,6 +103,24 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.doesNotMatch(service, /(?:SESSION_API_KEY|LITELLM_V3_KEY|OH_SECRET_KEY)=\S+/);
 });
 
+test('OpenHands literal-worktree mounts expose only managed workspaces and allowlisted Git common dirs', () => {
+  assert.match(openHandsCompose, /\/opt\/data\/hermes-ai-office-v3\/workspaces:\/workspace/);
+  assert.match(
+    openHandsCompose,
+    /\/opt\/data\/hermes-ai-office-v3\/workspaces:\/opt\/data\/hermes-ai-office-v3\/workspaces/,
+  );
+  for (const project of ['bodysense', 'digital-biome', 'memoflow'])
+    assert.ok(
+      openHandsCompose.includes(
+        `/home/dev/projects/${project}/.git:/home/dev/projects/${project}/.git`,
+      ),
+    );
+  assert.doesNotMatch(openHandsCompose, /\/home\/dev\/projects:\/home\/dev\/projects(?:\s|$)/);
+  assert.match(installer, /apt-get install -y -qq acl/);
+  assert.match(installer, /command -v setfacl/);
+  assert.match(release, /setfacl is required for literal V4 worktree ACLs/);
+});
+
 test('V4 installer takes a SQLite backup and requires V4 execution health', () => {
   assert.match(installer, /from 'node:sqlite'/);
   assert.match(installer, /await backup\(db, target\)/);
@@ -137,6 +157,8 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /hermes-antigravity-v4@\.service/);
   assert.match(release, /gemini-3\.8-flash-high/);
   assert.match(release, /gemini-3\.1-pro-high/);
+  assert.match(release, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true/);
+  assert.match(release, /smoke-v4-literal-worktree\.mjs/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });
 

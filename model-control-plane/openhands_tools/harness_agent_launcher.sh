@@ -19,8 +19,12 @@ esac
 workspace_repo="${HERMES_V3_WORKSPACE_REF:-}"
 expected_v3_workspace_repo="/workspace/executions/$execution_id/repo"
 expected_v4_workspace_repo="/workspace/v4/executions/$execution_id/repo"
-if [[ "$workspace_repo" != "$expected_v3_workspace_repo" && "$workspace_repo" != "$expected_v4_workspace_repo" ]]; then
-  echo "agent-harness launch requires an execution-scoped V3/V4 HERMES_V3_WORKSPACE_REF" >&2
+literal_worktree=false
+if [[ "$workspace_repo" =~ ^/workspace/v4/plans/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/(items|reviews|repairs)/[A-Za-z0-9._-]+/repo$ ]]; then
+  literal_worktree=true
+fi
+if [[ "$workspace_repo" != "$expected_v3_workspace_repo" && "$workspace_repo" != "$expected_v4_workspace_repo" && "$literal_worktree" != true ]]; then
+  echo "agent-harness launch requires an execution-scoped workspace or an admitted V4 Plan worktree" >&2
   exit 2
 fi
 if [[ ! -d "$workspace_repo" ]]; then

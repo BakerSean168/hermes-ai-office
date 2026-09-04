@@ -514,10 +514,35 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
     };
   }
 
-  protected conversationSecrets(_input: ProviderLaunchInput): JsonRecord {
+  protected conversationSecrets(input: ProviderLaunchInput): JsonRecord {
     return {
       CI: { kind: 'StaticSecret', value: '1' },
       NX_TUI: { kind: 'StaticSecret', value: 'false' },
+      HOME: {
+        kind: 'StaticSecret',
+        value: path.posix.join(
+          path.posix.dirname(input.workspace.executionPath),
+          '.agent-harness/home',
+        ),
+      },
+      XDG_CONFIG_HOME: {
+        kind: 'StaticSecret',
+        value: path.posix.join(
+          path.posix.dirname(input.workspace.executionPath),
+          '.agent-harness/xdg',
+        ),
+      },
+      GIT_CONFIG_NOSYSTEM: { kind: 'StaticSecret', value: '1' },
+      GIT_OPTIONAL_LOCKS: { kind: 'StaticSecret', value: '0' },
+      GIT_CONFIG_COUNT: { kind: 'StaticSecret', value: '4' },
+      GIT_CONFIG_KEY_0: { kind: 'StaticSecret', value: 'safe.directory' },
+      GIT_CONFIG_VALUE_0: { kind: 'StaticSecret', value: input.workspace.executionPath },
+      GIT_CONFIG_KEY_1: { kind: 'StaticSecret', value: 'safe.directory' },
+      GIT_CONFIG_VALUE_1: { kind: 'StaticSecret', value: input.workspace.hostPath },
+      GIT_CONFIG_KEY_2: { kind: 'StaticSecret', value: 'gc.auto' },
+      GIT_CONFIG_VALUE_2: { kind: 'StaticSecret', value: '0' },
+      GIT_CONFIG_KEY_3: { kind: 'StaticSecret', value: 'maintenance.auto' },
+      GIT_CONFIG_VALUE_3: { kind: 'StaticSecret', value: 'false' },
     };
   }
 

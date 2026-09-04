@@ -27,6 +27,13 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
+if ! command -v setfacl >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq acl
+fi
+command -v setfacl >/dev/null 2>&1 || { echo "setfacl is required for scoped V4 worktree Git access" >&2; exit 1; }
+
 for required in "$SOURCE_DIR/package.json" "$UNIT_SOURCE" "$OPENHANDS_UNIT_SOURCE" "$OPENHANDS_ENV_SOURCE"; do
   if [[ ! -f "$required" ]]; then
     echo "required deployment file missing: $required" >&2
