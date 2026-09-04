@@ -1,10 +1,11 @@
 # Pixel V3 Linked Workspace Storage Refactor
 
 Date: 2026-08-30
-Status: IMPLEMENTED / DEPLOYMENT GATED
+Status: HISTORICAL / SUPERSEDED FOR NORMAL V4 BY ADR-004
 Baseline: `a89ca77bf33616e401837d0d955070a3e4759b9d`
 Branch: `refactor/workspace-storage-v4-20260830`
 Worktree: `/home/dev/projects/pixel-agents-workspace-storage-v4`
+Supersession: normal new V4 execution now follows `docs/adr/ADR-004-single-active-plan-worktree-execution.md`; this plan remains the legacy/V3 isolation record.
 
 ## Executive decision
 
@@ -87,6 +88,7 @@ canonical repo
 **Goal:** Preserve measured root-cause evidence and architecture decision before changing mechanics.
 
 **Implementation:**
+
 1. Add forensic report.
 2. Add ADR and target architecture.
 3. Add this Active Plan.
@@ -98,6 +100,7 @@ canonical repo
 **Goal:** Tests fail if execution provisioning returns to physical full-history object copies or batch integration mutates the source worktree.
 
 **Implementation:**
+
 1. Force a packed source test repository.
 2. Provision an execution workspace.
 3. Assert a pre-existing pack is hardlinked (same device+inode, link count >1) when local sharing is supported.
@@ -115,6 +118,7 @@ canonical repo
 **Scope:** `model-control-plane/src/v3/workspace.ts`, focused tests, deployment docs.
 
 **Implementation:**
+
 1. Resolve canonical common object directory.
 2. For configured execution identity, inspect the real canonical object tree, link count, ownership, mode, and filesystem boundary before enabling sharing; unsafe sources use a private fallback without metadata mutation.
 3. Stage a `git clone --local --no-checkout` for safe sharing, or `git clone --no-local --no-checkout` for private fallback; atomically rename into the production workspace on the normal single filesystem.
@@ -124,6 +128,7 @@ canonical repo
 7. Revalidate existing workspace path components, real Git metadata, and top-level identity before reuse/retry/prune/integration; keep the public workspace-ref contract unchanged.
 
 **Acceptance:**
+
 - physical source object sharing proven by test;
 - worker can commit new objects without moving canonical HEAD;
 - review remains read-only;
@@ -136,6 +141,7 @@ canonical repo
 **Goal:** Eliminate `bundle --all` / full integration clone / integrated bundle feedback loop.
 
 **Implementation:**
+
 1. Create a detached temporary integration worktree from canonical at exact batch base.
 2. For each implementation, verify clean HEAD and required ancestors exactly as today.
 3. Fetch exact implementation HEAD into the integration worktree without persistent incoming refs.
@@ -144,6 +150,7 @@ canonical repo
 6. Force-remove temporary integration worktree in `finally` and prune administrative residue.
 
 **Acceptance:**
+
 - same integration result/ref contract;
 - source worktree unchanged;
 - conflict/ancestor tests pass;
@@ -359,7 +366,6 @@ Verification:
 - Real service-namespace mount smoke passed after the unit repair: a MemoFlow canonical pack and a workspace hardlink resolve to the same `device:inode`, proving the `ReadWritePaths` mount split is gone. The same durable MemoFlow plan was then resumed with `reconcile(auto)`; no replacement plan was created.
 - First successful post-cutover execution `exec_3b4c4937-e694-4a71-83e4-5d0d4920547f` is RUNNING with a durable OpenHands conversation and no storage error. At initial measurement the execution repository contained 4,536 Git object files, and **all 4,536 shared canonical inodes; unique execution Git-object files/blocks were zero**. The logical repository accounted ~3.23 GB of blocks if hardlinks are naively counted per pathname, but ~3.106 GB of that was shared canonical Git history; the execution working tree accounted ~124.3 MB of blocks. A representative ~123.7 MB pack had identical canonical/execution `device:inode` and link count 2.
 - Root filesystem after recovery was ~64% used with ~53 GB free, versus the prior 97–99% incidents. No `EXDEV`, ENOSPC, or workspace-provision error was observed on the successful execution. This is the production acceptance evidence for the core linked-workspace storage cutover.
-
 
 Deployment gate:
 

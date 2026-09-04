@@ -191,3 +191,36 @@ Digital Biome should not receive another standalone cron/agent workflow. It shou
 - exact-SHA auto-merge and post-merge verification remain deterministic.
 
 This preserves one governance and observability model across user-requested work and continuous autonomous improvement.
+
+## 14. V4 still provisions Git storage per Execution instead of per active Plan/WorkItem
+
+The current `LocalGitWorkspaceAdapter` creates a private Git repository for every new Execution by bundling the source and cloning it with `--no-hardlinks`. This preserves strong execution-level Git metadata isolation, but it is no longer aligned with the intended product concurrency boundary.
+
+The accepted V4 concurrency model is now:
+
+```text
+project
+  -> one active root Plan
+  -> later independent root Plans QUEUED
+  -> parallelism only for DAG-safe WorkItems inside the active Plan
+```
+
+Under this model, execution-level full clones duplicate immutable Git history without providing useful cross-plan concurrency. ADR-004 replaces normal new V4 execution storage with Plan-owned literal Git worktrees:
+
+```text
+one shared Git common database
+  + one controller integration worktree
+  + N WorkItem writer worktrees
+  + detached exact-SHA review worktrees
+  + bounded delivery-repair worktree
+```
+
+The migration is not a one-line replacement of `git clone` with `git worktree add`. Current OpenHands mounts the host workspace root at `/workspace`, canonical repositories are outside that mount, and GCP Dev currently runs Git 2.43 without relative-worktree-path support. The implementation therefore also needs project lease/queue state, durable worktree ownership, production path-identity mounts, protected-ref drift detection, single-writer integration, and crash-safe cleanup/recovery.
+
+See:
+
+- `docs/adr/ADR-004-single-active-plan-worktree-execution.md`
+- `docs/architecture/pixel-v4-single-active-plan-worktree-execution.md`
+- `docs/architecture/pixel-v4-plan-queue-and-worktree-lifecycle.md`
+- `docs/architecture/pixel-v4-worktree-migration-and-operations.md`
+- `docs/plan/active/2026-09-04-pixel-v4-single-active-plan-worktree-refactor.md`

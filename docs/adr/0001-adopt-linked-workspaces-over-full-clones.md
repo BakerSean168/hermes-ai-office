@@ -1,7 +1,7 @@
 # ADR-0001: Adopt Linked Workspaces Over Full-History Execution Clones
 
 Date: 2026-08-30
-Status: ACCEPTED
+Status: SUPERSEDED FOR V4 BY ADR-004 (retained for V3/legacy isolation reference)
 
 ## Context
 
@@ -36,7 +36,6 @@ The source object's owner remains unchanged. Runtime provisioning is read-only w
 
 Review snapshots remain execution-private linked clones and become physically read-only after snapshot overlay. Object files created by the implementation identity are privatized before review; safe canonical history may remain linked. Tracked symlinks that escape the execution root are rejected rather than merely protected from chown/chmod. This preserves independent review without copying immutable history or exposing host-visible sibling paths.
 
-
 Workspace publication follows the same privilege rule: the per-execution directory remains service-owned/inaccessible while root performs any recursive privatization, ownership, or mode normalization. Only after those operations finish is the directory itself chowned/chmodded to the execution identity. That ownership transition is the publication point; no privileged recursive pathname traversal may occur afterward.
 
 Provisioning stages execution clones in a service-private sibling of the configured workspace root rather than `/tmp`. This preserves local hardlink semantics under the production `PrivateTmp=true` mount namespace. `--local` is permitted only when the inspected source object directory and staging directory are device-compatible; otherwise the private `--no-local` fallback is used. The root linked-clone staging root and disposable trust config remain root-owned; a source-owned staging child exists only for a clone that deliberately runs as the source identity.
@@ -67,7 +66,6 @@ canonical repository
 ```
 
 The model never receives this integration worktree, so sharing the canonical common Git directory does not widen the model trust boundary.
-
 
 Before creating the host worktree or updating a durable integration ref, the canonical repository must pass the full Git-object trust check: the resolved top-level/common Git/object directories stay in the configured repository boundary, object alternates and descendant symlinks/special/cross-device entries are rejected, and implementation source revisions are resolved and proven ancestors of the exact imported HEAD. Unsafe plan/batch ref components are injectively UTF-8 hex encoded while the existing spelling for normal durable identifiers is preserved.
 

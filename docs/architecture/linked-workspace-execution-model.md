@@ -1,7 +1,7 @@
 # Linked Workspace Execution Model
 
 Date: 2026-08-30
-Status: TARGET ARCHITECTURE
+Status: HISTORICAL V3 / LEGACY ISOLATION ARCHITECTURE — superseded for normal V4 execution by ADR-004
 
 ## Ownership map
 
@@ -94,7 +94,6 @@ Antigravity already has deterministic execution-local state and implements the s
 ### Cleanup
 
 Removing an execution directory unlinks its hardlinks only. Canonical object files survive because they retain the canonical directory link. Old pack blocks can be reclaimed after all linked clones referencing them are removed.
-
 
 ### Durable repository identity
 
