@@ -230,6 +230,8 @@ test('V4 release reconciles OpenHands Agent runtimes from the shared Harness loc
   assert.match(openHandsTooling, /runtime_lock_version opencode/);
   assert.match(openHandsTooling, /runtime_lock_version claude/);
   assert.match(openHandsTooling, /runtime_lock_version zcode/);
+  assert.match(release, /deploy\/openhands-v3\/docker-compose\.yml/);
+  assert.match(release, /docker compose.*up -d --remove-orphans --wait --wait-timeout 120/);
   assert.match(release, /install-openhands-v3-tooling\.sh/);
   assert.match(release, /CODEX_HOME=\/openhands-state\/codex-business/);
   assert.match(release, /codex login status/);

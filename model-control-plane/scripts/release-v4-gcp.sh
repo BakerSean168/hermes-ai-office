@@ -21,6 +21,8 @@ if [[ "$source_sha" != "$target_sha" ]]; then
 fi
 
 (cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
+openhands_compose="$repo_root/model-control-plane/deploy/openhands-v3/docker-compose.yml"
+sudo docker compose -f "$openhands_compose" up -d --remove-orphans --wait --wait-timeout 120
 sudo "$repo_root/model-control-plane/scripts/install-openhands-v3-tooling.sh"
 sudo install -d -m 0755 /usr/local/libexec
 sudo install -m 0755 \
