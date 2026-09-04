@@ -642,7 +642,24 @@ async function buildExecutionAutomation(
     const readme = path.join(repository, 'README.md');
     fs.writeFileSync(readme, '# Pixel runtime admission probe\n');
     fs.chownSync(readme, workspaceUid, workspaceGid);
-    git(['add', 'README.md']);
+    const harnessManifest = path.join(repository, '.agent-harness.json');
+    fs.writeFileSync(
+      harnessManifest,
+      JSON.stringify(
+        {
+          version: 1,
+          id: 'pixel-runtime-admission',
+          sharedMcpProfile: 'common',
+          packs: [],
+          capabilities: [],
+        },
+        null,
+        2,
+      ) + '\n',
+      { mode: 0o640 },
+    );
+    fs.chownSync(harnessManifest, workspaceUid, workspaceGid);
+    git(['add', 'README.md', '.agent-harness.json']);
     git([
       '-c',
       'user.name=Pixel Runtime Probe',
