@@ -17,7 +17,12 @@ import {
   type WorkspaceProvisionInput,
   type WorkspaceStorageStatus,
 } from '../orchestration/contracts.js';
-import { decodeImplementationEvidence, decodeReviewEvidence } from './gitWorkspace.js';
+import {
+  assertImplementationEvidenceGate,
+  assertReviewEvidenceGate,
+  decodeImplementationEvidence,
+  decodeReviewEvidence,
+} from './gitWorkspace.js';
 import { PlanWorktreeManager } from './planWorktrees.js';
 
 const execFileAsync = promisify(execFile);
@@ -26,6 +31,8 @@ const MAX_EVIDENCE_BYTES = 256_000;
 const MAX_CHANGED_FILES = 1_000;
 const MAX_DIFF_STAT_BYTES = 64_000;
 const DEFAULT_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024;
+const MAX_EPHEMERAL_EVIDENCE_HELPER_BYTES = 64 * 1024;
+const EPHEMERAL_EVIDENCE_HELPERS = ['_write_evidence.py', '_gen_evidence.py'] as const;
 
 export interface LiteralWorktreeWorkspaceOptions {
   repositories: V4Repositories;
@@ -41,6 +48,10 @@ export interface LiteralWorktreeWorkspaceOptions {
 
 interface StoredDescriptor extends WorkspaceDescriptor {
   version: 1;
+}
+
+interface EvidencePromotionMetadata {
+  replacedInvalidEvidenceHash?: string;
 }
 
 function component(value: string, code: string): string {
@@ -303,7 +314,15 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
       '--verify',
       'HEAD^{commit}',
     ]);
-    await this.promoteRepositoryEvidence(descriptor, 'IMPLEMENTATION', headRevision);
+    const promotion = await this.promoteRepositoryEvidence(
+      descriptor,
+      'IMPLEMENTATION',
+      headRevision,
+    );
+    const ephemeralArtifactsPruned = await this.pruneEphemeralEvidenceHelpers(
+      descriptor,
+      headRevision,
+    );
     const clean =
       (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
     if (!clean) throw new V4Error('WORKSPACE_DIRTY');
@@ -312,18 +331,9 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
     const evidence = decodeImplementationEvidence(
       readJson(descriptor.evidenceHostPath, 'WORKSPACE_EVIDENCE_INVALID'),
     );
-    if (
-      evidence.executionId !== descriptor.executionId ||
-      evidence.sourceRevision !== descriptor.sourceRevision ||
-      evidence.resultRevision !== headRevision
-    )
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
+    assertImplementationEvidenceGate(evidence, descriptor, headRevision);
     const satisfiedWithoutChange =
       headRevision === descriptor.sourceRevision && evidence.outcome === 'SATISFIED';
-    if (headRevision === descriptor.sourceRevision && !satisfiedWithoutChange)
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
-    if (headRevision !== descriptor.sourceRevision && evidence.outcome === 'SATISFIED')
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID');
     const descendantOfSource =
       satisfiedWithoutChange ||
       (await this.gitSucceeds(descriptor.hostPath, [
@@ -333,12 +343,6 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
         headRevision,
       ]));
     if (!descendantOfSource) throw new V4Error('WORKSPACE_RESULT_NOT_DESCENDANT');
-    if (
-      evidence.tests.length === 0 ||
-      evidence.tests.some((entry) => entry.status === 'FAIL') ||
-      !evidence.tests.some((entry) => entry.status === 'PASS')
-    )
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_TEST_GATE_FAILED');
     const changedFiles = satisfiedWithoutChange
       ? []
       : (
@@ -386,6 +390,10 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
       changedFiles,
       diffStat,
       evidence,
+      ...(ephemeralArtifactsPruned.length > 0 ? { ephemeralArtifactsPruned } : {}),
+      ...(promotion.replacedInvalidEvidenceHash
+        ? { replacedInvalidEvidenceHash: promotion.replacedInvalidEvidenceHash }
+        : {}),
       observedAt: new Date().toISOString(),
     };
   }
@@ -409,20 +417,7 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
     const evidence = decodeReviewEvidence(
       readJson(descriptor.evidenceHostPath, 'WORKSPACE_EVIDENCE_INVALID'),
     );
-    if (evidence.executionId !== descriptor.executionId || evidence.reviewedSha !== reviewedSha)
-      throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
-    if (evidence.verdict === 'PASS') {
-      if (
-        evidence.checks.length === 0 ||
-        evidence.checks.some((entry) => entry.status === 'FAIL') ||
-        !evidence.checks.some((entry) => entry.status === 'PASS')
-      )
-        throw new V4Error('WORKSPACE_REVIEW_CHECK_GATE_FAILED');
-    } else if (
-      evidence.findings.length === 0 &&
-      !evidence.checks.some((entry) => entry.status === 'FAIL')
-    )
-      throw new V4Error('WORKSPACE_REVIEW_FINDINGS_REQUIRED');
+    assertReviewEvidenceGate(evidence, descriptor, reviewedSha);
 
     const record = this.repositories.planWorktrees.findByPath(descriptor.hostPath);
     if (!record || record.role !== 'REVIEW') throw new V4Error('WORKTREE_REVIEW_REGISTRY_MISSING');
@@ -641,10 +636,10 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
     descriptor: WorkspaceDescriptor,
     phase: 'IMPLEMENTATION' | 'REVIEW',
     expectedRevision: string,
-  ): Promise<void> {
+  ): Promise<EvidencePromotionMetadata> {
     const staged = path.join(descriptor.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
     const stagedStat = fs.lstatSync(staged, { throwIfNoEntry: false });
-    if (!stagedStat) return;
+    if (!stagedStat) return {};
     if (
       !stagedStat.isFile() ||
       stagedStat.isSymbolicLink() ||
@@ -652,8 +647,6 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
       stagedStat.size > MAX_EVIDENCE_BYTES
     )
       throw new V4Error('WORKSPACE_REPOSITORY_EVIDENCE_INVALID');
-    if (fs.existsSync(descriptor.evidenceHostPath))
-      throw new V4Error('WORKSPACE_EVIDENCE_AMBIGUOUS');
     const tracked = await this.git(descriptor.hostPath, [
       'ls-files',
       '--',
@@ -663,23 +656,122 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
     const raw = readJson(staged, 'WORKSPACE_EVIDENCE_INVALID');
     const evidence =
       phase === 'IMPLEMENTATION' ? decodeImplementationEvidence(raw) : decodeReviewEvidence(raw);
-    if (phase === 'IMPLEMENTATION') {
-      const value = evidence as ReturnType<typeof decodeImplementationEvidence>;
+    if (phase === 'IMPLEMENTATION')
+      assertImplementationEvidenceGate(
+        evidence as ReturnType<typeof decodeImplementationEvidence>,
+        descriptor,
+        expectedRevision,
+      );
+    else
+      assertReviewEvidenceGate(
+        evidence as ReturnType<typeof decodeReviewEvidence>,
+        descriptor,
+        expectedRevision,
+      );
+
+    let replacedInvalidEvidenceHash: string | undefined;
+    const existingStat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (existingStat) {
       if (
-        value.executionId !== descriptor.executionId ||
-        value.sourceRevision !== descriptor.sourceRevision ||
-        value.resultRevision !== expectedRevision
+        !existingStat.isFile() ||
+        existingStat.isSymbolicLink() ||
+        existingStat.size <= 0 ||
+        existingStat.size > MAX_EVIDENCE_BYTES
       )
-        throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
-    } else {
-      const value = evidence as ReturnType<typeof decodeReviewEvidence>;
-      if (value.executionId !== descriptor.executionId || value.reviewedSha !== expectedRevision)
-        throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
+        throw new V4Error('WORKSPACE_EVIDENCE_INVALID');
+      const existingBytes = fs.readFileSync(descriptor.evidenceHostPath);
+      let existingValid = false;
+      let existingCanonical = '';
+      try {
+        const existingRaw = JSON.parse(existingBytes.toString('utf8')) as unknown;
+        const existing =
+          phase === 'IMPLEMENTATION'
+            ? decodeImplementationEvidence(existingRaw)
+            : decodeReviewEvidence(existingRaw);
+        if (phase === 'IMPLEMENTATION')
+          assertImplementationEvidenceGate(
+            existing as ReturnType<typeof decodeImplementationEvidence>,
+            descriptor,
+            expectedRevision,
+          );
+        else
+          assertReviewEvidenceGate(
+            existing as ReturnType<typeof decodeReviewEvidence>,
+            descriptor,
+            expectedRevision,
+          );
+        existingCanonical = JSON.stringify(existing);
+        existingValid = true;
+      } catch {
+        existingValid = false;
+      }
+      if (existingValid) {
+        if (existingCanonical !== JSON.stringify(evidence))
+          throw new V4Error('WORKSPACE_EVIDENCE_AMBIGUOUS');
+        fs.unlinkSync(staged);
+        return {};
+      }
+      replacedInvalidEvidenceHash = createHash('sha256').update(existingBytes).digest('hex');
     }
     const temporary = descriptor.evidenceHostPath + '.tmp-' + randomUUID();
-    fs.writeFileSync(temporary, JSON.stringify(evidence) + '\n', { encoding: 'utf8', mode: 0o600 });
-    fs.renameSync(temporary, descriptor.evidenceHostPath);
-    fs.unlinkSync(staged);
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(evidence) + '\n', {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
+      fs.renameSync(temporary, descriptor.evidenceHostPath);
+      fs.unlinkSync(staged);
+      return replacedInvalidEvidenceHash ? { replacedInvalidEvidenceHash } : {};
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      if (error instanceof V4Error) throw error;
+      throw new V4Error('WORKSPACE_EVIDENCE_PROMOTION_FAILED');
+    }
+  }
+
+  private async pruneEphemeralEvidenceHelpers(
+    descriptor: WorkspaceDescriptor,
+    expectedRevision: string,
+  ): Promise<string[]> {
+    const evidenceStat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (!evidenceStat?.isFile() || evidenceStat.isSymbolicLink()) return [];
+    try {
+      const evidence = decodeImplementationEvidence(
+        readJson(descriptor.evidenceHostPath, 'WORKSPACE_EVIDENCE_INVALID'),
+      );
+      assertImplementationEvidenceGate(evidence, descriptor, expectedRevision);
+    } catch {
+      return [];
+    }
+    const pruned: string[] = [];
+    for (const name of EPHEMERAL_EVIDENCE_HELPERS) {
+      const candidate = path.join(descriptor.hostPath, name);
+      const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+      if (!stat) continue;
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.size > MAX_EPHEMERAL_EVIDENCE_HELPER_BYTES ||
+        stat.uid !== this.workspaceUid
+      )
+        continue;
+      const untracked = (
+        await this.git(descriptor.hostPath, [
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '--',
+          name,
+        ])
+      )
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (untracked.length !== 1 || untracked[0] !== name) continue;
+      fs.unlinkSync(candidate);
+      pruned.push(name);
+    }
+    return pruned;
   }
 
   private cacheDirectories(repositoryRoot: string): string[] {

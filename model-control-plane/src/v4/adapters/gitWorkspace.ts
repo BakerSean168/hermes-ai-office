@@ -29,6 +29,8 @@ const MAX_IDENTIFIER = 180;
 const MAX_SUBMODULES = 64;
 const MAX_SUBMODULE_DEPTH = 4;
 const DEFAULT_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024;
+const MAX_EPHEMERAL_EVIDENCE_HELPER_BYTES = 64 * 1024;
+const EPHEMERAL_EVIDENCE_HELPERS = ['_write_evidence.py', '_gen_evidence.py'] as const;
 
 export interface LocalGitWorkspaceOptions {
   allowedRepositoryRoots: string[];
@@ -198,6 +200,56 @@ function descriptorFrom(value: unknown): StoredWorkspaceDescriptor {
   };
   canonicalTimestamp(descriptor.createdAt, 'WORKSPACE_DESCRIPTOR_TIME_INVALID');
   return descriptor;
+}
+
+export function assertImplementationEvidenceGate(
+  evidence: ImplementationCompletionEvidence,
+  descriptor: Pick<WorkspaceDescriptor, 'executionId' | 'sourceRevision'>,
+  expectedRevision: string,
+): void {
+  if (
+    evidence.executionId !== descriptor.executionId ||
+    evidence.sourceRevision !== descriptor.sourceRevision ||
+    evidence.resultRevision !== expectedRevision
+  )
+    throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
+  const satisfiedWithoutChange =
+    expectedRevision === descriptor.sourceRevision && evidence.outcome === 'SATISFIED';
+  if (expectedRevision === descriptor.sourceRevision && !satisfiedWithoutChange)
+    throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
+  if (expectedRevision !== descriptor.sourceRevision && evidence.outcome === 'SATISFIED')
+    throw new V4Error('WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID');
+  if (
+    evidence.tests.length === 0 ||
+    evidence.tests.some((item) => item.status === 'FAIL') ||
+    !evidence.tests.some((item) => item.status === 'PASS')
+  )
+    throw new V4Error('WORKSPACE_IMPLEMENTATION_TEST_GATE_FAILED');
+}
+
+export function assertReviewEvidenceGate(
+  evidence: ReviewCompletionEvidence,
+  descriptor: Pick<WorkspaceDescriptor, 'executionId'>,
+  reviewedSha: string,
+): void {
+  if (evidence.executionId !== descriptor.executionId || evidence.reviewedSha !== reviewedSha)
+    throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
+  if (evidence.verdict === 'PASS') {
+    if (
+      evidence.checks.length === 0 ||
+      evidence.checks.some((item) => item.status === 'FAIL') ||
+      !evidence.checks.some((item) => item.status === 'PASS')
+    )
+      throw new V4Error('WORKSPACE_REVIEW_CHECK_GATE_FAILED');
+  } else if (
+    evidence.findings.length === 0 &&
+    !evidence.checks.some((item) => item.status === 'FAIL')
+  )
+    throw new V4Error('WORKSPACE_REVIEW_FINDINGS_REQUIRED');
+}
+
+interface EvidencePromotionMetadata {
+  replacedInvalidEvidenceHash?: string;
 }
 
 export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
@@ -592,26 +644,24 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       '--verify',
       'HEAD^{commit}',
     ]);
-    await this.promoteRepositoryEvidence(descriptor, 'IMPLEMENTATION', headRevision);
+    const promotion = await this.promoteRepositoryEvidence(
+      descriptor,
+      'IMPLEMENTATION',
+      headRevision,
+    );
+    const ephemeralArtifactsPruned = await this.pruneEphemeralEvidenceHelpers(
+      descriptor,
+      headRevision,
+    );
     const clean =
       (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
     if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     if (headRevision === descriptor.sourceRevision && !fs.existsSync(descriptor.evidenceHostPath))
       throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
     const evidence = decodeImplementationEvidence(this.readEvidence(descriptor.evidenceHostPath));
-    if (
-      evidence.executionId !== descriptor.executionId ||
-      evidence.sourceRevision !== descriptor.sourceRevision ||
-      evidence.resultRevision !== headRevision
-    ) {
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
-    }
+    assertImplementationEvidenceGate(evidence, descriptor, headRevision);
     const satisfiedWithoutChange =
       headRevision === descriptor.sourceRevision && evidence.outcome === 'SATISFIED';
-    if (headRevision === descriptor.sourceRevision && !satisfiedWithoutChange)
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_NOOP');
-    if (headRevision !== descriptor.sourceRevision && evidence.outcome === 'SATISFIED')
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID');
     const descendantOfSource =
       satisfiedWithoutChange ||
       (await this.gitSucceeds(descriptor.hostPath, [
@@ -621,13 +671,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         headRevision,
       ]));
     if (!descendantOfSource) throw new V4Error('WORKSPACE_RESULT_NOT_DESCENDANT');
-    if (
-      evidence.tests.length === 0 ||
-      evidence.tests.some((item) => item.status === 'FAIL') ||
-      !evidence.tests.some((item) => item.status === 'PASS')
-    ) {
-      throw new V4Error('WORKSPACE_IMPLEMENTATION_TEST_GATE_FAILED');
-    }
     const changedFiles = satisfiedWithoutChange
       ? []
       : (
@@ -664,6 +707,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       changedFiles,
       diffStat,
       evidence,
+      ...(ephemeralArtifactsPruned.length > 0 ? { ephemeralArtifactsPruned } : {}),
+      ...(promotion.replacedInvalidEvidenceHash
+        ? { replacedInvalidEvidenceHash: promotion.replacedInvalidEvidenceHash }
+        : {}),
       observedAt: new Date().toISOString(),
     };
   }
@@ -685,22 +732,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       (await this.git(descriptor.hostPath, ['status', '--porcelain=v1', '-z'])).length === 0;
     if (!clean) throw new V4Error('WORKSPACE_DIRTY');
     const evidence = decodeReviewEvidence(this.readEvidence(descriptor.evidenceHostPath));
-    if (evidence.executionId !== descriptor.executionId || evidence.reviewedSha !== reviewedSha)
-      throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
-    if (evidence.verdict === 'PASS') {
-      if (
-        evidence.checks.length === 0 ||
-        evidence.checks.some((item) => item.status === 'FAIL') ||
-        !evidence.checks.some((item) => item.status === 'PASS')
-      ) {
-        throw new V4Error('WORKSPACE_REVIEW_CHECK_GATE_FAILED');
-      }
-    } else if (
-      evidence.findings.length === 0 &&
-      !evidence.checks.some((item) => item.status === 'FAIL')
-    ) {
-      throw new V4Error('WORKSPACE_REVIEW_FINDINGS_REQUIRED');
-    }
+    assertReviewEvidenceGate(evidence, descriptor, reviewedSha);
     return {
       workspace: descriptor,
       clean,
@@ -1270,10 +1302,10 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     descriptor: WorkspaceDescriptor,
     phase: 'IMPLEMENTATION' | 'REVIEW',
     expectedRevision: string,
-  ): Promise<void> {
+  ): Promise<EvidencePromotionMetadata> {
     const staged = path.join(descriptor.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
     const stagedStat = fs.lstatSync(staged, { throwIfNoEntry: false });
-    if (!stagedStat) return;
+    if (!stagedStat) return {};
     if (
       !stagedStat.isFile() ||
       stagedStat.isSymbolicLink() ||
@@ -1281,8 +1313,6 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       stagedStat.size > MAX_EVIDENCE_BYTES
     )
       throw new V4Error('WORKSPACE_REPOSITORY_EVIDENCE_INVALID');
-    if (fs.existsSync(descriptor.evidenceHostPath))
-      throw new V4Error('WORKSPACE_EVIDENCE_AMBIGUOUS');
     const tracked = await this.git(descriptor.hostPath, [
       'ls-files',
       '--',
@@ -1293,18 +1323,58 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     const raw = this.readEvidence(staged);
     const evidence =
       phase === 'IMPLEMENTATION' ? decodeImplementationEvidence(raw) : decodeReviewEvidence(raw);
-    if (phase === 'IMPLEMENTATION') {
-      const implementation = evidence as ImplementationCompletionEvidence;
+    if (phase === 'IMPLEMENTATION')
+      assertImplementationEvidenceGate(
+        evidence as ImplementationCompletionEvidence,
+        descriptor,
+        expectedRevision,
+      );
+    else
+      assertReviewEvidenceGate(evidence as ReviewCompletionEvidence, descriptor, expectedRevision);
+
+    let replacedInvalidEvidenceHash: string | undefined;
+    const existingStat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (existingStat) {
       if (
-        implementation.executionId !== descriptor.executionId ||
-        implementation.sourceRevision !== descriptor.sourceRevision ||
-        implementation.resultRevision !== expectedRevision
+        !existingStat.isFile() ||
+        existingStat.isSymbolicLink() ||
+        existingStat.size <= 0 ||
+        existingStat.size > MAX_EVIDENCE_BYTES
       )
-        throw new V4Error('WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH');
-    } else {
-      const review = evidence as ReviewCompletionEvidence;
-      if (review.executionId !== descriptor.executionId || review.reviewedSha !== expectedRevision)
-        throw new V4Error('WORKSPACE_REVIEW_EVIDENCE_MISMATCH');
+        throw new V4Error('WORKSPACE_EVIDENCE_INVALID');
+      const existingBytes = fs.readFileSync(descriptor.evidenceHostPath);
+      let existingValid = false;
+      let existingCanonical = '';
+      try {
+        const existingRaw = JSON.parse(existingBytes.toString('utf8')) as unknown;
+        const existing =
+          phase === 'IMPLEMENTATION'
+            ? decodeImplementationEvidence(existingRaw)
+            : decodeReviewEvidence(existingRaw);
+        if (phase === 'IMPLEMENTATION')
+          assertImplementationEvidenceGate(
+            existing as ImplementationCompletionEvidence,
+            descriptor,
+            expectedRevision,
+          );
+        else
+          assertReviewEvidenceGate(
+            existing as ReviewCompletionEvidence,
+            descriptor,
+            expectedRevision,
+          );
+        existingCanonical = JSON.stringify(existing);
+        existingValid = true;
+      } catch {
+        existingValid = false;
+      }
+      if (existingValid) {
+        if (existingCanonical !== JSON.stringify(evidence))
+          throw new V4Error('WORKSPACE_EVIDENCE_AMBIGUOUS');
+        fs.unlinkSync(staged);
+        return {};
+      }
+      replacedInvalidEvidenceHash = createHash('sha256').update(existingBytes).digest('hex');
     }
 
     const temporary = descriptor.evidenceHostPath + '.staging-' + randomUUID();
@@ -1315,15 +1385,62 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       fs.fsyncSync(fd);
       fs.closeSync(fd);
       fd = undefined;
-      fs.linkSync(temporary, descriptor.evidenceHostPath);
-      fs.unlinkSync(temporary);
+      if (existingStat) fs.renameSync(temporary, descriptor.evidenceHostPath);
+      else {
+        fs.linkSync(temporary, descriptor.evidenceHostPath);
+        fs.unlinkSync(temporary);
+      }
       fs.unlinkSync(staged);
+      return replacedInvalidEvidenceHash ? { replacedInvalidEvidenceHash } : {};
     } catch (error) {
       if (fd !== undefined) fs.closeSync(fd);
       fs.rmSync(temporary, { force: true });
       if (error instanceof V4Error) throw error;
       throw new V4Error('WORKSPACE_EVIDENCE_PROMOTION_FAILED');
     }
+  }
+
+  private async pruneEphemeralEvidenceHelpers(
+    descriptor: WorkspaceDescriptor,
+    expectedRevision: string,
+  ): Promise<string[]> {
+    const evidenceStat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    if (!evidenceStat?.isFile() || evidenceStat.isSymbolicLink()) return [];
+    try {
+      const evidence = decodeImplementationEvidence(this.readEvidence(descriptor.evidenceHostPath));
+      assertImplementationEvidenceGate(evidence, descriptor, expectedRevision);
+    } catch {
+      return [];
+    }
+    const pruned: string[] = [];
+    for (const name of EPHEMERAL_EVIDENCE_HELPERS) {
+      const candidate = path.join(descriptor.hostPath, name);
+      const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+      if (!stat) continue;
+      if (
+        !stat.isFile() ||
+        stat.isSymbolicLink() ||
+        stat.size > MAX_EPHEMERAL_EVIDENCE_HELPER_BYTES ||
+        stat.uid !== this.workspaceUid
+      )
+        continue;
+      const untracked = (
+        await this.git(descriptor.hostPath, [
+          'ls-files',
+          '--others',
+          '--exclude-standard',
+          '--',
+          name,
+        ])
+      )
+        .split('\n')
+        .map((item) => item.trim())
+        .filter(Boolean);
+      if (untracked.length !== 1 || untracked[0] !== name) continue;
+      fs.unlinkSync(candidate);
+      pruned.push(name);
+    }
+    return pruned;
   }
 
   private readDescriptor(file: string): StoredWorkspaceDescriptor {

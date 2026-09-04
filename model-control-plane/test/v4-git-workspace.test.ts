@@ -423,6 +423,7 @@ test('LocalGitWorkspace promotes controller-staged repository evidence and rejec
   const resultRevision = commit(workspace.hostPath, 'feat: repository evidence');
   const staged = path.join(workspace.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
   write(staged, JSON.stringify(implementationEvidence(workspace, resultRevision)));
+  write(path.join(workspace.hostPath, '_gen_evidence.py'), 'temporary evidence helper\n');
   assert.equal(value.adapter.hasCompletionEvidence(workspace), true);
   const beforeEvidenceFingerprint = await value.adapter.progressFingerprint(workspace);
   assert.match(
@@ -433,6 +434,8 @@ test('LocalGitWorkspace promotes controller-staged repository evidence and rejec
   assert.equal(verified.headRevision, resultRevision);
   assert.equal(fs.existsSync(staged), false);
   assert.equal(fs.existsSync(workspace.evidenceHostPath), true);
+  assert.deepEqual(verified.ephemeralArtifactsPruned, ['_gen_evidence.py']);
+  assert.equal(fs.existsSync(path.join(workspace.hostPath, '_gen_evidence.py')), false);
   assert.equal(value.adapter.hasCompletionEvidence(workspace), true);
   const afterEvidenceFingerprint = await value.adapter.progressFingerprint(workspace);
   assert.notEqual(beforeEvidenceFingerprint, afterEvidenceFingerprint);
@@ -481,6 +484,97 @@ test('LocalGitWorkspace promotes controller-staged repository evidence and rejec
       error instanceof V4Error && error.code === 'WORKSPACE_REPOSITORY_EVIDENCE_INVALID',
   );
   fs.rmSync('/tmp/pixel-v4-evidence-target.json', { force: true });
+});
+
+test('LocalGitWorkspace refuses semantically invalid staged evidence before sealing it', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-invalid-staged-outcome',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(workspace);
+  write(path.join(workspace.hostPath, 'feature.txt'), 'feature\n');
+  const resultRevision = commit(workspace.hostPath, 'feat: invalid staged outcome');
+  const staged = path.join(workspace.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+  write(
+    staged,
+    JSON.stringify(implementationEvidence(workspace, resultRevision, { outcome: 'SATISFIED' })),
+  );
+  await assert.rejects(
+    () => value.adapter.verifyImplementation(workspace),
+    (error: unknown) =>
+      error instanceof V4Error && error.code === 'WORKSPACE_IMPLEMENTATION_OUTCOME_INVALID',
+  );
+  assert.equal(fs.existsSync(staged), true);
+  assert.equal(fs.existsSync(workspace.evidenceHostPath), false);
+  fs.rmSync(value.directory, { recursive: true, force: true });
+});
+
+test('LocalGitWorkspace atomically replaces an old invalid sealed evidence record with valid staged evidence from the same execution', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-replace-invalid-evidence',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(workspace);
+  write(path.join(workspace.hostPath, 'feature.txt'), 'feature\n');
+  const resultRevision = commit(workspace.hostPath, 'feat: replace invalid evidence');
+  write(
+    workspace.evidenceHostPath,
+    JSON.stringify(implementationEvidence(workspace, resultRevision, { outcome: 'SATISFIED' })),
+  );
+  const staged = path.join(workspace.hostPath, REPOSITORY_COMPLETION_EVIDENCE_FILE);
+  write(
+    staged,
+    JSON.stringify(implementationEvidence(workspace, resultRevision, { outcome: 'CHANGED' })),
+  );
+  write(path.join(workspace.hostPath, '_write_evidence.py'), 'temporary helper\n');
+  const verified = await value.adapter.verifyImplementation(workspace);
+  assert.equal(verified.headRevision, resultRevision);
+  assert.equal(verified.evidence.phase, 'IMPLEMENT');
+  if (verified.evidence.phase === 'IMPLEMENT') assert.equal(verified.evidence.outcome, 'CHANGED');
+  assert.equal(verified.replacedInvalidEvidenceHash?.length, 64);
+  assert.deepEqual(verified.ephemeralArtifactsPruned, ['_write_evidence.py']);
+  assert.equal(fs.existsSync(staged), false);
+  assert.equal(fs.existsSync(path.join(workspace.hostPath, '_write_evidence.py')), false);
+  assert.equal(JSON.parse(fs.readFileSync(workspace.evidenceHostPath, 'utf8')).outcome, 'CHANGED');
+  assert.equal(git(workspace.hostPath, ['status', '--porcelain=v1']), '');
+  fs.rmSync(value.directory, { recursive: true, force: true });
+});
+
+test('LocalGitWorkspace never prunes a symlink or non-allowlisted untracked artifact during evidence finalization', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-no-unsafe-prune',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  configureWriter(workspace);
+  write(path.join(workspace.hostPath, 'feature.txt'), 'feature\n');
+  const resultRevision = commit(workspace.hostPath, 'feat: unsafe helper guard');
+  write(
+    workspace.evidenceHostPath,
+    JSON.stringify(implementationEvidence(workspace, resultRevision)),
+  );
+  const target = path.join(value.directory, 'outside-helper.py');
+  write(target, 'outside\n');
+  fs.symlinkSync(target, path.join(workspace.hostPath, '_gen_evidence.py'));
+  write(path.join(workspace.hostPath, 'unexpected.tmp'), 'keep\n');
+  await assert.rejects(
+    () => value.adapter.verifyImplementation(workspace),
+    (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_DIRTY',
+  );
+  assert.equal(
+    fs.lstatSync(path.join(workspace.hostPath, '_gen_evidence.py')).isSymbolicLink(),
+    true,
+  );
+  assert.equal(fs.existsSync(path.join(workspace.hostPath, 'unexpected.tmp')), true);
+  fs.rmSync(value.directory, { recursive: true, force: true });
 });
 
 test('LocalGitWorkspace provisions independent exact-SHA review snapshots and validates verdict evidence', async () => {

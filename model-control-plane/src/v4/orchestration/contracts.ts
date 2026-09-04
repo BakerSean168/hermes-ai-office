@@ -194,6 +194,8 @@ export interface WorkspaceCompletionSnapshot {
   changedFiles: string[];
   diffStat: string;
   evidence: CompletionEvidence;
+  ephemeralArtifactsPruned?: string[];
+  replacedInvalidEvidenceHash?: string;
   observedAt: string;
 }
 

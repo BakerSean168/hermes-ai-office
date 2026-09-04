@@ -110,6 +110,12 @@ function workspacePayload(snapshot: WorkspaceCompletionSnapshot): Record<string,
     headRevision: snapshot.headRevision,
     clean: snapshot.clean,
     descendantOfSource: snapshot.descendantOfSource,
+    ...(snapshot.ephemeralArtifactsPruned?.length
+      ? { ephemeralArtifactsPruned: snapshot.ephemeralArtifactsPruned }
+      : {}),
+    ...(snapshot.replacedInvalidEvidenceHash
+      ? { replacedInvalidEvidenceHash: snapshot.replacedInvalidEvidenceHash }
+      : {}),
     observedAt: snapshot.observedAt,
   };
 }
