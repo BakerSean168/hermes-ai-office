@@ -728,16 +728,11 @@ async function buildExecutionAutomation(
     const queue = admissionCandidates().filter((candidate) =>
       runtimeAdmission.isStale(candidate, now, runtimeAdmissionTtlMs),
     );
-    let cursor = 0;
-    const workerCount = Math.min(2, queue.length);
-    await Promise.all(
-      Array.from({ length: workerCount }, async () => {
-        while (cursor < queue.length) {
-          const candidate = queue[cursor++];
-          if (candidate) await probeAdmissionCandidate(candidate);
-        }
-      }),
-    );
+    // Runtime admission is a startup/readiness gate rather than throughput work.
+    // Probe serially so provider-native OAuth homes and ACP runtime caches are never
+    // mutated or inspected concurrently by sibling probes. This also keeps admission
+    // ordering deterministic across restarts.
+    for (const candidate of queue) await probeAdmissionCandidate(candidate);
   };
   await reconcileRuntimeAdmission();
   const resourceSelector = new ResourceSelector(
