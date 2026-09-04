@@ -616,16 +616,11 @@ async function buildExecutionAutomation(
     return [...selected.values()].filter(requiresAcpRuntimeAdmission);
   };
 
-  const createAdmissionWorkspace = (candidate: ResourceSelectionCandidate, probeId: string) => {
-    const suffix = createHash('sha256')
-      .update(runtimeAdmissionKey(candidate))
-      .digest('hex')
-      .slice(0, 16);
-    const admissionRoot = path.join(managedHostRoot, 'v4', '.runtime-admission');
-    const root = path.join(admissionRoot, suffix);
+  const createAdmissionWorkspace = (_candidate: ResourceSelectionCandidate, probeId: string) => {
+    const executionsRoot = path.join(managedHostRoot, 'v4', 'executions');
+    const root = path.join(executionsRoot, probeId);
     const repository = path.join(root, 'repo');
-    fs.mkdirSync(admissionRoot, { recursive: true, mode: 0o711 });
-    fs.chmodSync(admissionRoot, 0o711);
+    fs.mkdirSync(executionsRoot, { recursive: true, mode: 0o755 });
     fs.rmSync(root, { recursive: true, force: true });
     fs.mkdirSync(root, { mode: 0o750 });
     fs.chownSync(root, workspaceUid, workspaceGid);
@@ -671,7 +666,7 @@ async function buildExecutionAutomation(
       'chore: runtime admission probe',
     ]);
     const sourceRevision = git(['rev-parse', '--verify', 'HEAD^{commit}']);
-    const executionPath = path.join(executionRoot, 'v4', '.runtime-admission', suffix, 'repo');
+    const executionPath = path.join(executionRoot, 'v4', 'executions', probeId, 'repo');
     return {
       root,
       sourceRevision,
@@ -683,8 +678,8 @@ async function buildExecutionAutomation(
         evidenceExecutionPath: path.join(
           executionRoot,
           'v4',
-          '.runtime-admission',
-          suffix,
+          'executions',
+          probeId,
           'completion-evidence.json',
         ),
         sourceRepositoryPath: repository,
@@ -739,19 +734,27 @@ async function buildExecutionAutomation(
     }
   };
 
+  let runtimeAdmissionCycle: Promise<void> | undefined;
   const reconcileRuntimeAdmission = async (): Promise<void> => {
     if (!runtimeAdmissionEnabled) return;
-    const now = Date.now();
-    const queue = admissionCandidates().filter((candidate) =>
-      runtimeAdmission.isStale(candidate, now, runtimeAdmissionTtlMs),
-    );
-    // Runtime admission is a startup/readiness gate rather than throughput work.
-    // Probe serially so provider-native OAuth homes and ACP runtime caches are never
-    // mutated or inspected concurrently by sibling probes. This also keeps admission
-    // ordering deterministic across restarts.
-    for (const candidate of queue) await probeAdmissionCandidate(candidate);
+    if (runtimeAdmissionCycle) return await runtimeAdmissionCycle;
+    runtimeAdmissionCycle = (async () => {
+      const now = Date.now();
+      const queue = admissionCandidates().filter((candidate) =>
+        runtimeAdmission.isStale(candidate, now, runtimeAdmissionTtlMs),
+      );
+      // Admission is a readiness gate, not a startup dependency or throughput path.
+      // Probe serially so provider-native OAuth homes and ACP runtime caches are never
+      // mutated concurrently by sibling probes. The selector fails closed until a
+      // candidate has a positive admission record.
+      for (const candidate of queue) await probeAdmissionCandidate(candidate);
+    })();
+    try {
+      await runtimeAdmissionCycle;
+    } finally {
+      runtimeAdmissionCycle = undefined;
+    }
   };
-  await reconcileRuntimeAdmission();
   const resourceSelector = new ResourceSelector(
     resources,
     DEFAULT_AFFINITY_POLICY,
@@ -1870,6 +1873,19 @@ export async function buildControlPlane(
           ),
         )
       : undefined;
+
+  if (automation?.runtimeAdmissionEnabled) {
+    setImmediate(() => {
+      void automation
+        .reconcileRuntimeAdmission()
+        .catch((error) =>
+          app.log.error(
+            { error: error instanceof Error ? error.message : String(error) },
+            'runtime admission warmup failed',
+          ),
+        );
+    });
+  }
 
   let resourceCycleRunning = false;
   const resourceInterval = automation?.resourceSelectorEnabled

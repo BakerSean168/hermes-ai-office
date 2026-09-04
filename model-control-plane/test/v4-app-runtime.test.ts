@@ -441,6 +441,115 @@ test('V4 resource selector creates immutable execution provenance and resource c
   await runtime.app.close();
 });
 
+test('runtime admission warms in background, single-flights probes, and uses execution-shaped Harness workspaces', async () => {
+  const value = fixture();
+  const adminEnv = path.join(value.root, 'litellm.env');
+  fs.writeFileSync(adminEnv, 'LITELLM_MASTER_KEY=test-master-key\n');
+  let releaseProbe!: () => void;
+  const probeBlocked = new Promise<void>((resolve) => {
+    releaseProbe = resolve;
+  });
+  let providerRequests = 0;
+  const fakeFetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = String(input);
+    if (url.endsWith('/model/info')) {
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              model_name: 'route-free-deepseek-v4-flash',
+              litellm_params: { litellm_credential_name: 'free-provider' },
+              model_info: {
+                id: 'deployment-free-deepseek',
+                blocked: false,
+                metadata: {
+                  automatic_core: true,
+                  resource_id: 'free-provider',
+                  resource_sequence: 101,
+                  model_family: 'deepseek-v4-flash',
+                  route_model: 'route-free-deepseek-v4-flash',
+                  protocol: 'openai-chat-completions',
+                  commercial_type: 'FREE',
+                  supply_origin: 'COMMUNITY_RELAY',
+                  resource_lifecycle: 'RECURRING',
+                },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    providerRequests += 1;
+    if (url.endsWith('/api/conversations') && init.method === 'POST') {
+      const payload = JSON.parse(String(init.body));
+      const workingDir = String(payload.workspace?.working_dir ?? '');
+      assert.match(
+        workingDir,
+        /^\/workspace\/v4\/executions\/runtime-admission-[a-f0-9]{20}\/repo$/,
+      );
+      const probeId = workingDir.split('/').at(-2)!;
+      const manifestPath = path.join(
+        value.managed,
+        'v4',
+        'executions',
+        probeId,
+        'repo',
+        '.agent-harness.json',
+      );
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      assert.equal(manifest.id, 'pixel-runtime-admission');
+      await probeBlocked;
+      throw new Error('intentional blocked runtime probe');
+    }
+    throw new Error('unexpected provider request: ' + url);
+  }) as typeof fetch;
+
+  const runtime = await buildControlPlane({
+    dbFile: ':memory:',
+    environment: 'test',
+    logger: false,
+    fetchImpl: fakeFetch,
+    env: {
+      NODE_ENV: 'test',
+      MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
+      MODEL_CP_AUTOMATION_RUNTIME_ENABLED: 'false',
+      MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED: 'true',
+      MODEL_CP_V4_RUNTIME_ADMISSION_ENABLED: 'true',
+      MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED: 'false',
+      MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
+      SESSION_API_KEY: 'test-session-key',
+      LITELLM_V3_KEY: 'test-litellm-key',
+      LITELLM_V3_BASE_URL: 'http://litellm.test/v1',
+      MODEL_CP_V4_LITELLM_ADMIN_BASE_URL: 'http://litellm.test',
+      MODEL_CP_LITELLM_ADMIN_ENV_FILE: adminEnv,
+      MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS: value.allowed,
+      MODEL_CP_V4_WORKSPACE_HOST_ROOT: value.managed,
+      MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
+      MODEL_CP_V4_AUTOMATION_PROJECTS: 'app-runtime-project',
+      MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 0),
+      MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
+      MODEL_CP_V4_RESOURCE_REFRESH_MS: '3600000',
+    },
+  });
+
+  const health = await runtime.app.inject({ method: 'GET', url: '/api/health' });
+  assert.equal(health.statusCode, 200);
+  assert.equal(health.json().executionRuntime.runtimeAdmission.enabled, true);
+  assert.equal(health.json().executionRuntime.runtimeAdmission.checked, 0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(providerRequests, 1);
+
+  const first = runtime.automation!.reconcileRuntimeAdmission();
+  const second = runtime.automation!.reconcileRuntimeAdmission();
+  releaseProbe();
+  await Promise.all([first, second]);
+  assert.equal(providerRequests, 1);
+  assert.equal(runtime.automation!.runtimeAdmission.summary().checked, 1);
+  assert.equal(runtime.automation!.runtimeAdmission.summary().unready, 1);
+  await runtime.app.close();
+});
+
 test('single-active-plan API queues later root tasks without supervisor or execution activity and hands off atomically', async () => {
   const value = fixture();
   const runtime = await buildControlPlane({
