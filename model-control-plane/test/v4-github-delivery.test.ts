@@ -428,6 +428,58 @@ test('GitHub delivery waits when GitHub still reports the PR blocked after confi
   fs.rmSync(value.root, { recursive: true, force: true });
 });
 
+test('GitHub delivery discovers an exact already-merged PR for a recovery Plan whose canonical checkout advanced', async () => {
+  const value = fixture();
+  value.delivery.status = 'PENDING';
+  value.delivery.pullRequestNumber = undefined;
+  value.delivery.pullRequestUrl = undefined;
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const mergedPr = {
+    number: 165,
+    state: 'MERGED',
+    url: 'https://github.com/acme/repo/pull/165',
+    headRefOid: 'head-sha',
+    headRefName: 'pixel/exact-delivery',
+    baseRefName: 'main',
+    mergeCommit: { oid: 'merge-sha' },
+  };
+  const spawn = ((command: string, args: readonly string[]) => {
+    const argv = [...args];
+    calls.push({ command, args: argv });
+    if (command === '/usr/bin/getent')
+      return result(
+        `dev:x:${fs.statSync(value.root).uid}:${fs.statSync(value.root).gid}:dev:/tmp:/bin/bash\n`,
+      );
+    if (command === '/usr/bin/git') {
+      if (argv.includes('check-ref-format')) return result('');
+      if (argv.includes('status')) return result('');
+      if (argv.includes('rev-parse')) return result('later-canonical\n');
+      if (argv.includes('remote') && argv.includes('get-url'))
+        return result('https://github.com/acme/repo.git\n');
+      if (argv.includes('ls-remote')) return result('later-main\trefs/heads/main\n');
+      if (argv.includes('merge-base')) return result('');
+      return result('', 'unexpected local command: ' + argv.join(' '), 1);
+    }
+    if (command === '/usr/bin/gh' && argv[0] === 'pr' && argv[1] === 'list')
+      return result(JSON.stringify([mergedPr]));
+    return result('', 'unexpected command: ' + command + ' ' + argv.join(' '), 1);
+  }) as any;
+  const adapter = new GitHubCliDeliveryAdapter({ allowedRepositoryRoots: [value.root], spawn });
+  const observed = await adapter.advance(value.plan, value.delivery);
+  assert.deepEqual(observed, {
+    status: 'VERIFIED',
+    headSha: 'head-sha',
+    pullRequestNumber: 165,
+    pullRequestUrl: 'https://github.com/acme/repo/pull/165',
+    mergeSha: 'merge-sha',
+  });
+  assert.ok(calls.some((call) => call.command === '/usr/bin/gh' && call.args[1] === 'list'));
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/git' && call.args.includes('push')));
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/pnpm'));
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/gh' && call.args[1] === 'create'));
+  fs.rmSync(value.root, { recursive: true, force: true });
+});
+
 test('GitHub delivery refuses a durable merged PR whose head is not the exact reviewed Plan SHA', async () => {
   const value = fixture();
   value.delivery.status = 'CHECKS_PENDING';

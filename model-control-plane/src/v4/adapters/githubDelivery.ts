@@ -82,15 +82,16 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
   ): Promise<DeliveryObservation> {
     const sourceRepository = this.repositoryRoot(plan.repositoryPath);
     const identity = this.repositoryIdentity(sourceRepository);
+    this.assertBranch(delivery.branch, sourceRepository, identity);
+    this.assertBranch(delivery.targetBranch, sourceRepository, identity);
+    let repositoryName: string | undefined;
 
     // Once a PR number is durable, GitHub is the authoritative delivery surface.
     // Reconcile that exact PR before consulting the mutable canonical checkout:
     // the checkout can legitimately advance after this Plan's exact SHA was pushed
     // or even after the PR was merged.
     if (delivery.pullRequestNumber !== undefined) {
-      this.assertBranch(delivery.branch, sourceRepository, identity);
-      this.assertBranch(delivery.targetBranch, sourceRepository, identity);
-      const repositoryName = this.githubRepository(sourceRepository, identity, delivery.remote);
+      repositoryName = this.githubRepository(sourceRepository, identity, delivery.remote);
       const durablePullRequest = this.viewPullRequest(
         sourceRepository,
         identity,
@@ -111,6 +112,38 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       if (durablePullRequest.state === 'MERGED') throw new V4Error('DELIVERY_PR_HEAD_STALE');
       // An open durable PR can legitimately lag a newly reviewed Plan head. Fall
       // through to the exact-local mutation path to fast-forward its delivery ref.
+    } else if (!context.workspacePath) {
+      // Historical recovery is the only no-workspace case where the canonical
+      // checkout may have legitimately advanced beyond this Plan. Detect that
+      // mismatch first, then discover only an exact-head PR. Normal first-time
+      // delivery keeps the original local commitlint/push/create path.
+      if (this.git(sourceRepository, identity, ['status', '--porcelain=v1', '-z']).length !== 0)
+        throw new V4Error('DELIVERY_LOCAL_REPOSITORY_DIRTY');
+      const sourceHead = this.git(sourceRepository, identity, [
+        'rev-parse',
+        '--verify',
+        'HEAD^{commit}',
+      ]).trim();
+      if (sourceHead !== plan.currentRevision) {
+        repositoryName = this.githubRepository(sourceRepository, identity, delivery.remote);
+        const discovered = this.findPullRequest(
+          sourceRepository,
+          identity,
+          repositoryName,
+          delivery,
+          plan.currentRevision,
+        );
+        if (discovered)
+          return this.observeExactPullRequest(
+            sourceRepository,
+            identity,
+            repositoryName,
+            plan,
+            delivery,
+            discovered,
+          );
+        throw new V4Error('DELIVERY_LOCAL_HEAD_STALE');
+      }
     }
 
     if (this.git(sourceRepository, identity, ['status', '--porcelain=v1', '-z']).length !== 0)
@@ -127,11 +160,10 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     if (head !== plan.currentRevision) throw new V4Error('DELIVERY_LOCAL_HEAD_STALE');
     if (this.git(repository, identity, ['status', '--porcelain=v1', '-z']).length !== 0)
       throw new V4Error('DELIVERY_LOCAL_REPOSITORY_DIRTY');
-    this.assertBranch(delivery.branch, repository, identity);
-    this.assertBranch(delivery.targetBranch, repository, identity);
     this.preflightCommitLint(repository, identity, plan, delivery);
+    repositoryName ??= this.githubRepository(repository, identity, delivery.remote);
 
-    const repositoryName = this.githubRepository(repository, identity, delivery.remote);
+    const exactRepositoryName = repositoryName;
     const remoteHead = this.remoteHead(repository, identity, delivery.remote, delivery.branch);
     if (remoteHead && remoteHead !== plan.currentRevision) {
       const fastForward = this.gitSucceeds(repository, identity, [
@@ -156,7 +188,13 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       );
     }
 
-    let pullRequest = this.findPullRequest(repository, identity, repositoryName, delivery);
+    let pullRequest = this.findPullRequest(
+      repository,
+      identity,
+      exactRepositoryName,
+      delivery,
+      plan.currentRevision,
+    );
     if (!pullRequest) {
       const title = plan.objective.trim().slice(0, 240) || 'Pixel Agent delivery';
       const body = [
@@ -169,7 +207,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
         'pr',
         'create',
         '--repo',
-        repositoryName,
+        exactRepositoryName,
         '--base',
         delivery.targetBranch,
         '--head',
@@ -179,13 +217,19 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
         '--body',
         body,
       ]);
-      pullRequest = this.findPullRequest(repository, identity, repositoryName, delivery);
+      pullRequest = this.findPullRequest(
+        repository,
+        identity,
+        exactRepositoryName,
+        delivery,
+        plan.currentRevision,
+      );
       if (!pullRequest) throw new V4Error('DELIVERY_PR_CREATE_NOT_OBSERVED');
     }
     return this.observeExactPullRequest(
       repository,
       identity,
-      repositoryName,
+      exactRepositoryName,
       plan,
       delivery,
       pullRequest,
@@ -403,6 +447,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     identity: { uid: number; gid: number; home: string },
     repositoryName: string,
     delivery: PlanDelivery,
+    expectedHeadSha?: string,
   ): PullRequestView | undefined {
     const output = this.gh(repository, identity, [
       'pr',
@@ -422,8 +467,16 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     ]).stdout;
     const parsed = this.parseJson<unknown>(output, 'DELIVERY_PR_LIST_INVALID');
     if (!Array.isArray(parsed)) throw new V4Error('DELIVERY_PR_LIST_INVALID');
-    if (parsed.length > 1) throw new V4Error('DELIVERY_PR_AMBIGUOUS');
-    return parsed[0] as PullRequestView | undefined;
+    const candidates = expectedHeadSha
+      ? parsed.filter(
+          (item) =>
+            item &&
+            typeof item === 'object' &&
+            (item as PullRequestView).headRefOid === expectedHeadSha,
+        )
+      : parsed;
+    if (candidates.length > 1) throw new V4Error('DELIVERY_PR_AMBIGUOUS');
+    return candidates[0] as PullRequestView | undefined;
   }
 
   private viewPullRequest(
