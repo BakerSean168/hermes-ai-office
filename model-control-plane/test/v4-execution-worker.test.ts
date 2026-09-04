@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
 import type { Execution } from '../src/v4/domain/execution.js';
+import { createExecutionResourceSelection } from '../src/v4/domain/resourceRouting.js';
 import { ExecutionWorker } from '../src/v4/orchestration/executionWorker.js';
 import type {
   ExecutionProviderPort,
@@ -256,6 +257,24 @@ class FakeProvider implements ExecutionProviderPort {
     this.replaceCalls += 1;
     this.lastReplacement = input;
     return { ...this.replaceSnapshot, observedAt: now(-1_000) };
+  }
+}
+
+class FakeResourceFeedback {
+  readonly failures: Array<{ resourceId: string; error: unknown }> = [];
+  readonly successes: string[] = [];
+
+  failure(
+    selection: import('../src/v4/domain/resourceRouting.js').ExecutionResourceSelection,
+    error: unknown,
+  ): void {
+    this.failures.push({ resourceId: selection.resourceId, error });
+  }
+
+  success(
+    selection: import('../src/v4/domain/resourceRouting.js').ExecutionResourceSelection,
+  ): void {
+    this.successes.push(selection.resourceId);
   }
 }
 
@@ -846,6 +865,66 @@ test('execution worker resumes the same terminal implementation session once to 
     seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
     'SUCCEEDED',
   );
+  seeded.db.close();
+});
+
+test('execution worker does not poison resource health when a provider no-op is caused by local Harness admission', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-local-harness-noop',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  provider.launchSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-local-harness-session',
+    status: 'SUCCEEDED',
+    finalResponse:
+      'IMPLEMENT_TRANSPORT_ERROR\nHEADLESS_REVIEW_HARNESS_BLOCKED:harnessctl: No capability manifest matches project /workspace/repo.',
+    observedAt: now(10),
+  };
+  const feedback = new FakeResourceFeedback();
+  const selection = createExecutionResourceSelection(execution.identity.executionId, {
+    capability: 'IMPLEMENTATION',
+    phase: 'IMPLEMENT',
+    modelFamily: 'gpt-5.6-luna',
+    agentBackend: 'codex-acp',
+    transport: 'PROVIDER_NATIVE',
+    resourceId: 'chatgpt-business-primary',
+    resourceTier: 'SUBSCRIPTION',
+    modelRank: 30,
+    resourceSequence: 120,
+    resourceState: 'ACTIVE',
+    selectionReason: 'STATIC_POLICY',
+    bindingId: 'chatgpt-business-luna',
+  });
+  seeded.repositories.resourceSelections.create(selection);
+  const descriptor = await workspace.provision({
+    executionId: execution.identity.executionId,
+    repositoryPath: seeded.plan.repositoryPath,
+    sourceRevision: execution.identity.sourceRevision!,
+    phase: 'IMPLEMENT',
+  });
+  workspace.implementationFailures.set(execution.identity.executionId, [
+    new V4Error('WORKSPACE_IMPLEMENTATION_NOOP'),
+  ]);
+  workspace.completions.set(execution.identity.executionId, implementationCompletion(descriptor));
+  const worker = new ExecutionWorker(seeded.repositories, workspace, [], {
+    ownerId: 'worker-local-harness-noop',
+    providerFactory: () => provider,
+    resourceFeedback: feedback,
+    requireResourceSelection: true,
+  });
+
+  const result = await worker.runExecution(execution.identity.executionId);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'AGENT_HARNESS_PROJECT_UNREGISTERED');
+  const stored = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(stored.errorCode, 'AGENT_HARNESS_PROJECT_UNREGISTERED');
+  assert.equal(stored.retryable, false);
+  assert.deepEqual(feedback.failures, []);
   seeded.db.close();
 });
 

@@ -77,6 +77,24 @@ function bounded(value: string | undefined, maximum: number): string | undefined
   return value?.slice(0, maximum);
 }
 
+function localExecutionBlockerCode(
+  code: string,
+  session: ExecutionSession | undefined,
+): string | undefined {
+  if (code !== 'WORKSPACE_IMPLEMENTATION_NOOP' || !session) return undefined;
+  const detail = [session.errorCode, session.finalResponse].filter(Boolean).join(' ');
+  if (/harnessctl:\s*No capability manifest matches project/i.test(detail))
+    return 'AGENT_HARNESS_PROJECT_UNREGISTERED';
+  if (/HEADLESS_(?:REVIEW_)?HARNESS_BLOCKED/i.test(detail)) return 'AGENT_HARNESS_RUNTIME_BLOCKED';
+  if (
+    /HEADLESS_WORKER_WRITABLE_ROOT_NOT_ALLOWED|PIXEL_V4_(?:IMPLEMENTATION|REVIEW)_EVIDENCE_PATH_INVALID/i.test(
+      detail,
+    )
+  )
+    return 'WORKSPACE_EXECUTION_CONTRACT_INVALID';
+  return undefined;
+}
+
 function evidencePayload(evidence: CompletionEvidence): Record<string, unknown> {
   return JSON.parse(JSON.stringify(evidence)) as Record<string, unknown>;
 }
@@ -839,9 +857,13 @@ export class ExecutionWorker {
         resultRevision: completion.headRevision,
       };
     } catch (error) {
-      const code = errorCode(error);
-      if (this.providerFailureEligible(code)) this.reportResourceFailure(selectedResource, error);
-      if (RETRYABLE_RESOURCE_QUALITY_CODES.has(code))
+      const observedCode = errorCode(error);
+      const currentSession = this.repositories.sessions.getOptional(executionId);
+      const localBlockerCode = localExecutionBlockerCode(observedCode, currentSession);
+      const code = localBlockerCode ?? observedCode;
+      if (!localBlockerCode && this.providerFailureEligible(observedCode))
+        this.reportResourceFailure(selectedResource, error);
+      if (!localBlockerCode && RETRYABLE_RESOURCE_QUALITY_CODES.has(observedCode))
         this.reportResourceFailure(selectedResource, {
           code: 'PROVIDER_SUCCESS_NO_IMPLEMENTATION',
           message:
@@ -855,10 +877,12 @@ export class ExecutionWorker {
           code.startsWith('WORKSPACE_EVIDENCE_') ||
           code.startsWith('WORKSPACE_REVIEW_');
         const retryable =
-          workspaceInfrastructureFailure ||
-          this.providerFailureEligible(code) ||
-          RETRYABLE_RESOURCE_QUALITY_CODES.has(code) ||
-          (execution.identity.phase !== 'REVIEW' && FINALIZABLE_IMPLEMENTATION_CODES.has(code));
+          !localBlockerCode &&
+          (workspaceInfrastructureFailure ||
+            this.providerFailureEligible(observedCode) ||
+            RETRYABLE_RESOURCE_QUALITY_CODES.has(observedCode) ||
+            (execution.identity.phase !== 'REVIEW' &&
+              FINALIZABLE_IMPLEMENTATION_CODES.has(observedCode)));
         this.repositories.executions.recordResult(executionId, {
           status: 'FAILED',
           errorCode: code,
