@@ -555,7 +555,7 @@ test('OpenHands launch explicitly runs an idle initial conversation before retur
       ['POST', '/api/conversations'],
       ['POST', '/api/conversations/idle-session/run'],
       ['GET', '/api/conversations/idle-session'],
-      ['GET', '/api/conversations/idle-session/events/search?limit=1&sort_order=TIMESTAMP_DESC'],
+      ['GET', '/api/conversations/idle-session/events/search?limit=20&sort_order=TIMESTAMP_DESC'],
     ],
   );
 });
@@ -601,7 +601,7 @@ test('OpenHands launch never interrupts an initial turn that is already running'
       ['POST', '/api/conversations'],
       ['POST', '/api/conversations/race-session/run'],
       ['GET', '/api/conversations/race-session'],
-      ['GET', '/api/conversations/race-session/events/search?limit=1&sort_order=TIMESTAMP_DESC'],
+      ['GET', '/api/conversations/race-session/events/search?limit=20&sort_order=TIMESTAMP_DESC'],
     ],
   );
 });
@@ -719,8 +719,9 @@ test('OpenHands replacement conversation is crash-safe and excluded from initial
   assert.equal(recovered?.providerSessionId, 'original-session');
 });
 
-test('OpenHands exposes only an opaque provider progress fingerprint derived from the latest event cursor', async () => {
+test('OpenHands progress fingerprint advances only on repository/tool activity, not liveness-only events', async () => {
   let eventId = 'event-1';
+  let eventKind = 'ActionEvent';
   const fake = (async (url: string | URL | Request) => {
     const value = String(url);
     if (value.endsWith('/api/conversations/progress-session'))
@@ -738,7 +739,7 @@ test('OpenHands exposes only an opaque provider progress fingerprint derived fro
           items: [
             {
               id: eventId,
-              kind: 'ActionEvent',
+              kind: eventKind,
               timestamp:
                 eventId === 'event-1' ? '2026-09-04T01:00:01.000Z' : '2026-09-04T01:00:02.000Z',
               content: 'must-not-enter-progress-state',
@@ -757,6 +758,12 @@ test('OpenHands exposes only an opaque provider progress fingerprint derived fro
   assert.equal(typeof first.progressFingerprint, 'string');
   assert.equal(first.progressFingerprint?.length, 64);
   assert.notEqual(first.progressFingerprint, second.progressFingerprint);
+  eventKind = 'MessageEvent';
+  eventId = 'event-3';
+  const messageOnly = await provider.inspect('progress-session');
+  eventId = 'event-4';
+  const laterMessageOnly = await provider.inspect('progress-session');
+  assert.equal(messageOnly.progressFingerprint, laterMessageOnly.progressFingerprint);
   assert.equal(JSON.stringify(first).includes('must-not-enter-progress-state'), false);
 });
 

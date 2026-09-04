@@ -802,32 +802,37 @@ abstract class OpenHandsProviderBase implements ExecutionProviderPort {
   }
 
   private async providerProgressFingerprint(
-    conversation: JsonRecord,
+    _conversation: JsonRecord,
     conversationId: string,
     status: ProviderSessionStatus,
   ): Promise<string> {
-    let latest: JsonRecord = {};
+    let latestMeaningful: JsonRecord = {};
     try {
       const events = await this.json(
         '/api/conversations/' +
           encodeURIComponent(conversationId) +
-          '/events/search?limit=1&sort_order=TIMESTAMP_DESC',
+          '/events/search?limit=20&sort_order=TIMESTAMP_DESC',
       );
-      const items = Array.isArray(events.items) ? events.items : [];
-      latest = items.length > 0 ? record(items[0]) : {};
+      const items = Array.isArray(events.items) ? events.items.map(record) : [];
+      latestMeaningful =
+        items.find((item) =>
+          ['ACPToolCallEvent', 'ActionEvent', 'ObservationEvent'].includes(String(item.kind ?? '')),
+        ) ?? {};
     } catch {
       // Progress telemetry is advisory. Provider status inspection remains the
       // authoritative liveness path when an older OpenHands lacks event search.
     }
+    // Liveness-only fields such as conversation.updated_at and MessageEvent cursor
+    // intentionally do not participate. A model that keeps thinking/talking without
+    // repository/tool activity must not postpone the meaningful-progress deadline.
     const safeCursor = {
       status,
-      conversationUpdatedAt: boundedText(
-        conversation.updated_at ?? conversation.updatedAt ?? conversation.last_updated_at,
+      eventId: boundedText(latestMeaningful.id ?? latestMeaningful.event_id, 300),
+      eventKind: boundedText(latestMeaningful.kind, 200),
+      eventTimestamp: boundedText(
+        latestMeaningful.timestamp ?? latestMeaningful.created_at ?? latestMeaningful.updated_at,
         200,
       ),
-      eventId: boundedText(latest.id ?? latest.event_id, 300),
-      eventKind: boundedText(latest.kind, 200),
-      eventTimestamp: boundedText(latest.timestamp ?? latest.created_at ?? latest.updated_at, 200),
     };
     return createHash('sha256').update(JSON.stringify(safeCursor)).digest('hex');
   }
