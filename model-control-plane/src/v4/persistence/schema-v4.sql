@@ -264,6 +264,27 @@ CREATE TABLE IF NOT EXISTS project_plan_queue (
 );
 CREATE INDEX IF NOT EXISTS idx_project_plan_queue_ready ON project_plan_queue(project_key, cancelled_at, activated_at, priority DESC, sequence ASC);
 
+CREATE TABLE IF NOT EXISTS plan_worktrees (
+  worktree_id TEXT PRIMARY KEY,
+  project_key TEXT NOT NULL,
+  root_plan_id TEXT NOT NULL REFERENCES plans(plan_id),
+  work_item_id TEXT REFERENCES work_items(work_item_id),
+  role TEXT NOT NULL,
+  repository_path TEXT NOT NULL,
+  host_path TEXT NOT NULL UNIQUE,
+  execution_path TEXT NOT NULL UNIQUE,
+  branch_ref TEXT,
+  base_revision TEXT NOT NULL,
+  current_revision TEXT NOT NULL,
+  state TEXT NOT NULL,
+  owner_execution_id TEXT REFERENCES executions(execution_id),
+  version INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_worktrees_plan ON plan_worktrees(root_plan_id, state, role);
+CREATE INDEX IF NOT EXISTS idx_plan_worktrees_work_item ON plan_worktrees(root_plan_id, work_item_id, state);
+
 CREATE TABLE IF NOT EXISTS external_changes (
   external_change_id TEXT PRIMARY KEY,
   fingerprint TEXT NOT NULL UNIQUE,
@@ -306,4 +327,4 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
   updated_at TEXT NOT NULL
 );
 INSERT OR IGNORE INTO schema_meta(schema_id, schema_version, created_at)
-VALUES ('pixel-v4', 7, CAST(strftime('%s','now') AS INTEGER));
+VALUES ('pixel-v4', 8, CAST(strftime('%s','now') AS INTEGER));

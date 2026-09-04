@@ -83,6 +83,7 @@ import {
 import { assertCurrentV4Schema, withTransaction } from './database.js';
 import { EventStore } from './eventStore.js';
 import { ExecutionEvidenceRepository, ExecutionSessionRepository } from './executionArtifacts.js';
+import { PlanWorktreeRepository } from './worktreeRepository.js';
 
 export type MutationStatus = 'created' | 'existing' | 'updated' | 'rejected';
 export interface MutationResult<T> {
@@ -3811,6 +3812,7 @@ export interface V4Repositories {
   executionResourceSelections: ExecutionResourceSelectionRepository;
   resourceStateOverrides: ResourceStateOverrideRepository;
   projectPlans: ProjectPlanSchedulerRepository;
+  planWorktrees: PlanWorktreeRepository;
   events: EventStore;
 }
 
@@ -3833,6 +3835,7 @@ export function createRepositories(db: DatabaseSync): V4Repositories {
     executionResourceSelections: resourceSelections,
     resourceStateOverrides,
     projectPlans: new ProjectPlanSchedulerRepository(db, events),
+    planWorktrees: new PlanWorktreeRepository(db, events),
     events,
   };
 }
