@@ -621,11 +621,15 @@ async function buildExecutionAutomation(
       .update(runtimeAdmissionKey(candidate))
       .digest('hex')
       .slice(0, 16);
-    const root = path.join(managedHostRoot, 'v4', '.runtime-admission', suffix);
+    const admissionRoot = path.join(managedHostRoot, 'v4', '.runtime-admission');
+    const root = path.join(admissionRoot, suffix);
     const repository = path.join(root, 'repo');
+    fs.mkdirSync(admissionRoot, { recursive: true, mode: 0o711 });
+    fs.chmodSync(admissionRoot, 0o711);
     fs.rmSync(root, { recursive: true, force: true });
-    fs.mkdirSync(repository, { recursive: true, mode: 0o750 });
+    fs.mkdirSync(root, { mode: 0o750 });
     fs.chownSync(root, workspaceUid, workspaceGid);
+    fs.mkdirSync(repository, { mode: 0o750 });
     fs.chownSync(repository, workspaceUid, workspaceGid);
     const git = (args: string[]) =>
       execFileSync('/usr/bin/git', ['-C', repository, ...args], {
