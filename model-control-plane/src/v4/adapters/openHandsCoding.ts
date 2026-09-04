@@ -1035,7 +1035,7 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
         launchInput,
         prompt,
         { runtimeprobe: tagValue(input.probeId) },
-        { maxIterations: 1, secrets, roleTag: 'runtimeprobe' },
+        { maxIterations: 3, secrets, roleTag: 'runtimeprobe' },
       );
       providerSessionId = snapshot.providerSessionId;
       const deadline = Date.now() + Math.min(90_000, (this.acp.startupTimeoutSeconds + 60) * 1000);
@@ -1045,15 +1045,21 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
       }
       const response = snapshot.finalResponse?.trim() ?? '';
       const transportError = /TRANSPORT_ERROR|ACP error|runtime error/i.test(response);
+      const missingToolActivity =
+        /without (?:independent )?repository command|without repository command|without .*tool.*activity/i.test(
+          response,
+        );
       const hasReadyToken = /(?:^|\b)READY(?:\b|$)/i.test(response);
       const ready = snapshot.status === 'SUCCEEDED' && hasReadyToken && !transportError;
       const errorCode = ready
         ? undefined
-        : transportError
-          ? 'RUNTIME_PROBE_TRANSPORT_ERROR'
-          : snapshot.status !== 'SUCCEEDED'
-            ? 'RUNTIME_PROBE_STATUS_' + snapshot.status
-            : 'RUNTIME_PROBE_READY_TOKEN_MISSING';
+        : missingToolActivity
+          ? 'RUNTIME_PROBE_TOOL_ACTIVITY_MISSING'
+          : transportError
+            ? 'RUNTIME_PROBE_TRANSPORT_ERROR'
+            : snapshot.status !== 'SUCCEEDED'
+              ? 'RUNTIME_PROBE_STATUS_' + snapshot.status
+              : 'RUNTIME_PROBE_READY_TOKEN_MISSING';
       return {
         provider: this.provider,
         providerSessionId,

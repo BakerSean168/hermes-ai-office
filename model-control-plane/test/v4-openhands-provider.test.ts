@@ -462,7 +462,7 @@ test('model-native ACP runtime probe performs a real bounded turn with probe-onl
   const body = JSON.parse(String(create.init.body)) as Record<string, any>;
   assert.equal(body.agent.kind, 'ACPAgent');
   assert.equal(body.agent.acp_model, 'route-orcai-gpt-5.6-luna');
-  assert.equal(body.max_iterations, 1);
+  assert.equal(body.max_iterations, 3);
   assert.equal(body.tags.role, 'runtimeprobe');
   assert.match(String(body.initial_message.content[0].text), /git status --short/);
   assert.equal(body.secrets.AI_OFFICE_HEADLESS_ROLE.value, 'planner');
@@ -977,4 +977,49 @@ test('model-native runtime probe classifies finished ACP transport errors withou
   assert.equal(result.status, 'FAILED');
   assert.equal(result.errorCode, 'RUNTIME_PROBE_TRANSPORT_ERROR');
   assert.equal('finalResponse' in result, false);
+});
+
+test('runtime probe distinguishes a model runtime with no repository tool activity from transport failure', async () => {
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    const value = String(url);
+    if (value.endsWith('/api/conversations') && init.method === 'POST') {
+      const body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(
+        JSON.stringify({
+          id: 'runtime-probe-no-tools',
+          execution_status: 'finished',
+          workspace: body.workspace,
+          tags: body.tags,
+        }),
+        { status: 201 },
+      );
+    }
+    if (value.endsWith('/api/conversations/runtime-probe-no-tools/agent_final_response'))
+      return new Response(
+        JSON.stringify({
+          response:
+            'PLAN_TRANSPORT_ERROR\nplanner completed without independent repository command activity',
+        }),
+        { status: 200 },
+      );
+    if (value.includes('/api/conversations/runtime-probe-no-tools/events/search'))
+      return new Response(JSON.stringify({ items: [] }), { status: 200 });
+    if (value.endsWith('/api/conversations/runtime-probe-no-tools') && init.method === 'DELETE')
+      return new Response('', { status: 204 });
+    throw new Error('unexpected request ' + value + ' ' + String(init.method));
+  }) as typeof fetch;
+  const provider = createOpenHandsProviderForSelection(options(fake), {
+    backend: 'codex-acp',
+    model: 'route-orcai-gpt-5.6-luna',
+    role: 'IMPLEMENTATION',
+    transport: 'LITELLM_MANAGED',
+  });
+  const input = launchInput('IMPLEMENT');
+  const result = await provider.probeRuntime!({
+    probeId: 'runtime-probe-no-tools',
+    sourceRevision: input.sourceRevision,
+    workspace: { ...input.workspace, executionId: 'runtime-probe-no-tools' },
+  });
+  assert.equal(result.ready, false);
+  assert.equal(result.errorCode, 'RUNTIME_PROBE_TOOL_ACTIVITY_MISSING');
 });

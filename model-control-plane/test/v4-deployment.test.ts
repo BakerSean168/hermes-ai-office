@@ -186,6 +186,9 @@ test('V4 Luna implementation uses managed Codex Responses and bridges durable im
   assert.match(headlessReview, /isPixelV4ImplementationFinalizationError/);
   assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
   assert.match(headlessReview, /HEADLESS_ROLE === 'worker'/);
+  assert.match(headlessReview, /AI_OFFICE_HEADLESS_IDLE_EXIT_SECONDS/);
+  assert.match(headlessReview, /scheduleProcessExit\(1_000\)/);
+  assert.doesNotMatch(headlessReview, /EXIT_GRACE_MS = 5_000/);
 });
 
 test('V4 Business Codex review is provider-native and bridges durable review evidence', () => {

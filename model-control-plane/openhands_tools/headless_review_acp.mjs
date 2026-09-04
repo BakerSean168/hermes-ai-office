@@ -34,7 +34,11 @@ const TIMEOUT_MS = Math.max(
   Math.min(30 * 60_000, Number(process.env.AI_OFFICE_HEADLESS_TIMEOUT_SECONDS ?? '900') * 1000),
 );
 const HEARTBEAT_MS = 15_000;
-const EXIT_GRACE_MS = 5_000;
+const IDLE_EXIT_MS = Math.max(
+  30_000,
+  Math.min(15 * 60_000, Number(process.env.AI_OFFICE_HEADLESS_IDLE_EXIT_SECONDS ?? '120') * 1000),
+);
+let idleExitTimer;
 const OUTPUT_LIMIT = 16 * 1024 * 1024;
 const EVIDENCE_LIMIT = 768 * 1024;
 const UNTRACKED_FILE_LIMIT = 128 * 1024;
@@ -953,9 +957,16 @@ function runChild(session, spec) {
   });
 }
 
-function scheduleProcessExit() {
-  const timer = setTimeout(() => process.exit(0), EXIT_GRACE_MS);
-  timer.unref();
+function cancelScheduledProcessExit() {
+  if (!idleExitTimer) return;
+  clearTimeout(idleExitTimer);
+  idleExitTimer = undefined;
+}
+
+function scheduleProcessExit(delayMs = IDLE_EXIT_MS) {
+  cancelScheduledProcessExit();
+  idleExitTimer = setTimeout(() => process.exit(0), delayMs);
+  idleExitTimer.unref();
 }
 
 class HeadlessReviewAgent {
@@ -971,6 +982,7 @@ class HeadlessReviewAgent {
   }
 
   async newSession(params) {
+    cancelScheduledProcessExit();
     const cwd = assertWorkspace(params.cwd);
     const id = crypto.randomUUID();
     this.sessions.set(id, {
@@ -993,6 +1005,7 @@ class HeadlessReviewAgent {
   }
 
   async prompt(params, cx) {
+    cancelScheduledProcessExit();
     const session = this.sessions.get(params.sessionId);
     if (!session) throw new Error('HEADLESS_REVIEW_SESSION_NOT_FOUND');
     session.controller = new AbortController();
@@ -1217,6 +1230,7 @@ class HeadlessReviewAgent {
     const session = this.sessions.get(params.sessionId);
     session?.controller.abort();
     this.sessions.delete(params.sessionId);
+    if (this.sessions.size === 0) scheduleProcessExit(1_000);
     return {};
   }
 }
