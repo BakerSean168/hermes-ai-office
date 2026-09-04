@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
 import { V4Error } from '../src/v4/domain/errors.js';
@@ -210,6 +214,75 @@ test('Managed Codex implementation launches ACP with Responses transport and con
   assert.equal(body.secrets.PIXEL_V4_SOURCE_SHA.value, 'source-sha');
   assert.equal(body.secrets.PIXEL_V4_IMPLEMENTATION_PHASE.value, 'IMPLEMENT');
   assert.equal(JSON.stringify(snapshot).includes(secrets.liteLlmApiKey), false);
+});
+
+test('Business Codex implementation injects exact literal-worktree Git provenance', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-provider-worktree-'));
+  const repository = path.join(root, 'repository');
+  const worktree = path.join(root, 'worktree');
+  fs.mkdirSync(repository);
+  const git = (cwd: string, args: string[]) =>
+    execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
+  git(repository, ['init', '-q', '-b', 'main']);
+  fs.writeFileSync(path.join(repository, 'README.md'), '# literal provider test\n');
+  git(repository, ['add', 'README.md']);
+  git(repository, [
+    '-c',
+    'user.name=Pixel Test',
+    '-c',
+    'user.email=pixel@test.invalid',
+    'commit',
+    '-q',
+    '-m',
+    'chore: base',
+  ]);
+  const sourceRevision = git(repository, ['rev-parse', 'HEAD']);
+  git(repository, [
+    'worktree',
+    'add',
+    '-q',
+    '-b',
+    'pixel-v4/test/provider',
+    worktree,
+    sourceRevision,
+  ]);
+
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const fake = (async (url: string | URL | Request, init: RequestInit = {}) => {
+    requests.push({ url: String(url), init });
+    const body = JSON.parse(String(init.body)) as Record<string, any>;
+    return new Response(
+      JSON.stringify({
+        id: 'literal-business-session',
+        execution_status: 'running',
+        workspace: body.workspace,
+        tags: body.tags,
+      }),
+      { status: 201, headers: { 'content-type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  const provider = new OpenHandsCodexBusinessExecutionProvider(options(fake));
+  const input = launchInput('IMPLEMENT');
+  input.sourceRevision = sourceRevision;
+  input.workspace = {
+    ...input.workspace,
+    hostPath: worktree,
+    executionPath: '/workspace/v4/plans/project/plan/items/work/repo',
+    evidenceHostPath: path.join(root, 'evidence.json'),
+    evidenceExecutionPath:
+      '/workspace/v4/plans/project/plan/items/work/.executions/exec-1/evidence.json',
+    sourceRepositoryPath: repository,
+    sourceRevision,
+  };
+  await provider.launch(input);
+  const body = JSON.parse(String(requests[0]!.init.body)) as Record<string, any>;
+  assert.equal(body.secrets.AI_OFFICE_EXPECTED_GIT_COMMON_DIR.value, path.join(repository, '.git'));
+  assert.equal(
+    body.secrets.AI_OFFICE_EXPECTED_WORKTREE_GIT_FILE.value,
+    path.join(worktree, '.git'),
+  );
+  git(repository, ['worktree', 'remove', '--force', worktree]);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test('Business Codex review launches provider-native ACP with persisted ChatGPT auth and V4 evidence metadata', async () => {

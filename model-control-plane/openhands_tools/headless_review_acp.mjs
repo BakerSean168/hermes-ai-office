@@ -16,6 +16,8 @@ const IS_WORKER = HEADLESS_ROLE === 'worker';
 const IS_PLANNER = HEADLESS_ROLE === 'planner';
 const HEADLESS_REASONING_EFFORT =
   process.env.AI_OFFICE_HEADLESS_REASONING_EFFORT ?? (IS_WORKER ? 'xhigh' : 'medium');
+const EXPECTED_GIT_COMMON_DIR = process.env.AI_OFFICE_EXPECTED_GIT_COMMON_DIR ?? '';
+const EXPECTED_WORKTREE_GIT_FILE = process.env.AI_OFFICE_EXPECTED_WORKTREE_GIT_FILE ?? '';
 const CODEX_AUTH_HOME = process.env.AI_OFFICE_CODEX_AUTH_HOME ?? '';
 const HARNESS_CTL = process.env.AI_OFFICE_HARNESS_CTL ?? '/opt/agent-harness/bin/harnessctl.py';
 const HARNESS_PROFILE =
@@ -236,24 +238,68 @@ function optionalGit(cwd, args) {
   return result.stdout.trim();
 }
 
+function sameFileIdentity(left, right) {
+  const a = fs.statSync(left, { throwIfNoEntry: false });
+  const b = fs.statSync(right, { throwIfNoEntry: false });
+  return Boolean(a && b && a.dev === b.dev && a.ino === b.ino);
+}
+
+function workerGitWritableRoots(cwd, executionRoot) {
+  const adminDir = path.resolve(git(cwd, ['rev-parse', '--absolute-git-dir']).trim());
+  const commonRaw = git(cwd, ['rev-parse', '--git-common-dir']).trim();
+  const commonDir = path.resolve(cwd, commonRaw);
+  if (isInside(adminDir, executionRoot) && isInside(commonDir, executionRoot)) {
+    return [adminDir, commonDir];
+  }
+
+  if (!EXPECTED_GIT_COMMON_DIR || !EXPECTED_WORKTREE_GIT_FILE) {
+    throw new Error(`HEADLESS_WORKER_WRITABLE_ROOT_NOT_ALLOWED:${adminDir}`);
+  }
+  const expectedCommon = path.resolve(EXPECTED_GIT_COMMON_DIR);
+  const expectedGitFile = path.resolve(EXPECTED_WORKTREE_GIT_FILE);
+  if (commonDir !== expectedCommon) {
+    throw new Error('HEADLESS_WORKER_GIT_COMMON_DIR_MISMATCH');
+  }
+  if (path.dirname(adminDir) !== path.join(commonDir, 'worktrees')) {
+    throw new Error('HEADLESS_WORKER_GIT_ADMIN_DIR_INVALID');
+  }
+  const commondirFile = path.join(adminDir, 'commondir');
+  const gitdirFile = path.join(adminDir, 'gitdir');
+  const reverseCommon = path.resolve(adminDir, fs.readFileSync(commondirFile, 'utf8').trim());
+  const reverseGitFile = path.resolve(adminDir, fs.readFileSync(gitdirFile, 'utf8').trim());
+  if (reverseCommon !== commonDir) {
+    throw new Error('HEADLESS_WORKER_GIT_COMMON_POINTER_INVALID');
+  }
+  if (reverseGitFile !== expectedGitFile) {
+    throw new Error('HEADLESS_WORKER_GIT_WORKTREE_POINTER_INVALID');
+  }
+  const currentGitFile = path.join(cwd, '.git');
+  if (!sameFileIdentity(currentGitFile, expectedGitFile)) {
+    throw new Error('HEADLESS_WORKER_GIT_WORKTREE_IDENTITY_INVALID');
+  }
+  const pointer = fs.readFileSync(currentGitFile, 'utf8').trim();
+  if (pointer !== `gitdir: ${adminDir}`) {
+    throw new Error('HEADLESS_WORKER_GIT_ADMIN_POINTER_INVALID');
+  }
+  return [adminDir, commonDir];
+}
+
 function codexWritableArgs(session, harness) {
   const executionRoot = path.dirname(session.cwd);
-  const roots = [
-    ...(IS_WORKER
-      ? [path.resolve(git(session.cwd, ['rev-parse', '--absolute-git-dir']).trim())]
-      : []),
+  const gitRoots = IS_WORKER ? workerGitWritableRoots(session.cwd, executionRoot) : [];
+  const localRoots = [
     harness.env.HOME,
     harness.env.AGENT_HARNESS_STATE,
     harness.env.AGENT_HARNESS_SHARE,
   ]
     .filter((value) => typeof value === 'string' && value.trim())
     .map((value) => path.resolve(value));
-  for (const root of roots) {
+  for (const root of localRoots) {
     if (!isInside(root, executionRoot)) {
       throw new Error(`HEADLESS_WORKER_WRITABLE_ROOT_NOT_ALLOWED:${root}`);
     }
   }
-  return [...new Set(roots)].flatMap((root) => ['--add-dir', root]);
+  return [...new Set([...gitRoots, ...localRoots])].flatMap((root) => ['--add-dir', root]);
 }
 
 function collectEvidence(cwd) {
@@ -540,6 +586,20 @@ function normalizedReviewChecks(value, stdout) {
   return normalized.length ? normalized : successfulCodexChecks(stdout);
 }
 
+function assertPixelV4EvidenceTarget(session, target, code) {
+  const executionRoot = path.dirname(session.cwd);
+  const legacyTarget = path.join(executionRoot, 'completion-evidence.json');
+  const literalTarget = PIXEL_V4_EXECUTION_ID
+    ? path.join(executionRoot, '.executions', PIXEL_V4_EXECUTION_ID, 'completion-evidence.json')
+    : '';
+  if (
+    path.basename(target) !== 'completion-evidence.json' ||
+    (target !== legacyTarget && target !== literalTarget)
+  ) {
+    throw new Error(code);
+  }
+}
+
 function writePixelV4ImplementationEvidence(session, summary, stdout) {
   if (!PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH) return;
   if (!PIXEL_V4_EXECUTION_ID || !PIXEL_V4_SOURCE_SHA) {
@@ -552,13 +612,7 @@ function writePixelV4ImplementationEvidence(session, summary, stdout) {
     throw new Error('PIXEL_V4_IMPLEMENTATION_PHASE_INVALID');
   }
   const target = path.resolve(PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH);
-  const executionRoot = path.dirname(session.cwd);
-  if (
-    path.dirname(target) !== executionRoot ||
-    path.basename(target) !== 'completion-evidence.json'
-  ) {
-    throw new Error('PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH_INVALID');
-  }
+  assertPixelV4EvidenceTarget(session, target, 'PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH_INVALID');
   const status = git(session.cwd, ['status', '--porcelain=v1', '-z']);
   if (status.length > 0) throw new Error('PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY');
   const resultRevision = git(session.cwd, ['rev-parse', '--verify', 'HEAD^{commit}']).trim();
@@ -614,13 +668,7 @@ function writePixelV4ReviewEvidence(session, value, stdout) {
     throw new Error('PIXEL_V4_REVIEW_EVIDENCE_METADATA_MISSING');
   }
   const target = path.resolve(PIXEL_V4_REVIEW_EVIDENCE_PATH);
-  const executionRoot = path.dirname(session.cwd);
-  if (
-    path.dirname(target) !== executionRoot ||
-    path.basename(target) !== 'completion-evidence.json'
-  ) {
-    throw new Error('PIXEL_V4_REVIEW_EVIDENCE_PATH_INVALID');
-  }
+  assertPixelV4EvidenceTarget(session, target, 'PIXEL_V4_REVIEW_EVIDENCE_PATH_INVALID');
   const checks = normalizedReviewChecks(value, stdout);
   if (
     value?.verdict === 'PASS' &&

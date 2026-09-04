@@ -184,6 +184,8 @@ test('V4 Luna implementation uses managed Codex Responses and bridges durable im
     /managedCodexModelCatalog|model_catalog_json|use_responses_lite/,
   );
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_EVIDENCE_PATH/);
+  assert.match(headlessReview, /assertPixelV4EvidenceTarget/);
+  assert.match(headlessReview, /\.executions.*PIXEL_V4_EXECUTION_ID.*completion-evidence\.json/s);
   assert.match(headlessReview, /PIXEL_V4_SOURCE_SHA/);
   assert.match(headlessReview, /writePixelV4ImplementationEvidence/);
   assert.match(headlessReview, /PIXEL_V4_IMPLEMENTATION_WORKSPACE_DIRTY/);
@@ -196,6 +198,16 @@ test('V4 Luna implementation uses managed Codex Responses and bridges durable im
   assert.match(headlessReview, /isPixelV4ImplementationFinalizationError/);
   assert.match(headlessReview, /outer headless adapter, not this Codex sandbox, persists/);
   assert.match(headlessReview, /HEADLESS_ROLE === 'worker'/);
+  assert.match(headlessReview, /AI_OFFICE_EXPECTED_GIT_COMMON_DIR/);
+  assert.match(headlessReview, /AI_OFFICE_EXPECTED_WORKTREE_GIT_FILE/);
+  assert.match(headlessReview, /HEADLESS_WORKER_GIT_COMMON_DIR_MISMATCH/);
+  assert.match(headlessReview, /HEADLESS_WORKER_GIT_COMMON_POINTER_INVALID/);
+  assert.match(headlessReview, /HEADLESS_WORKER_GIT_WORKTREE_POINTER_INVALID/);
+  assert.match(headlessReview, /HEADLESS_WORKER_GIT_WORKTREE_IDENTITY_INVALID/);
+  assert.match(
+    headlessReview,
+    /path\.dirname\(adminDir\) !== path\.join\(commonDir, 'worktrees'\)/,
+  );
   assert.match(headlessReview, /AI_OFFICE_HEADLESS_IDLE_EXIT_SECONDS/);
   assert.match(headlessReview, /scheduleProcessExit\(1_000\)/);
   assert.doesNotMatch(headlessReview, /EXIT_GRACE_MS = 5_000/);

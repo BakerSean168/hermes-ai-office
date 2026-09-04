@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 import { V4Error, failClosed } from '../domain/errors.js';
 import { REPOSITORY_COMPLETION_EVIDENCE_FILE } from '../orchestration/contracts.js';
@@ -965,6 +966,33 @@ function pathIsAbsolute(value: string): boolean {
   return value.startsWith('/');
 }
 
+function literalGitProvenance(
+  input: ProviderLaunchInput,
+): { commonDir: string; worktreeGitFile: string } | undefined {
+  if (!input.workspace.executionPath.startsWith('/workspace/v4/plans/')) return undefined;
+  const hostPath = input.workspace.hostPath;
+  try {
+    const rawCommon = execFileSync(
+      '/usr/bin/git',
+      ['-c', 'safe.directory=' + hostPath, '-C', hostPath, 'rev-parse', '--git-common-dir'],
+      { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024 },
+    ).trim();
+    failClosed(rawCommon.length > 0, 'LITERAL_GIT_COMMON_DIR_REQUIRED');
+    const commonDir = path.resolve(hostPath, rawCommon);
+    const worktreeGitFile = path.join(hostPath, '.git');
+    failClosed(path.isAbsolute(commonDir), 'LITERAL_GIT_COMMON_DIR_INVALID');
+    failClosed(path.isAbsolute(worktreeGitFile), 'LITERAL_GIT_WORKTREE_FILE_INVALID');
+    return { commonDir, worktreeGitFile };
+  } catch (error) {
+    if (error instanceof V4Error) throw error;
+    throw new V4Error(
+      'LITERAL_GIT_PROVENANCE_UNAVAILABLE',
+      'Unable to resolve literal worktree Git provenance.',
+      error,
+    );
+  }
+}
+
 function executablePath(value: string, code: string): string {
   const executable = value.trim();
   failClosed(
@@ -1144,6 +1172,18 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
         value: input.workspace.executionPath,
       },
     };
+
+    const gitProvenance = literalGitProvenance(input);
+    if (gitProvenance) {
+      secrets.AI_OFFICE_EXPECTED_GIT_COMMON_DIR = {
+        kind: 'StaticSecret',
+        value: gitProvenance.commonDir,
+      };
+      secrets.AI_OFFICE_EXPECTED_WORKTREE_GIT_FILE = {
+        kind: 'StaticSecret',
+        value: gitProvenance.worktreeGitFile,
+      };
+    }
 
     if (this.driver === 'codex' || this.driver === 'claude') {
       secrets.AI_OFFICE_HEADLESS_DRIVER = { kind: 'StaticSecret', value: this.driver };
