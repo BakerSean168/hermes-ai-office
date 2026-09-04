@@ -53,6 +53,21 @@ export interface WorkspaceDescriptor {
   createdAt: string;
 }
 
+export interface WorkspaceStorageStatus {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  minimumFreeBytes: number;
+  lowCapacity: boolean;
+}
+
+export interface WorkspaceCachePruneResult {
+  workspacesScanned: number;
+  cacheDirectoriesPruned: number;
+  freeBytesBefore: number;
+  freeBytesAfter: number;
+}
+
 export interface TestCommandEvidence {
   command: string;
   status: 'PASS' | 'FAIL' | 'SKIP';
@@ -173,6 +188,12 @@ export interface WorkspaceProvisionInput {
 export interface WorkspaceProviderPort {
   observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
   provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
+  /** Cheap signal used by the worker before attempting evidence-verified finalization. */
+  hasCompletionEvidence?(workspace: WorkspaceDescriptor): boolean;
+  storageStatus?(): WorkspaceStorageStatus;
+  pruneTerminalCaches?(
+    workspaces: readonly WorkspaceDescriptor[],
+  ): Promise<WorkspaceCachePruneResult>;
   verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot>;
   verifyReview(
     workspace: WorkspaceDescriptor,

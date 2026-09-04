@@ -13,8 +13,10 @@ import type {
   RepositoryObservation,
   ReviewCompletionEvidence,
   TestCommandEvidence,
+  WorkspaceCachePruneResult,
   WorkspaceCompletionSnapshot,
   WorkspaceDescriptor,
+  WorkspaceStorageStatus,
   WorkspaceProviderPort,
   WorkspaceProvisionInput,
 } from '../orchestration/contracts.js';
@@ -26,6 +28,7 @@ const MAX_CHANGED_FILES = 1_000;
 const MAX_IDENTIFIER = 180;
 const MAX_SUBMODULES = 64;
 const MAX_SUBMODULE_DEPTH = 4;
+const DEFAULT_MINIMUM_FREE_BYTES = 1024 * 1024 * 1024;
 
 export interface LocalGitWorkspaceOptions {
   allowedRepositoryRoots: string[];
@@ -35,6 +38,8 @@ export interface LocalGitWorkspaceOptions {
   maxBufferBytes?: number;
   workspaceUid?: number;
   workspaceGid?: number;
+  minimumFreeBytes?: number;
+  freeBytes?: (targetPath: string) => number;
 }
 
 interface StoredWorkspaceDescriptor extends WorkspaceDescriptor {
@@ -203,6 +208,8 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
   readonly maxBufferBytes: number;
   readonly workspaceUid: number;
   readonly workspaceGid: number;
+  readonly minimumFreeBytes: number;
+  readonly freeBytes: (targetPath: string) => number;
 
   constructor(options: LocalGitWorkspaceOptions) {
     failClosed(options.allowedRepositoryRoots.length > 0, 'WORKSPACE_ALLOWED_ROOT_REQUIRED');
@@ -218,6 +225,13 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     this.maxBufferBytes = options.maxBufferBytes ?? 8 * 1024 * 1024;
     this.workspaceUid = options.workspaceUid ?? process.getuid?.() ?? 0;
     this.workspaceGid = options.workspaceGid ?? process.getgid?.() ?? 0;
+    this.minimumFreeBytes = options.minimumFreeBytes ?? DEFAULT_MINIMUM_FREE_BYTES;
+    this.freeBytes =
+      options.freeBytes ??
+      ((targetPath: string) => {
+        const stat = fs.statfsSync(targetPath);
+        return Number(stat.bavail) * Number(stat.bsize);
+      });
     failClosed(
       this.commandTimeoutMs >= 1_000 && this.commandTimeoutMs <= 15 * 60_000,
       'WORKSPACE_GIT_TIMEOUT_INVALID',
@@ -232,6 +246,12 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
         Number.isInteger(this.workspaceGid) &&
         this.workspaceGid >= 0,
       'WORKSPACE_OWNER_INVALID',
+    );
+    failClosed(
+      Number.isFinite(this.minimumFreeBytes) &&
+        this.minimumFreeBytes >= 0 &&
+        this.minimumFreeBytes <= 1024 ** 5,
+      'WORKSPACE_CAPACITY_THRESHOLD_INVALID',
     );
   }
 
@@ -350,6 +370,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       throw new V4Error('WORKSPACE_SOURCE_REVISION_MISSING');
     }
 
+    this.preflightCapacity(this.managedHostRoot);
     const staging = executionDirectory + '.staging-' + randomUUID();
     fs.mkdirSync(staging, { mode: 0o750 });
     try {
@@ -418,8 +439,88 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       return descriptor;
     } catch (error) {
       fs.rmSync(staging, { recursive: true, force: true });
+      if (this.isStorageExhaustion(error))
+        throw new V4Error(
+          'WORKSPACE_STORAGE_EXHAUSTED',
+          'Workspace provisioning ran out of storage.',
+          error,
+        );
       throw error;
     }
+  }
+
+  hasCompletionEvidence(workspace: WorkspaceDescriptor): boolean {
+    const descriptor = this.validateWorkspace(workspace);
+    const stat = fs.lstatSync(descriptor.evidenceHostPath, { throwIfNoEntry: false });
+    return Boolean(stat?.isFile() && !stat.isSymbolicLink() && stat.size > 0);
+  }
+
+  storageStatus(): WorkspaceStorageStatus {
+    let stat: ReturnType<typeof fs.statfsSync>;
+    try {
+      stat = fs.statfsSync(this.managedHostRoot);
+    } catch (error) {
+      if (this.isStorageExhaustion(error))
+        throw new V4Error(
+          'WORKSPACE_STORAGE_EXHAUSTED',
+          'Unable to inspect workspace storage because the filesystem is exhausted.',
+          error,
+        );
+      throw new V4Error(
+        'WORKSPACE_CAPACITY_PROBE_FAILED',
+        'Unable to inspect workspace storage.',
+        error,
+      );
+    }
+    const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+    const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+    if (
+      !Number.isFinite(totalBytes) ||
+      !Number.isFinite(freeBytes) ||
+      totalBytes < 0 ||
+      freeBytes < 0
+    )
+      throw new V4Error('WORKSPACE_CAPACITY_PROBE_FAILED');
+    return {
+      totalBytes,
+      freeBytes,
+      usedBytes: Math.max(0, totalBytes - freeBytes),
+      minimumFreeBytes: this.minimumFreeBytes,
+      lowCapacity: freeBytes < this.minimumFreeBytes,
+    };
+  }
+
+  async pruneTerminalCaches(
+    workspaces: readonly WorkspaceDescriptor[],
+  ): Promise<WorkspaceCachePruneResult> {
+    const before = this.storageStatus();
+    let cacheDirectoriesPruned = 0;
+    const seen = new Set<string>();
+    for (const workspace of workspaces) {
+      const descriptor = this.validateWorkspace(workspace);
+      if (seen.has(descriptor.hostPath)) continue;
+      seen.add(descriptor.hostPath);
+      for (const candidate of this.cacheDirectories(descriptor.hostPath)) {
+        const relative = path.relative(descriptor.hostPath, candidate);
+        if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) continue;
+        const ignored = await this.gitSucceeds(descriptor.hostPath, [
+          'check-ignore',
+          '-q',
+          '--',
+          relative,
+        ]);
+        if (!ignored) continue;
+        fs.rmSync(candidate, { recursive: true, force: true });
+        cacheDirectoriesPruned += 1;
+      }
+    }
+    const after = this.storageStatus();
+    return {
+      workspacesScanned: seen.size,
+      cacheDirectoriesPruned,
+      freeBytesBefore: before.freeBytes,
+      freeBytesAfter: after.freeBytes,
+    };
   }
 
   async verifyImplementation(workspace: WorkspaceDescriptor): Promise<WorkspaceCompletionSnapshot> {
@@ -580,6 +681,7 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     ) {
       throw new V4Error('WORKSPACE_ACCEPTED_REVISION_NOT_DESCENDANT');
     }
+    this.preflightCapacity(repositoryRoot);
     const repositoryIdentity = this.repositoryIdentity(repositoryRoot);
     const gitDirectory = path.resolve(
       repositoryRoot,
@@ -596,6 +698,12 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'EEXIST') throw new V4Error('WORKSPACE_INTEGRATION_LOCKED');
+      if (code === 'ENOSPC' || code === 'EDQUOT')
+        throw new V4Error(
+          'WORKSPACE_STORAGE_EXHAUSTED',
+          'Integration filesystem is out of storage.',
+          error,
+        );
       throw new V4Error(
         'WORKSPACE_INTEGRATION_LOCK_FAILED',
         'Unable to create the integration lock: ' + (code ?? 'UNKNOWN'),
@@ -1237,6 +1345,82 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     return { uid: stat.uid, gid: stat.gid };
   }
 
+  private cacheDirectories(repositoryRoot: string): string[] {
+    const names = new Set([
+      'node_modules',
+      '.venv',
+      '.cache',
+      '.pytest_cache',
+      '.mypy_cache',
+      '.ruff_cache',
+      '.turbo',
+    ]);
+    const found: string[] = [];
+    const walk = (directory: string, depth: number): void => {
+      if (depth > 6) return;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+        if (entry.name === '.git') continue;
+        const child = path.join(directory, entry.name);
+        if (names.has(entry.name)) {
+          found.push(child);
+          continue;
+        }
+        walk(child, depth + 1);
+      }
+    };
+    walk(repositoryRoot, 0);
+    return found;
+  }
+
+  private preflightCapacity(targetPath: string): void {
+    let available: number;
+    try {
+      available = this.freeBytes(targetPath);
+    } catch (error) {
+      if (this.isStorageExhaustion(error))
+        throw new V4Error(
+          'WORKSPACE_STORAGE_EXHAUSTED',
+          'Unable to inspect storage because the filesystem is exhausted.',
+          error,
+        );
+      throw new V4Error(
+        'WORKSPACE_CAPACITY_PROBE_FAILED',
+        'Unable to inspect workspace filesystem capacity.',
+        error,
+      );
+    }
+    if (!Number.isFinite(available) || available < 0)
+      throw new V4Error('WORKSPACE_CAPACITY_PROBE_FAILED');
+    if (available < this.minimumFreeBytes)
+      throw new V4Error(
+        'WORKSPACE_CAPACITY_LOW',
+        'Workspace filesystem free space is below the configured safety threshold.',
+      );
+  }
+
+  private isStorageExhaustion(error: unknown): boolean {
+    if (error === null || typeof error !== 'object') return false;
+    const value = error as NodeJS.ErrnoException & { stderr?: string | Buffer };
+    const stderr =
+      typeof value.stderr === 'string'
+        ? value.stderr
+        : Buffer.isBuffer(value.stderr)
+          ? value.stderr.toString('utf8')
+          : '';
+    return (
+      value.code === 'ENOSPC' ||
+      value.code === 'EDQUOT' ||
+      /no space left on device|disk quota exceeded/i.test(stderr + ' ' + (value.message ?? ''))
+    );
+  }
+
   private async runGit(args: string[], identity?: { uid: number; gid: number }): Promise<string> {
     try {
       const result = await execFileAsync('git', args, {
@@ -1258,6 +1442,12 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
       return result.stdout.trim();
     } catch (error) {
       if (error instanceof V4Error) throw error;
+      if (this.isStorageExhaustion(error))
+        throw new V4Error(
+          'WORKSPACE_STORAGE_EXHAUSTED',
+          'Git operation ran out of storage.',
+          error,
+        );
       throw new V4Error('WORKSPACE_GIT_COMMAND_FAILED');
     }
   }

@@ -57,6 +57,8 @@ const FINALIZABLE_IMPLEMENTATION_CODES = new Set([
   'WORKSPACE_EVIDENCE_INVALID',
   'WORKSPACE_IMPLEMENTATION_EVIDENCE_MISMATCH',
 ]);
+const RETRYABLE_RESOURCE_QUALITY_CODES = new Set(['WORKSPACE_IMPLEMENTATION_NOOP']);
+const EVIDENCE_FINALIZATION_NAME = 'evidence-verified-provider-finalization';
 
 function errorCode(error: unknown): string {
   if (error instanceof V4Error) return error.code;
@@ -196,7 +198,7 @@ export class ExecutionWorker {
     if (!claim.value || claim.status === 'rejected')
       return { executionId, status: 'SKIPPED', code: claim.reason ?? 'EXECUTION_LEASE_HELD' };
     try {
-      const execution = this.repositories.executions.get(executionId);
+      let execution = this.repositories.executions.get(executionId);
       if (execution.status !== 'RUNNING')
         return { executionId, status: 'SKIPPED', code: 'EXECUTION_NOT_RESUMABLE' };
       const resolved = this.resolveProvider(execution);
@@ -586,7 +588,7 @@ export class ExecutionWorker {
     }
     let selectedResource: ExecutionResourceSelection | undefined;
     try {
-      const execution = this.repositories.executions.get(executionId);
+      let execution = this.repositories.executions.get(executionId);
       if (execution.status !== 'QUEUED' && execution.status !== 'RUNNING') {
         return { executionId, status: 'SKIPPED', code: 'EXECUTION_TERMINAL' };
       }
@@ -595,6 +597,20 @@ export class ExecutionWorker {
         return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
       const { provider, selection } = resolved;
       selectedResource = selection;
+      if (execution.status === 'QUEUED') {
+        const started = this.repositories.executions.compareAndSetStatus(
+          executionId,
+          'QUEUED',
+          'RUNNING',
+        );
+        if (!started.value || started.status === 'rejected')
+          return {
+            executionId,
+            status: 'SKIPPED',
+            code: started.reason ?? 'STALE_EXECUTION_STATUS',
+          };
+        execution = started.value;
+      }
       this.assertProviderPhase(provider, execution);
       const plan = this.repositories.plans.getPlan(execution.identity.planId);
       const workItem = execution.identity.workItemId
@@ -656,23 +672,18 @@ export class ExecutionWorker {
       session = this.repositories.sessions.get(executionId);
       if (!session.providerSessionId) throw new V4Error('PROVIDER_SESSION_ID_REQUIRED');
 
-      if (execution.status === 'QUEUED') {
-        const started = this.repositories.executions.compareAndSetStatus(
-          executionId,
-          'QUEUED',
-          'RUNNING',
-        );
-        if (started.status === 'rejected')
-          return {
-            executionId,
-            status: 'SKIPPED',
-            code: started.reason ?? 'STALE_EXECUTION_STATUS',
-          };
-      }
       if (execution.identity.phase === 'REVIEW') this.bindReviewerExecution(execution, session);
       this.renewLease(executionId, claim.value.leaseToken);
 
       if (!TERMINAL_PROVIDER_STATUSES.has(snapshot.status)) {
+        const finalized = await this.finalizeFromVerifiedEvidence(
+          provider,
+          execution,
+          session,
+          snapshot,
+          selectedResource,
+        );
+        if (finalized) return finalized;
         this.recordActiveProviderStatus(executionId, session, snapshot);
         return {
           executionId,
@@ -795,10 +806,24 @@ export class ExecutionWorker {
     } catch (error) {
       const code = errorCode(error);
       if (this.providerFailureEligible(code)) this.reportResourceFailure(selectedResource, error);
+      if (RETRYABLE_RESOURCE_QUALITY_CODES.has(code))
+        this.reportResourceFailure(selectedResource, {
+          code: 'PROVIDER_SUCCESS_NO_IMPLEMENTATION',
+          message:
+            'Provider completed without a verified implementation change or SATISFIED evidence.',
+        });
       const execution = this.repositories.executions.get(executionId);
-      if (execution.status === 'RUNNING' && code.startsWith('WORKSPACE_')) {
+      if (execution.status === 'RUNNING') {
+        const workspaceInfrastructureFailure =
+          code.startsWith('WORKSPACE_STORAGE_') ||
+          code.startsWith('WORKSPACE_CAPACITY_') ||
+          code.startsWith('WORKSPACE_EVIDENCE_') ||
+          code.startsWith('WORKSPACE_REVIEW_');
         const retryable =
-          execution.identity.phase !== 'REVIEW' && FINALIZABLE_IMPLEMENTATION_CODES.has(code);
+          workspaceInfrastructureFailure ||
+          this.providerFailureEligible(code) ||
+          RETRYABLE_RESOURCE_QUALITY_CODES.has(code) ||
+          (execution.identity.phase !== 'REVIEW' && FINALIZABLE_IMPLEMENTATION_CODES.has(code));
         this.repositories.executions.recordResult(executionId, {
           status: 'FAILED',
           errorCode: code,
@@ -809,6 +834,80 @@ export class ExecutionWorker {
     } finally {
       this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
     }
+  }
+
+  private async finalizeFromVerifiedEvidence(
+    provider: ExecutionProviderPort,
+    execution: Execution,
+    session: ExecutionSession,
+    observed: ProviderSessionSnapshot,
+    selectedResource: ExecutionResourceSelection | undefined,
+  ): Promise<ExecutionWorkerResult | undefined> {
+    if (!session.providerSessionId || !this.workspace.hasCompletionEvidence?.(session.workspace))
+      return undefined;
+    let completion: WorkspaceCompletionSnapshot;
+    try {
+      completion =
+        execution.identity.phase === 'REVIEW'
+          ? await this.workspace.verifyReview(session.workspace, execution.identity.sourceRevision!)
+          : await this.workspace.verifyImplementation(session.workspace);
+    } catch {
+      // A worker can create the evidence file before the final atomic write or
+      // clean-status check. Treat incomplete evidence as progress, not success.
+      return undefined;
+    }
+    if (!provider.interrupt) return undefined;
+    const stopped = await provider.interrupt(session.providerSessionId);
+    if (!TERMINAL_PROVIDER_STATUSES.has(stopped.status) && stopped.status !== 'PAUSED') {
+      this.recordActiveProviderStatus(execution.identity.executionId, session, stopped);
+      return undefined;
+    }
+    if (TERMINAL_PROVIDER_STATUSES.has(stopped.status))
+      this.recordTerminalProviderStatus(execution.identity.executionId, session, stopped);
+    else this.recordActiveProviderStatus(execution.identity.executionId, session, stopped);
+
+    this.persistCompletion(
+      execution,
+      completion,
+      stopped,
+      'evidence-finalization-provider-snapshot',
+    );
+    this.repositories.evidence.append({
+      executionId: execution.identity.executionId,
+      kind: 'RECOVERY',
+      name: EVIDENCE_FINALIZATION_NAME,
+      sourceRevision: execution.identity.sourceRevision,
+      payload: {
+        mode: 'evidence-verified-provider-finalization',
+        provider: stopped.provider,
+        providerSessionId: stopped.providerSessionId,
+        providerStatus: stopped.status,
+        observedStatus: observed.status,
+        observedAt: stopped.observedAt,
+        resultRevision: completion.headRevision,
+        ...(completion.evidence.phase === 'REVIEW'
+          ? { verdict: completion.evidence.verdict }
+          : { outcome: completion.evidence.outcome ?? 'CHANGED' }),
+      },
+    });
+    this.repositories.executions.recordResult(execution.identity.executionId, {
+      status: 'SUCCEEDED',
+      resultRevision: completion.headRevision,
+      resultSummary: bounded(completion.evidence.summary, MAX_RESULT_SUMMARY),
+    });
+    if (execution.identity.phase === 'REVIEW')
+      this.persistReviewVerdict(execution.identity.executionId, completion.evidence);
+    this.reportResourceSuccess(selectedResource);
+    return {
+      executionId: execution.identity.executionId,
+      status: 'SUCCEEDED',
+      code:
+        execution.identity.phase === 'REVIEW'
+          ? 'REVIEW_EVIDENCE_FINALIZED'
+          : 'IMPLEMENTATION_EVIDENCE_FINALIZED',
+      providerSessionId: stopped.providerSessionId,
+      resultRevision: completion.headRevision,
+    };
   }
 
   private finalizationInstruction(
@@ -1037,6 +1136,7 @@ export class ExecutionWorker {
     execution: Execution,
     snapshot: WorkspaceCompletionSnapshot,
     provider: ProviderSessionSnapshot,
+    providerEvidenceName = 'terminal-provider-snapshot',
   ): void {
     const sourceRevision = execution.identity.sourceRevision;
     this.repositories.evidence.append({
@@ -1070,7 +1170,7 @@ export class ExecutionWorker {
     this.repositories.evidence.append({
       executionId: execution.identity.executionId,
       kind: 'PROVIDER_OUTPUT',
-      name: 'terminal-provider-snapshot',
+      name: providerEvidenceName,
       sourceRevision,
       payload: {
         provider: provider.provider,

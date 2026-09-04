@@ -1,6 +1,32 @@
 # BodySense HDREV Pixel V4 Recovery Incident — 2026-09-03
 
-Status: OPEN (Pixel reliability). BodySense containment is CLOSED: direct operator development completed PR #165 and merged it to `main` as `a82da464f109c407e66328d9f9aff94a01589629` after all required CI checks passed. Pixel remains the subject of this incident; its P0/P1 reliability backlog is not closed by the BodySense merge.
+Status: P0 CLOSED / P1 PARTIALLY OPEN (Pixel reliability). BodySense containment is CLOSED: direct operator development completed PR #165 and merged it to `main` as `a82da464f109c407e66328d9f9aff94a01589629` after all required CI checks passed. Pixel remains the subject of this incident until the residual P1 items below are closed.
+
+## 2026-09-04 verification and remediation status
+
+The incident was re-verified against the current V4 source and production architecture rather than closed from historical intent. The important distinction is that several findings had already been fixed by the routing/resource convergence, while several others were still reproducible in current code and were fixed in this remediation batch.
+
+| # | Finding | Status after re-verification | Evidence / remediation |
+|---|---|---|---|
+| 1 | BodySense integration outside sandbox allowlist | CLOSED | Existing `9fdf316` plus release sandbox probe covers BodySense repo and Git common dir. |
+| 2 / 11 | Declared Go runtime not proven from the Agent-visible PATH | CLOSED | Release now proves `command -v go` resolves `/openhands-state/toolchains/go-1.26.0/bin/go` as the OpenHands worker user and proves `go version` is 1.26.0. |
+| 3 | Provider failures consume product attempts | CLOSED | Product and infrastructure attempt budgets are now separate; provider/transport/workspace infrastructure failures do not consume product implementation/review attempts and have a bounded infrastructure-attempt ceiling. |
+| 4 / 12 | Valid repo/evidence completion can be stranded behind provider finalization | CLOSED | The worker verifies exact completion evidence while the provider is still non-terminal, interrupts the stuck turn, preserves the real provider state, and finalizes the durable execution from repository facts. |
+| 5 | Heartbeat is not meaningful progress | OPEN (P1) | Provider heartbeat and workspace/evidence completion are now separated operationally, but V4 still lacks a first-class durable meaningful-progress cursor/fingerprint for arbitrary long-running turns. |
+| 6 | Worker/reviewer starts in the wrong workspace | CLOSED | Current OpenHands launch passes the exact `LocalWorkspace.working_dir` and recovery validates the execution workspace path. |
+| 7 / 8 / 13 | Operator/evidence completion provenance is not accepted consistently by review/replay/integration | CLOSED | `ReviewRepository` now owns a canonical completion-origin gate: exact verified workspace + exact result revision + provider success or an evidence-verified recovery origin. Downstream integration no longer re-imposes a contradictory provider-status requirement. |
+| 9 | INVALID/infrastructure review attempts consume review quality budget | CLOSED | INVALID/STALE and infrastructure reviewer failures use the separate infrastructure budget; genuine product review outcomes use the product budget. |
+| 10 | Release requires the canonical checkout HEAD | OPEN (P1) | A dedicated reviewed release worktree/ref remains desirable; the current release still intentionally fails closed unless canonical source and release SHA match. |
+| 14 | Provider `SUCCEEDED` + no product change is terminal non-retryable | CLOSED | `WORKSPACE_IMPLEMENTATION_NOOP` is retryable, is classified as provider/resource quality failure, and can reselect another execution resource. |
+| 15 | ENOSPC / unbounded workspace cache growth | PARTIAL (P1 residual) | V4 now has an 8 GiB production free-space preflight, typed `WORKSPACE_CAPACITY_*` / `WORKSPACE_STORAGE_EXHAUSTED`, health/storage accounting, release low-capacity gate, and high-watermark pruning of Git-ignored caches for terminal execution workspaces only. Global Docker/build-cache accounting and pruning remain open. |
+| 16 | Commit governance is discovered only after push/PR | CLOSED for the observed BodySense failure | When a required check is commit-lint/commitlint and the repository declares commitlint, delivery runs the repository's own `pnpm commitlint --from <target> --to <reviewed>` contract before push; failure enters delivery repair without publishing the bad head. |
+| 17 | Required CI failure has no bounded repair path | CLOSED | Required-check failure is durable `CHECKS_FAILED` and creates a bounded FOLLOW_UP delivery-repair plan with the same delivery contract and independent exact-SHA review. |
+| 18 / 20 | Repeated delivery repair restarts from stale product SHA / stale parent delivery | CLOSED | FOLLOW_UP repair bases on the durable delivery `headSha`; `SUPERSEDED_PENDING_CHILD` delegates delivery ownership to the repair child; child→grandchild repairs therefore advance from the latest PR head and supersede back up the chain after verified delivery. |
+| 19 | Resource admission can select a route whose ACP/tool runtime is unusable | PARTIAL (P1 residual) | Resource/provider launch failures are now durable, retryable infrastructure failures and trigger resource feedback/reselection without product-budget loss. Release-gated model-native runtimes and real E2E smokes exist, but periodic resource admission still probes provider transport rather than a full per-binding ACP workspace/tool smoke. |
+
+Additional regression coverage added by this remediation includes: queued capacity failure becomes durable retryable failure; unrecovered provider launch failure cannot leave an orphan RUNNING execution; live evidence can finalize implementation and independent review without falsifying provider success; chained CI repair uses successive delivery heads; ignored terminal caches are the only workspace paths eligible for automatic pruning; and commitlint failure occurs before any push.
+
+The remaining incident work is therefore P1 hardening, not a BodySense product blocker: first-class meaningful-progress tracking, a dedicated reviewed release worktree/ref, full ACP admission smoke per resource binding, and host-wide Docker/build-cache lifecycle governance.
 
 ## Scope
 

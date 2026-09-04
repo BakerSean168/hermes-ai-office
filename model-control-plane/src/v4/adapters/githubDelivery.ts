@@ -65,6 +65,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
       throw new V4Error('DELIVERY_LOCAL_REPOSITORY_DIRTY');
     this.assertBranch(delivery.branch, repository, identity);
     this.assertBranch(delivery.targetBranch, repository, identity);
+    this.preflightCommitLint(repository, identity, plan, delivery);
 
     const repositoryName = this.githubRepository(repository, identity, delivery.remote);
     const remoteHead = this.remoteHead(repository, identity, delivery.remote, delivery.branch);
@@ -109,7 +110,7 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
 
     const checks = pullRequest.statusCheckRollup ?? [];
     const checkState = this.checkState(checks, delivery.requiredChecks);
-    if (checkState === 'FAILED') throw new V4Error('DELIVERY_REQUIRED_CHECK_FAILED');
+    if (checkState === 'FAILED') return { status: 'CHECKS_FAILED', ...base, errorCode: 'DELIVERY_REQUIRED_CHECK_FAILED' };
     if (checkState === 'PENDING') return { status: 'CHECKS_PENDING', ...base };
     const mergeState = String(pullRequest.mergeStateStatus ?? '').toUpperCase();
     if (mergeState === 'BEHIND') throw new V4Error('DELIVERY_TARGET_BRANCH_ADVANCED');
@@ -139,6 +140,65 @@ export class GitHubCliDeliveryAdapter implements DeliveryAutomationPort {
     const targetHead = this.remoteHead(repository, identity, delivery.remote, delivery.targetBranch);
     if (!targetHead || targetHead !== mergeSha) throw new V4Error('DELIVERY_POST_MERGE_HEAD_MISMATCH');
     return { status: 'VERIFIED', ...base, mergeSha };
+  }
+
+  private preflightCommitLint(
+    repository: string,
+    identity: { uid: number; gid: number; home: string },
+    plan: Plan,
+    delivery: PlanDelivery,
+  ): void {
+    if (!delivery.requiredChecks.some((name) => /commit[-_ ]?lint/i.test(name))) return;
+    const configNames = [
+      'commitlint.config.js',
+      'commitlint.config.cjs',
+      'commitlint.config.mjs',
+      'commitlint.config.ts',
+      '.commitlintrc',
+      '.commitlintrc.json',
+      '.commitlintrc.yaml',
+      '.commitlintrc.yml',
+    ];
+    const packageFile = path.join(repository, 'package.json');
+    let declared = configNames.some((name) => fs.existsSync(path.join(repository, name)));
+    if (fs.existsSync(packageFile)) {
+      try {
+        const pkg = JSON.parse(fs.readFileSync(packageFile, 'utf8')) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+        };
+        declared ||= Boolean(
+          pkg.dependencies?.['@commitlint/cli'] || pkg.devDependencies?.['@commitlint/cli'],
+        );
+      } catch {
+        throw new V4Error('DELIVERY_COMMITLINT_CONFIG_INVALID');
+      }
+    }
+    if (!declared) return;
+    const baseSha = this.remoteHead(repository, identity, delivery.remote, delivery.targetBranch);
+    if (!baseSha) throw new V4Error('DELIVERY_COMMITLINT_BASE_UNAVAILABLE');
+    let command: string;
+    let args: string[];
+    if (fs.existsSync(path.join(repository, 'pnpm-lock.yaml'))) {
+      command = '/usr/bin/pnpm';
+      args = ['commitlint', '--from', baseSha, '--to', plan.currentRevision];
+    } else if (fs.existsSync(path.join(repository, 'package-lock.json'))) {
+      command = '/usr/bin/npx';
+      args = ['--no-install', 'commitlint', '--from', baseSha, '--to', plan.currentRevision];
+    } else {
+      throw new V4Error('DELIVERY_COMMITLINT_RUNTIME_UNAVAILABLE');
+    }
+    try {
+      this.command(command, args, identity, { COREPACK_ENABLE_DOWNLOAD_PROMPT: '0' }, repository);
+    } catch (error) {
+      if (error instanceof V4Error && error.code === 'DELIVERY_COMMAND_FAILED')
+        throw new V4Error(
+          'DELIVERY_REQUIRED_CHECK_FAILED',
+          'Local commitlint preflight failed before delivery push.',
+          error,
+        );
+      throw error;
+    }
   }
 
   private checkState(checks: NonNullable<PullRequestView['statusCheckRollup']>, required: string[]): 'READY' | 'PENDING' | 'FAILED' {

@@ -261,6 +261,7 @@ function runtime(
       reviewRoutes: ['gpt-5.6-sol', 'review-premium'],
       maxImplementationAttempts: 3,
       maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
       maxRepairCycles: 3,
       requireDelivery: options.requireDelivery ?? false,
     }),
@@ -369,6 +370,97 @@ test('plan automation persists delivery progress and succeeds only after remote 
   assert.equal(plan.delivery?.pullRequestNumber, 42);
   assert.equal(plan.delivery?.mergeSha, 'merge-sha');
   assert.deepEqual(delivery.calls, ['result-sha-1', 'result-sha-1']);
+  seeded.db.close();
+});
+
+test('required CI failures create chained delivery repairs from the latest durable delivery head', async () => {
+  const config: PlanDeliveryConfig = {
+    remote: 'origin',
+    branch: 'pixel/delivery-repair-chain',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
+  };
+  const seeded = seed([{ itemKey: 'first' }], config);
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const delivery = new ScriptedDelivery();
+  delivery.observations = [
+    {
+      status: 'CHECKS_FAILED',
+      headSha: 'result-sha-1',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+      errorCode: 'DELIVERY_REQUIRED_CHECK_FAILED',
+    },
+    {
+      status: 'CHECKS_FAILED',
+      headSha: 'result-sha-2',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+      errorCode: 'DELIVERY_REQUIRED_CHECK_FAILED',
+    },
+    {
+      status: 'VERIFIED',
+      headSha: 'result-sha-3',
+      pullRequestNumber: 42,
+      pullRequestUrl: 'https://example.test/pull/42',
+      mergeSha: 'merge-sha-3',
+    },
+  ];
+  const automation = runtime(seeded.repositories, runner, workspace, {
+    requireDelivery: true,
+    delivery,
+  });
+
+  let parentRepair: Awaited<ReturnType<PlanAutomationRuntime['runPlan']>> | undefined;
+  for (let index = 0; index < 10; index += 1) {
+    const result = await automation.runPlan(seeded.plan.planId);
+    if (result.code === 'DELIVERY_REPAIR_QUEUED') {
+      parentRepair = result;
+      break;
+    }
+  }
+  assert.ok(parentRepair?.childPlanId);
+  const firstChildId = parentRepair.childPlanId;
+  const parent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  assert.equal(parent.delivery?.status, 'SUPERSEDED_PENDING_CHILD');
+  assert.equal(parent.delivery?.headSha, 'result-sha-1');
+  const firstChild = seeded.repositories.plans.getPlan(firstChildId);
+  assert.equal(firstChild.baseRevision, 'result-sha-1');
+  assert.equal(firstChild.status, 'READY');
+  assert.equal(firstChild.delivery?.branch, config.branch);
+
+  let childRepair: Awaited<ReturnType<PlanAutomationRuntime['runPlan']>> | undefined;
+  for (let index = 0; index < 10; index += 1) {
+    const result = await automation.runPlan(firstChildId);
+    if (result.code === 'DELIVERY_REPAIR_QUEUED') {
+      childRepair = result;
+      break;
+    }
+  }
+  assert.ok(childRepair?.childPlanId);
+  const secondChildId = childRepair.childPlanId;
+  const firstChildAfterFailure = seeded.repositories.plans.getPlan(firstChildId);
+  assert.equal(firstChildAfterFailure.currentRevision, 'result-sha-2');
+  assert.equal(firstChildAfterFailure.delivery?.headSha, 'result-sha-2');
+  assert.equal(firstChildAfterFailure.delivery?.status, 'SUPERSEDED_PENDING_CHILD');
+  assert.equal(seeded.repositories.plans.getPlan(secondChildId).baseRevision, 'result-sha-2');
+
+  const secondChildResults = await drive(automation, secondChildId);
+  assert.equal(secondChildResults.at(-1)?.code, 'PLAN_DELIVERED');
+  assert.equal(seeded.repositories.plans.getPlan(secondChildId).currentRevision, 'result-sha-3');
+
+  const firstFinished = await automation.runPlan(firstChildId);
+  assert.equal(firstFinished.code, 'PLAN_DELIVERY_SUPERSEDED');
+  assert.equal(seeded.repositories.plans.getPlan(firstChildId).delivery?.status, 'SUPERSEDED');
+  const parentFinished = await automation.runPlan(seeded.plan.planId);
+  assert.equal(parentFinished.code, 'PLAN_DELIVERY_SUPERSEDED');
+  const finalParent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  assert.equal(finalParent.status, 'SUCCEEDED');
+  assert.equal(finalParent.delivery?.status, 'SUPERSEDED');
+  assert.equal(finalParent.delivery?.mergeSha, 'merge-sha-3');
   seeded.db.close();
 });
 
@@ -564,14 +656,14 @@ test('plan automation retries an INVALID review without creating a product repai
   seeded.db.close();
 });
 
-test('explicit review reconciliation revives an exhausted INVALID review at the same exact revision', async () => {
+test('explicit review reconciliation revives infrastructure-exhausted INVALID reviews at the same exact revision', async () => {
   const seeded = seed();
   const workspace = new AutomationWorkspace();
   const runner = new ScriptedRunner(seeded.repositories, workspace);
   runner.reviewVerdicts = ['INVALID', 'INVALID'];
   const automation = runtime(seeded.repositories, runner, workspace);
   const failed = await drive(automation, seeded.plan.planId);
-  assert.equal(failed.at(-1)?.code, 'REVIEW_ATTEMPTS_EXHAUSTED');
+  assert.equal(failed.at(-1)?.code, 'REVIEW_INFRASTRUCTURE_ATTEMPTS_EXHAUSTED');
   assert.equal(seeded.repositories.plans.getPlan(seeded.plan.planId).status, 'FAILED');
 
   runner.reviewVerdicts = ['PASS'];

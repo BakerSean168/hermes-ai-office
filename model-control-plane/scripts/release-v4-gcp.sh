@@ -102,6 +102,16 @@ if [[ "$openhands_node_major" != "24" ]]; then
   echo "OpenHands coding runtime must use Node 24, got major $openhands_node_major" >&2
   exit 1
 fi
+openhands_go_path="$(sudo docker exec --user 10001:10001 hermes-openhands-v3 /bin/sh -c 'command -v go')"
+if [[ "$openhands_go_path" != "/openhands-state/toolchains/go-1.26.0/bin/go" ]]; then
+  echo "OpenHands Agent PATH must resolve persisted Go 1.26.0 first, got $openhands_go_path" >&2
+  exit 1
+fi
+openhands_go_version="$(sudo docker exec --user 10001:10001 hermes-openhands-v3 /bin/sh -c 'go version')"
+if [[ "$openhands_go_version" != *"go1.26.0"* ]]; then
+  echo "OpenHands Agent PATH must expose Go 1.26.0, got $openhands_go_version" >&2
+  exit 1
+fi
 sudo docker exec --user 10001:10001 hermes-openhands-v3 /bin/sh -lc '
   test "$COREPACK_HOME" = /openhands-state/corepack
   test "$COREPACK_ENABLE_DOWNLOAD_PROMPT" = 0
@@ -153,7 +163,11 @@ for _ in $(seq 1 30); do
     if HEALTH_JSON="$health" /usr/bin/node - <<'NODE'
 const payload = JSON.parse(process.env.HEALTH_JSON ?? '{}');
 const runtime = payload.executionRuntime ?? {};
+const storage = payload.workspaceStorage ?? {};
 if (payload.status !== 'ok' || payload.apiVersion !== 4) process.exit(1);
+if (storage.lowCapacity !== false) process.exit(1);
+if (!Number.isFinite(Number(storage.freeBytes)) || !Number.isFinite(Number(storage.minimumFreeBytes))) process.exit(1);
+if (Number(storage.freeBytes) < Number(storage.minimumFreeBytes)) process.exit(1);
 if (runtime.enabled !== true || runtime.autonomousPolling !== true) process.exit(1);
 if (runtime.resourceSelectorEnabled !== true || Number(runtime.resourceCount) < 1) process.exit(1);
 if (Array.isArray(runtime.compatibilityReviewRoutes) && runtime.compatibilityReviewRoutes.includes('codex-auto-review')) process.exit(1);

@@ -125,6 +125,9 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /await backup\(db, target\)/);
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.resourceSelectorEnabled !== true/);
+  assert.match(release, /storage\.lowCapacity !== false/);
+  assert.match(release, /storage\.freeBytes/);
+  assert.match(release, /storage\.minimumFreeBytes/);
   assert.match(release, /runtime\.compatibilityReviewRoutes.*codex-auto-review/);
   assert.match(release, /runtime\.requireDelivery !== true/);
   assert.match(release, /runtime\.automationProjectKeys/);
@@ -240,6 +243,10 @@ test('OpenHands persists and gates the exact BodySense Go toolchain', () => {
   assert.match(openHandsTooling, /--volumes-from "\$CONTAINER"/);
   assert.match(openHandsTooling, /"\$GO_TOOLCHAIN_ROOT\/bin\/go" version/);
   assert.match(openHandsTooling, /test -x "\$GO_TOOLCHAIN_ROOT\/bin\/gofmt"/);
+  assert.match(release, /command -v go/);
+  assert.match(release, /OpenHands Agent PATH must resolve persisted Go 1\.26\.0 first/);
+  assert.match(release, /go version/);
+  assert.match(release, /OpenHands Agent PATH must expose Go 1\.26\.0/);
 });
 
 test('OpenHands persists and prewarms exact Corepack pnpm versions without prompts', () => {

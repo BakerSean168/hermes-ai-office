@@ -6,6 +6,7 @@ import test from 'node:test';
 import type { SpawnSyncReturns } from 'node:child_process';
 
 import { GitHubCliDeliveryAdapter } from '../src/v4/adapters/githubDelivery.js';
+import { V4Error } from '../src/v4/domain/errors.js';
 import type { PlanDelivery } from '../src/v4/domain/delivery.js';
 import type { Plan } from '../src/v4/domain/plan.js';
 
@@ -101,6 +102,91 @@ test('GitHub delivery merges only the exact PR head after required checks and ve
   assert.ok(merge!.args.includes('--match-head-commit'));
   assert.ok(merge!.args.includes('head-sha'));
   assert.ok(!calls.some((call) => call.command === '/usr/bin/git' && call.args.includes('push')));
+  fs.rmSync(value.root, { recursive: true, force: true });
+});
+
+test('GitHub delivery runs the repository commitlint contract before pushing and converts failure to typed repair', async () => {
+  const value = fixture();
+  value.delivery.requiredChecks = ['commit-lint'];
+  fs.writeFileSync(path.join(value.root, 'commitlint.config.ts'), 'export default {};\n');
+  fs.writeFileSync(
+    path.join(value.root, 'package.json'),
+    JSON.stringify({ devDependencies: { '@commitlint/cli': '21.2.1' } }),
+  );
+  fs.writeFileSync(path.join(value.root, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n');
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const spawn = ((command: string, args: readonly string[]) => {
+    const argv = [...args];
+    calls.push({ command, args: argv });
+    if (command === '/usr/bin/getent')
+      return result(
+        `dev:x:${fs.statSync(value.root).uid}:${fs.statSync(value.root).gid}:dev:/tmp:/bin/bash\n`,
+      );
+    if (command === '/usr/bin/git') {
+      if (argv.includes('rev-parse')) return result('head-sha\n');
+      if (argv.includes('status')) return result('');
+      if (argv.includes('check-ref-format')) return result('');
+      if (argv.includes('ls-remote')) {
+        const ref = argv.at(-1);
+        if (ref === 'refs/heads/main') return result('base-sha\trefs/heads/main\n');
+        return result('');
+      }
+    }
+    if (command === '/usr/bin/pnpm') return result('', 'commit message violates config', 1);
+    return result('', 'unexpected command: ' + command + ' ' + argv.join(' '), 1);
+  }) as any;
+  const adapter = new GitHubCliDeliveryAdapter({ allowedRepositoryRoots: [value.root], spawn });
+  await assert.rejects(
+    () => adapter.advance(value.plan, value.delivery),
+    (error: unknown) => error instanceof V4Error && error.code === 'DELIVERY_REQUIRED_CHECK_FAILED',
+  );
+  const lint = calls.find((call) => call.command === '/usr/bin/pnpm');
+  assert.deepEqual(lint?.args, ['commitlint', '--from', 'base-sha', '--to', 'head-sha']);
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/git' && call.args.includes('push')));
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/gh'));
+  fs.rmSync(value.root, { recursive: true, force: true });
+});
+
+test('GitHub delivery reports a failed required check as durable repairable delivery state', async () => {
+  const value = fixture();
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const failedPr = {
+    number: 12,
+    state: 'OPEN',
+    url: 'https://github.com/acme/repo/pull/12',
+    headRefOid: 'head-sha',
+    mergeStateStatus: 'CLEAN',
+    statusCheckRollup: [{ name: 'CI', status: 'COMPLETED', conclusion: 'FAILURE' }],
+  };
+  const spawn = ((command: string, args: readonly string[]) => {
+    const argv = [...args];
+    calls.push({ command, args: argv });
+    if (command === '/usr/bin/getent')
+      return result(
+        `dev:x:${fs.statSync(value.root).uid}:${fs.statSync(value.root).gid}:dev:/tmp:/bin/bash\n`,
+      );
+    if (command === '/usr/bin/git') {
+      if (argv.includes('rev-parse')) return result('head-sha\n');
+      if (argv.includes('status')) return result('');
+      if (argv.includes('check-ref-format')) return result('');
+      if (argv.includes('remote') && argv.includes('get-url'))
+        return result('https://github.com/acme/repo.git\n');
+      if (argv.includes('ls-remote')) return result('head-sha\trefs/heads/pixel/exact-delivery\n');
+    }
+    if (command === '/usr/bin/gh' && argv[0] === 'pr' && argv[1] === 'list')
+      return result(JSON.stringify([failedPr]));
+    return result('', 'unexpected command: ' + command + ' ' + argv.join(' '), 1);
+  }) as any;
+  const adapter = new GitHubCliDeliveryAdapter({ allowedRepositoryRoots: [value.root], spawn });
+  const observed = await adapter.advance(value.plan, value.delivery);
+  assert.deepEqual(observed, {
+    status: 'CHECKS_FAILED',
+    headSha: 'head-sha',
+    pullRequestNumber: 12,
+    pullRequestUrl: 'https://github.com/acme/repo/pull/12',
+    errorCode: 'DELIVERY_REQUIRED_CHECK_FAILED',
+  });
+  assert.ok(!calls.some((call) => call.command === '/usr/bin/gh' && call.args[1] === 'merge'));
   fs.rmSync(value.root, { recursive: true, force: true });
 });
 

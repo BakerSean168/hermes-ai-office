@@ -440,6 +440,13 @@ async function buildExecutionAutomation(
       64 * 1024 * 1024,
       'WORKSPACE_GIT_BUFFER_INVALID',
     ),
+    minimumFreeBytes: integerValue(
+      env.MODEL_CP_V4_WORKSPACE_MIN_FREE_BYTES,
+      8 * 1024 * 1024 * 1024,
+      0,
+      1024 ** 5,
+      'WORKSPACE_CAPACITY_THRESHOLD_INVALID',
+    ),
     workspaceUid,
     workspaceGid,
   });
@@ -829,6 +836,32 @@ export async function buildControlPlane(
     ...execution,
     resourceSelection: repositories.resourceSelections.get(execution.identity.executionId) ?? null,
   });
+  const workspaceStorage = () => automation?.workspace.storageStatus?.() ?? null;
+  const runWorkspaceStorageMaintenance = async () => {
+    if (!automation?.workspace.storageStatus || !automation.workspace.pruneTerminalCaches)
+      return null;
+    const before = automation.workspace.storageStatus();
+    if (!before.lowCapacity) return null;
+    const terminal = repositories.executions.listByStatuses(
+      ['SUCCEEDED', 'FAILED', 'BLOCKED', 'CANCELLED'],
+      1000,
+    );
+    const workspaces = terminal
+      .map(
+        (execution) => repositories.sessions.getOptional(execution.identity.executionId)?.workspace,
+      )
+      .filter((workspace): workspace is NonNullable<typeof workspace> => Boolean(workspace));
+    const result = await automation.workspace.pruneTerminalCaches(workspaces);
+    app.log.warn(
+      {
+        ...result,
+        minimumFreeBytes: before.minimumFreeBytes,
+        terminalExecutions: terminal.length,
+      },
+      'workspace storage high-watermark cleanup',
+    );
+    return result;
+  };
 
   app.get('/api/health', async () => ({
     status: 'ok',
@@ -836,6 +869,7 @@ export async function buildControlPlane(
     apiVersion: 4,
     mode: 'greenfield',
     database: boot.dbFile,
+    workspaceStorage: workspaceStorage(),
     executionRuntime: {
       enabled: Boolean(automation),
       autonomousPolling: Boolean(automation && env.MODEL_CP_AUTOMATION_RUNTIME_ENABLED === 'true'),
@@ -848,6 +882,15 @@ export async function buildControlPlane(
       automationProjectKeys: automation?.automationProjectKeys ?? [],
       requireDelivery: automation?.requireDelivery ?? false,
     },
+  }));
+
+  app.get('/api/v4/storage', async () => ({
+    storage: workspaceStorage(),
+  }));
+
+  app.post('/api/v4/storage/reconcile', async () => ({
+    storage: workspaceStorage(),
+    cleanup: await runWorkspaceStorageMaintenance(),
   }));
 
   app.get('/api/v4/resources', async () => {
@@ -1412,8 +1455,8 @@ export async function buildControlPlane(
           () => {
             if (automationCycleRunning) return;
             automationCycleRunning = true;
-            void automation.plans
-              .runOnce()
+            void runWorkspaceStorageMaintenance()
+              .then(() => automation.plans.runOnce())
               .then((results) => {
                 for (const result of results)
                   if (result.status !== 'SKIPPED')

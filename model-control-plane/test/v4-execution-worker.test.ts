@@ -89,7 +89,13 @@ class FakeWorkspace implements WorkspaceProviderPort {
   readonly descriptors = new Map<string, WorkspaceDescriptor>();
   readonly completions = new Map<string, WorkspaceCompletionSnapshot>();
   readonly implementationFailures = new Map<string, V4Error[]>();
+  readonly completionEvidence = new Set<string>();
+  provisionError?: V4Error;
   provisionCalls = 0;
+
+  hasCompletionEvidence(workspace: WorkspaceDescriptor): boolean {
+    return this.completionEvidence.has(workspace.executionId);
+  }
 
   async observeRepository(repositoryPath: string, revision: string) {
     return {
@@ -104,6 +110,7 @@ class FakeWorkspace implements WorkspaceProviderPort {
 
   async provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor> {
     this.provisionCalls += 1;
+    if (this.provisionError) throw this.provisionError;
     const existing = this.descriptors.get(input.executionId);
     if (existing) return existing;
     const descriptor: WorkspaceDescriptor = {
@@ -395,6 +402,195 @@ test('execution worker launches once, persists provider correlation, then comple
   seeded.db.close();
 });
 
+test('execution worker durably fails a queued execution when workspace capacity blocks provisioning', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-capacity-preflight-failure',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.provisionError = new V4Error('WORKSPACE_CAPACITY_LOW');
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-capacity-preflight-failure' },
+  );
+
+  const result = await worker.runExecution(execution.identity.executionId);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'WORKSPACE_CAPACITY_LOW');
+  const durable = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(durable.status, 'FAILED');
+  assert.equal(durable.retryable, true);
+  assert.equal(provider.launchCalls, 0);
+  seeded.db.close();
+});
+
+test('execution worker persists unrecovered provider launch failures instead of leaving RUNNING work orphaned', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-provider-launch-failure',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  provider.launchError = new V4Error('OPENHANDS_LAUNCH_HTTP_503');
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-provider-launch-failure' },
+  );
+
+  const result = await worker.runExecution(execution.identity.executionId);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'OPENHANDS_LAUNCH_HTTP_503');
+  const durable = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(durable.status, 'FAILED');
+  assert.equal(durable.retryable, true);
+  assert.equal(provider.launchCalls, 1);
+  seeded.db.close();
+});
+
+test('execution worker automatically finalizes exact implementation evidence while provider turn is still running', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-evidence-finalize-implementation',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-evidence-finalize-implementation' },
+  );
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  const descriptor = seeded.repositories.sessions.get(execution.identity.executionId).workspace;
+  workspace.completions.set(execution.identity.executionId, implementationCompletion(descriptor));
+  workspace.completionEvidence.add(execution.identity.executionId);
+  provider.inspectSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'RUNNING',
+    observedAt: now(200),
+  };
+  provider.interruptSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'PAUSED',
+    observedAt: now(210),
+  };
+
+  const completed = await worker.runExecution(execution.identity.executionId);
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.code, 'IMPLEMENTATION_EVIDENCE_FINALIZED');
+  assert.equal(completed.resultRevision, 'result-sha');
+  assert.equal(provider.interruptCalls, 1);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'PAUSED',
+  );
+  const evidence = seeded.repositories.evidence.listByExecution(execution.identity.executionId);
+  assert.ok(
+    evidence.some(
+      (item) =>
+        item.kind === 'RECOVERY' &&
+        item.name === 'evidence-verified-provider-finalization' &&
+        item.payload.providerStatus === 'PAUSED',
+    ),
+  );
+  seeded.db.close();
+});
+
+test('execution worker automatically finalizes exact independent review evidence without provider success fiction', async () => {
+  const seeded = seed();
+  const implementation = createExecution(seeded.repositories, {
+    executionId: 'implementation-evidence-finalize-review',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const implementationWorkspace: WorkspaceDescriptor = {
+    executionId: implementation.identity.executionId,
+    hostPath: '/managed/implementation-evidence-finalize-review/repo',
+    executionPath: '/workspace/implementation-evidence-finalize-review/repo',
+    evidenceHostPath: '/managed/implementation-evidence-finalize-review/completion-evidence.json',
+    evidenceExecutionPath:
+      '/workspace/implementation-evidence-finalize-review/completion-evidence.json',
+    sourceRepositoryPath: seeded.plan.repositoryPath,
+    sourceRevision: 'base-sha',
+    createdAt: now(),
+  };
+  succeedImplementationSession(seeded.repositories, implementation, implementationWorkspace);
+  const review = seeded.repositories.reviews.create({
+    idempotencyKey: 'review-evidence-finalize',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+    implementationExecutionId: implementation.identity.executionId,
+    sourceRevision: 'result-sha',
+  }).value!;
+  const reviewer = createExecution(seeded.repositories, {
+    executionId: 'reviewer-evidence-finalize',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+    phase: 'REVIEW',
+    parentExecutionId: implementation.identity.executionId,
+    sourceRevision: 'result-sha',
+    route: 'review',
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeReviewProvider();
+  provider.launchSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'review-evidence-session',
+    status: 'RUNNING',
+    observedAt: now(10),
+  };
+  provider.inspectSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'review-evidence-session',
+    status: 'RUNNING',
+    observedAt: now(200),
+  };
+  provider.interruptSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'review-evidence-session',
+    status: 'PAUSED',
+    observedAt: now(210),
+  };
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'review', provider }],
+    { ownerId: 'worker-evidence-finalize-review' },
+  );
+  const launched = await worker.runExecution(reviewer.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  seeded.repositories.reviews.attachReviewerExecution(
+    review.reviewId,
+    reviewer.identity.executionId,
+  );
+  const descriptor = seeded.repositories.sessions.get(reviewer.identity.executionId).workspace;
+  workspace.completions.set(reviewer.identity.executionId, reviewCompletion(descriptor));
+  workspace.completionEvidence.add(reviewer.identity.executionId);
+  const completed = await worker.runExecution(reviewer.identity.executionId);
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.code, 'REVIEW_EVIDENCE_FINALIZED');
+  assert.equal(
+    seeded.repositories.sessions.get(reviewer.identity.executionId).providerStatus,
+    'PAUSED',
+  );
+  assert.equal(seeded.repositories.reviews.getById(review.reviewId).status, 'PASSED');
+  seeded.db.close();
+});
+
 test('execution worker adopts a paused operator-assisted implementation only after deterministic workspace verification', async () => {
   const seeded = seed();
   const execution = createExecution(seeded.repositories, {
@@ -636,6 +832,47 @@ test('execution worker resumes the same terminal implementation session once to 
     seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
     'SUCCEEDED',
   );
+  seeded.db.close();
+});
+
+test('execution worker treats provider success without implementation evidence as retryable resource quality failure', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-provider-success-noop',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  provider.launchSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-success-noop-session',
+    status: 'SUCCEEDED',
+    observedAt: now(10),
+  };
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-provider-success-noop' },
+  );
+  const descriptor = await workspace.provision({
+    executionId: execution.identity.executionId,
+    repositoryPath: seeded.plan.repositoryPath,
+    sourceRevision: execution.identity.sourceRevision!,
+    phase: 'IMPLEMENT',
+  });
+  workspace.implementationFailures.set(execution.identity.executionId, [
+    new V4Error('WORKSPACE_IMPLEMENTATION_NOOP'),
+  ]);
+  workspace.completions.set(execution.identity.executionId, implementationCompletion(descriptor));
+
+  const result = await worker.runExecution(execution.identity.executionId);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'WORKSPACE_IMPLEMENTATION_NOOP');
+  const stored = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(stored.status, 'FAILED');
+  assert.equal(stored.retryable, true);
   seeded.db.close();
 });
 

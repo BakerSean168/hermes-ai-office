@@ -60,6 +60,7 @@ function fixture() {
     managedHostRoot: managedRoot,
     executionRoot: '/workspace',
     commandTimeoutMs: 30_000,
+    minimumFreeBytes: 0,
   });
   return { directory, allowedRoot, managedRoot, adapter, ...repo };
 }
@@ -103,6 +104,56 @@ function reviewEvidence(
     ...override,
   };
 }
+
+test('LocalGitWorkspace fails closed before provisioning when managed storage is below threshold', async () => {
+  const value = fixture();
+  const adapter = new LocalGitWorkspaceAdapter({
+    allowedRepositoryRoots: [value.allowedRoot],
+    managedHostRoot: value.managedRoot,
+    executionRoot: '/workspace',
+    commandTimeoutMs: 30_000,
+    minimumFreeBytes: 8 * 1024 * 1024 * 1024,
+    freeBytes: () => 1024,
+  });
+  await assert.rejects(
+    () =>
+      adapter.provision({
+        executionId: 'exec-capacity-low',
+        repositoryPath: value.repositoryPath,
+        sourceRevision: value.baseRevision,
+        phase: 'IMPLEMENT',
+      }),
+    (error: unknown) => error instanceof V4Error && error.code === 'WORKSPACE_CAPACITY_LOW',
+  );
+  assert.equal(
+    fs.existsSync(path.join(value.managedRoot, 'v4', 'executions', 'exec-capacity-low')),
+    false,
+  );
+});
+
+test('LocalGitWorkspace prunes only ignored cache directories from explicitly terminal workspaces', async () => {
+  const value = fixture();
+  const workspace = await value.adapter.provision({
+    executionId: 'exec-terminal-cache-prune',
+    repositoryPath: value.repositoryPath,
+    sourceRevision: value.baseRevision,
+    phase: 'IMPLEMENT',
+  });
+  write(path.join(workspace.hostPath, 'node_modules', 'pkg', 'index.js'), 'cache\n');
+  write(path.join(workspace.hostPath, 'kept', 'artifact.txt'), 'keep\n');
+  write(workspace.evidenceHostPath, '{"terminal":true}\n');
+  const result = await value.adapter.pruneTerminalCaches([workspace, workspace]);
+  assert.equal(result.workspacesScanned, 1);
+  assert.equal(result.cacheDirectoriesPruned, 1);
+  assert.equal(fs.existsSync(path.join(workspace.hostPath, 'node_modules')), false);
+  assert.equal(
+    fs.readFileSync(path.join(workspace.hostPath, 'kept', 'artifact.txt'), 'utf8'),
+    'keep\n',
+  );
+  assert.equal(fs.existsSync(path.join(workspace.hostPath, '.git')), true);
+  assert.equal(fs.existsSync(workspace.evidenceHostPath), true);
+  fs.rmSync(value.directory, { recursive: true, force: true });
+});
 
 test('LocalGitWorkspace observes allowed repositories and rejects roots and symlinks', async () => {
   const value = fixture();

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { validatePlanDeliveryConfig, type DeliveryObservation, type DeliveryStatus, type PlanDelivery, type PlanDeliveryConfig } from '../domain/delivery.js';
+import { isDeliveryComplete, validatePlanDeliveryConfig, type DeliveryObservation, type DeliveryStatus, type PlanDelivery, type PlanDeliveryConfig } from '../domain/delivery.js';
 import { DuplicateKeyError, StaleStateError, V4Error, failClosed } from '../domain/errors.js';
 import { assertSafeEventPayload, type EventEnvelope } from '../domain/events.js';
 import { transitionExecution, validateExecutionIdentity, type Execution, type ExecutionIdentity, type ExecutionPhase, type ExecutionStatus } from '../domain/execution.js';
@@ -107,10 +107,12 @@ const DELIVERY_STAGE: Record<DeliveryStatus, number> = {
   PUSHED: 1,
   PR_OPEN: 2,
   CHECKS_PENDING: 2,
-  READY_TO_MERGE: 3,
-  MERGED: 4,
-  VERIFIED: 5,
-  SUPERSEDED: 6,
+  CHECKS_FAILED: 3,
+  SUPERSEDED_PENDING_CHILD: 4,
+  READY_TO_MERGE: 5,
+  MERGED: 6,
+  VERIFIED: 7,
+  SUPERSEDED: 8,
 };
 
 interface GraphRow {
@@ -170,19 +172,23 @@ export class PlanRepository {
   }): { plan: Plan; relationshipId: string } {
     return withTransaction(this.db, () => {
       const parent = this.getPlan(input.parentPlanId);
+      const childBaseRevision =
+        input.relation === 'FOLLOW_UP'
+          ? (parent.delivery?.headSha ?? parent.currentRevision)
+          : parent.currentRevision;
       const childInput: CreatePlanInput = {
         planId: input.childPlanId,
         idempotencyKey: 'child-plan:' + input.parentPlanId + ':' + input.childPlanId,
         projectKey: parent.projectKey,
         objective: input.objective,
         repositoryPath: input.repositoryPath,
-        baseRevision: parent.currentRevision,
+        baseRevision: childBaseRevision,
         parentPlanId: parent.planId,
       };
       validatePlanInput(childInput);
       let row = this.db.prepare('SELECT * FROM plans WHERE idempotency_key=?').get(childInput.idempotencyKey) as PlanRow | undefined;
       if (row) {
-        if (row.plan_id !== input.childPlanId || row.parent_plan_id !== parent.planId || row.objective !== input.objective || row.repository_path !== input.repositoryPath || row.base_revision !== parent.currentRevision) {
+        if (row.plan_id !== input.childPlanId || row.parent_plan_id !== parent.planId || row.objective !== input.objective || row.repository_path !== input.repositoryPath || row.base_revision !== childBaseRevision) {
           throw new DuplicateKeyError(childInput.idempotencyKey);
         }
       } else {
@@ -282,6 +288,52 @@ export class PlanRepository {
     });
   }
 
+  delegateDeliveryRepair(
+    planId: string,
+    childPlanId: string,
+    errorCode = 'DELIVERY_REQUIRED_CHECK_FAILED',
+  ): MutationResult<PlanDelivery> {
+    failClosed(
+      errorCode.trim().length > 0 && errorCode.length <= 500,
+      'DELIVERY_ERROR_CODE_INVALID',
+    );
+    return withTransaction(this.db, () => {
+      const parent = this.getPlan(planId);
+      const current = this.getDelivery(planId);
+      if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+      if (isDeliveryComplete(current)) throw new V4Error('DELIVERY_ALREADY_COMPLETE');
+      const child = this.getPlan(childPlanId);
+      const relation = this.db
+        .prepare('SELECT kind FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?')
+        .get(planId, childPlanId) as { kind: string } | undefined;
+      if (!relation || relation.kind !== 'FOLLOW_UP')
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_RELATION_REQUIRED');
+      if (child.parentPlanId !== planId)
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PARENT_MISMATCH');
+      const expectedChildBase = current.headSha ?? parent.currentRevision;
+      if (child.baseRevision !== expectedChildBase)
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_BASE_MISMATCH');
+      if (current.supersededByPlanId && current.supersededByPlanId !== childPlanId)
+        throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
+      if (current.status === 'SUPERSEDED_PENDING_CHILD')
+        return { status: 'existing', value: current };
+      const updatedAt = iso();
+      this.db
+        .prepare(
+          'UPDATE plan_deliveries SET status=?,superseded_by_plan_id=?,error_code=?,updated_at=? WHERE plan_id=?',
+        )
+        .run('SUPERSEDED_PENDING_CHILD', childPlanId, errorCode, updatedAt, planId);
+      this.events.appendInTransaction(
+        makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_REPAIR_DELEGATED', {
+          childPlanId,
+          headSha: current.headSha ?? null,
+          errorCode,
+        }),
+      );
+      return { status: 'updated', value: this.getDelivery(planId)! };
+    });
+  }
+
   supersedeDelivery(planId: string, childPlanId: string): MutationResult<PlanDelivery> {
     return withTransaction(this.db, () => {
       const parent = this.getPlan(planId);
@@ -289,20 +341,29 @@ export class PlanRepository {
       if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
       if (current.status === 'VERIFIED') throw new V4Error('DELIVERY_ALREADY_VERIFIED');
       if (current.status === 'SUPERSEDED') {
-        if (current.supersededByPlanId !== childPlanId) throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
+        if (current.supersededByPlanId !== childPlanId)
+          throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
         return { status: 'existing', value: current };
       }
+      if (
+        current.status === 'SUPERSEDED_PENDING_CHILD' &&
+        current.supersededByPlanId !== childPlanId
+      )
+        throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
       const child = this.getPlan(childPlanId);
-      const relation = this.db.prepare(
-        'SELECT kind FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?',
-      ).get(planId, childPlanId) as { kind: string } | undefined;
-      if (!relation || relation.kind !== 'FOLLOW_UP') throw new V4Error('DELIVERY_SUPERSEDING_CHILD_RELATION_REQUIRED');
-      if (child.parentPlanId !== planId) throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PARENT_MISMATCH');
-      if (child.baseRevision !== parent.currentRevision)
+      const relation = this.db
+        .prepare('SELECT kind FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?')
+        .get(planId, childPlanId) as { kind: string } | undefined;
+      if (!relation || relation.kind !== 'FOLLOW_UP')
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_RELATION_REQUIRED');
+      if (child.parentPlanId !== planId)
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PARENT_MISMATCH');
+      const expectedChildBase = current.headSha ?? parent.currentRevision;
+      if (child.baseRevision !== expectedChildBase)
         throw new V4Error('DELIVERY_SUPERSEDING_CHILD_BASE_MISMATCH');
-      if (child.status !== 'SUCCEEDED' || child.delivery?.status !== 'VERIFIED')
-        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_NOT_VERIFIED');
       const childDelivery = child.delivery;
+      if (child.status !== 'SUCCEEDED' || !childDelivery || !isDeliveryComplete(childDelivery))
+        throw new V4Error('DELIVERY_SUPERSEDING_CHILD_NOT_VERIFIED');
       if (childDelivery.headSha !== child.currentRevision || !childDelivery.mergeSha)
         throw new V4Error('DELIVERY_SUPERSEDING_CHILD_EXACT_REVISION_REQUIRED');
       if (!this.deliveryConfigEqual(current, childDelivery))
@@ -314,15 +375,25 @@ export class PlanRepository {
       )
         throw new V4Error('DELIVERY_SUPERSEDING_CHILD_PR_MISMATCH');
       const updatedAt = iso();
-      this.db.prepare(
-        'UPDATE plan_deliveries SET status=?,superseded_by_plan_id=?,merge_sha=?,error_code=NULL,updated_at=? WHERE plan_id=?',
-      ).run('SUPERSEDED', childPlanId, childDelivery.mergeSha ?? current.mergeSha ?? null, updatedAt, planId);
-      this.events.appendInTransaction(makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_SUPERSEDED', {
-        childPlanId,
-        childHeadSha: childDelivery.headSha ?? null,
-        mergeSha: childDelivery.mergeSha ?? null,
-        pullRequestNumber: childDelivery.pullRequestNumber ?? null,
-      }));
+      this.db
+        .prepare(
+          'UPDATE plan_deliveries SET status=?,superseded_by_plan_id=?,merge_sha=?,error_code=NULL,updated_at=? WHERE plan_id=?',
+        )
+        .run(
+          'SUPERSEDED',
+          childPlanId,
+          childDelivery.mergeSha ?? current.mergeSha ?? null,
+          updatedAt,
+          planId,
+        );
+      this.events.appendInTransaction(
+        makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_SUPERSEDED', {
+          childPlanId,
+          childHeadSha: childDelivery.headSha ?? null,
+          mergeSha: childDelivery.mergeSha ?? null,
+          pullRequestNumber: childDelivery.pullRequestNumber ?? null,
+        }),
+      );
       return { status: 'updated', value: this.getDelivery(planId)! };
     });
   }
@@ -817,19 +888,101 @@ function assertReviewerBinding(db: DatabaseSync, review: Pick<Review, 'planId' |
   return reviewer;
 }
 
+function hasVerifiedRecoveryCompletion(
+  db: DatabaseSync,
+  executionId: string,
+  resultRevision: string,
+): boolean {
+  const workspace = db
+    .prepare(
+      "SELECT payload FROM execution_evidence WHERE execution_id=? AND kind='WORKSPACE' AND name='verified-workspace'",
+    )
+    .get(executionId) as { payload: string } | undefined;
+  const revision = db
+    .prepare(
+      "SELECT payload FROM execution_evidence WHERE execution_id=? AND kind='REVISION' AND name='result-revision'",
+    )
+    .get(executionId) as { payload: string } | undefined;
+  if (!workspace || !revision) return false;
+  let workspacePayload: Record<string, unknown>;
+  let revisionPayload: Record<string, unknown>;
+  try {
+    workspacePayload = decode<Record<string, unknown>>(workspace.payload);
+    revisionPayload = decode<Record<string, unknown>>(revision.payload);
+  } catch {
+    return false;
+  }
+  if (
+    workspacePayload.clean !== true ||
+    workspacePayload.headRevision !== resultRevision ||
+    revisionPayload.resultRevision !== resultRevision
+  )
+    return false;
+  const rows = db
+    .prepare("SELECT payload FROM execution_evidence WHERE execution_id=? AND kind='RECOVERY'")
+    .all(executionId) as unknown as Array<{ payload: string }>;
+  const acceptedModes = new Set([
+    'operator-assisted-workspace-adoption',
+    'operator-assisted-review-adoption',
+    'evidence-verified-provider-finalization',
+  ]);
+  return rows.some((row) => {
+    try {
+      const payload = decode<Record<string, unknown>>(row.payload);
+      return (
+        typeof payload.mode === 'string' &&
+        acceptedModes.has(payload.mode) &&
+        payload.resultRevision === resultRevision &&
+        typeof payload.providerSessionId === 'string' &&
+        payload.providerSessionId.length > 0
+      );
+    } catch {
+      return false;
+    }
+  });
+}
+
+function assertCanonicalExecutionCompletion(
+  db: DatabaseSync,
+  executionId: string,
+  binding: ReviewExecutionBindingRow | undefined,
+  expectedRevision: string,
+  phases: readonly string[],
+  code: string,
+): void {
+  if (
+    !binding ||
+    !phases.includes(binding.phase ?? '') ||
+    binding.status !== 'SUCCEEDED' ||
+    binding.result_revision !== expectedRevision ||
+    !binding.provider_session_id
+  )
+    throw new V4Error(code);
+  if (binding.provider_status === 'SUCCEEDED') return;
+  if (hasVerifiedRecoveryCompletion(db, executionId, expectedRevision)) return;
+  throw new V4Error(code);
+}
+
 function assertReviewCompletion(db: DatabaseSync, review: Review): void {
   if (!review.reviewerExecutionId) throw new V4Error('REVIEWER_EXECUTION_REQUIRED');
   const reviewer = assertReviewerBinding(db, review, review.reviewerExecutionId);
-  if (reviewer.status !== 'SUCCEEDED' || reviewer.result_revision !== review.sourceRevision || reviewer.provider_status !== 'SUCCEEDED') {
-    throw new V4Error('REVIEWER_EXECUTION_NOT_SUCCEEDED');
-  }
+  assertCanonicalExecutionCompletion(
+    db,
+    review.reviewerExecutionId,
+    reviewer,
+    review.sourceRevision,
+    ['REVIEW'],
+    'REVIEWER_EXECUTION_NOT_SUCCEEDED',
+  );
   const implementation = reviewerBinding(db, review.implementationExecutionId);
-  if (!implementation
-    || (implementation.phase !== 'IMPLEMENT' && implementation.phase !== 'IMPLEMENT_FIX')
-    || implementation.provider_status !== 'SUCCEEDED'
-    || !implementation.provider_session_id) {
-    throw new V4Error('IMPLEMENTATION_SESSION_NOT_SUCCEEDED');
-  }
+  assertCanonicalExecutionCompletion(
+    db,
+    review.implementationExecutionId,
+    implementation,
+    review.sourceRevision,
+    ['IMPLEMENT', 'IMPLEMENT_FIX'],
+    'IMPLEMENTATION_SESSION_NOT_SUCCEEDED',
+  );
 }
 
 export class ReviewRepository {
