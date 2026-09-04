@@ -241,15 +241,14 @@ async function buildExecutionAutomation(
     env.MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT ?? '/workspace',
     'WORKSPACE_EXECUTION_ROOT_REQUIRED',
   );
-  const implementationSpecs = routeSpecs(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, [
-    'gpt-5.6-luna',
-    'implementation-efficient',
-    'implementation-glm=glm-5.2',
-  ]);
+  // Resource-selected executions bypass this map and resolve their provider from
+  // the immutable ExecutionResourceSelection. Keep only same-family emergency
+  // compatibility routes for selector-disabled recovery; task aliases and
+  // cross-model GLM fallbacks belong to the durable ResourceSelector instead.
+  const implementationSpecs = routeSpecs(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, ['gpt-5.6-luna']);
   const reviewSpecs = routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, [
     'codex-business-review=gpt-5.6-sol',
     'gpt-5.6-sol',
-    'review-glm=glm-5.2',
   ]);
   const implementationRoutes = implementationSpecs.map((item) => item.route);
   const reviewRoutes = reviewSpecs.map((item) => item.route);
