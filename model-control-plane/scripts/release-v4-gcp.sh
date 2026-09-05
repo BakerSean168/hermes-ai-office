@@ -4,10 +4,12 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 service="hermes-model-control-plane.service"
 target_root="/home/dev/projects/pixel-agents"
-target_dist="$target_root/model-control-plane/dist"
 health_url="http://127.0.0.1:8320/api/health"
 db_file="/srv/hermes-personal/data/model-control-plane/pixel-v4.sqlite"
 backup_dir="/srv/hermes-personal/data/model-control-plane/backups"
+release_lock=/tmp/hermes-pixel-v4-release.lock
+exec 9>"$release_lock"
+flock -n 9 || { echo "refusing release: another V4 release is active" >&2; exit 1; }
 
 if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
   echo "refusing release from dirty worktree" >&2
@@ -17,6 +19,13 @@ command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is requi
 harnessctl=/home/dev/projects/agent-harness/bin/harnessctl.py
 [[ -f "$harnessctl" ]] || { echo "refusing release: Agent Harness resolver is missing" >&2; exit 1; }
 /usr/bin/python3 "$harnessctl" --help >/dev/null
+# This host is a Spot VM. Make Git commits/refs durable enough to survive
+# preemption rather than leaving zero-length loose objects after a power cut.
+git -C "$repo_root" config core.fsync committed
+[[ "$(git -C "$repo_root" config --get core.fsync)" == committed ]] || {
+  echo "refusing release: canonical repository must use core.fsync=committed" >&2
+  exit 1
+}
 
 expected_single_active=false
 expected_literal=false
@@ -39,10 +48,25 @@ if [[ "$source_sha" != "$target_sha" ]]; then
   echo "refusing release: canonical source SHA $target_sha does not match release SHA $source_sha" >&2
   exit 1
 fi
+if [[ "$(realpath "$repo_root")" != "$(realpath "$target_root")" ]]; then
+  echo "refusing release: GCP V4 must release from the canonical checkout" >&2
+  exit 1
+fi
 
-(cd "$repo_root/model-control-plane" && npm run check-types && npm test && npm run build)
+release_build_root="$repo_root/model-control-plane/.release-candidates"
+candidate_dist="$release_build_root/$source_sha-$$"
+# The release lock proves no live candidate belongs to a concurrent release.
+# Remove residue from a prior Spot preemption before allocating this build.
+rm -rf "$release_build_root"
+install -d "$release_build_root"
+# Build away from the live dist directory. A Spot preemption during tsc can
+# destroy only this ignored candidate, never the last-known-good runtime.
+(cd "$repo_root/model-control-plane" && npm run check-types && npm test)
+(cd "$repo_root/model-control-plane" && npm exec -- tsc -p tsconfig.json --outDir "$candidate_dist")
+test -s "$candidate_dist/main.js"
 if [[ "$expected_literal" == true ]]; then
-  sudo /usr/bin/node "$repo_root/model-control-plane/scripts/smoke-v4-literal-worktree.mjs"
+  sudo env PIXEL_V4_DIST_ROOT="$candidate_dist" \
+    /usr/bin/node "$repo_root/model-control-plane/scripts/smoke-v4-literal-worktree.mjs"
 fi
 openhands_compose="$repo_root/model-control-plane/deploy/openhands-v3/docker-compose.yml"
 sudo docker compose -f "$openhands_compose" up -d --remove-orphans --wait --wait-timeout 120
@@ -65,7 +89,7 @@ sudo -u dev env HOME=/home/dev /home/dev/.local/bin/agy models \
   | grep -q '^gemini-3.1-pro-high'
 sudo docker exec --user 10001:10001 -e CODEX_HOME=/openhands-state/codex-business hermes-openhands-v3 \
   /openhands-state/tooling/node_modules/.bin/codex login status >/dev/null
-artifact_sha="$(find "$repo_root/model-control-plane/dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+artifact_sha="$(find "$candidate_dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
 
 sudo install -d -o root -g root -m 0711 \
   /opt/data/hermes-ai-office-v3/workspaces/v4 \
@@ -110,7 +134,7 @@ sudo systemd-run --wait --pipe --collect --unit="$probe_unit" \
   -p ReadWritePaths=/home/dev/projects/digital-biome \
   -p ReadWritePaths=/home/dev/projects/bodysense \
   "$probe_script" \
-  "$target_root/model-control-plane/dist/main.js" \
+  "$candidate_dist/main.js" \
   "$probe_dir" \
   "$memo_probe" \
   "$memo_git_probe" \
@@ -175,9 +199,25 @@ NODE
   sudo chmod 0600 "$backup_path"
 fi
 
-if [[ "$repo_root" != "$target_root" ]]; then
-  install -d "$target_dist"
-  rsync -a --delete "$repo_root/model-control-plane/dist/" "$target_dist/"
+current_dist="$target_root/model-control-plane/dist"
+# Flush every completed candidate file before publishing it. The following
+# renameat2 exchange is one atomic metadata operation on the same filesystem:
+# after a preemption, dist is therefore either the previous complete build or
+# this complete candidate, never a half-written directory.
+sync -f "$candidate_dist"
+if [[ -d "$current_dist" ]]; then
+  /usr/bin/python3 "$repo_root/model-control-plane/scripts/atomic-exchange-directories.py" \
+    "$candidate_dist" "$current_dist"
+  # candidate_dist now names the old complete build after the exchange.
+  rm -rf "$candidate_dist"
+else
+  mv --no-copy "$candidate_dist" "$current_dist"
+  sync -f "$(dirname "$current_dist")"
+fi
+deployed_artifact_sha="$(find "$current_dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+if [[ "$deployed_artifact_sha" != "$artifact_sha" ]]; then
+  echo "refusing release: atomic dist artifact hash mismatch" >&2
+  exit 1
 fi
 sudo install -m 0644 "$repo_root/model-control-plane/deploy/gcp/hermes-model-control-plane.service" "/etc/systemd/system/$service"
 sudo systemctl daemon-reload

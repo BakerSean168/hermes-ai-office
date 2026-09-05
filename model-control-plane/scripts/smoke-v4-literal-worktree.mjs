@@ -3,11 +3,24 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-import { LiteralWorktreeWorkspaceAdapter } from '../dist/v4/adapters/literalWorktreeWorkspace.js';
-import { PlanWorktreeManager } from '../dist/v4/adapters/planWorktrees.js';
-import { openV4Database } from '../dist/v4/persistence/database.js';
-import { createRepositories } from '../dist/v4/persistence/repositories.js';
+const candidateDistRoot = process.env.PIXEL_V4_DIST_ROOT?.trim();
+const distModule = (relativePath) =>
+  candidateDistRoot
+    ? pathToFileURL(path.resolve(candidateDistRoot, relativePath)).href
+    : new URL('../dist/' + relativePath, import.meta.url).href;
+const [
+  { LiteralWorktreeWorkspaceAdapter },
+  { PlanWorktreeManager },
+  { openV4Database },
+  { createRepositories },
+] = await Promise.all([
+  import(distModule('v4/adapters/literalWorktreeWorkspace.js')),
+  import(distModule('v4/adapters/planWorktrees.js')),
+  import(distModule('v4/persistence/database.js')),
+  import(distModule('v4/persistence/repositories.js')),
+]);
 
 if (process.getuid?.() !== 0) throw new Error('LITERAL_WORKTREE_SMOKE_REQUIRES_ROOT');
 

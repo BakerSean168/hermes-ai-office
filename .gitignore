@@ -1,6 +1,7 @@
 # Compiled output
 out
 dist
+/model-control-plane/.release-candidates/
 node_modules
 *.tsbuildinfo
 

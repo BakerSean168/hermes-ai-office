@@ -18,6 +18,12 @@ const releasePath = path.join(root, 'scripts/release-v4-gcp.sh');
 const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
 const release = fs.readFileSync(releasePath, 'utf8');
 const probe = fs.readFileSync(probePath, 'utf8');
+const literalWorktreeSmoke = fs.readFileSync(
+  path.join(root, 'scripts/smoke-v4-literal-worktree.mjs'),
+  'utf8',
+);
+const atomicExchangePath = path.join(root, 'scripts/atomic-exchange-directories.py');
+const atomicExchange = fs.readFileSync(atomicExchangePath, 'utf8');
 const openHandsBuild = fs.readFileSync(
   path.join(root, 'scripts/build-openhands-v3-source.sh'),
   'utf8',
@@ -313,9 +319,38 @@ test('OpenHands persists and prewarms exact Corepack pnpm versions without promp
   assert.match(release, /actual_version=.*pnpm --version/);
 });
 
-test('V4 release never rsyncs a build directory onto itself', () => {
-  assert.match(release, /if \[\[ "\$repo_root" != "\$target_root" \]\]; then/);
-  assert.match(release, /rsync -a --delete/);
+test('V4 release publishes only a complete fsynced dist with an atomic directory exchange', () => {
+  assert.match(release, /core\.fsync committed/);
+  assert.match(release, /\.release-candidates/);
+  assert.match(release, /npm exec -- tsc -p tsconfig\.json --outDir "\$candidate_dist"/);
+  assert.match(release, /PIXEL_V4_DIST_ROOT="\$candidate_dist"/);
+  assert.match(literalWorktreeSmoke, /PIXEL_V4_DIST_ROOT/);
+  assert.match(release, /sync -f "\$candidate_dist"/);
+  assert.match(release, /atomic-exchange-directories\.py/);
+  assert.match(release, /deployed_artifact_sha/);
+  assert.doesNotMatch(release, /npm run build/);
+  assert.doesNotMatch(release, /rsync -a --delete/);
+  assert.match(atomicExchange, /RENAME_EXCHANGE = 2/);
+  assert.match(atomicExchange, /renameat2/);
+});
+
+test('atomic dist exchange helper swaps two complete directories in one operation', () => {
+  const temp = fs.mkdtempSync('/tmp/pixel-v4-atomic-exchange-');
+  const candidate = path.join(temp, 'candidate');
+  const current = path.join(temp, 'current');
+  try {
+    fs.mkdirSync(candidate);
+    fs.mkdirSync(current);
+    fs.writeFileSync(path.join(candidate, 'main.js'), 'candidate\n');
+    fs.writeFileSync(path.join(current, 'main.js'), 'current\n');
+    execFileSync('/usr/bin/python3', [atomicExchangePath, candidate, current], {
+      stdio: 'pipe',
+    });
+    assert.equal(fs.readFileSync(path.join(current, 'main.js'), 'utf8'), 'candidate\n');
+    assert.equal(fs.readFileSync(path.join(candidate, 'main.js'), 'utf8'), 'current\n');
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test('V4 release proves the exact service sandbox can read, chown and write only approved paths', () => {
