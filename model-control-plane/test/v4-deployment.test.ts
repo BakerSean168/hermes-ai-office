@@ -347,6 +347,11 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
     'utf8',
   );
   assert.match(launcher, /dsh-acp\|zcode-acp/);
+  assert.match(launcher, /ai_office_dsh_patch=\/etc\/hermes-ai-office-v3\/dsh-acp-v3\.patch\.yml/);
+  assert.match(
+    launcher,
+    /--patch \"\$ai_office_dsh_patch\"[\s\S]*--patch \"\$root\/dsh\/capabilities\.patch\.yml\"/,
+  );
   assert.match(
     launcher,
     /expected_v3_workspace_repo="\/workspace\/executions\/\$execution_id\/repo"/,

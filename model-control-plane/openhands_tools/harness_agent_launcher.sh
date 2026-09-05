@@ -102,7 +102,16 @@ case "$mode" in
       "$DSH_BIN" plugin --profile acp add /openhands-state/tooling/node_modules/dsh-acp-server \
         >/dev/null
     fi
+    ai_office_dsh_patch=/etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml
+    [[ -r "$ai_office_dsh_patch" ]] || {
+      echo "dsh-acp launch requires the AI Office routing patch: $ai_office_dsh_patch" >&2
+      exit 2
+    }
+    # The first overlay owns the immutable model/provider transport selected by
+    # Pixel. Agent Harness is deliberately a second, capability-only overlay
+    # for Skills/MCP/instructions; it must not become another routing authority.
     exec /openhands-state/tooling/node_modules/.bin/dsh-acp-server \
+      --patch "$ai_office_dsh_patch" \
       --patch "$root/dsh/capabilities.patch.yml" "$@"
     ;;
   zcode-acp)
