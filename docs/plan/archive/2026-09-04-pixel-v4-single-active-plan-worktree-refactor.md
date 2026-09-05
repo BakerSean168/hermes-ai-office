@@ -1,7 +1,7 @@
 # Pixel V4 Single Active Plan + Git Worktree Refactor
 
 Date: 2026-09-04
-Status: IMPLEMENTED / DEPLOYED / PRODUCTION GATE HELD
+Status: IMPLEMENTED / DEPLOYED / PRODUCTION GATE ENABLED
 Governing ADR: `docs/adr/ADR-004-single-active-plan-worktree-execution.md`
 
 ## Goal
@@ -16,24 +16,38 @@ and preserving controlled parallelism only for mutually independent WorkItems in
 
 ## 2026-09-05 closure snapshot
 
-The refactor implementation is complete and deployed behind the production gates. The production-shaped canary has already proved the core mechanics: two root Plans serialize correctly, parallel-safe WorkItems execute concurrently, exact-SHA independent review precedes serial integration, terminal cleanup releases the first Plan, the queued Plan inherits the logical project head, and the canonical checkout remains unchanged. Durable project-head recovery and restart behavior are covered by regression tests.
+The refactor is now **fully enabled in production for the intended scope**. The production-shaped canary and the real BodySense recovery lineage together prove the complete control path: root Plans serialize per project, parallel-safe WorkItems can execute concurrently, exact-SHA independent review precedes integration, delivery is reconciled durably, terminal cleanup releases the project lease, and the canonical checkout remains unchanged.
 
-Current runtime source is `32fad95` (`fix(v4): finalize terminal recovery paths`). The model-control-plane quality gate is **218/218 tests PASS**, with typecheck, build, and `git diff --check` also passing. The canonical Pixel repository is clean and has one worktree and one local branch (`main`).
+The BodySense exact-SHA recovery Plan `plan_5e1ab84d-5eb1-4ed5-ba22-800f3bfc8fae` completed at revision `a53052129a95ab017be3bd8b427ab4cc0b95d028`. Its independent review passed at that exact SHA, PR #165 was verified and merged as `a82da464f109c407e66328d9f9aff94a01589629`, and the older sibling delivery `plan_938c89bb-5b2f-4f74-a7b7-856d5818ce4f` was safely marked `SUPERSEDED` only after exact Git ancestry and shared delivery lineage were proven. There are now **zero non-terminal BodySense Plans**.
 
-Production rollout intentionally remains held:
+The production gates are enabled:
 
 ```text
-MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false
-MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false
+MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense
+MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2
 ```
 
-The remaining gate is not a worktree/scheduler implementation defect. The legacy BodySense exact-SHA recovery Plan `plan_5e1ab84d-5eb1-4ed5-ba22-800f3bfc8fae` has already adopted the existing implementation revision `a53052129a95ab017be3bd8b427ab4cc0b95d028`, but its independent review is waiting for an executable reasoning resource. Runtime admission currently has no READY review binding: the authenticated ChatGPT Team Codex workspace reports exhausted credits, PQH cannot satisfy the real Responses preauthorization, OrcAI's route is unusable, and no Claude Opus deployment is currently projected. The exact review remains pending rather than being bypassed.
+`MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED` is project-scoped: MemoFlow, Digital Biome, and BodySense may each own one active root Plan independently. Literal worktrees are currently enabled only for BodySense; the other project workspace providers are intentionally unchanged.
 
-Do not enable the production gates until that review completes and the remaining legacy BodySense Plan lineage reaches a terminal durable state.
+The final runtime/release line is:
 
-## Definition of Done
+- `ee21e7e` — close terminal Supervisor recovery and exact verified-sibling delivery lineage;
+- `32a9224` — enable the production single-active/literal-worktree gates;
+- `d98c22f` — retry transient runtime transport admission failures on the short recovery TTL;
+- `9ed8b2f` — make release artifact publication safe against Spot preemption;
+- `a50289b` — verify candidate/live artifacts with a path-independent relative manifest.
 
-The refactor is complete only when a production-shaped scenario proves:
+The model-control-plane quality gate is **224/224 tests PASS**, with typecheck, release-script syntax validation, Python helper compilation, JavaScript syntax validation, `git diff --check`, and a production-shaped literal-worktree smoke also passing. The final release reported source SHA `a50289ba860e07b8f26ebecb69e733c6401e6157`, exact review `true`, canonical checkout unchanged `true`, and production health with both gates enabled.
+
+A real GCP Spot preemption during the rollout proved an additional failure mode: the VM was preempted while Git/build output was being written, leaving zero-length loose Git objects and a truncated `dist/main.js`. Source integrity was recovered from the last complete commit, `git fsck --full` returned clean, and the release path was hardened. Releases now use `core.fsync=committed`, a single-release lock, an ignored staging candidate, production-shaped smoke against that candidate, and an atomic same-filesystem `renameat2(RENAME_EXCHANGE)` cutover. A preemption during compilation therefore leaves either the previous complete runtime or the new complete runtime, not a partially rebuilt live `dist`.
+
+Runtime admission remains intentionally fail-closed and dynamic. At the final observation the available implementation probe set had READY capacity while the reasoning routes were temporarily returning transport failures, so `reviewReady=0`. This does **not** reopen the worktree rollout: new review work waits for an admitted reviewer rather than bypassing review. `RUNTIME_PROBE_TRANSPORT_ERROR` now uses the short transient retry TTL, and production timestamps confirmed affected bindings were re-probed on subsequent resource-refresh cycles instead of remaining negatively cached for 15 minutes.
+
+## Definition of Done — satisfied
+
+The refactor was considered complete only after a production-shaped scenario proved:
 
 ```text
 submit Plan A
@@ -92,8 +106,8 @@ Add:
 
 ```text
 MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED
-MODEL_CP_V4_WORKTREE_WORKSPACES_ENABLED
-MODEL_CP_V4_WORKTREE_MAX_PARALLEL_WRITERS
+MODEL_CP_V4_LITERAL_WORKTREES_ENABLED
+MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS
 ```
 
 Default worktree flag OFF until release smoke exists.
@@ -600,7 +614,7 @@ Only after canary and another project pass:
 
 # Release Gate
 
-Before enabling `MODEL_CP_V4_WORKTREE_WORKSPACES_ENABLED=true` in production:
+Before enabling `MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true` for a project in production:
 
 ```text
 full unit/integration suite PASS

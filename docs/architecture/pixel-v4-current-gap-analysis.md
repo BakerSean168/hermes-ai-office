@@ -215,7 +215,7 @@ one shared Git common database
   + bounded delivery-repair worktree
 ```
 
-The migration is not a one-line replacement of `git clone` with `git worktree add`. Current OpenHands mounts the host workspace root at `/workspace`, canonical repositories are outside that mount, and GCP Dev currently runs Git 2.43 without relative-worktree-path support. The implementation therefore also needs project lease/queue state, durable worktree ownership, production path-identity mounts, protected-ref drift detection, single-writer integration, and crash-safe cleanup/recovery.
+The migration is not a one-line replacement of `git clone` with `git worktree add`. Current OpenHands mounts the host workspace root at `/workspace`, canonical repositories are outside that mount, and GCP Dev currently runs Git 2.43 without relative-worktree-path support. The production implementation now includes project lease/queue state, durable worktree ownership, production path-identity mounts, protected-ref drift detection, single-writer integration, and crash-safe cleanup/recovery. Literal worktrees are enabled for BodySense while other projects remain on their existing workspace provider until separately admitted.
 
 See:
 
@@ -223,4 +223,4 @@ See:
 - `docs/architecture/pixel-v4-single-active-plan-worktree-execution.md`
 - `docs/architecture/pixel-v4-plan-queue-and-worktree-lifecycle.md`
 - `docs/architecture/pixel-v4-worktree-migration-and-operations.md`
-- `docs/plan/active/2026-09-04-pixel-v4-single-active-plan-worktree-refactor.md`
+- `docs/plan/archive/2026-09-04-pixel-v4-single-active-plan-worktree-refactor.md`

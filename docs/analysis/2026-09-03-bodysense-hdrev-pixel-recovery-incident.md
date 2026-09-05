@@ -214,7 +214,7 @@ Closure status as of the direct-operator handoff:
 2. HDREV-002 integration: **DONE** at `7d250eb667080b5f4c46284ddd9dca588969b08a`.
 3. HDREV-003 implementation, blocking bbox repair, independent re-review and integration: **DONE** at `4d69acd05d3e242d90164e418e38b0c234e0dfb6`.
 4. BodySense delivery PR #165: **DONE**. Direct follow-up `a53052129a95ab017be3bd8b427ab4cc0b95d028` aligned the stale Assessment-v5 E2E/current docs; all required GitHub checks passed and PR #165 merged to `main` as `a82da464f109c407e66328d9f9aff94a01589629`.
-5. This Pixel incident remains **OPEN** until the P0 reliability items above are converted into implementation work and verified independently of BodySense delivery.
+5. At the direct-operator handoff this Pixel incident remained open. The subsequent V4 recovery and production rollout closed the P0 lineage/state-machine items; see the 2026-09-05 final rollout closure below. Residual P1 hardening remains tracked separately.
 
 ## Additional failures discovered during final HDREV-003 and delivery closure
 
@@ -351,32 +351,94 @@ In addition to the earlier entries:
 - `3765c4e` — accept independently reviewed operator-adopted implementation candidates in plan integration.
 - `58023b7` — treat provider-success/workspace-noop as a retryable implementation outcome.
 
-## Priority follow-up backlog
+## Follow-up backlog after subsequent V4 fixes
 
-### P0 — reliability / correctness
+### Closed P0 / execution correctness
 
-1. Single canonical provenance invariant shared by review, integration and delivery.
-2. Automatic evidence-complete finalization recovery for implementation and review.
-3. Delivery-head-aware chained repair/supersession.
-4. Required-CI failure -> typed delivery repair -> independent re-review loop.
-5. ENOSPC/capacity preflight and typed storage failures before integration.
+The original P0 list is now closed by the later V4 recovery line: canonical evidence/review acceptance, automatic terminal evidence finalization, delivery repair/supersession, required-CI repair handling, and storage-capacity preflight all have durable implementation and regression coverage. The exact BodySense recovery and production gate rollout below provide the production validation that was missing at the direct-operator handoff.
 
-### P1 — execution resource quality
+### Closed P1 items relevant to this incident
 
-1. Meaningful-progress detector distinct from heartbeat.
-2. Route-health admission/quarantine for auth/quota/transport/ACP-init failures.
-3. Runtime-enforced exact workspace cwd.
-4. Agent-visible toolchain convergence probe (`command -v`, version, execution), not file-exists probes.
-5. Retry budgets that do not charge infrastructure-invalid attempts as product attempts.
+The later V4 work also closed the incident-specific meaningful-progress detector, execution-shaped per-binding runtime admission/quarantine, Agent-visible toolchain convergence checks, terminal workspace cache pruning, and workspace storage health accounting. Transient transport admission failures now receive short-TTL re-probes instead of being held by the ordinary negative cache.
 
-### P1 — storage and lifecycle
+### Residual P1 hardening
 
-1. Terminal workspace cache pruning while preserving Git/evidence.
-2. Docker/build-cache high-watermark GC with active-execution protection.
-3. Workspace storage accounting exposed in runtime status/alerts.
+1. A dedicated reviewed release worktree/ref remains desirable so canonical-source provenance does not depend on the mutable developer checkout.
+2. Host-wide Docker/build-cache high-watermark governance remains broader than V4's existing active-execution protections, workspace low-capacity gate, and terminal ignored-cache pruning.
 
 ## Operator decision on 2026-09-03
 
 After the failures above, BodySense PR #165 closure was intentionally removed from Pixel execution. The stale Assessment-v5 E2E contract and current architecture documentation were completed directly on GCP Dev in `a53052129a95ab017be3bd8b427ab4cc0b95d028`. Local validation included Web typecheck/lint/build, 212/212 Web unit tests, targeted production-shaped Assessment Playwright 2/2 PASS, and full PR-range commitlint. GitHub CI then passed every required lane, including the 10-test Browser longitudinal health E2E child, Experience Oracle, Quality Oracle, Database Oracle, Governance Oracle, Delivery Observation and commit-lint. PR #165 merged as `a82da464f109c407e66328d9f9aff94a01589629`.
 
-This is an operational containment decision: accepted/reviewed BodySense product revisions were preserved, while Pixel's defects remain open here instead of being allowed to keep consuming the product delivery loop.
+At that point this was an operational containment decision: accepted/reviewed BodySense product revisions were preserved while the remaining Pixel defects stayed open here instead of consuming the product delivery loop. Those P0 defects were subsequently closed by the V4 rollout recorded below.
+
+## 2026-09-05 final Pixel rollout closure
+
+The P0 Pixel recovery/rollout lineage is now closed in production. This does not erase the historical failures above; it records the durable state reached after implementing and validating their recovery paths.
+
+### Exact BodySense lineage
+
+- Recovery Plan `plan_5e1ab84d-5eb1-4ed5-ba22-800f3bfc8fae` finished `SUCCEEDED` at exact revision `a53052129a95ab017be3bd8b427ab4cc0b95d028`.
+- Independent review `review_cb1a96d6031a5acd43658e36` finished `PASSED / PASS` for that exact SHA.
+- PR #165 delivery is `VERIFIED` and merged as `a82da464f109c407e66328d9f9aff94a01589629`.
+- The older sibling `plan_938c89bb-5b2f-4f74-a7b7-856d5818ce4f` is now `SUCCEEDED`; its stale delivery is `SUPERSEDED` by the verified recovery Plan after same-parent/repository/delivery-contract checks and exact Git ancestry proof.
+- BodySense has zero non-terminal V4 Plans. No review verdict or provider completion was fabricated.
+
+### Supervisor and admission closure
+
+`ee21e7e` added two missing terminal/restart semantics:
+
+- a wake for an already-terminal Plan closes its Supervisor without reopening a stale OpenHands conversation;
+- an active Plan whose persisted OpenHands Supervisor conversation is missing/corrupt can CAS-replace that conversation and continue rather than retrying HTTP 404/410/500 forever.
+
+Production validation showed the legacy terminal Supervisors becoming `COMPLETED` and no new `OPENHANDS_SUPERVISOR_HTTP_500` events after release.
+
+`d98c22f` also classifies `RUNTIME_PROBE_TRANSPORT_ERROR` as transient admission evidence. Production `checkedAt` timestamps for Business/PQH bindings advanced on later resource-refresh cycles, proving transport failures are re-probed rather than being held by the normal 15-minute negative cache. Runtime admission still fails closed: the final observation had implementation capacity but `reviewReady=0`, so new review work waits for reviewer recovery.
+
+### Production worktree rollout
+
+The rollout gates are now enabled:
+
+```text
+MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense
+MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2
+```
+
+`32a9224` enabled the gates after all legacy BodySense root lineage was terminal. The release gate then ran the real OpenHands UID/container through implementation, exact-SHA review, serial integration and cleanup while proving the canonical BodySense checkout was unchanged. Single-active scheduling remains per project; literal worktrees are only admitted for BodySense.
+
+The final model-control-plane gate is **224/224 tests PASS**, plus TypeScript typecheck, shell/Python/JavaScript release validation and production-shaped literal-worktree smoke.
+
+### Spot-preemption incident and release hardening
+
+During the first gate release, GCP operation history proved that `gcp-dev-01` was preempted by the platform (`provisioningModel=SPOT`, `compute.instances.preempted`), not stopped by Pixel. The power loss landed during Git/build writes and left ten zero-length loose objects plus a zero-length `dist/main.js`.
+
+Recovery was evidence-driven:
+
+- damaged metadata and intended gate files were backed up under `/home/dev/recovery/pixel-preempt-20260905T0742Z`;
+- the last complete parent `ee21e7e` was verified readable;
+- every parent-tracked blob was hashed against the worktree, showing zero missing files and exactly the two intended gate-file differences;
+- only zero-length loose objects/torn reflog tail/index state were repaired;
+- `git fsck --full` returned clean and zero-length Git objects returned to zero;
+- the gate commit was rebuilt as `32a9224`.
+
+`9ed8b2f` and `a50289b` then hardened steady-state release:
+
+- enforce `core.fsync=committed`;
+- serialize releases with `flock`;
+- compile into an ignored candidate directory instead of deleting/rebuilding live `dist`;
+- run production-shaped smoke against the candidate;
+- publish with a same-filesystem `renameat2(RENAME_EXCHANGE)` atomic directory swap;
+- compare candidate/live artifacts using a root-independent relative manifest before restart.
+
+The final release completed successfully from source `a50289ba860e07b8f26ebecb69e733c6401e6157`. Repository integrity remained clean, there were no literal-smoke worktree residues, and production health reported both worktree gates enabled.
+
+### Residual P1 scope
+
+The remaining incident backlog is hardening, not a blocker for the completed BodySense/worktree rollout:
+
+- a dedicated reviewed release worktree/ref remains desirable so canonical-source provenance does not depend on the mutable developer checkout;
+- host-wide Docker/build-cache lifecycle governance remains broader than the existing V4 workspace low-capacity and terminal-cache pruning protections.
+
+These residuals should not be conflated with exact-review correctness, Plan scheduling, worktree ownership, delivery lineage, or Supervisor restart recovery, which are now production-validated.

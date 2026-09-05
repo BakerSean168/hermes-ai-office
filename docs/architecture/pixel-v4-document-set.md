@@ -26,12 +26,12 @@ Read in this order:
 16. **Migration/operations** — `docs/architecture/pixel-v4-migration-rollout-and-operations.md`
 17. **Supervisor implementation plan** — `docs/plan/active/2026-08-31-pixel-v4-durable-supervisor-and-autonomous-improvement.md`
 18. **Routing/provider implementation plan** — `docs/plan/active/2026-09-03-pixel-v4-routing-and-provider-governance.md`
-19. **Single-active-plan/worktree implementation plan** — `docs/plan/active/2026-09-04-pixel-v4-single-active-plan-worktree-refactor.md`
+19. **Single-active-plan/worktree implementation plan** — `docs/plan/archive/2026-09-04-pixel-v4-single-active-plan-worktree-refactor.md`
 
 ## One-sentence architecture
 
 A persistent supervisor proposes bounded actions; the deterministic Pixel kernel validates them, serializes top-level work behind one active root Plan per project, runs only DAG-safe WorkItems concurrently in Plan-owned Git worktrees, selects a durable model-agent-resource execution profile, and owns exact review, single-writer integration, delivery, recovery, and rollback.
 
-## First implementation gate
+## Production rollout status
 
-Do not enable literal V4 worktree provisioning until the current reliability patch is committed/released, the project single-active-plan lease and durable queue are in place, no in-flight legacy writer for the canary project requires clone-only recovery, and the real OpenHands UID passes the production-shaped worktree/common-Git-dir smoke defined by ADR-004.
+The ADR-004 implementation gate is satisfied. GCP production now runs per-project single-active root Plan scheduling with `MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true`; literal worktrees are enabled with `MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true` and scoped to BodySense by `MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense`. The release gate runs the real OpenHands UID through the production-shaped worktree/common-Git-dir smoke before an artifact is published.

@@ -1,7 +1,7 @@
 # Pixel V4 Worktree Migration and Operations
 
 Date: 2026-09-04
-Status: TARGET MIGRATION / OPERATIONS GUIDE
+Status: PRODUCTION OPERATIONS GUIDE
 
 ## 1. Migration objective
 
@@ -19,26 +19,32 @@ Project -> one Active Root Plan -> Plan-owned Git worktrees
 
 without invalidating existing durable executions, reviews, delivery evidence, or crash recovery.
 
-## 2. Feature gates
+## 2. Production feature gates
 
-Introduce explicit gates:
-
-```text
-MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false
-MODEL_CP_V4_WORKTREE_WORKSPACES_ENABLED=false
-MODEL_CP_V4_WORKTREE_OPENHANDS_IDENTITY_MOUNT_REQUIRED=true
-MODEL_CP_V4_WORKTREE_MAX_PARALLEL_WRITERS=<N>
-```
-
-Recommended rollout:
+Current GCP production policy:
 
 ```text
-queue gate first
--> worktree mechanics in shadow/fixture
--> one project canary
--> all new root Plans
--> retire legacy clone provisioning only after no old writer depends on it
+MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true
+MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense
+MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2
 ```
+
+The single-active constraint is **per `projectKey`**, not global. Each automated project may own one active root Plan while later root Plans for that same project remain durably queued. Internal child/recovery Plans remain in the owning root Plan family.
+
+Literal worktrees are currently scoped to BodySense. MemoFlow and Digital Biome continue using their existing workspace provider until separately admitted; enabling the global literal-worktree gate does not implicitly migrate those projects.
+
+The production rollout completed on 2026-09-05 after:
+
+```text
+queue/single-active canary
+-> literal worktree implementation/review/integration smoke
+-> exact BodySense recovery review and verified delivery
+-> zero non-terminal legacy BodySense Plans
+-> production gates enabled
+```
+
+Legacy execution workspaces are still recoverable and are never converted in place.
 
 ## 3. Do not convert in-flight workspaces
 
@@ -193,9 +199,39 @@ Rollback sequence:
 stop activating new worktree Plans
 -> finish/cancel active root Plan safely
 -> clean Plan worktrees
--> disable WORKTREE_WORKSPACES
--> keep SINGLE_ACTIVE_PLAN queue semantics
+-> set MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false
+-> keep MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true
 -> use legacy clone workspace provider for subsequent Plan
 ```
 
 The queue/single-active-plan model should remain even if worktree mechanics are rolled back; it is independently useful for correctness.
+
+## 11. Spot-safe release publication
+
+`gcp-dev-01` is a Spot/preemptible VM, so a release must assume power loss can occur between any two filesystem writes. The canonical release path therefore never compiles into the live `model-control-plane/dist` directory.
+
+`release-v4-gcp.sh` now performs:
+
+```text
+flock single-release lock
+-> require canonical clean source SHA
+-> git core.fsync=committed
+-> build into ignored .release-candidates/<sha>-<pid>
+-> validate non-empty entrypoint
+-> run literal-worktree production smoke against candidate dist
+-> flush candidate files
+-> atomically exchange candidate and live dist with renameat2(RENAME_EXCHANGE)
+-> verify a path-independent relative artifact manifest
+-> install/reload systemd unit
+-> restart and verify V4 health/resources
+```
+
+The atomic exchange is regression-tested with two real directories. If the VM is preempted before exchange, the old live `dist` remains intact. If it is preempted after exchange, the new complete `dist` is already the live directory. A partially written candidate is ignored and removed by the next single-owner release.
+
+Git repository integrity is also treated as part of release safety. `core.fsync=committed` is enforced locally on the canonical Pixel checkout, and post-incident validation uses `git fsck --full` plus a zero-length loose-object check before accepting a repaired repository.
+
+## 12. Runtime admission after rollout
+
+A statically ACTIVE resource is not executable until its execution-shaped runtime probe is READY. OpenHands startup failures and `RUNTIME_PROBE_TRANSPORT_ERROR` use a short transient negative-cache TTL so recovered relays are re-tested on subsequent resource-refresh cycles rather than remaining blocked by the normal admission TTL.
+
+Reviewer scarcity is therefore a normal fail-closed state: when `reviewReady=0`, implementation/review automation waits for an admitted reasoning resource. Production gate enablement never relaxes exact-SHA review requirements.
