@@ -937,6 +937,69 @@ test('execution worker resumes the same terminal implementation session once to 
   seeded.db.close();
 });
 
+test('execution worker keeps provider-session CAS conflicts retryable without poisoning resource health', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-provider-session-race',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const feedback = new FakeResourceFeedback();
+  const selection = createExecutionResourceSelection(execution.identity.executionId, {
+    capability: 'IMPLEMENTATION',
+    phase: 'IMPLEMENT',
+    modelFamily: 'gpt-5.6-luna',
+    agentBackend: 'codex-acp',
+    transport: 'PROVIDER_NATIVE',
+    resourceId: 'chatgpt-business-primary',
+    resourceTier: 'SUBSCRIPTION',
+    modelRank: 30,
+    resourceSequence: 120,
+    resourceState: 'ACTIVE',
+    selectionReason: 'STATIC_POLICY',
+    bindingId: 'chatgpt-business-luna',
+  });
+  seeded.repositories.resourceSelections.create(selection);
+
+  class ConflictingSessionProvider extends FakeProvider {
+    override async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
+      this.launchCalls += 1;
+      this.lastLaunch = input;
+      seeded.repositories.sessions.attachProviderSession(
+        input.executionId,
+        'provider-session-race-winner',
+      );
+      return {
+        ...this.launchSnapshot,
+        providerSessionId: 'provider-session-race-loser',
+        observedAt: now(10),
+      };
+    }
+  }
+
+  const provider = new ConflictingSessionProvider();
+  const worker = new ExecutionWorker(seeded.repositories, workspace, [], {
+    ownerId: 'worker-provider-session-race',
+    providerFactory: () => provider,
+    resourceFeedback: feedback,
+    requireResourceSelection: true,
+  });
+
+  const result = await worker.runExecution(execution.identity.executionId);
+  assert.equal(result.status, 'FAILED');
+  assert.equal(result.code, 'PROVIDER_SESSION_IMMUTABLE');
+  const stored = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(stored.errorCode, 'PROVIDER_SESSION_IMMUTABLE');
+  assert.equal(stored.retryable, true);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
+    'provider-session-race-winner',
+  );
+  assert.deepEqual(feedback.failures, []);
+  seeded.db.close();
+});
+
 test('execution worker does not poison resource health when a provider no-op is caused by local Harness admission', async () => {
   const seeded = seed();
   const execution = createExecution(seeded.repositories, {

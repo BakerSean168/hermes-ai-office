@@ -216,7 +216,12 @@ export class ExecutionWorker {
     }
   }
 
+  private providerSessionInfrastructureFailure(code: string): boolean {
+    return /^(?:PROVIDER_SESSION_|STALE_PROVIDER_SESSION$)/.test(code);
+  }
+
   private providerFailureEligible(code: string): boolean {
+    if (this.providerSessionInfrastructureFailure(code)) return false;
     return /^(?:OPENHANDS|PROVIDER|LLM|ANTIGRAVITY|CODEX|CLAUDE|DSH|ZCODE|RESOURCE_NOT_READY|RESOURCE_UNAVAILABLE)/.test(
       code,
     );
@@ -885,6 +890,7 @@ export class ExecutionWorker {
         const retryable =
           !localBlockerCode &&
           (workspaceInfrastructureFailure ||
+            this.providerSessionInfrastructureFailure(observedCode) ||
             this.providerFailureEligible(observedCode) ||
             RETRYABLE_RESOURCE_QUALITY_CODES.has(observedCode) ||
             (execution.identity.phase !== 'REVIEW' &&
