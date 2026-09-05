@@ -276,7 +276,7 @@ test('selector uses tier, model rank, sequence and hard filters deterministicall
   );
 });
 
-test('runtime admission retries transient OpenHands startup failures before the normal TTL', () => {
+test('runtime admission retries transient OpenHands startup and provider transport failures before the normal TTL', () => {
   const resources = [
     resource({
       resourceId: 'transient-deepseek',
@@ -318,11 +318,16 @@ test('runtime admission retries transient OpenHands startup failures before the 
     errorCode: 'RUNTIME_PROBE_TRANSPORT_ERROR',
   });
   assert.equal(
-    registry.isStale(selected.candidate, checkedAt + transientTtlMs, normalTtlMs, transientTtlMs),
+    registry.isStale(
+      selected.candidate,
+      checkedAt + transientTtlMs - 1,
+      normalTtlMs,
+      transientTtlMs,
+    ),
     false,
   );
   assert.equal(
-    registry.isStale(selected.candidate, checkedAt + normalTtlMs, normalTtlMs, transientTtlMs),
+    registry.isStale(selected.candidate, checkedAt + transientTtlMs, normalTtlMs, transientTtlMs),
     true,
   );
 });

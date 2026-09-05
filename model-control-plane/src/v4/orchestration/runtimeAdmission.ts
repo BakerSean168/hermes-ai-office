@@ -36,6 +36,7 @@ export function isTransientRuntimeAdmissionFailure(errorCode: string | undefined
   return (
     errorCode === 'OPENHANDS_UNAVAILABLE' ||
     errorCode === 'OPENHANDS_TIMEOUT' ||
+    errorCode === 'RUNTIME_PROBE_TRANSPORT_ERROR' ||
     /^OPENHANDS_HTTP_5\d\d$/.test(errorCode)
   );
 }
