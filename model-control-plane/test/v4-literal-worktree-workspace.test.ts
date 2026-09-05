@@ -213,6 +213,40 @@ test('literal workspace completes implementation, exact-SHA review and Plan inte
   fs.rmSync(value.root, { recursive: true, force: true });
 });
 
+test('literal workspace preserves native writer provisioning errno as a typed infrastructure failure', async () => {
+  const value = fixture();
+  const execution = createExecution(
+    value,
+    'exec-literal-provision-error',
+    'IMPLEMENT',
+    value.revision,
+  );
+  const original = value.manager.prepareWriterForExecution.bind(value.manager);
+  value.manager.prepareWriterForExecution = async () => {
+    const error = new Error('permission denied') as NodeJS.ErrnoException;
+    error.code = 'EACCES';
+    throw error;
+  };
+  await assert.rejects(
+    value.adapter.provision({
+      executionId: execution.identity.executionId,
+      planId: value.plan.planId,
+      projectKey: value.plan.projectKey,
+      workItemId: value.item.workItemId,
+      repositoryPath: value.repository,
+      sourceRevision: value.revision,
+      phase: 'IMPLEMENT',
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      (error as { code?: unknown }).code === 'WORKSPACE_PROVISION_WRITER_EACCES',
+  );
+  value.manager.prepareWriterForExecution = original;
+  value.db.close();
+  fs.rmSync(value.root, { recursive: true, force: true });
+});
+
 test('literal workspace retry reuses WorkItem path across Execution ids', async () => {
   const value = fixture();
   const first = createExecution(value, 'exec-literal-failed', 'IMPLEMENT', value.revision);

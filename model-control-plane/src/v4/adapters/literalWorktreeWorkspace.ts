@@ -71,6 +71,23 @@ function inside(candidate: string, root: string): boolean {
   return value === boundary || value.startsWith(boundary + path.sep);
 }
 
+function provisioningNativeError(error: unknown, stage: string): V4Error {
+  if (error instanceof V4Error) return error;
+  const nativeCode =
+    error &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof (error as { code?: unknown }).code === 'string'
+      ? (error as { code: string }).code
+      : 'ERROR';
+  const suffix = nativeCode.replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80) || 'ERROR';
+  return new V4Error(
+    'WORKSPACE_PROVISION_' + stage + '_' + suffix,
+    'Workspace provisioning failed during ' + stage.toLowerCase() + '.',
+    error,
+  );
+}
+
 function readJson(file: string, code: string): Record<string, unknown> {
   const stat = fs.lstatSync(file, { throwIfNoEntry: false });
   if (!stat?.isFile() || stat.isSymbolicLink() || stat.size <= 0 || stat.size > MAX_EVIDENCE_BYTES)
@@ -245,16 +262,24 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
           repositoryPath: rootPlan.repositoryPath,
           baseRevision: item.integrationBaseRevision ?? input.sourceRevision,
         }));
-      worktree = await this.manager.prepareWriterForExecution(
-        worktree.worktreeId,
-        executionId,
-        input.sourceRevision,
-        this.workspaceUid,
-        this.workspaceGid,
-      );
+      try {
+        worktree = await this.manager.prepareWriterForExecution(
+          worktree.worktreeId,
+          executionId,
+          input.sourceRevision,
+          this.workspaceUid,
+          this.workspaceGid,
+        );
+      } catch (error) {
+        throw provisioningNativeError(error, 'WRITER');
+      }
     }
 
-    return this.executionDescriptor(worktree, executionId, input.sourceRevision);
+    try {
+      return this.executionDescriptor(worktree, executionId, input.sourceRevision);
+    } catch (error) {
+      throw provisioningNativeError(error, 'DESCRIPTOR');
+    }
   }
 
   hasCompletionEvidence(workspace: WorkspaceDescriptor): boolean {

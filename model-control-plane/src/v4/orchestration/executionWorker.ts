@@ -836,6 +836,7 @@ export class ExecutionWorker {
         const workspaceInfrastructureFailure =
           code.startsWith('WORKSPACE_STORAGE_') ||
           code.startsWith('WORKSPACE_CAPACITY_') ||
+          code.startsWith('WORKSPACE_PROVISION_') ||
           code.startsWith('WORKSPACE_EVIDENCE_') ||
           code.startsWith('WORKSPACE_REVIEW_');
         const retryable =
