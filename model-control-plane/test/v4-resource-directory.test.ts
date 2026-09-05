@@ -14,10 +14,14 @@ import {
   providerNativeResources,
 } from '../src/v4/adapters/resourceDirectory.js';
 import { openV4Database } from '../src/v4/persistence/database.js';
+import { ResourceSelector } from '../src/v4/orchestration/resourceSelector.js';
 import { createRepositories } from '../src/v4/persistence/repositories.js';
-import type {
-  ExecutionResource,
-  ExecutionResourceSelection,
+import {
+  COMMUNITY_SUSPENSION_MS,
+  normalizeResourceFailure,
+  transitionResourceState,
+  type ExecutionResource,
+  type ExecutionResourceSelection,
 } from '../src/v4/domain/resourceRouting.js';
 
 const envFile = (): string => {
@@ -189,6 +193,40 @@ function freeResource(): ExecutionResource {
   };
 }
 
+function pvrResource(resourceId: string, resourceSequence: number): ExecutionResource {
+  return {
+    resourceId,
+    displayName: resourceId,
+    resourceTier: 'FREE',
+    resourceSequence,
+    state: 'ACTIVE',
+    ready: true,
+    commercialType: 'FREE',
+    supplyOrigin: 'COMMUNITY_RELAY',
+    resourceLifecycle: 'RECURRING',
+    bindings: [
+      {
+        bindingId: `binding-${resourceId}`,
+        deploymentId: `deployment-${resourceId}`,
+        modelFamily: 'deepseek-v4-flash',
+        routeModel: `route-${resourceId}-deepseek-v4-flash`,
+        protocol: 'openai-chat-completions',
+        transport: 'LITELLM_MANAGED',
+        agentBackend: 'dsh-acp',
+        enabled: true,
+        ready: true,
+      },
+    ],
+  };
+}
+
+function selectedResourceId(selector: ResourceSelector): string {
+  const selected = selector.select({ phase: 'IMPLEMENT' });
+  assert.equal(selected.status, 'SELECTED');
+  if (selected.status !== 'SELECTED') throw new Error('expected selected resource');
+  return selected.profile.resourceId;
+}
+
 test('state service disables quota exhaustion and suspends free transient failures', () => {
   const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
   const repositories = createRepositories(db);
@@ -332,6 +370,154 @@ test('lifecycle probes expired free suspension once and disables failure', async
   assert.equal(calls, 1);
   assert.equal(repositories.resourceStateOverrides.get('free-provider')?.state, 'DISABLED');
   db.close();
+});
+
+test('PVR-7102 exhausted resource is durably disabled and restart selects the next resource', () => {
+  const file = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'pvr-resource-exhaustion-')),
+    'pixel.sqlite',
+  );
+  const resources = [pvrResource('earlier', 10), pvrResource('later', 20)];
+
+  let db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  let repositories = createRepositories(db);
+  let raw = new StaticResourceDirectory(resources);
+  let effective = new CompositeResourceDirectory([raw], repositories.resourceStateOverrides);
+  let selector = new ResourceSelector(effective);
+  const first = selector.select({
+    phase: 'IMPLEMENT',
+    executionId: 'pvr-exhausted-first',
+    selectedAt: '2026-09-05T00:00:00.000Z',
+  });
+  assert.equal(first.status, 'SELECTED');
+  if (first.status !== 'SELECTED' || !first.selection) throw new Error('first selection missing');
+  assert.equal(first.profile.resourceId, 'earlier');
+
+  new ResourceStateService(raw, repositories.resourceStateOverrides).failure(
+    first.selection,
+    new Error('monthly usage limit reached'),
+  );
+  assert.equal(repositories.resourceStateOverrides.get('earlier')?.state, 'DISABLED');
+  assert.equal(selectedResourceId(selector), 'later');
+  db.close();
+
+  // A process restart rebuilds the directory in a different source-row order;
+  // the durable override must still fence the exhausted resource.
+  db = openV4Database(file, { environment: 'test', env: { NODE_ENV: 'test' } });
+  repositories = createRepositories(db);
+  assert.equal(repositories.resourceStateOverrides.get('earlier')?.state, 'DISABLED');
+  raw = new StaticResourceDirectory([...resources].reverse());
+  effective = new CompositeResourceDirectory([raw], repositories.resourceStateOverrides);
+  selector = new ResourceSelector(effective);
+  assert.equal(selectedResourceId(selector), 'later');
+  db.close();
+});
+
+test('PVR-7102 community transient suspension lasts exactly 24h and re-enters only after expiry probe', async () => {
+  const now = '2026-09-05T00:00:00.000Z';
+  const transition = transitionResourceState(
+    {
+      state: 'ACTIVE',
+      resourceTier: 'FREE',
+      commercialType: 'FREE',
+      supplyOrigin: 'COMMUNITY_RELAY',
+      resourceLifecycle: 'RECURRING',
+    },
+    normalizeResourceFailure({ status: 429, message: 'rate limited' }),
+    now,
+  );
+  assert.equal(transition.state, 'SUSPENDED');
+  assert.equal(transition.probeRequired, true);
+  assert.equal(Date.parse(transition.suspendedUntil!) - Date.parse(now), COMMUNITY_SUSPENSION_MS);
+
+  const db = openV4Database(':memory:', { environment: 'test', env: { NODE_ENV: 'test' } });
+  const repositories = createRepositories(db);
+  const resources = [pvrResource('community-earlier', 10), pvrResource('community-later', 20)];
+  const raw = new StaticResourceDirectory(resources);
+  repositories.resourceStateOverrides.create({
+    resourceId: 'community-earlier',
+    state: 'SUSPENDED',
+    suspendedUntil: transition.suspendedUntil!,
+    reasonClass: transition.reasonClass,
+    sanitizedReason: transition.sanitizedReason,
+    source: 'EXECUTION',
+  });
+  const effective = new CompositeResourceDirectory([raw], repositories.resourceStateOverrides);
+  const selector = new ResourceSelector(effective);
+  assert.equal(selectedResourceId(selector), 'community-later');
+
+  let probes = 0;
+  const lifecycle = new ResourceLifecycleManager(raw, repositories.resourceStateOverrides, {
+    probe: async () => {
+      probes += 1;
+      return true;
+    },
+  });
+  assert.equal(
+    await lifecycle.reconcileOnce(new Date(Date.parse(transition.suspendedUntil!) - 1)),
+    0,
+  );
+  assert.equal(probes, 0);
+  assert.equal(selectedResourceId(selector), 'community-later');
+
+  assert.equal(await lifecycle.reconcileOnce(new Date(transition.suspendedUntil!)), 1);
+  assert.equal(probes, 1);
+  assert.equal(repositories.resourceStateOverrides.get('community-earlier')?.state, 'ACTIVE');
+  assert.equal(selectedResourceId(selector), 'community-earlier');
+  db.close();
+});
+
+test('PVR-7102 resource sequence remains sticky across directory rebuild and source row reordering', async () => {
+  const metadata = (resourceId: string, sequence: number, routeModel: string) => ({
+    automatic_core: true,
+    resource_id: resourceId,
+    resource_sequence: sequence,
+    model_family: 'deepseek-v4-flash',
+    route_model: routeModel,
+    protocol: 'openai-chat-completions',
+    commercial_type: 'FREE',
+    supply_origin: 'COMMUNITY_RELAY',
+    resource_lifecycle: 'RECURRING',
+  });
+  const earlier = row({
+    model_name: 'route-earlier-deepseek',
+    litellm_params: { litellm_credential_name: 'earlier' },
+    model_info: {
+      id: 'deployment-earlier',
+      blocked: false,
+      metadata: metadata('earlier', 10, 'route-earlier-deepseek'),
+    },
+  });
+  const later = row({
+    model_name: 'route-later-deepseek',
+    litellm_params: { litellm_credential_name: 'later' },
+    model_info: {
+      id: 'deployment-later',
+      blocked: false,
+      metadata: metadata('later', 20, 'route-later-deepseek'),
+    },
+  });
+
+  const firstDirectory = new LiteLlmResourceDirectory({
+    baseUrl: 'http://litellm.test',
+    envFile: envFile(),
+    fetchImpl: response([later, earlier]),
+  });
+  await firstDirectory.refresh();
+  assert.equal(selectedResourceId(new ResourceSelector(firstDirectory)), 'earlier');
+
+  // Simulate a control-plane restart plus a provider API row-order change.
+  const restartedDirectory = new LiteLlmResourceDirectory({
+    baseUrl: 'http://litellm.test',
+    envFile: envFile(),
+    fetchImpl: response([earlier, later]),
+  });
+  await restartedDirectory.refresh();
+  const selected = new ResourceSelector(restartedDirectory).select({ phase: 'IMPLEMENT' });
+  assert.equal(selected.status, 'SELECTED');
+  if (selected.status !== 'SELECTED') throw new Error('restart selection missing');
+  assert.equal(selected.profile.resourceId, 'earlier');
+  assert.equal(selected.profile.resourceSequence, 10);
 });
 
 test('composite directory rejects duplicate resource identities', () => {
