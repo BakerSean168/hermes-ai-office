@@ -1227,6 +1227,177 @@ test('execution worker keeps review workspace failures strict and never asks the
   seeded.db.close();
 });
 
+test('continue execution finalizes a successful implementation with durable revision and evidence', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-continue-terminal-success',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-continue-terminal-success' },
+  );
+
+  const launched = await worker.runExecution(execution.identity.executionId);
+  assert.equal(launched.status, 'RUNNING');
+  const descriptor = seeded.repositories.sessions.get(execution.identity.executionId).workspace;
+  workspace.completions.set(
+    execution.identity.executionId,
+    implementationCompletion(descriptor, 'continued-result-sha'),
+  );
+  provider.continueSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'SUCCEEDED',
+    finalResponse: 'done',
+    observedAt: now(300),
+  };
+
+  const completed = await worker.continueExecution(
+    execution.identity.executionId,
+    'Finish the existing implementation.',
+  );
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.code, 'IMPLEMENTATION_EXECUTION_SUCCEEDED');
+  assert.equal(completed.resultRevision, 'continued-result-sha');
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).status,
+    'SUCCEEDED',
+  );
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).resultRevision,
+    'continued-result-sha',
+  );
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'SUCCEEDED',
+  );
+  assert.ok(
+    seeded.repositories.evidence
+      .listByExecution(execution.identity.executionId)
+      .some((item) => item.kind === 'DIFF' && item.name === 'implementation-diff'),
+  );
+  seeded.db.close();
+});
+
+test('continue execution persists a terminal provider failure instead of leaving the execution RUNNING', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-continue-terminal-failure',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const provider = new FakeProvider();
+  provider.continueSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'FAILED',
+    errorCode: 'PROVIDER_TRANSPORT_ERROR',
+    retryable: true,
+    finalResponse: 'transport failed',
+    observedAt: now(300),
+  };
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    new FakeWorkspace(),
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-continue-terminal-failure' },
+  );
+
+  assert.equal((await worker.runExecution(execution.identity.executionId)).status, 'RUNNING');
+  const failed = await worker.continueExecution(execution.identity.executionId);
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(failed.code, 'PROVIDER_TRANSPORT_ERROR');
+  const durable = seeded.repositories.executions.get(execution.identity.executionId);
+  assert.equal(durable.status, 'FAILED');
+  assert.equal(durable.errorCode, 'PROVIDER_TRANSPORT_ERROR');
+  assert.equal(durable.retryable, true);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'FAILED',
+  );
+  seeded.db.close();
+});
+
+test('continue execution finalizes an exact independent review verdict', async () => {
+  const seeded = seed();
+  const implementation = createExecution(seeded.repositories, {
+    executionId: 'implementation-continue-review',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const implementationWorkspace: WorkspaceDescriptor = {
+    executionId: implementation.identity.executionId,
+    hostPath: '/managed/implementation-continue-review/repo',
+    executionPath: '/workspace/implementation-continue-review/repo',
+    evidenceHostPath: '/managed/implementation-continue-review/completion-evidence.json',
+    evidenceExecutionPath: '/workspace/implementation-continue-review/completion-evidence.json',
+    sourceRepositoryPath: seeded.plan.repositoryPath,
+    sourceRevision: 'base-sha',
+    createdAt: now(),
+  };
+  succeedImplementationSession(seeded.repositories, implementation, implementationWorkspace);
+  const review = seeded.repositories.reviews.create({
+    idempotencyKey: 'continue-review',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+    implementationExecutionId: implementation.identity.executionId,
+    sourceRevision: 'result-sha',
+  }).value!;
+  const reviewer = createExecution(seeded.repositories, {
+    executionId: 'reviewer-continue-terminal',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+    phase: 'REVIEW',
+    parentExecutionId: implementation.identity.executionId,
+    sourceRevision: 'result-sha',
+    route: 'review',
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeReviewProvider();
+  provider.launchSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'review-continue-session',
+    status: 'RUNNING',
+    observedAt: now(10),
+  };
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'review', provider }],
+    { ownerId: 'worker-continue-terminal-review' },
+  );
+
+  assert.equal((await worker.runExecution(reviewer.identity.executionId)).status, 'RUNNING');
+  const descriptor = seeded.repositories.sessions.get(reviewer.identity.executionId).workspace;
+  workspace.completions.set(reviewer.identity.executionId, reviewCompletion(descriptor, 'PASS'));
+  provider.continueSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'review-continue-session',
+    status: 'SUCCEEDED',
+    finalResponse: 'PASS',
+    observedAt: now(300),
+  };
+  const completed = await worker.continueExecution(reviewer.identity.executionId);
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.code, 'REVIEW_EXECUTION_SUCCEEDED');
+  assert.equal(completed.resultRevision, 'result-sha');
+  const durableReview = seeded.repositories.reviews.getById(review.reviewId);
+  assert.equal(durableReview.reviewerExecutionId, reviewer.identity.executionId);
+  assert.equal(durableReview.status, 'PASSED');
+  assert.equal(durableReview.verdict, 'PASS');
+  assert.equal(
+    seeded.repositories.executions.get(reviewer.identity.executionId).status,
+    'SUCCEEDED',
+  );
+  seeded.db.close();
+});
+
 test('execution worker can interrupt a stuck provider turn and continue the same durable session', async () => {
   const seeded = seed();
   const execution = createExecution(seeded.repositories, {
@@ -1361,6 +1532,68 @@ test('execution worker separates liveness heartbeats from meaningful progress an
   assert.equal(
     evidence.filter((item) => item.name.startsWith('meaningful-stall-recovery-')).length,
     1,
+  );
+  seeded.db.close();
+});
+
+test('meaningful-progress stall recovery finalizes a terminal race in the same execution cycle', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-meaningful-stall-terminal-race',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  workspace.progressFingerprints.set(execution.identity.executionId, 'workspace-static');
+  const provider = new FakeProvider();
+  provider.launchSnapshot = { ...provider.launchSnapshot, progressFingerprint: 'event-static' };
+  provider.inspectSnapshot = { ...provider.inspectSnapshot, progressFingerprint: 'event-static' };
+  provider.interruptSnapshot = {
+    provider: provider.provider,
+    providerSessionId: 'provider-session-1',
+    status: 'SUCCEEDED',
+    finalResponse: 'completed during interrupt race',
+    observedAt: now(500),
+  };
+  let clock = Date.now();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    {
+      ownerId: 'worker-meaningful-stall-terminal-race',
+      meaningfulProgressTimeoutMs: 30_000,
+      maxStallRecoveries: 1,
+      now: () => new Date(clock),
+    },
+  );
+
+  assert.equal((await worker.runExecution(execution.identity.executionId)).status, 'RUNNING');
+  const descriptor = seeded.repositories.sessions.get(execution.identity.executionId).workspace;
+  workspace.completions.set(
+    execution.identity.executionId,
+    implementationCompletion(descriptor, 'stall-race-result-sha'),
+  );
+  clock += 31_000;
+  const completed = await worker.runExecution(execution.identity.executionId);
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.resultRevision, 'stall-race-result-sha');
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).status,
+    'SUCCEEDED',
+  );
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).resultRevision,
+    'stall-race-result-sha',
+  );
+  assert.ok(
+    seeded.repositories.evidence
+      .listByExecution(execution.identity.executionId)
+      .some(
+        (item) =>
+          item.name.startsWith('meaningful-stall-recovery-') &&
+          item.payload.action === 'terminal-race',
+      ),
   );
   seeded.db.close();
 });
@@ -1504,6 +1737,67 @@ test('execution worker replaces a stalled provider session without changing exec
   assert.equal(
     seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
     'provider-session-2',
+  );
+  seeded.db.close();
+});
+
+test('provider-session replacement finalizes an immediately terminal replacement in the same call', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-session-replace-terminal',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new FakeProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'worker-session-replace-terminal' },
+  );
+  assert.equal((await worker.runExecution(execution.identity.executionId)).status, 'RUNNING');
+  const descriptor = seeded.repositories.sessions.get(execution.identity.executionId).workspace;
+  workspace.completions.set(
+    execution.identity.executionId,
+    implementationCompletion(descriptor, 'replacement-result-sha'),
+  );
+  provider.inspect = async (providerSessionId: string) =>
+    providerSessionId === 'provider-session-2'
+      ? {
+          provider: provider.provider,
+          providerSessionId,
+          status: 'SUCCEEDED',
+          finalResponse: 'replacement finished immediately',
+          observedAt: now(400),
+        }
+      : {
+          provider: provider.provider,
+          providerSessionId,
+          status: 'RUNNING',
+          observedAt: now(200),
+        };
+
+  const completed = await worker.replaceStalledProviderSession(
+    execution.identity.executionId,
+    'replace-terminal-test-key',
+    'Resume and finish from the same durable workspace.',
+    'terminal replacement regression',
+  );
+  assert.equal(completed.status, 'SUCCEEDED');
+  assert.equal(completed.code, 'IMPLEMENTATION_EXECUTION_SUCCEEDED');
+  assert.equal(completed.resultRevision, 'replacement-result-sha');
+  assert.equal(
+    seeded.repositories.executions.get(execution.identity.executionId).status,
+    'SUCCEEDED',
+  );
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
+    'provider-session-2',
+  );
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerStatus,
+    'SUCCEEDED',
   );
   seeded.db.close();
 });

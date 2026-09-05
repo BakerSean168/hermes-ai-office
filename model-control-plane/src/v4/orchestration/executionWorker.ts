@@ -257,7 +257,7 @@ export class ExecutionWorker {
       const resolved = this.resolveProvider(execution);
       if (!resolved)
         return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
-      const { provider } = resolved;
+      const { provider, selection } = resolved;
       if (!provider.continue)
         return { executionId, status: 'WAITING', code: 'PROVIDER_CONTINUE_UNAVAILABLE' };
       let session = this.repositories.sessions.get(executionId);
@@ -269,31 +269,29 @@ export class ExecutionWorker {
           return { executionId, status: 'WAITING', code: 'PROVIDER_INTERRUPT_UNAVAILABLE' };
         const interrupted = await provider.interrupt(providerSessionId);
         if (TERMINAL_PROVIDER_STATUSES.has(interrupted.status))
-          this.recordTerminalProviderStatus(executionId, session, interrupted);
-        else this.recordActiveProviderStatus(executionId, session, interrupted);
+          return await this.completeTerminalExecution(execution, session, interrupted, selection);
+        this.recordActiveProviderStatus(executionId, session, interrupted);
         session = this.repositories.sessions.get(executionId);
       }
       const snapshot = await provider.continue(providerSessionId, instruction);
       if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status))
-        this.recordTerminalProviderStatus(executionId, session, snapshot);
-      else this.recordActiveProviderStatus(executionId, session, snapshot);
+        return await this.completeTerminalExecution(execution, session, snapshot, selection);
+      this.recordActiveProviderStatus(executionId, session, snapshot);
       return {
         executionId,
         status:
-          snapshot.status === 'FAILED' ||
-          snapshot.status === 'STUCK' ||
-          snapshot.status === 'CANCELLED'
-            ? 'FAILED'
-            : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
-              ? 'WAITING'
-              : snapshot.status === 'SUCCEEDED'
-                ? 'SUCCEEDED'
-                : 'RUNNING',
+          snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+            ? 'WAITING'
+            : 'RUNNING',
         code: 'PROVIDER_' + snapshot.status,
         providerSessionId: snapshot.providerSessionId,
       };
     } catch (error) {
-      return { executionId, status: 'FAILED', code: errorCode(error) };
+      return {
+        executionId,
+        status: 'FAILED',
+        code: this.recordTerminalOperationError(executionId, error),
+      };
     } finally {
       this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
     }
@@ -325,7 +323,7 @@ export class ExecutionWorker {
       const resolved = this.resolveProvider(execution);
       if (!resolved)
         return { executionId, status: 'WAITING', code: 'EXECUTION_RESOURCE_SELECTION_UNAVAILABLE' };
-      const { provider } = resolved;
+      const { provider, selection } = resolved;
       if (!provider.replace)
         return { executionId, status: 'WAITING', code: 'PROVIDER_REPLACE_UNAVAILABLE' };
       if (!provider.interrupt)
@@ -365,20 +363,14 @@ export class ExecutionWorker {
         }
         const snapshot = await provider.inspect(replacementId);
         if (TERMINAL_PROVIDER_STATUSES.has(snapshot.status))
-          this.recordTerminalProviderStatus(executionId, session, snapshot);
-        else this.recordActiveProviderStatus(executionId, session, snapshot);
+          return await this.completeTerminalExecution(execution, session, snapshot, selection);
+        this.recordActiveProviderStatus(executionId, session, snapshot);
         return {
           executionId,
           status:
-            snapshot.status === 'FAILED' ||
-            snapshot.status === 'STUCK' ||
-            snapshot.status === 'CANCELLED'
-              ? 'FAILED'
-              : snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
-                ? 'WAITING'
-                : snapshot.status === 'SUCCEEDED'
-                  ? 'SUCCEEDED'
-                  : 'RUNNING',
+            snapshot.status === 'PAUSED' || snapshot.status === 'WAITING_FOR_CONFIRMATION'
+              ? 'WAITING'
+              : 'RUNNING',
           code: 'PROVIDER_SESSION_REPLACEMENT_EXISTING_' + snapshot.status,
           providerSessionId: replacementId,
         };
@@ -464,26 +456,29 @@ export class ExecutionWorker {
       session = this.repositories.sessions.get(executionId);
       const currentReplacement = await provider.inspect(replacement.providerSessionId);
       if (TERMINAL_PROVIDER_STATUSES.has(currentReplacement.status))
-        this.recordTerminalProviderStatus(executionId, session, currentReplacement);
-      else this.recordActiveProviderStatus(executionId, session, currentReplacement);
+        return await this.completeTerminalExecution(
+          execution,
+          session,
+          currentReplacement,
+          selection,
+        );
+      this.recordActiveProviderStatus(executionId, session, currentReplacement);
       return {
         executionId,
         status:
-          currentReplacement.status === 'FAILED' ||
-          currentReplacement.status === 'STUCK' ||
-          currentReplacement.status === 'CANCELLED'
-            ? 'FAILED'
-            : currentReplacement.status === 'PAUSED' ||
-                currentReplacement.status === 'WAITING_FOR_CONFIRMATION'
-              ? 'WAITING'
-              : currentReplacement.status === 'SUCCEEDED'
-                ? 'SUCCEEDED'
-                : 'RUNNING',
+          currentReplacement.status === 'PAUSED' ||
+          currentReplacement.status === 'WAITING_FOR_CONFIRMATION'
+            ? 'WAITING'
+            : 'RUNNING',
         code: 'PROVIDER_SESSION_REPLACED_' + currentReplacement.status,
         providerSessionId: currentReplacement.providerSessionId,
       };
     } catch (error) {
-      return { executionId, status: 'FAILED', code: errorCode(error) };
+      return {
+        executionId,
+        status: 'FAILED',
+        code: this.recordTerminalOperationError(executionId, error),
+      };
     } finally {
       this.repositories.executions.releaseLease(executionId, this.ownerId, claim.value.leaseToken);
     }
@@ -816,57 +811,13 @@ export class ExecutionWorker {
         }
       }
 
-      this.recordTerminalProviderStatus(executionId, session, snapshot);
-      if (snapshot.status === 'FAILED' || snapshot.status === 'STUCK') {
-        const code =
-          bounded(snapshot.errorCode, MAX_ERROR_CODE) ??
-          (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
-        this.reportResourceFailure(selectedResource, {
-          code,
-          message: [snapshot.errorCode, snapshot.finalResponse].filter(Boolean).join(' '),
-        });
-        this.repositories.executions.recordResult(executionId, {
-          status: 'FAILED',
-          errorCode: code,
-          retryable: snapshot.status === 'STUCK' ? true : Boolean(snapshot.retryable),
-          resultSummary: bounded(snapshot.finalResponse, MAX_RESULT_SUMMARY),
-        });
-        return {
-          executionId,
-          status: 'FAILED',
-          code,
-          providerSessionId: snapshot.providerSessionId,
-        };
-      }
-      if (snapshot.status === 'CANCELLED') {
-        this.repositories.executions.updateStatus(executionId, 'CANCELLED');
-        return {
-          executionId,
-          status: 'FAILED',
-          code: 'PROVIDER_CANCELLED',
-          providerSessionId: snapshot.providerSessionId,
-        };
-      }
-      if (!completion) throw new V4Error('WORKSPACE_COMPLETION_MISSING');
-      this.persistCompletion(execution, completion, snapshot);
-      this.repositories.executions.recordResult(executionId, {
-        status: 'SUCCEEDED',
-        resultRevision: completion.headRevision,
-        resultSummary: bounded(completion.evidence.summary, MAX_RESULT_SUMMARY),
-      });
-      if (execution.identity.phase === 'REVIEW')
-        this.persistReviewVerdict(executionId, completion.evidence);
-      this.reportResourceSuccess(selectedResource);
-      return {
-        executionId,
-        status: 'SUCCEEDED',
-        code:
-          execution.identity.phase === 'REVIEW'
-            ? 'REVIEW_EXECUTION_SUCCEEDED'
-            : 'IMPLEMENTATION_EXECUTION_SUCCEEDED',
-        providerSessionId: snapshot.providerSessionId,
-        resultRevision: completion.headRevision,
-      };
+      return await this.completeTerminalExecution(
+        execution,
+        session,
+        snapshot,
+        selectedResource,
+        completion,
+      );
     } catch (error) {
       const observedCode = errorCode(error);
       const currentSession = this.repositories.sessions.getOptional(executionId);
@@ -1129,7 +1080,6 @@ export class ExecutionWorker {
       if (snapshot.status !== 'PAUSED')
         stopped = await provider.interrupt(previousProviderSessionId);
       if (TERMINAL_PROVIDER_STATUSES.has(stopped.status)) {
-        this.recordTerminalProviderStatus(execution.identity.executionId, session, stopped);
         this.repositories.evidence.append({
           executionId: execution.identity.executionId,
           kind: 'RECOVERY',
@@ -1137,12 +1087,7 @@ export class ExecutionWorker {
           sourceRevision: execution.identity.sourceRevision,
           payload: { ...basePayload, action: 'terminal-race', terminalStatus: stopped.status },
         });
-        return {
-          executionId: execution.identity.executionId,
-          status: 'WAITING',
-          code: 'PROVIDER_MEANINGFUL_PROGRESS_TERMINAL_RACE',
-          providerSessionId: stopped.providerSessionId,
-        };
+        return await this.completeTerminalExecution(execution, session, stopped, selectedResource);
       }
       this.recordActiveProviderStatus(execution.identity.executionId, session, stopped);
       const currentSession = this.repositories.sessions.get(execution.identity.executionId);
@@ -1200,21 +1145,19 @@ export class ExecutionWorker {
       const current = await provider.inspect(replacement.providerSessionId);
       const replacedSession = this.repositories.sessions.get(execution.identity.executionId);
       if (TERMINAL_PROVIDER_STATUSES.has(current.status))
-        this.recordTerminalProviderStatus(execution.identity.executionId, replacedSession, current);
-      else
-        this.recordActiveProviderStatus(execution.identity.executionId, replacedSession, current);
+        return await this.completeTerminalExecution(
+          execution,
+          replacedSession,
+          current,
+          selectedResource,
+        );
+      this.recordActiveProviderStatus(execution.identity.executionId, replacedSession, current);
       return {
         executionId: execution.identity.executionId,
         status:
-          current.status === 'FAILED' ||
-          current.status === 'STUCK' ||
-          current.status === 'CANCELLED'
-            ? 'FAILED'
-            : current.status === 'SUCCEEDED'
-              ? 'SUCCEEDED'
-              : current.status === 'PAUSED' || current.status === 'WAITING_FOR_CONFIRMATION'
-                ? 'WAITING'
-                : 'RUNNING',
+          current.status === 'PAUSED' || current.status === 'WAITING_FOR_CONFIRMATION'
+            ? 'WAITING'
+            : 'RUNNING',
         code: 'PROVIDER_MEANINGFUL_PROGRESS_RECOVERED_' + current.status,
         providerSessionId: current.providerSessionId,
       };
@@ -1389,6 +1332,95 @@ export class ExecutionWorker {
     );
     if (attached.status === 'rejected')
       throw new V4Error(attached.reason ?? 'STALE_REVIEWER_EXECUTION');
+  }
+
+  private recordTerminalOperationError(executionId: string, error: unknown): string {
+    const code = errorCode(error);
+    const execution = this.repositories.executions.get(executionId);
+    const session = this.repositories.sessions.getOptional(executionId);
+    if (
+      execution.status === 'RUNNING' &&
+      session &&
+      TERMINAL_PROVIDER_STATUSES.has(session.providerStatus)
+    ) {
+      const retryable =
+        code.startsWith('WORKSPACE_STORAGE_') ||
+        code.startsWith('WORKSPACE_CAPACITY_') ||
+        code.startsWith('WORKSPACE_EVIDENCE_') ||
+        code.startsWith('WORKSPACE_REVIEW_') ||
+        (execution.identity.phase !== 'REVIEW' && FINALIZABLE_IMPLEMENTATION_CODES.has(code));
+      this.repositories.executions.recordResult(executionId, {
+        status: 'FAILED',
+        errorCode: code,
+        retryable,
+      });
+    }
+    return code;
+  }
+
+  private async completeTerminalExecution(
+    execution: Execution,
+    session: ExecutionSession,
+    snapshot: ProviderSessionSnapshot,
+    selectedResource: ExecutionResourceSelection | undefined,
+    completion?: WorkspaceCompletionSnapshot,
+  ): Promise<ExecutionWorkerResult> {
+    const executionId = execution.identity.executionId;
+    this.recordTerminalProviderStatus(executionId, session, snapshot);
+    if (snapshot.status === 'FAILED' || snapshot.status === 'STUCK') {
+      const code =
+        bounded(snapshot.errorCode, MAX_ERROR_CODE) ??
+        (snapshot.status === 'STUCK' ? 'PROVIDER_STUCK' : 'PROVIDER_FAILED');
+      this.reportResourceFailure(selectedResource, {
+        code,
+        message: [snapshot.errorCode, snapshot.finalResponse].filter(Boolean).join(' '),
+      });
+      this.repositories.executions.recordResult(executionId, {
+        status: 'FAILED',
+        errorCode: code,
+        retryable: snapshot.status === 'STUCK' ? true : Boolean(snapshot.retryable),
+        resultSummary: bounded(snapshot.finalResponse, MAX_RESULT_SUMMARY),
+      });
+      return {
+        executionId,
+        status: 'FAILED',
+        code,
+        providerSessionId: snapshot.providerSessionId,
+      };
+    }
+    if (snapshot.status === 'CANCELLED') {
+      this.repositories.executions.updateStatus(executionId, 'CANCELLED');
+      return {
+        executionId,
+        status: 'FAILED',
+        code: 'PROVIDER_CANCELLED',
+        providerSessionId: snapshot.providerSessionId,
+      };
+    }
+    const verifiedCompletion =
+      completion ??
+      (execution.identity.phase === 'REVIEW'
+        ? await this.workspace.verifyReview(session.workspace, execution.identity.sourceRevision!)
+        : await this.workspace.verifyImplementation(session.workspace));
+    this.persistCompletion(execution, verifiedCompletion, snapshot);
+    this.repositories.executions.recordResult(executionId, {
+      status: 'SUCCEEDED',
+      resultRevision: verifiedCompletion.headRevision,
+      resultSummary: bounded(verifiedCompletion.evidence.summary, MAX_RESULT_SUMMARY),
+    });
+    if (execution.identity.phase === 'REVIEW')
+      this.persistReviewVerdict(executionId, verifiedCompletion.evidence);
+    this.reportResourceSuccess(selectedResource);
+    return {
+      executionId,
+      status: 'SUCCEEDED',
+      code:
+        execution.identity.phase === 'REVIEW'
+          ? 'REVIEW_EXECUTION_SUCCEEDED'
+          : 'IMPLEMENTATION_EXECUTION_SUCCEEDED',
+      providerSessionId: snapshot.providerSessionId,
+      resultRevision: verifiedCompletion.headRevision,
+    };
   }
 
   private recordActiveProviderStatus(
