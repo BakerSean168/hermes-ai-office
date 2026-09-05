@@ -5,7 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { PlanWorktreeManager, worktreeRefComponent } from '../src/v4/adapters/planWorktrees.js';
+import {
+  PlanWorktreeManager,
+  workerSafeGitCommonMode,
+  worktreeRefComponent,
+} from '../src/v4/adapters/planWorktrees.js';
 import { V4Error } from '../src/v4/domain/errors.js';
 import { openV4Database, SCHEMA_VERSION } from '../src/v4/persistence/database.js';
 import { createRepositories } from '../src/v4/persistence/repositories.js';
@@ -141,6 +145,12 @@ test('PlanWorktreeManager creates one literal shared-common-dir worktree per rol
 
   value.db.close();
   fs.rmSync(value.root, { recursive: true, force: true });
+});
+
+test('worker Git ACL mode normalization drops privileged bits and keeps sticky ordinary permissions', () => {
+  assert.equal(workerSafeGitCommonMode(0o2775), 0o1775);
+  assert.equal(workerSafeGitCommonMode(0o3775), 0o1775);
+  assert.equal(workerSafeGitCommonMode(0o0775), 0o1775);
 });
 
 test('WorkItem worktree survives provider retries and enforces one durable writer at a time', async () => {

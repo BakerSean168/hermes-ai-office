@@ -78,6 +78,10 @@ export function worktreeRefComponent(value: string): string {
   return encoded;
 }
 
+export function workerSafeGitCommonMode(mode: number): number {
+  return (mode & 0o0777) | 0o1000;
+}
+
 function worktreeId(role: PlanWorktreeRole, rootPlanId: string, identity: string): string {
   return [
     'worktree',
@@ -270,7 +274,13 @@ export class PlanWorktreeManager {
     if (source.uid !== uid) {
       failClosed(fs.existsSync(this.setfaclBinary), 'WORKTREE_ACL_TOOL_MISSING');
       const commonMode = fs.statSync(common).mode & 0o7777;
-      fs.chmodSync(common, commonMode | 0o1000);
+      // Worker access is ACL-scoped below. Keep the common Git directory sticky,
+      // but never preserve setuid/setgid bits in chmod: production runs with
+      // RestrictSUIDSGID=true, which correctly rejects chmod requests that set
+      // those privileged bits. Fresh repositories can inherit setgid from their
+      // parent directory, so normalize to ordinary rwx permissions + sticky.
+      const workerSafeCommonMode = workerSafeGitCommonMode(commonMode);
+      fs.chmodSync(common, workerSafeCommonMode);
       await this.execAcl(['-m', `u:${uid}:rwx`, '--', common]);
       const objects = path.join(common, 'objects');
       this.ensureObjectDirectories(objects, source.uid, source.gid);
