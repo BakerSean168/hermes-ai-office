@@ -2396,10 +2396,8 @@ export class LeaseRepository {
       const current = this.db
         .prepare('SELECT * FROM leases WHERE aggregate_type=? AND aggregate_id=?')
         .get(aggregateType, aggregateId) as LeaseRow | undefined;
-      if (current && current.expires_at > at) {
-        if (current.owner_id === ownerId) return { status: 'existing', value: leaseFrom(current) };
+      if (current && current.expires_at > at)
         return { status: 'rejected', value: leaseFrom(current), reason: 'LEASE_HELD' };
-      }
       const lease: Lease = {
         aggregateType,
         aggregateId,

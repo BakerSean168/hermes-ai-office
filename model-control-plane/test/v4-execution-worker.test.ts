@@ -260,6 +260,36 @@ class FakeProvider implements ExecutionProviderPort {
   }
 }
 
+class BlockingLaunchProvider extends FakeProvider {
+  readonly launchEntered: Promise<void>;
+  private readonly launchGate: Promise<void>;
+  private markLaunchEntered!: () => void;
+  private releaseLaunchGate!: () => void;
+
+  constructor() {
+    super();
+    this.launchEntered = new Promise<void>((resolve) => {
+      this.markLaunchEntered = resolve;
+    });
+    this.launchGate = new Promise<void>((resolve) => {
+      this.releaseLaunchGate = resolve;
+    });
+  }
+
+  releaseLaunch(): void {
+    this.releaseLaunchGate();
+  }
+
+  override async launch(input: ProviderLaunchInput): Promise<ProviderSessionSnapshot> {
+    this.launchCalls += 1;
+    this.lastLaunch = input;
+    this.markLaunchEntered();
+    await this.launchGate;
+    if (this.launchError) throw this.launchError;
+    return { ...this.launchSnapshot, observedAt: now(10) };
+  }
+}
+
 class FakeResourceFeedback {
   readonly failures: Array<{ resourceId: string; error: unknown }> = [];
   readonly successes: string[] = [];
@@ -431,6 +461,45 @@ test('execution worker launches once, persists provider correlation, then comple
     seeded.repositories.evidence
       .listByExecution(execution.identity.executionId)
       .some((item) => item.kind === 'DIFF'),
+  );
+  seeded.db.close();
+});
+
+test('execution worker lease rejects same-owner reentry before a provider session can launch twice', async () => {
+  const seeded = seed();
+  const execution = createExecution(seeded.repositories, {
+    executionId: 'exec-overlapping-launch',
+    planId: seeded.plan.planId,
+    workItemId: seeded.item.workItemId,
+  });
+  const workspace = new FakeWorkspace();
+  const provider = new BlockingLaunchProvider();
+  const worker = new ExecutionWorker(
+    seeded.repositories,
+    workspace,
+    [{ route: 'implementation', provider }],
+    { ownerId: 'shared-worker-owner' },
+  );
+
+  const first = worker.runExecution(execution.identity.executionId);
+  await provider.launchEntered;
+  const overlapping = await worker.runExecution(execution.identity.executionId);
+
+  assert.equal(overlapping.status, 'SKIPPED');
+  assert.equal(overlapping.code, 'LEASE_HELD');
+  assert.equal(provider.launchCalls, 1);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
+    undefined,
+  );
+
+  provider.releaseLaunch();
+  const launched = await first;
+  assert.equal(launched.status, 'RUNNING');
+  assert.equal(provider.launchCalls, 1);
+  assert.equal(
+    seeded.repositories.sessions.get(execution.identity.executionId).providerSessionId,
+    'provider-session-1',
   );
   seeded.db.close();
 });

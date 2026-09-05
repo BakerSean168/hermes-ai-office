@@ -915,6 +915,11 @@ test('execution leases allow takeover only after expiry', () => {
   );
   assert.equal(first.status, 'created');
   assert.equal(
+    seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-a', 10, 1001)
+      .status,
+    'rejected',
+  );
+  assert.equal(
     seeded.repositories.executions.claimLease(execution.identity.executionId, 'worker-b', 10, 1001)
       .status,
     'rejected',
