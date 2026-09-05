@@ -15,8 +15,10 @@ const installer = fs.readFileSync(
   'utf8',
 );
 const releasePath = path.join(root, 'scripts/release-v4-gcp.sh');
+const pinReleasePath = path.join(root, 'scripts/pin-v4-release-ref.sh');
 const probePath = path.join(root, 'scripts/probe-v4-service-sandbox.sh');
 const release = fs.readFileSync(releasePath, 'utf8');
+const pinRelease = fs.readFileSync(pinReleasePath, 'utf8');
 const probe = fs.readFileSync(probePath, 'utf8');
 const literalWorktreeSmoke = fs.readFileSync(
   path.join(root, 'scripts/smoke-v4-literal-worktree.mjs'),
@@ -155,13 +157,24 @@ test('V4 installer takes a SQLite backup and requires V4 execution health', () =
   assert.doesNotMatch(installer, /PIXEL_V4_ALLOW_DATA_RESET=true/);
 });
 
-test('V4 release deploys the reviewed canonical SHA and fails closed on partial health', () => {
+test('V4 release uses an approved exact-SHA transient worktree and fails closed on partial health', () => {
   assert.match(service, /WorkingDirectory=\/home\/dev\/projects\/pixel-agents/);
   assert.match(service, /ExecStart=\/usr\/bin\/node model-control-plane\/dist\/main\.js/);
-  assert.match(release, /target_root="\/home\/dev\/projects\/pixel-agents"/);
-  assert.match(release, /source_sha=.*rev-parse HEAD/);
-  assert.match(release, /target_sha=.*rev-parse HEAD/);
-  assert.match(release, /canonical source SHA/);
+  assert.match(release, /canonical_root=.*\/home\/dev\/projects\/pixel-agents/);
+  assert.match(release, /release_ref=.*refs\/pixel-v4\/release-approved/);
+  assert.match(release, /rev-parse .*release_ref.*\^\{commit\}/);
+  assert.match(release, /worktree add --detach/);
+  assert.match(release, /PIXEL_V4_RELEASE_INNER=1/);
+  assert.match(release, /inherited release lock is missing/);
+  assert.match(release, /flock -n 9/);
+  assert.match(release, /release worktree HEAD mismatch/);
+  assert.match(release, /release worktree is not clean/);
+  assert.match(release, /--path-format=absolute --git-common-dir/);
+  assert.match(release, /release worktree does not share canonical Git common dir/);
+  assert.match(release, /approved ref moved during release/);
+  assert.match(release, /launcher differs from approved release SHA/);
+  assert.doesNotMatch(release, /refusing release from dirty worktree/);
+  assert.doesNotMatch(release, /canonical source SHA .* does not match release SHA/);
   assert.match(release, /await backup\(db, target\)/);
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.resourceSelectorEnabled !== true/);
@@ -180,6 +193,57 @@ test('V4 release deploys the reviewed canonical SHA and fails closed on partial 
   assert.match(release, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true/);
   assert.match(release, /smoke-v4-literal-worktree\.mjs/);
   assert.doesNotMatch(release, /PIXEL_V4_ALLOW_DATA_RESET=true/);
+});
+
+test('V4 release approval ref is explicit, durable, and fast-forward only', () => {
+  const temp = fs.mkdtempSync('/tmp/pixel-v4-release-ref-');
+  try {
+    execFileSync('git', ['init', '-q', temp]);
+    execFileSync('git', ['-C', temp, 'config', 'user.name', 'Pixel Test']);
+    execFileSync('git', ['-C', temp, 'config', 'user.email', 'pixel-test@localhost']);
+    fs.writeFileSync(path.join(temp, 'value.txt'), 'one\n');
+    execFileSync('git', ['-C', temp, 'add', 'value.txt']);
+    execFileSync('git', ['-C', temp, 'commit', '-qm', 'one']);
+    const first = execFileSync('git', ['-C', temp, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    fs.writeFileSync(path.join(temp, 'value.txt'), 'two\n');
+    execFileSync('git', ['-C', temp, 'commit', '-qam', 'two']);
+    const second = execFileSync('git', ['-C', temp, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+
+    execFileSync('bash', [pinReleasePath, first], {
+      env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+      stdio: 'pipe',
+    });
+    execFileSync('bash', [pinReleasePath, second], {
+      env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+      stdio: 'pipe',
+    });
+    const approved = execFileSync(
+      'git',
+      ['-C', temp, 'rev-parse', 'refs/pixel-v4/release-approved^{commit}'],
+      { encoding: 'utf8' },
+    ).trim();
+    assert.equal(approved, second);
+    assert.throws(() =>
+      execFileSync('bash', [pinReleasePath, first], {
+        env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+        stdio: 'pipe',
+      }),
+    );
+    const reflog = execFileSync(
+      'git',
+      ['-C', temp, 'reflog', 'show', 'refs/pixel-v4/release-approved'],
+      { encoding: 'utf8' },
+    );
+    assert.match(reflog, /pixel-v4 release approval/);
+    assert.match(pinRelease, /not invent or claim review evidence itself/);
+    assert.match(pinRelease, /merge-base --is-ancestor/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test('V4 Luna implementation uses managed Codex Responses and bridges durable implementation evidence', () => {

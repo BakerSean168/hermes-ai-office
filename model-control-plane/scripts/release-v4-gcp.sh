@@ -1,31 +1,131 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+canonical_root="${PIXEL_V4_CANONICAL_ROOT:-/home/dev/projects/pixel-agents}"
+release_ref="${PIXEL_V4_RELEASE_REF:-refs/pixel-v4/release-approved}"
+release_worktree_root="${PIXEL_V4_RELEASE_WORKTREE_ROOT:-/home/dev/projects/.pixel-v4-release-worktrees}"
 service="hermes-model-control-plane.service"
-target_root="/home/dev/projects/pixel-agents"
+target_root="$canonical_root"
 health_url="http://127.0.0.1:8320/api/health"
 db_file="/srv/hermes-personal/data/model-control-plane/pixel-v4.sqlite"
 backup_dir="/srv/hermes-personal/data/model-control-plane/backups"
 release_lock=/tmp/hermes-pixel-v4-release.lock
-exec 9>"$release_lock"
-flock -n 9 || { echo "refusing release: another V4 release is active" >&2; exit 1; }
 
-if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
-  echo "refusing release from dirty worktree" >&2
-  exit 1
+release_outer() {
+  exec 9>"$release_lock"
+  flock -n 9 || { echo "refusing release: another V4 release is active" >&2; exit 1; }
+
+  [[ "$release_ref" == refs/pixel-v4/* ]] || {
+    echo "refusing release ref outside refs/pixel-v4" >&2
+    exit 1
+  }
+  source_sha="$(git -C "$canonical_root" rev-parse "${release_ref}^{commit}")"
+  git -C "$canonical_root" cat-file -e "${source_sha}^{commit}"
+
+  # The bootstrap launcher may run from a developer checkout with unrelated
+  # dirty files, but the launcher itself must exactly match the approved SHA.
+  launcher_rel="model-control-plane/scripts/release-v4-gcp.sh"
+  launcher_file="$canonical_root/$launcher_rel"
+  approved_launcher_sha="$(git -C "$canonical_root" show "$source_sha:$launcher_rel" | sha256sum | awk '{print $1}')"
+  current_launcher_sha="$(sha256sum "$launcher_file" | awk '{print $1}')"
+  [[ "$approved_launcher_sha" == "$current_launcher_sha" ]] || {
+    echo "refusing release: launcher differs from approved release SHA" >&2
+    exit 1
+  }
+
+  command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is required for literal V4 worktree ACLs" >&2; exit 1; }
+  git -C "$canonical_root" config core.fsync committed
+  [[ "$(git -C "$canonical_root" config --get core.fsync)" == committed ]] || {
+    echo "refusing release: canonical repository must use core.fsync=committed" >&2
+    exit 1
+  }
+
+  # With the process lock held, any prior release worktree is residue from a
+  # crashed/preempted release. Remove only paths under the dedicated root.
+  mkdir -p "$release_worktree_root"
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+    case "$path" in
+      "$release_worktree_root"/*)
+        git -C "$canonical_root" worktree unlock -- "$path" >/dev/null 2>&1 || true
+        git -C "$canonical_root" worktree remove --force -- "$path" >/dev/null 2>&1 || true
+        ;;
+    esac
+  done < <(git -C "$canonical_root" worktree list --porcelain | sed -n 's/^worktree //p')
+  git -C "$canonical_root" worktree prune --expire now
+
+  release_worktree="$release_worktree_root/${source_sha}-$$"
+  git -C "$canonical_root" worktree add --detach "$release_worktree" "$source_sha"
+  cleanup_release_worktree() {
+    git -C "$canonical_root" worktree unlock -- "$release_worktree" >/dev/null 2>&1 || true
+    git -C "$canonical_root" worktree remove --force -- "$release_worktree" >/dev/null 2>&1 || true
+    git -C "$canonical_root" worktree prune --expire now >/dev/null 2>&1 || true
+  }
+  trap cleanup_release_worktree EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  [[ "$(git -C "$release_worktree" rev-parse HEAD)" == "$source_sha" ]] || {
+    echo "refusing release: release worktree HEAD mismatch" >&2
+    exit 1
+  }
+  [[ -z "$(git -C "$release_worktree" status --porcelain --untracked-files=no)" ]] || {
+    echo "refusing release: release worktree is not clean" >&2
+    exit 1
+  }
+  canonical_common="$(realpath "$(git -C "$canonical_root" rev-parse --path-format=absolute --git-common-dir)")"
+  release_common="$(realpath "$(git -C "$release_worktree" rev-parse --path-format=absolute --git-common-dir)")"
+  [[ "$release_common" == "$canonical_common" ]] || {
+    echo "refusing release: release worktree does not share canonical Git common dir" >&2
+    exit 1
+  }
+
+  [[ -d "$canonical_root/node_modules" ]] || {
+    echo "refusing release: canonical dependency runtime is missing" >&2
+    exit 1
+  }
+  ln -s "$canonical_root/node_modules" "$release_worktree/node_modules"
+
+  PIXEL_V4_RELEASE_INNER=1 \
+  PIXEL_V4_RELEASE_SOURCE_ROOT="$release_worktree" \
+  PIXEL_V4_RELEASE_SOURCE_SHA="$source_sha" \
+  PIXEL_V4_CANONICAL_ROOT="$canonical_root" \
+  PIXEL_V4_RELEASE_REF="$release_ref" \
+    /bin/bash "$release_worktree/model-control-plane/scripts/release-v4-gcp.sh"
+}
+
+if [[ "${PIXEL_V4_RELEASE_INNER:-0}" != 1 ]]; then
+  release_outer
+  exit $?
 fi
+
+repo_root="${PIXEL_V4_RELEASE_SOURCE_ROOT:?release source worktree required}"
+source_sha="${PIXEL_V4_RELEASE_SOURCE_SHA:?release source SHA required}"
+[[ -e /proc/$$/fd/9 ]] || { echo "refusing release: inherited release lock is missing" >&2; exit 1; }
+flock -n 9 || { echo "refusing release: inherited release lock is not held" >&2; exit 1; }
+[[ "$(git -C "$repo_root" rev-parse HEAD)" == "$source_sha" ]] || {
+  echo "refusing release: inner source SHA mismatch" >&2
+  exit 1
+}
+[[ -z "$(git -C "$repo_root" status --porcelain --untracked-files=no)" ]] || {
+  echo "refusing release: inner release source is not clean" >&2
+  exit 1
+}
+canonical_common="$(realpath "$(git -C "$canonical_root" rev-parse --path-format=absolute --git-common-dir)")"
+repo_common="$(realpath "$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)")"
+[[ "$repo_common" == "$canonical_common" ]] || {
+  echo "refusing release: inner source is not a canonical linked worktree" >&2
+  exit 1
+}
+[[ "$(git -C "$canonical_root" rev-parse "${release_ref}^{commit}")" == "$source_sha" ]] || {
+  echo "refusing release: approved ref moved during release" >&2
+  exit 1
+}
+
 command -v setfacl >/dev/null 2>&1 || { echo "refusing release: setfacl is required for literal V4 worktree ACLs" >&2; exit 1; }
 harnessctl=/home/dev/projects/agent-harness/bin/harnessctl.py
 [[ -f "$harnessctl" ]] || { echo "refusing release: Agent Harness resolver is missing" >&2; exit 1; }
 /usr/bin/python3 "$harnessctl" --help >/dev/null
-# This host is a Spot VM. Make Git commits/refs durable enough to survive
-# preemption rather than leaving zero-length loose objects after a power cut.
-git -C "$repo_root" config core.fsync committed
-[[ "$(git -C "$repo_root" config --get core.fsync)" == committed ]] || {
-  echo "refusing release: canonical repository must use core.fsync=committed" >&2
-  exit 1
-}
 
 expected_single_active=false
 expected_literal=false
@@ -42,18 +142,7 @@ if [[ "$expected_literal" == true && "$expected_single_active" != true ]]; then
   exit 1
 fi
 
-source_sha="$(git -C "$repo_root" rev-parse HEAD)"
-target_sha="$(git -C "$target_root" rev-parse HEAD)"
-if [[ "$source_sha" != "$target_sha" ]]; then
-  echo "refusing release: canonical source SHA $target_sha does not match release SHA $source_sha" >&2
-  exit 1
-fi
-if [[ "$(realpath "$repo_root")" != "$(realpath "$target_root")" ]]; then
-  echo "refusing release: GCP V4 must release from the canonical checkout" >&2
-  exit 1
-fi
-
-release_build_root="$repo_root/model-control-plane/.release-candidates"
+release_build_root="$target_root/model-control-plane/.release-candidates"
 candidate_dist="$release_build_root/$source_sha-$$"
 # The release lock proves no live candidate belongs to a concurrent release.
 # Remove residue from a prior Spot preemption before allocating this build.
@@ -107,7 +196,7 @@ memo_git_probe="/home/dev/projects/memoflow/.git/pixel-v4-release-$probe_id"
 digital_probe="/home/dev/projects/digital-biome/.pixel-v4-release-$probe_id"
 body_probe="/home/dev/projects/bodysense/.pixel-v4-release-$probe_id"
 body_git_probe="/home/dev/projects/bodysense/.git/pixel-v4-release-$probe_id"
-probe_script="$target_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
+probe_script="$repo_root/model-control-plane/scripts/probe-v4-service-sandbox.sh"
 cleanup_probe() {
   sudo rm -rf "$probe_dir" "${digital_probe}.repository-owner"
   sudo rm -f "$memo_probe" "$memo_git_probe" "$digital_probe" "$body_probe" "$body_git_probe"
