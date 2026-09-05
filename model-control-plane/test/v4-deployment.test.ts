@@ -220,6 +220,11 @@ test('V4 release uses an approved exact-SHA transient worktree and fails closed 
   assert.match(release, /runtime\.reviewRoutes\.includes\('codex-auto-review'\)/);
   assert.match(release, /runtime\.requireDelivery !== true/);
   assert.match(release, /runtime\.automationProjectKeys/);
+  assert.match(release, /\['memoflow', 'digital-biome', 'bodysense', 'forgeflow'\]/);
+  assert.match(
+    release,
+    /expectedLiteralProjects = expectedLiteral \? \['bodysense', 'forgeflow'\] : \[\]/,
+  );
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
   assert.match(release, /api\/v4\/resources/);
   assert.match(release, /hermes-antigravity-v4-unit\.mjs/);

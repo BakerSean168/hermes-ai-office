@@ -393,12 +393,12 @@ if (!Array.isArray(runtime.implementationRoutes) || runtime.implementationRoutes
 if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes.length < 1) process.exit(1);
 if (runtime.reviewRoutes.includes('codex-auto-review')) process.exit(1);
 if (runtime.requireDelivery !== true) process.exit(1);
-if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense'])) process.exit(1);
+if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense', 'forgeflow'])) process.exit(1);
 const expectedSingle = process.env.EXPECTED_SINGLE_ACTIVE === 'true';
 const expectedLiteral = process.env.EXPECTED_LITERAL === 'true';
 if (Boolean(scheduling.singleActivePlanEnabled) !== expectedSingle) process.exit(1);
 if (Boolean(scheduling.literalWorktreesEnabled) !== expectedLiteral) process.exit(1);
-const expectedLiteralProjects = expectedLiteral ? ['bodysense'] : [];
+const expectedLiteralProjects = expectedLiteral ? ['bodysense', 'forgeflow'] : [];
 if (JSON.stringify(runtime.literalWorktreeProjectKeys) !== JSON.stringify(expectedLiteralProjects)) process.exit(1);
 NODE
     then
