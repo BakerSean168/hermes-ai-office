@@ -74,10 +74,13 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
-  assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
+  assert.match(
+    service,
+    /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense,forgeflow/,
+  );
   assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true/);
-  assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense/);
+  assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense,forgeflow/);
   assert.match(
     service,
     /MODEL_CP_V4_HOST_CACHE_STATE_FILE=\/srv\/hermes-personal\/data\/model-control-plane\/host-cache-maintenance\.json/,
@@ -106,6 +109,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
     '/home/dev/projects/memoflow/.git',
     '/home/dev/projects/digital-biome',
     '/home/dev/projects/bodysense',
+    '/home/dev/projects/forgeflow',
   ])
     assert.match(
       service,
@@ -143,7 +147,7 @@ test('OpenHands literal-worktree mounts expose only managed workspaces and allow
     openHandsCompose,
     /\/opt\/data\/hermes-ai-office-v3\/workspaces:\/opt\/data\/hermes-ai-office-v3\/workspaces/,
   );
-  for (const project of ['bodysense', 'digital-biome', 'memoflow', 'ai-office-smoke'])
+  for (const project of ['bodysense', 'digital-biome', 'memoflow', 'forgeflow', 'ai-office-smoke'])
     assert.ok(
       openHandsCompose.includes(
         `/home/dev/projects/${project}/.git:/home/dev/projects/${project}/.git`,
