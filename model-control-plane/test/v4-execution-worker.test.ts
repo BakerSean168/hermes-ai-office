@@ -601,6 +601,16 @@ test('execution worker automatically finalizes exact implementation evidence whi
     'PAUSED',
   );
   const evidence = seeded.repositories.evidence.listByExecution(execution.identity.executionId);
+  const implementationTestEvidence = evidence.find(
+    (item) => item.kind === 'TEST' && item.name === 'implementation-test-001',
+  );
+  assert.ok(implementationTestEvidence);
+  assert.equal(implementationTestEvidence.sourceRevision, 'result-sha');
+  assert.deepEqual(implementationTestEvidence.payload, {
+    command: 'npm test',
+    status: 'PASS',
+    exitCode: 0,
+  });
   assert.ok(
     evidence.some(
       (item) =>
@@ -690,6 +700,19 @@ test('execution worker automatically finalizes exact independent review evidence
     'PAUSED',
   );
   assert.equal(seeded.repositories.reviews.getById(review.reviewId).status, 'PASSED');
+  const reviewEvidence = seeded.repositories.evidence.listByExecution(
+    reviewer.identity.executionId,
+  );
+  const reviewCheckEvidence = reviewEvidence.find(
+    (item) => item.kind === 'TEST' && item.name === 'review-check-001',
+  );
+  assert.ok(reviewCheckEvidence);
+  assert.equal(reviewCheckEvidence.sourceRevision, 'result-sha');
+  assert.deepEqual(reviewCheckEvidence.payload, {
+    command: 'npm test',
+    status: 'PASS',
+    exitCode: 0,
+  });
   seeded.db.close();
 });
 
@@ -741,6 +764,16 @@ test('execution worker adopts a paused operator-assisted implementation only aft
   );
   const evidence = seeded.repositories.evidence.listByExecution(execution.identity.executionId);
   assert.ok(evidence.some((item) => item.kind === 'DIFF' && item.name === 'implementation-diff'));
+  const operatorTestEvidence = evidence.find(
+    (item) => item.kind === 'TEST' && item.name === 'implementation-test-001',
+  );
+  assert.ok(operatorTestEvidence);
+  assert.equal(operatorTestEvidence.sourceRevision, 'operator-result-sha');
+  assert.deepEqual(operatorTestEvidence.payload, {
+    command: 'npm test',
+    status: 'PASS',
+    exitCode: 0,
+  });
   assert.ok(
     evidence.some(
       (item) =>

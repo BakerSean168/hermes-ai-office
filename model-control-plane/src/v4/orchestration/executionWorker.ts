@@ -1462,6 +1462,26 @@ export class ExecutionWorker {
       throw new V4Error(completed.reason ?? 'STALE_PROVIDER_STATUS');
   }
 
+  private persistTestEvidence(execution: Execution, snapshot: WorkspaceCompletionSnapshot): void {
+    const checks =
+      snapshot.evidence.phase === 'REVIEW' ? snapshot.evidence.checks : snapshot.evidence.tests;
+    const prefix = snapshot.evidence.phase === 'REVIEW' ? 'review-check' : 'implementation-test';
+    for (const [index, check] of checks.entries()) {
+      this.repositories.evidence.append({
+        executionId: execution.identity.executionId,
+        kind: 'TEST',
+        name: prefix + '-' + String(index + 1).padStart(3, '0'),
+        sourceRevision: snapshot.headRevision,
+        payload: {
+          command: check.command,
+          status: check.status,
+          ...(check.exitCode === undefined ? {} : { exitCode: check.exitCode }),
+          ...(check.summary === undefined ? {} : { summary: check.summary }),
+        },
+      });
+    }
+  }
+
   private persistOperatorCompletion(
     execution: Execution,
     snapshot: WorkspaceCompletionSnapshot,
@@ -1495,6 +1515,7 @@ export class ExecutionWorker {
         completion: evidencePayload(snapshot.evidence),
       },
     });
+    this.persistTestEvidence(execution, snapshot);
     this.repositories.evidence.append({
       executionId: execution.identity.executionId,
       kind: 'RECOVERY',
@@ -1547,6 +1568,7 @@ export class ExecutionWorker {
               completion: evidencePayload(snapshot.evidence),
             },
     });
+    this.persistTestEvidence(execution, snapshot);
     this.repositories.evidence.append({
       executionId: execution.identity.executionId,
       kind: 'PROVIDER_OUTPUT',
