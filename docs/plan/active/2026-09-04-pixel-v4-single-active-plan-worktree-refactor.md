@@ -1,7 +1,7 @@
 # Pixel V4 Single Active Plan + Git Worktree Refactor
 
 Date: 2026-09-04
-Status: READY FOR IMPLEMENTATION
+Status: IMPLEMENTED / DEPLOYED / PRODUCTION GATE HELD
 Governing ADR: `docs/adr/ADR-004-single-active-plan-worktree-execution.md`
 
 ## Goal
@@ -13,6 +13,23 @@ one project -> one active root Plan -> queued later tasks
 ```
 
 and preserving controlled parallelism only for mutually independent WorkItems inside that active Plan.
+
+## 2026-09-05 closure snapshot
+
+The refactor implementation is complete and deployed behind the production gates. The production-shaped canary has already proved the core mechanics: two root Plans serialize correctly, parallel-safe WorkItems execute concurrently, exact-SHA independent review precedes serial integration, terminal cleanup releases the first Plan, the queued Plan inherits the logical project head, and the canonical checkout remains unchanged. Durable project-head recovery and restart behavior are covered by regression tests.
+
+Current runtime source is `32fad95` (`fix(v4): finalize terminal recovery paths`). The model-control-plane quality gate is **218/218 tests PASS**, with typecheck, build, and `git diff --check` also passing. The canonical Pixel repository is clean and has one worktree and one local branch (`main`).
+
+Production rollout intentionally remains held:
+
+```text
+MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=false
+MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=false
+```
+
+The remaining gate is not a worktree/scheduler implementation defect. The legacy BodySense exact-SHA recovery Plan `plan_5e1ab84d-5eb1-4ed5-ba22-800f3bfc8fae` has already adopted the existing implementation revision `a53052129a95ab017be3bd8b427ab4cc0b95d028`, but its independent review is waiting for an executable reasoning resource. Runtime admission currently has no READY review binding: the authenticated ChatGPT Team Codex workspace reports exhausted credits, PQH cannot satisfy the real Responses preauthorization, OrcAI's route is unusable, and no Claude Opus deployment is currently projected. The exact review remains pending rather than being bypassed.
+
+Do not enable the production gates until that review completes and the remaining legacy BodySense Plan lineage reaches a terminal durable state.
 
 ## Definition of Done
 
