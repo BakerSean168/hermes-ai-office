@@ -3,7 +3,7 @@ set -euo pipefail
 
 canonical_root="${PIXEL_V4_CANONICAL_ROOT:-/home/dev/projects/pixel-agents}"
 release_ref="${PIXEL_V4_RELEASE_REF:-refs/pixel-v4/release-approved}"
-release_lock=/tmp/hermes-pixel-v4-release.lock
+release_lock="${PIXEL_V4_RELEASE_LOCK:-/tmp/hermes-pixel-v4-release.lock}"
 candidate="${1:-}"
 
 if [[ -z "$candidate" ]]; then

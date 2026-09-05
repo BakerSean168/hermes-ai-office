@@ -214,11 +214,19 @@ test('V4 release approval ref is explicit, durable, and fast-forward only', () =
     }).trim();
 
     execFileSync('bash', [pinReleasePath, first], {
-      env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+      env: {
+        ...process.env,
+        PIXEL_V4_CANONICAL_ROOT: temp,
+        PIXEL_V4_RELEASE_LOCK: path.join(temp, 'release.lock'),
+      },
       stdio: 'pipe',
     });
     execFileSync('bash', [pinReleasePath, second], {
-      env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+      env: {
+        ...process.env,
+        PIXEL_V4_CANONICAL_ROOT: temp,
+        PIXEL_V4_RELEASE_LOCK: path.join(temp, 'release.lock'),
+      },
       stdio: 'pipe',
     });
     const approved = execFileSync(
@@ -229,7 +237,11 @@ test('V4 release approval ref is explicit, durable, and fast-forward only', () =
     assert.equal(approved, second);
     assert.throws(() =>
       execFileSync('bash', [pinReleasePath, first], {
-        env: { ...process.env, PIXEL_V4_CANONICAL_ROOT: temp },
+        env: {
+          ...process.env,
+          PIXEL_V4_CANONICAL_ROOT: temp,
+          PIXEL_V4_RELEASE_LOCK: path.join(temp, 'release.lock'),
+        },
         stdio: 'pipe',
       }),
     );

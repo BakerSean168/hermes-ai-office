@@ -9,7 +9,7 @@ target_root="$canonical_root"
 health_url="http://127.0.0.1:8320/api/health"
 db_file="/srv/hermes-personal/data/model-control-plane/pixel-v4.sqlite"
 backup_dir="/srv/hermes-personal/data/model-control-plane/backups"
-release_lock=/tmp/hermes-pixel-v4-release.lock
+release_lock="${PIXEL_V4_RELEASE_LOCK:-/tmp/hermes-pixel-v4-release.lock}"
 
 release_outer() {
   exec 9>"$release_lock"
