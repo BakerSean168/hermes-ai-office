@@ -168,6 +168,7 @@ class ScriptedRunner implements ExecutionRunnerPort {
   readonly runCounts = new Map<string, number>();
   readonly implementationRoutes: string[] = [];
   implementationFailures = 0;
+  reviewFailures: Array<{ code: string; retryable: boolean }> = [];
   reviewVerdicts: Array<'PASS' | 'FAIL' | 'INVALID'> = ['PASS'];
   implementationRevision = 0;
 
@@ -244,6 +245,20 @@ class ScriptedRunner implements ExecutionRunnerPort {
       parent.identity.executionId,
     )!;
     this.repositories.reviews.attachReviewerExecution(review.reviewId, executionId);
+    const failure = this.reviewFailures.shift();
+    if (failure) {
+      this.repositories.sessions.complete(executionId, {
+        status: 'FAILED',
+        errorCode: failure.code,
+        completedAt: now(20),
+      });
+      this.repositories.executions.recordResult(executionId, {
+        status: 'FAILED',
+        errorCode: failure.code,
+        retryable: failure.retryable,
+      });
+      return { executionId, status: 'FAILED', code: failure.code };
+    }
     const verdict = this.reviewVerdicts.shift() ?? 'PASS';
     this.repositories.sessions.complete(executionId, {
       status: 'SUCCEEDED',
@@ -322,6 +337,151 @@ async function drive(runtime: PlanAutomationRuntime, planId: string, limit = 20)
   }
   throw new Error('plan did not reach a terminal state');
 }
+
+function retrySelector() {
+  const calls: Array<{ phase: string; priorAttempts: unknown[] }> = [];
+  return {
+    calls,
+    select(
+      request: import('../src/v4/orchestration/resourceSelector.js').ResourceSelectionRequest,
+    ) {
+      calls.push({ phase: request.phase, priorAttempts: [...(request.priorAttempts ?? [])] });
+      const review = request.phase === 'REVIEW';
+      const profile = review
+        ? ({
+            capability: 'REASONING',
+            phase: 'REVIEW',
+            modelFamily: 'gpt-5.6-sol',
+            agentBackend: 'codex-business-review-headless',
+            transport: 'PROVIDER_NATIVE',
+            resourceId: 'chatgpt-business-primary',
+            resourceTier: 'SUBSCRIPTION',
+            modelRank: 10,
+            resourceSequence: 10,
+            resourceState: 'ACTIVE',
+            selectionReason: 'STATIC_POLICY',
+            bindingId: 'chatgpt-business-sol',
+          } as const)
+        : ({
+            capability: 'IMPLEMENTATION',
+            phase: request.phase === 'IMPLEMENT_FIX' ? 'IMPLEMENT_FIX' : 'IMPLEMENT',
+            modelFamily: 'gpt-5.6-luna',
+            agentBackend: 'codex-acp',
+            transport: 'LITELLM_MANAGED',
+            resourceId: 'managed-luna-primary',
+            resourceTier: 'SUBSCRIPTION',
+            modelRank: 10,
+            resourceSequence: 10,
+            resourceState: 'ACTIVE',
+            selectionReason: 'STATIC_POLICY',
+            bindingId: 'managed-luna',
+          } as const);
+      const excluded = [...(request.priorAttempts ?? [])].some(
+        (attempt) =>
+          attempt.resourceId === profile.resourceId &&
+          (attempt.bindingId === undefined || attempt.bindingId === profile.bindingId) &&
+          (attempt.modelFamily === undefined || attempt.modelFamily === profile.modelFamily),
+      );
+      if (excluded)
+        return {
+          status: 'WAITING_FOR_RESOURCE',
+          capability: profile.capability,
+          reason: 'NO_ELIGIBLE_RESOURCE',
+        } as const;
+      return {
+        status: 'SELECTED',
+        capability: profile.capability,
+        profile,
+        candidate: { profile, resource: {} as never, binding: {} as never },
+      } as const;
+    },
+  };
+}
+
+test('retryable review transport failure may reuse the same recovered ready resource within the infrastructure budget', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  runner.reviewFailures = [{ code: 'REVIEW_TRANSPORT_ERROR', retryable: true }];
+  const selector = retrySelector();
+  const automation = new PlanAutomationRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      resourceSelection: { includeProviderNativeProfiles: true },
+      maxImplementationAttempts: 3,
+      maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
+      maxRepairCycles: 3,
+    }),
+    undefined,
+    selector,
+  );
+
+  const results = await drive(automation, seeded.plan.planId, 20);
+  assert.equal(results.at(-1)?.status, 'SUCCEEDED');
+  assert.ok(results.some((result) => result.code === 'REVIEW_RETRY_QUEUED'));
+  const reviews = seeded.repositories.executions
+    .listByPlan(seeded.plan.planId)
+    .filter((execution) => execution.identity.phase === 'REVIEW');
+  assert.equal(reviews.length, 2);
+  assert.equal(reviews[0]?.errorCode, 'REVIEW_TRANSPORT_ERROR');
+  assert.equal(reviews[0]?.retryable, true);
+  assert.equal(
+    seeded.repositories.resourceSelections.get(reviews[0]!.identity.executionId)?.bindingId,
+    'chatgpt-business-sol',
+  );
+  assert.equal(
+    seeded.repositories.resourceSelections.get(reviews[1]!.identity.executionId)?.bindingId,
+    'chatgpt-business-sol',
+  );
+  const retryCall = selector.calls.filter((call) => call.phase === 'REVIEW').at(-1)!;
+  assert.deepEqual(retryCall.priorAttempts, []);
+  seeded.db.close();
+});
+
+test('retryable flag does not permit same-resource reuse for normalized authentication failures', async () => {
+  const seeded = seed();
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  runner.reviewFailures = [{ code: 'PROVIDER_AUTHENTICATION_FAILED HTTP 401', retryable: true }];
+  const selector = retrySelector();
+  const automation = new PlanAutomationRuntime(
+    seeded.repositories,
+    runner,
+    workspace,
+    new StaticPlanAutomationPolicyResolver({
+      resourceSelection: { includeProviderNativeProfiles: true },
+      maxImplementationAttempts: 3,
+      maxReviewAttempts: 2,
+      maxInfrastructureAttempts: 2,
+      maxRepairCycles: 3,
+    }),
+    undefined,
+    selector,
+  );
+
+  const first = await automation.runPlan(seeded.plan.planId);
+  await runner.runExecution(first.executionId!);
+  const reviewQueued = await automation.runPlan(seeded.plan.planId);
+  await runner.runExecution(reviewQueued.executionId!);
+  const waiting = await automation.runPlan(seeded.plan.planId);
+  assert.equal(waiting.code, 'WAITING_FOR_RESOURCE');
+  assert.equal(
+    seeded.repositories.plans.getPlan(seeded.plan.planId).status,
+    'WAITING_FOR_RESOURCE',
+  );
+  const retryCall = selector.calls.filter((call) => call.phase === 'REVIEW').at(-1)!;
+  assert.deepEqual(retryCall.priorAttempts, [
+    {
+      resourceId: 'chatgpt-business-primary',
+      bindingId: 'chatgpt-business-sol',
+      modelFamily: 'gpt-5.6-sol',
+    },
+  ]);
+  seeded.db.close();
+});
 
 test('resource wait resumes a RUNNING work item that has no execution once a resource becomes eligible', async () => {
   const seeded = seed();

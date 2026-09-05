@@ -5,6 +5,7 @@ import { V4Error } from '../domain/errors.js';
 import type { Execution, ExecutionPhase } from '../domain/execution.js';
 import {
   createExecutionResourceSelection,
+  normalizeResourceFailure,
   type ExecutableProfile,
   type ExecutionResourceSelection,
   type ResourceTransport,
@@ -205,6 +206,16 @@ export class PlanAutomationRuntime {
           ]
         : [];
     });
+  }
+
+  private reusableReviewResourceFailure(execution: Execution): boolean {
+    return (
+      (execution.status === 'FAILED' ||
+        execution.status === 'BLOCKED' ||
+        execution.status === 'CANCELLED') &&
+      execution.retryable === true &&
+      normalizeResourceFailure(execution.errorCode ?? '').retryable
+    );
   }
 
   private resourceRetryAllowed(execution: Execution): boolean {
@@ -1155,7 +1166,10 @@ export class PlanAutomationRuntime {
       'reasoning';
     const priorReviews = this.repositories.executions
       .listByWorkItem(item.workItemId)
-      .filter((execution) => execution.identity.phase === 'REVIEW');
+      .filter(
+        (execution) =>
+          execution.identity.phase === 'REVIEW' && !this.reusableReviewResourceFailure(execution),
+      );
     const execution = this.createSelectedExecution(
       {
         plan: this.repositories.plans.getPlan(candidate.identity.planId),
