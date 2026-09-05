@@ -523,6 +523,166 @@ test('V4 resource selector creates immutable execution provenance and resource c
   await runtime.app.close();
 });
 
+test('selector-off rollback preserves durable selector provenance in the same V4 database', async () => {
+  const value = fixture();
+  const dbFile = path.join(value.root, 'rollback.sqlite');
+  const adminEnv = path.join(value.root, 'litellm.env');
+  fs.writeFileSync(adminEnv, 'LITELLM_MASTER_KEY=test-master-key\n');
+  const commonEnv = {
+    NODE_ENV: 'test',
+    MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
+    MODEL_CP_AUTOMATION_RUNTIME_ENABLED: 'false',
+    MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
+    SESSION_API_KEY: 'test-session-key',
+    LITELLM_V3_KEY: 'test-litellm-key',
+    LITELLM_V3_BASE_URL: 'http://litellm.test/v1',
+    MODEL_CP_V4_ALLOWED_REPOSITORY_ROOTS: value.allowed,
+    MODEL_CP_V4_WORKSPACE_HOST_ROOT: value.managed,
+    MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT: '/workspace',
+    MODEL_CP_V4_AUTOMATION_PROJECTS: 'rollback-project',
+    MODEL_CP_V4_WORKSPACE_UID: String(process.getuid?.() ?? 0),
+    MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
+  };
+  const selectorFetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith('/model/info')) {
+      return new Response(
+        JSON.stringify({
+          data: [
+            {
+              model_name: 'route-rollback-deepseek-v4-flash',
+              litellm_params: { litellm_credential_name: 'rollback-free' },
+              model_info: {
+                id: 'deployment-rollback-deepseek',
+                blocked: false,
+                metadata: {
+                  automatic_core: true,
+                  resource_id: 'rollback-free',
+                  resource_sequence: 77,
+                  model_family: 'deepseek-v4-flash',
+                  route_model: 'route-rollback-deepseek-v4-flash',
+                  protocol: 'openai-chat-completions',
+                  commercial_type: 'FREE',
+                  supply_origin: 'COMMUNITY_RELAY',
+                  resource_lifecycle: 'RECURRING',
+                },
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    }
+    throw new Error(`unexpected selector rollback fetch: ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const selectorRuntime = await buildControlPlane({
+      dbFile,
+      environment: 'test',
+      logger: false,
+      fetchImpl: selectorFetch,
+      env: {
+        ...commonEnv,
+        MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED: 'true',
+        MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED: 'false',
+        MODEL_CP_V4_LITELLM_ADMIN_BASE_URL: 'http://litellm.test',
+        MODEL_CP_LITELLM_ADMIN_ENV_FILE: adminEnv,
+      },
+    });
+    let planId = '';
+    let executionId = '';
+    try {
+      const created = await selectorRuntime.app.inject({
+        method: 'POST',
+        url: '/api/v4/plans',
+        headers: { 'idempotency-key': 'selector-rollback-plan' },
+        payload: {
+          projectKey: 'rollback-project',
+          objective: 'prove selector rollback durability',
+          repositoryPath: value.repository,
+          baseRevision: value.revision,
+          workItems: [
+            {
+              itemKey: 'first',
+              title: 'First',
+              objective: 'Create one immutable selector decision',
+              dependencies: [],
+              acceptanceCriteria: ['persist resource provenance'],
+            },
+          ],
+        },
+      });
+      assert.equal(created.statusCode, 201);
+      planId = created.json().plan.planId as string;
+      const run = await selectorRuntime.app.inject({
+        method: 'POST',
+        url: `/api/v4/plans/${planId}/run`,
+      });
+      assert.equal(run.statusCode, 200);
+      assert.equal(run.json().code, 'IMPLEMENTATION_QUEUED');
+      const selected = await selectorRuntime.app.inject({
+        method: 'GET',
+        url: `/api/v4/plans/${planId}`,
+      });
+      executionId = selected.json().executions[0].identity.executionId as string;
+      assert.equal(selected.json().executions[0].resourceSelection.resourceId, 'rollback-free');
+      assert.equal(
+        selected.json().executions[0].resourceSelection.routeModel,
+        'route-rollback-deepseek-v4-flash',
+      );
+    } finally {
+      await selectorRuntime.app.close();
+    }
+
+    const rollbackRuntime = await buildControlPlane({
+      dbFile,
+      environment: 'test',
+      logger: false,
+      fetchImpl: (async (input: string | URL | Request) => {
+        throw new Error(`rollback startup must not require selector discovery: ${String(input)}`);
+      }) as typeof fetch,
+      env: {
+        ...commonEnv,
+        MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED: 'false',
+        MODEL_CP_V4_IMPLEMENTATION_ROUTES: 'gpt-5.6-luna',
+        MODEL_CP_V4_REVIEW_ROUTES: 'gpt-5.6-sol',
+      },
+    });
+    try {
+      const health = await rollbackRuntime.app.inject({ method: 'GET', url: '/api/health' });
+      assert.equal(health.json().executionRuntime.routingAuthority, 'LEGACY_ROUTE_LIST');
+      assert.deepEqual(health.json().executionRuntime.compatibilityImplementationRoutes, [
+        'gpt-5.6-luna',
+      ]);
+      assert.deepEqual(health.json().executionRuntime.compatibilityReviewRoutes, ['gpt-5.6-sol']);
+
+      const restored = await rollbackRuntime.app.inject({
+        method: 'GET',
+        url: `/api/v4/plans/${planId}`,
+      });
+      assert.equal(restored.statusCode, 200);
+      assert.equal(restored.json().plan.planId, planId);
+      const execution = restored
+        .json()
+        .executions.find((item: any) => item.identity.executionId === executionId);
+      assert.ok(execution);
+      assert.equal(execution.resourceSelection.resourceId, 'rollback-free');
+      assert.equal(execution.resourceSelection.modelFamily, 'deepseek-v4-flash');
+      assert.equal(execution.resourceSelection.agentBackend, 'dsh-acp');
+      assert.equal(execution.resourceSelection.routeModel, 'route-rollback-deepseek-v4-flash');
+      assert.equal(
+        rollbackRuntime.repositories.resourceSelections.require(executionId).resourceId,
+        'rollback-free',
+      );
+    } finally {
+      await rollbackRuntime.app.close();
+    }
+  } finally {
+    fs.rmSync(value.root, { recursive: true, force: true });
+  }
+});
+
 test('runtime admission warms in background, single-flights probes, and uses execution-shaped Harness workspaces', async () => {
   const value = fixture();
   const adminEnv = path.join(value.root, 'litellm.env');
