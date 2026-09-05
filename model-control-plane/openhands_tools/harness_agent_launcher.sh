@@ -187,7 +187,7 @@ if model_family == "glm-current":
         "medium": "high",
         "low": "nothink",
     }[reasoning_effort]
-    model_config["contextWindow"] = 1_000_000
+    model_config["limit"] = {"context": 1_000_000}
     model_config["reasoning"] = {
         "enabled": True,
         "variants": ["max", "high", "nothink"],

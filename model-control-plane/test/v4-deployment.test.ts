@@ -373,7 +373,7 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
   assert.match(launcher, /zcode_model_family="\$\{ZCODE_MODEL_FAMILY:-\}"/);
   assert.match(launcher, /zcode_reasoning_effort="\$\{ZCODE_REASONING_EFFORT:-high\}"/);
   assert.match(launcher, /model_family == "glm-current"/);
-  assert.match(launcher, /model_config\["contextWindow"\] = 1_000_000/);
+  assert.match(launcher, /model_config\["limit"\] = \{"context": 1_000_000\}/);
   assert.match(launcher, /"variants": \["max", "high", "nothink"\]/);
   assert.match(launcher, /"defaultVariant": thought/);
   assert.match(
