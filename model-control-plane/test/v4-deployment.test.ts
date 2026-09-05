@@ -25,6 +25,16 @@ const literalWorktreeSmoke = fs.readFileSync(
   'utf8',
 );
 const atomicExchangePath = path.join(root, 'scripts/atomic-exchange-directories.py');
+const hostCacheScriptPath = path.join(root, 'scripts/prune-v4-host-cache.sh');
+const hostCacheScript = fs.readFileSync(hostCacheScriptPath, 'utf8');
+const hostCacheService = fs.readFileSync(
+  path.join(root, 'deploy/gcp/hermes-pixel-v4-host-cache.service'),
+  'utf8',
+);
+const hostCacheTimer = fs.readFileSync(
+  path.join(root, 'deploy/gcp/hermes-pixel-v4-host-cache.timer'),
+  'utf8',
+);
 const atomicExchange = fs.readFileSync(atomicExchangePath, 'utf8');
 const openHandsBuild = fs.readFileSync(
   path.join(root, 'scripts/build-openhands-v3-source.sh'),
@@ -64,6 +74,10 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense/);
+  assert.match(
+    service,
+    /MODEL_CP_V4_HOST_CACHE_STATE_FILE=\/srv\/hermes-personal\/data\/model-control-plane\/host-cache-maintenance\.json/,
+  );
   assert.match(service, /MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS=2/);
   assert.match(
     service,
@@ -179,6 +193,7 @@ test('V4 release uses an approved exact-SHA transient worktree and fails closed 
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.resourceSelectorEnabled !== true/);
   assert.match(release, /storage\.lowCapacity !== false/);
+  assert.match(release, /hostCacheMaintenance\?\.status === 'INVALID'/);
   assert.match(release, /storage\.freeBytes/);
   assert.match(release, /storage\.minimumFreeBytes/);
   assert.match(release, /runtime\.compatibilityReviewRoutes.*codex-auto-review/);
@@ -411,6 +426,40 @@ test('V4 release publishes only a complete fsynced dist with an atomic directory
   assert.doesNotMatch(release, /rsync -a --delete/);
   assert.match(atomicExchange, /RENAME_EXCHANGE = 2/);
   assert.match(atomicExchange, /renameat2/);
+});
+
+test('V4 host cache maintenance is high-watermark, execution-aware, and volume-safe', () => {
+  assert.match(hostCacheScript, /TRIGGER_FREE_BYTES:-17179869184/);
+  assert.match(hostCacheScript, /TARGET_FREE_BYTES:-25769803776/);
+  assert.match(hostCacheScript, /status=RUNNING&limit=1/);
+  assert.match(hostCacheScript, /SKIPPED_ACTIVE_EXECUTION/);
+  assert.match(hostCacheScript, /SKIPPED_RELEASE_ACTIVE/);
+  assert.match(hostCacheScript, /builder prune -af --filter/);
+  assert.match(hostCacheScript, /builder prune -af/);
+  assert.match(hostCacheScript, /image prune -f/);
+  assert.match(hostCacheScript, /image prune -af --filter/);
+  assert.doesNotMatch(hostCacheScript, /volume prune|--volumes|system prune/);
+  assert.match(hostCacheScript, /host-cache-maintenance\.json/);
+  assert.doesNotMatch(hostCacheScript, /install -d -m 0755.*state_file/);
+  assert.match(hostCacheService, /Type=oneshot/);
+  assert.match(hostCacheService, /User=root/);
+  assert.match(hostCacheService, /NoNewPrivileges=true/);
+  assert.match(hostCacheService, /CapabilityBoundingSet=\s*$/m);
+  assert.match(hostCacheService, /AmbientCapabilities=\s*$/m);
+  assert.match(hostCacheService, /ProtectSystem=strict/);
+  assert.match(
+    hostCacheService,
+    /ReadWritePaths=\/srv\/hermes-personal\/data\/model-control-plane/,
+  );
+  assert.match(hostCacheTimer, /OnUnitActiveSec=15min/);
+  assert.match(hostCacheTimer, /Persistent=true/);
+  assert.match(release, /prune-v4-host-cache\.sh/);
+  assert.match(release, /hermes-pixel-v4-host-cache\.service/);
+  assert.match(release, /hermes-pixel-v4-host-cache\.timer/);
+  assert.match(release, /systemctl enable --now hermes-pixel-v4-host-cache\.timer/);
+  assert.match(installer, /HOST_CACHE_SCRIPT_SOURCE/);
+  assert.match(installer, /systemctl enable --now hermes-pixel-v4-host-cache\.timer/);
+  execFileSync('bash', ['-n', hostCacheScriptPath]);
 });
 
 test('atomic dist exchange helper swaps two complete directories in one operation', () => {

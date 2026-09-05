@@ -17,6 +17,12 @@ OPENHANDS_UNIT_SOURCE="$SOURCE_DIR/deploy/gcp/hermes-openhands-v3.service"
 OPENHANDS_UNIT_TARGET="/etc/systemd/system/$OPENHANDS_UNIT_NAME"
 OPENHANDS_ENV_SOURCE="$SOURCE_DIR/deploy/gcp/openhands-v3.env"
 OPENHANDS_ENV_TARGET="$SECRETS_DIR/openhands-v3.env"
+HOST_CACHE_SCRIPT_SOURCE="$SOURCE_DIR/scripts/prune-v4-host-cache.sh"
+HOST_CACHE_SCRIPT_TARGET="/usr/local/libexec/hermes-pixel-v4-host-cache.sh"
+HOST_CACHE_SERVICE_SOURCE="$SOURCE_DIR/deploy/gcp/hermes-pixel-v4-host-cache.service"
+HOST_CACHE_SERVICE_TARGET="/etc/systemd/system/hermes-pixel-v4-host-cache.service"
+HOST_CACHE_TIMER_SOURCE="$SOURCE_DIR/deploy/gcp/hermes-pixel-v4-host-cache.timer"
+HOST_CACHE_TIMER_TARGET="/etc/systemd/system/hermes-pixel-v4-host-cache.timer"
 OPENHANDS_DIR="/opt/hermes-openhands-v3"
 OPENHANDS_VENV="$OPENHANDS_DIR/venv"
 OPENHANDS_SERVER_REF_FILE="$OPENHANDS_DIR/agent-server-ref"
@@ -34,7 +40,8 @@ if ! command -v setfacl >/dev/null 2>&1; then
 fi
 command -v setfacl >/dev/null 2>&1 || { echo "setfacl is required for scoped V4 worktree Git access" >&2; exit 1; }
 
-for required in "$SOURCE_DIR/package.json" "$UNIT_SOURCE" "$OPENHANDS_UNIT_SOURCE" "$OPENHANDS_ENV_SOURCE"; do
+for required in "$SOURCE_DIR/package.json" "$UNIT_SOURCE" "$OPENHANDS_UNIT_SOURCE" "$OPENHANDS_ENV_SOURCE" \
+  "$HOST_CACHE_SCRIPT_SOURCE" "$HOST_CACHE_SERVICE_SOURCE" "$HOST_CACHE_TIMER_SOURCE"; do
   if [[ ! -f "$required" ]]; then
     echo "required deployment file missing: $required" >&2
     exit 1
@@ -98,9 +105,14 @@ if [[ ! -x "$OPENHANDS_VENV/bin/openhands-agent-server" || ! -f "$OPENHANDS_SERV
   printf '%s\n' "$EXPECTED_OPENHANDS_REF" > "$OPENHANDS_SERVER_REF_FILE"
 fi
 
+install -d -m 0755 /usr/local/libexec
+install -m 0755 "$HOST_CACHE_SCRIPT_SOURCE" "$HOST_CACHE_SCRIPT_TARGET"
 install -m 0644 "$UNIT_SOURCE" "$UNIT_TARGET"
 install -m 0644 "$OPENHANDS_UNIT_SOURCE" "$OPENHANDS_UNIT_TARGET"
+install -m 0644 "$HOST_CACHE_SERVICE_SOURCE" "$HOST_CACHE_SERVICE_TARGET"
+install -m 0644 "$HOST_CACHE_TIMER_SOURCE" "$HOST_CACHE_TIMER_TARGET"
 systemctl daemon-reload
+systemd-analyze verify "$HOST_CACHE_SERVICE_TARGET" "$HOST_CACHE_TIMER_TARGET"
 systemctl enable --now "$OPENHANDS_UNIT_NAME"
 
 for _ in $(seq 1 60); do
@@ -112,6 +124,7 @@ done
 curl -fsS http://127.0.0.1:18000/health >/dev/null
 
 systemctl enable --now "$UNIT_NAME"
+systemctl enable --now hermes-pixel-v4-host-cache.timer
 for _ in $(seq 1 60); do
   if curl -fsS --max-time 2 http://127.0.0.1:8320/api/health >/dev/null; then
     break

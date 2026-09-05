@@ -231,6 +231,101 @@ function integerValue(
   return parsed;
 }
 
+type HostCacheMaintenanceProjection =
+  | { status: 'DISABLED' | 'MISSING' | 'INVALID' }
+  | {
+      status: 'AVAILABLE';
+      version: 1;
+      checkedAt: string;
+      action: string;
+      reason: string;
+      freeBytesBefore: number;
+      freeBytesAfter: number;
+      activeExecutions: number;
+      triggerFreeBytes: number;
+      targetFreeBytes: number;
+      steps: string[];
+    };
+
+const HOST_CACHE_ACTIONS = new Set([
+  'NOOP_CAPACITY_OK',
+  'SKIPPED_RELEASE_ACTIVE',
+  'SKIPPED_CONTROL_PLANE_UNAVAILABLE',
+  'SKIPPED_ACTIVE_EXECUTION',
+  'PRUNE_FAILED',
+  'PRUNED_TARGET_REACHED',
+  'PRUNED_PARTIAL',
+  'CAPACITY_STILL_LOW',
+]);
+const HOST_CACHE_STEPS = new Set([
+  'BUILDER_CACHE_OLDER_THAN_POLICY',
+  'ALL_UNUSED_BUILDER_CACHE',
+  'DANGLING_IMAGES',
+  'OLD_UNUSED_IMAGES',
+]);
+
+const HOST_CACHE_REASONS = new Set([
+  'FREE_SPACE_ABOVE_TRIGGER',
+  'RELEASE_LOCK_HELD',
+  'ACTIVE_EXECUTION_STATE_UNAVAILABLE',
+  'PIXEL_EXECUTION_RUNNING',
+  'SAFE_RECLAIM_COMPLETED',
+  'ABOVE_TRIGGER_BELOW_TARGET',
+  'SAFE_RECLAIM_EXHAUSTED',
+  ...HOST_CACHE_STEPS,
+]);
+
+function readHostCacheMaintenance(file: string | undefined): HostCacheMaintenanceProjection {
+  if (!file) return { status: 'DISABLED' };
+  try {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024)
+      return { status: 'INVALID' };
+    const value = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+    const numeric = [
+      'freeBytesBefore',
+      'freeBytesAfter',
+      'activeExecutions',
+      'triggerFreeBytes',
+      'targetFreeBytes',
+    ] as const;
+    if (
+      value.version !== 1 ||
+      typeof value.checkedAt !== 'string' ||
+      value.checkedAt.length > 64 ||
+      !Number.isFinite(Date.parse(value.checkedAt)) ||
+      typeof value.action !== 'string' ||
+      !HOST_CACHE_ACTIONS.has(value.action) ||
+      typeof value.reason !== 'string' ||
+      !HOST_CACHE_REASONS.has(value.reason) ||
+      !Array.isArray(value.steps) ||
+      value.steps.some((item) => typeof item !== 'string' || !HOST_CACHE_STEPS.has(item)) ||
+      numeric.some(
+        (key) =>
+          typeof value[key] !== 'number' ||
+          !Number.isSafeInteger(value[key]) ||
+          (value[key] as number) < 0,
+      )
+    )
+      return { status: 'INVALID' };
+    return {
+      status: 'AVAILABLE',
+      version: 1,
+      checkedAt: value.checkedAt,
+      action: value.action,
+      reason: value.reason,
+      freeBytesBefore: value.freeBytesBefore as number,
+      freeBytesAfter: value.freeBytesAfter as number,
+      activeExecutions: value.activeExecutions as number,
+      triggerFreeBytes: value.triggerFreeBytes as number,
+      targetFreeBytes: value.targetFreeBytes as number,
+      steps: value.steps as string[],
+    };
+  } catch {
+    return fs.existsSync(file) ? { status: 'INVALID' } : { status: 'MISSING' };
+  }
+}
+
 function statusFor(error: V4Error): number {
   if (error.code.endsWith('_NOT_FOUND')) return 404;
   if (
@@ -1201,6 +1296,8 @@ export async function buildControlPlane(
     resourceSelection: repositories.resourceSelections.get(execution.identity.executionId) ?? null,
   });
   const workspaceStorage = () => automation?.workspace.storageStatus?.() ?? null;
+  const hostCacheMaintenance = () =>
+    readHostCacheMaintenance(env.MODEL_CP_V4_HOST_CACHE_STATE_FILE);
   const runWorkspaceStorageMaintenance = async () => {
     if (!automation?.workspace.storageStatus || !automation.workspace.pruneTerminalCaches)
       return null;
@@ -1234,6 +1331,7 @@ export async function buildControlPlane(
     mode: 'greenfield',
     database: boot.dbFile,
     workspaceStorage: workspaceStorage(),
+    hostCacheMaintenance: hostCacheMaintenance(),
     planScheduling: {
       singleActivePlanEnabled,
       literalWorktreesEnabled,
@@ -1274,10 +1372,12 @@ export async function buildControlPlane(
 
   app.get('/api/v4/storage', async () => ({
     storage: workspaceStorage(),
+    hostCacheMaintenance: hostCacheMaintenance(),
   }));
 
   app.post('/api/v4/storage/reconcile', async () => ({
     storage: workspaceStorage(),
+    hostCacheMaintenance: hostCacheMaintenance(),
     cleanup: await runWorkspaceStorageMaintenance(),
   }));
 

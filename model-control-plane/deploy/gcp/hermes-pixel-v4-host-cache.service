@@ -1,0 +1,34 @@
+[Unit]
+Description=Hermes Pixel V4 host cache high-watermark maintenance
+After=docker.service hermes-model-control-plane.service
+Requires=docker.service
+Wants=hermes-model-control-plane.service
+
+[Service]
+Type=oneshot
+User=root
+Environment=PIXEL_V4_CONTROL_PLANE_URL=http://127.0.0.1:8320
+Environment=PIXEL_V4_HOST_CACHE_STATE_FILE=/srv/hermes-personal/data/model-control-plane/host-cache-maintenance.json
+Environment=PIXEL_V4_HOST_CACHE_TRIGGER_FREE_BYTES=17179869184
+Environment=PIXEL_V4_HOST_CACHE_TARGET_FREE_BYTES=25769803776
+Environment=PIXEL_V4_HOST_CACHE_BUILD_AGE=24h
+Environment=PIXEL_V4_HOST_CACHE_IMAGE_AGE=168h
+ExecStart=/bin/bash /usr/local/libexec/hermes-pixel-v4-host-cache.sh
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectKernelLogs=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/srv/hermes-personal/data/model-control-plane

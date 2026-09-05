@@ -1,0 +1,13 @@
+[Unit]
+Description=Schedule Hermes Pixel V4 host cache high-watermark maintenance
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+RandomizedDelaySec=2min
+AccuracySec=1min
+Persistent=true
+Unit=hermes-pixel-v4-host-cache.service
+
+[Install]
+WantedBy=timers.target

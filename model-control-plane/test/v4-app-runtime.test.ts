@@ -43,6 +43,64 @@ test('V4 app runtime fails closed when execution automation is disabled', async 
   await runtime.app.close();
 });
 
+test('V4 health exposes only validated host cache maintenance state', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pixel-v4-host-cache-state-'));
+  const stateFile = path.join(root, 'host-cache-maintenance.json');
+  try {
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        version: 1,
+        checkedAt: '2026-09-05T08:00:00Z',
+        action: 'PRUNED_TARGET_REACHED',
+        reason: 'SAFE_RECLAIM_COMPLETED',
+        freeBytesBefore: 12 * 1024 ** 3,
+        freeBytesAfter: 26 * 1024 ** 3,
+        activeExecutions: 0,
+        triggerFreeBytes: 16 * 1024 ** 3,
+        targetFreeBytes: 24 * 1024 ** 3,
+        steps: ['BUILDER_CACHE_OLDER_THAN_POLICY'],
+        ignoredUntrustedField: 'must-not-project',
+      }),
+    );
+    const runtime = await buildControlPlane({
+      dbFile: ':memory:',
+      environment: 'test',
+      logger: false,
+      env: {
+        NODE_ENV: 'test',
+        MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'false',
+        MODEL_CP_V4_HOST_CACHE_STATE_FILE: stateFile,
+      },
+    });
+    try {
+      const health = await runtime.app.inject({ method: 'GET', url: '/api/health' });
+      assert.deepEqual(health.json().hostCacheMaintenance, {
+        status: 'AVAILABLE',
+        version: 1,
+        checkedAt: '2026-09-05T08:00:00Z',
+        action: 'PRUNED_TARGET_REACHED',
+        reason: 'SAFE_RECLAIM_COMPLETED',
+        freeBytesBefore: 12 * 1024 ** 3,
+        freeBytesAfter: 26 * 1024 ** 3,
+        activeExecutions: 0,
+        triggerFreeBytes: 16 * 1024 ** 3,
+        targetFreeBytes: 24 * 1024 ** 3,
+        steps: ['BUILDER_CACHE_OLDER_THAN_POLICY'],
+      });
+      const storage = await runtime.app.inject({ method: 'GET', url: '/api/v4/storage' });
+      assert.equal(storage.json().hostCacheMaintenance.status, 'AVAILABLE');
+      fs.writeFileSync(stateFile, '{"version":1,"action":"UNTRUSTED"}\n');
+      const invalid = await runtime.app.inject({ method: 'GET', url: '/api/health' });
+      assert.deepEqual(invalid.json().hostCacheMaintenance, { status: 'INVALID' });
+    } finally {
+      await runtime.app.close();
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('V4 app creates a durable first execution through the public plan runtime API', async () => {
   const value = fixture();
   let providerCalled = false;

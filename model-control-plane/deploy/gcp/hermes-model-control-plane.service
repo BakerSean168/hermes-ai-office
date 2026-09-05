@@ -43,6 +43,7 @@ Environment=MODEL_CP_V4_WORKSPACE_HOST_ROOT=/opt/data/hermes-ai-office-v3/worksp
 Environment=MODEL_CP_V4_WORKSPACE_EXECUTION_ROOT=/workspace
 Environment=MODEL_CP_V4_WORKSPACE_UID=10001
 Environment=MODEL_CP_V4_WORKSPACE_GID=10001
+Environment=MODEL_CP_V4_HOST_CACHE_STATE_FILE=/srv/hermes-personal/data/model-control-plane/host-cache-maintenance.json
 Environment=MODEL_CP_AGENT_HARNESS_CTL=/home/dev/projects/agent-harness/bin/harnessctl.py
 Environment=MODEL_CP_V4_MAX_IMPLEMENTATION_ATTEMPTS=3
 Environment=MODEL_CP_V4_MAX_REVIEW_ATTEMPTS=4

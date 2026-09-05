@@ -167,10 +167,23 @@ sudo install -m 0755 \
 sudo install -m 0644 \
   "$repo_root/model-control-plane/deploy/gcp/hermes-antigravity-v4@.service" \
   /etc/systemd/system/hermes-antigravity-v4@.service
+sudo install -m 0755 \
+  "$repo_root/model-control-plane/scripts/prune-v4-host-cache.sh" \
+  /usr/local/libexec/hermes-pixel-v4-host-cache.sh
+sudo install -m 0644 \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-pixel-v4-host-cache.service" \
+  /etc/systemd/system/hermes-pixel-v4-host-cache.service
+sudo install -m 0644 \
+  "$repo_root/model-control-plane/deploy/gcp/hermes-pixel-v4-host-cache.timer" \
+  /etc/systemd/system/hermes-pixel-v4-host-cache.timer
 sudo install -d -o root -g root -m 0700 \
   /srv/hermes-personal/data/model-control-plane/antigravity-v4
 sudo systemctl daemon-reload
-sudo systemd-analyze verify /etc/systemd/system/hermes-antigravity-v4@.service
+sudo systemd-analyze verify \
+  /etc/systemd/system/hermes-antigravity-v4@.service \
+  /etc/systemd/system/hermes-pixel-v4-host-cache.service \
+  /etc/systemd/system/hermes-pixel-v4-host-cache.timer
+sudo systemctl enable --now hermes-pixel-v4-host-cache.timer
 sudo test -s /home/dev/.gemini/antigravity-cli/antigravity-oauth-token
 sudo -u dev env HOME=/home/dev /home/dev/.local/bin/agy models \
   | grep -q '^gemini-3.8-flash-high'
@@ -324,6 +337,7 @@ const runtime = payload.executionRuntime ?? {};
 const scheduling = payload.planScheduling ?? {};
 const storage = payload.workspaceStorage ?? {};
 if (payload.status !== 'ok' || payload.apiVersion !== 4) process.exit(1);
+if (payload.hostCacheMaintenance?.status === 'INVALID') process.exit(1);
 if (storage.lowCapacity !== false) process.exit(1);
 if (!Number.isFinite(Number(storage.freeBytes)) || !Number.isFinite(Number(storage.minimumFreeBytes))) process.exit(1);
 if (Number(storage.freeBytes) < Number(storage.minimumFreeBytes)) process.exit(1);
