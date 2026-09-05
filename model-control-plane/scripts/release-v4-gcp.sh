@@ -158,7 +158,50 @@ if [[ "$expected_literal" == true ]]; then
     /usr/bin/node "$repo_root/model-control-plane/scripts/smoke-v4-literal-worktree.mjs"
 fi
 openhands_compose="$repo_root/model-control-plane/deploy/openhands-v3/docker-compose.yml"
-sudo docker compose -f "$openhands_compose" up -d --remove-orphans --wait --wait-timeout 120
+openhands_tools_source="$repo_root/model-control-plane/openhands_tools"
+openhands_tools_release_root="/opt/data/hermes-ai-office-v3/release-artifacts/openhands-tools"
+openhands_tools_release="$openhands_tools_release_root/$source_sha"
+tree_manifest_sha() {
+  local root=$1
+  (cd "$root" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+}
+source_tools_sha="$(tree_manifest_sha "$openhands_tools_source")"
+sudo install -d -o root -g root -m 0755 "$openhands_tools_release_root"
+if [[ ! -d "$openhands_tools_release" ]]; then
+  tools_stage="${openhands_tools_release}.tmp.$$"
+  sudo rm -rf "$tools_stage"
+  sudo install -d -o root -g root -m 0755 "$tools_stage"
+  sudo cp -a "$openhands_tools_source/." "$tools_stage/"
+  sudo chown -R root:root "$tools_stage"
+  sudo find "$tools_stage" -type d -exec chmod 0555 {} +
+  sudo find "$tools_stage" -type f -perm /111 -exec chmod 0555 {} +
+  sudo find "$tools_stage" -type f ! -perm /111 -exec chmod 0444 {} +
+  sudo mv "$tools_stage" "$openhands_tools_release"
+fi
+[[ ! -L "$openhands_tools_release" ]] || {
+  echo "refusing release: persisted OpenHands tools artifact is a symlink" >&2
+  exit 1
+}
+[[ "$(sudo stat -c '%U:%G' "$openhands_tools_release")" == "root:root" ]] || {
+  echo "refusing release: persisted OpenHands tools artifact ownership drifted" >&2
+  exit 1
+}
+published_tools_sha="$(sudo bash -c 'cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '\''{print $1}'\''' _ "$openhands_tools_release")"
+[[ "$published_tools_sha" == "$source_tools_sha" ]] || {
+  echo "refusing release: persisted OpenHands tools differ from approved SHA" >&2
+  exit 1
+}
+sudo env HERMES_OPENHANDS_TOOLS_DIR="$openhands_tools_release" \
+  docker compose -f "$openhands_compose" up -d --remove-orphans --wait --wait-timeout 120
+actual_tools_mount="$(sudo docker inspect hermes-openhands-v3 --format '{{range .Mounts}}{{if eq .Destination "/opt/hermes-ai-office-tools"}}{{.Source}}{{end}}{{end}}')"
+[[ "$actual_tools_mount" == "$openhands_tools_release" ]] || {
+  echo "refusing release: OpenHands tools mount is not the approved persisted artifact" >&2
+  exit 1
+}
+sudo docker exec --user 10001:10001 hermes-openhands-v3 \
+  test -x /opt/hermes-ai-office-tools/harness_agent_launcher.sh
+sudo docker exec --user 10001:10001 hermes-openhands-v3 \
+  test -f /opt/agent-harness/bin/harnessctl.py
 sudo "$repo_root/model-control-plane/scripts/install-openhands-v3-tooling.sh"
 sudo install -d -m 0755 /usr/local/libexec
 sudo install -m 0755 \

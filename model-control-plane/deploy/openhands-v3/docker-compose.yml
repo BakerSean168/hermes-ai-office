@@ -48,7 +48,7 @@ services:
       - /opt/data/hermes-ai-office-v3/openhands:/openhands-state
       - ./opencode-v3.json:/etc/hermes-ai-office-v3/opencode.json:ro
       - ./dsh-acp-v3.patch.yml:/etc/hermes-ai-office-v3/dsh-acp-v3.patch.yml:ro
-      - ../../openhands_tools:/opt/hermes-ai-office-tools:ro
+      - ${HERMES_OPENHANDS_TOOLS_DIR:-../../openhands_tools}:/opt/hermes-ai-office-tools:ro
       - /home/dev/projects/agent-harness:/opt/agent-harness:ro
     cap_drop:
       - ALL

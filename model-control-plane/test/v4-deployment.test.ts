@@ -150,6 +150,16 @@ test('OpenHands literal-worktree mounts expose only managed workspaces and allow
     openHandsCompose,
     /\/home\/dev\/projects\/ai-office-smoke:\/home\/dev\/projects\/ai-office-smoke(?:\s|$)/,
   );
+  assert.match(
+    openHandsCompose,
+    /HERMES_OPENHANDS_TOOLS_DIR:-\.\.\/\.\.\/openhands_tools.*:\/opt\/hermes-ai-office-tools:ro/,
+  );
+  assert.match(release, /release-artifacts\/openhands-tools/);
+  assert.match(release, /HERMES_OPENHANDS_TOOLS_DIR=.*openhands_tools_release/);
+  assert.match(release, /actual_tools_mount=.*docker inspect hermes-openhands-v3/);
+  assert.match(release, /persisted OpenHands tools differ from approved SHA/);
+  assert.match(release, /harness_agent_launcher\.sh/);
+  assert.match(release, /\/opt\/agent-harness\/bin\/harnessctl\.py/);
   assert.match(installer, /apt-get install -y -qq acl/);
   assert.match(installer, /command -v setfacl/);
   assert.match(release, /setfacl is required for literal V4 worktree ACLs/);
