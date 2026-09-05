@@ -89,7 +89,11 @@ sudo -u dev env HOME=/home/dev /home/dev/.local/bin/agy models \
   | grep -q '^gemini-3.1-pro-high'
 sudo docker exec --user 10001:10001 -e CODEX_HOME=/openhands-state/codex-business hermes-openhands-v3 \
   /openhands-state/tooling/node_modules/.bin/codex login status >/dev/null
-artifact_sha="$(find "$candidate_dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+dist_manifest_sha() {
+  local root=$1
+  (cd "$root" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')
+}
+artifact_sha="$(dist_manifest_sha "$candidate_dist")"
 
 sudo install -d -o root -g root -m 0711 \
   /opt/data/hermes-ai-office-v3/workspaces/v4 \
@@ -214,7 +218,7 @@ else
   mv --no-copy "$candidate_dist" "$current_dist"
   sync -f "$(dirname "$current_dist")"
 fi
-deployed_artifact_sha="$(find "$current_dist" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}')"
+deployed_artifact_sha="$(dist_manifest_sha "$current_dist")"
 if [[ "$deployed_artifact_sha" != "$artifact_sha" ]]; then
   echo "refusing release: atomic dist artifact hash mismatch" >&2
   exit 1

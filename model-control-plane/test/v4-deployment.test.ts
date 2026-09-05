@@ -327,6 +327,9 @@ test('V4 release publishes only a complete fsynced dist with an atomic directory
   assert.match(literalWorktreeSmoke, /PIXEL_V4_DIST_ROOT/);
   assert.match(release, /sync -f "\$candidate_dist"/);
   assert.match(release, /atomic-exchange-directories\.py/);
+  assert.match(release, /dist_manifest_sha\(\)/);
+  assert.match(release, /cd \"\$root\"/);
+  assert.match(release, /find \. -type f -print0/);
   assert.match(release, /deployed_artifact_sha/);
   assert.doesNotMatch(release, /npm run build/);
   assert.doesNotMatch(release, /rsync -a --delete/);
