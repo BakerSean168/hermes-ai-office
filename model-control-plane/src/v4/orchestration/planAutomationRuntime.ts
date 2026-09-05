@@ -307,11 +307,12 @@ export class PlanAutomationRuntime {
       objective: string;
     },
     policy: NormalizedPolicy,
-    legacyRoute: string,
+    legacyRoute?: string,
     priorExecutions: readonly Execution[] = [],
     reuseSelection?: ExecutionResourceSelection,
   ): Execution {
     if (!this.resourceSelector) {
+      if (!legacyRoute) throw new V4Error('EXECUTION_ROUTE_REQUIRED');
       return this.createExecution({ ...input, route: legacyRoute });
     }
 
@@ -660,11 +661,13 @@ export class PlanAutomationRuntime {
       sourceRevision = repairRoot.resultRevision;
     }
 
-    const legacyRoute = finalizationRecovery
-      ? candidate.identity.route
-      : (policy.implementationRoutes[
-          Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
-        ] ?? 'implementation');
+    const legacyRoute = this.resourceSelector
+      ? undefined
+      : finalizationRecovery
+        ? candidate.identity.route
+        : (policy.implementationRoutes[
+            Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
+          ] ?? 'implementation');
     let recovery: Execution;
     try {
       recovery = this.createSelectedExecution(
@@ -832,7 +835,7 @@ export class PlanAutomationRuntime {
         objective: workItem.objective,
       },
       policy,
-      policy.implementationRoutes[0] ?? 'implementation',
+      this.resourceSelector ? undefined : (policy.implementationRoutes[0] ?? 'implementation'),
     );
   }
 
@@ -1059,10 +1062,11 @@ export class PlanAutomationRuntime {
         return this.failPlan(plan, item, 'IMPLEMENTATION_ATTEMPTS_EXHAUSTED');
       if (usage.infrastructure >= policy.maxInfrastructureAttempts)
         return this.failPlan(plan, item, 'IMPLEMENTATION_INFRASTRUCTURE_ATTEMPTS_EXHAUSTED');
-      const legacyRoute =
-        policy.implementationRoutes[
-          Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
-        ] ?? 'implementation';
+      const legacyRoute = this.resourceSelector
+        ? undefined
+        : (policy.implementationRoutes[
+            Math.min(attempts, Math.max(0, policy.implementationRoutes.length - 1))
+          ] ?? 'implementation');
       const execution = this.createSelectedExecution(
         {
           plan,
@@ -1100,10 +1104,11 @@ export class PlanAutomationRuntime {
       return this.failPlan(plan, item, 'REPAIR_ATTEMPTS_EXHAUSTED');
     if (repairUsage.infrastructure >= policy.maxInfrastructureAttempts)
       return this.failPlan(plan, item, 'REPAIR_INFRASTRUCTURE_ATTEMPTS_EXHAUSTED');
-    const legacyRoute =
-      policy.implementationRoutes[
-        Math.min(repairAttempts, Math.max(0, policy.implementationRoutes.length - 1))
-      ] ?? 'implementation';
+    const legacyRoute = this.resourceSelector
+      ? undefined
+      : (policy.implementationRoutes[
+          Math.min(repairAttempts, Math.max(0, policy.implementationRoutes.length - 1))
+        ] ?? 'implementation');
     const execution = this.createSelectedExecution(
       {
         plan,
@@ -1161,9 +1166,10 @@ export class PlanAutomationRuntime {
   ): Execution {
     if (!candidate.resultRevision) throw new V4Error('REVIEW_EXACT_RESULT_REQUIRED');
     const index = Math.max(0, attempt - 1);
-    const legacyRoute =
-      policy.reviewRoutes[Math.min(index, Math.max(0, policy.reviewRoutes.length - 1))] ??
-      'reasoning';
+    const legacyRoute = this.resourceSelector
+      ? undefined
+      : (policy.reviewRoutes[Math.min(index, Math.max(0, policy.reviewRoutes.length - 1))] ??
+        'reasoning');
     const priorReviews = this.repositories.executions
       .listByWorkItem(item.workItemId)
       .filter(
@@ -1212,10 +1218,11 @@ export class PlanAutomationRuntime {
     ).length;
     if (repairCycles >= policy.maxRepairCycles)
       return this.failPlan(plan, item, 'REPAIR_CYCLES_EXHAUSTED');
-    const legacyRoute =
-      policy.implementationRoutes[
-        Math.min(repairCycles, Math.max(0, policy.implementationRoutes.length - 1))
-      ] ?? 'implementation';
+    const legacyRoute = this.resourceSelector
+      ? undefined
+      : (policy.implementationRoutes[
+          Math.min(repairCycles, Math.max(0, policy.implementationRoutes.length - 1))
+        ] ?? 'implementation');
     const execution = this.createSelectedExecution(
       {
         plan,

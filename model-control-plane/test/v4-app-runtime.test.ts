@@ -142,6 +142,7 @@ test('V4 app creates a durable first execution through the public plan runtime A
       implementationReady: 0,
       reviewReady: 0,
     },
+    routingAuthority: 'LEGACY_ROUTE_LIST',
     compatibilityImplementationRoutes: ['gpt-5.6-luna'],
     compatibilityReviewRoutes: ['codex-business-review', 'gpt-5.6-sol'],
     implementationRoutes: ['gpt-5.6-luna'],
@@ -396,6 +397,10 @@ test('V4 resource selector creates immutable execution provenance and resource c
       MODEL_CP_EXECUTION_RUNTIME_ENABLED: 'true',
       MODEL_CP_AUTOMATION_RUNTIME_ENABLED: 'false',
       MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED: 'true',
+      // Deliberately conflicting legacy route lists prove selector mode never
+      // reads or validates the rollback-only route authority.
+      MODEL_CP_V4_IMPLEMENTATION_ROUTES: 'must-not-be-read',
+      MODEL_CP_V4_REVIEW_ROUTES: 'must-not-be-read',
       MODEL_CP_V4_BUSINESS_RESOURCE_ENABLED: 'false',
       MODEL_CP_OPENHANDS_URL: 'http://openhands.test',
       SESSION_API_KEY: 'test-session-key',
@@ -411,6 +416,25 @@ test('V4 resource selector creates immutable execution provenance and resource c
       MODEL_CP_V4_WORKSPACE_GID: String(process.getgid?.() ?? 0),
     },
   });
+
+  assert.equal(runtime.automation?.worker.requireResourceSelection, true);
+  assert.equal(runtime.automation?.worker.routes.size, 0);
+  assert.deepEqual(runtime.automation?.compatibilityImplementationRoutes, []);
+  assert.deepEqual(runtime.automation?.compatibilityReviewRoutes, []);
+  assert.deepEqual(runtime.automation?.implementationRoutes, [
+    'deepseek-v4-flash',
+    'glm-current',
+    'gpt-5.6-luna',
+  ]);
+  assert.deepEqual(runtime.automation?.reviewRoutes, [
+    'gpt-5.6-sol',
+    'claude-opus-5',
+    'claude-opus-4-8',
+  ]);
+  const selectorHealth = await runtime.app.inject({ method: 'GET', url: '/api/health' });
+  assert.equal(selectorHealth.json().executionRuntime.routingAuthority, 'RESOURCE_SELECTOR');
+  assert.deepEqual(selectorHealth.json().executionRuntime.compatibilityImplementationRoutes, []);
+  assert.deepEqual(selectorHealth.json().executionRuntime.compatibilityReviewRoutes, []);
 
   const resources = await runtime.app.inject({ method: 'GET', url: '/api/v4/resources' });
   assert.equal(resources.statusCode, 200);

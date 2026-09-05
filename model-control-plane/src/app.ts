@@ -101,6 +101,8 @@ export interface ExecutionAutomationRuntime {
   worker: ExecutionWorker;
   plans: PlanAutomationRuntime;
   policy: StaticPlanAutomationPolicyResolver;
+  compatibilityImplementationRoutes: string[];
+  compatibilityReviewRoutes: string[];
   implementationRoutes: string[];
   reviewRoutes: string[];
   automationProjectKeys: string[];
@@ -374,19 +376,29 @@ async function buildExecutionAutomation(
     literalWorktreeProjectKeys.some((projectKey) => !automationProjectKeys.includes(projectKey))
   )
     throw new V4Error('LITERAL_WORKTREE_PROJECT_NOT_AUTOMATED');
-  // Resource-selected executions bypass this map and resolve their provider from
-  // the immutable ExecutionResourceSelection. Keep only same-family emergency
-  // compatibility routes for selector-disabled recovery; task aliases and
-  // cross-model GLM fallbacks belong to the durable ResourceSelector instead.
-  const implementationSpecs = routeSpecs(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, ['gpt-5.6-luna']);
-  const reviewSpecs = routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, [
-    'codex-business-review=gpt-5.6-sol',
-    'gpt-5.6-sol',
-  ]);
-  const implementationRoutes = implementationSpecs.map((item) => item.route);
-  const reviewRoutes = reviewSpecs.map((item) => item.route);
-  if (implementationRoutes.some((route) => reviewRoutes.includes(route)))
+  const resourceSelectorEnabled = env.MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED === 'true';
+  // Selector-enabled V4 never reads the legacy route ladders. They remain only
+  // as an explicit rollback path when the selector gate is disabled. This keeps
+  // exactly one routing authority for every newly-created execution.
+  const implementationSpecs = resourceSelectorEnabled
+    ? []
+    : routeSpecs(env.MODEL_CP_V4_IMPLEMENTATION_ROUTES, ['gpt-5.6-luna']);
+  const reviewSpecs = resourceSelectorEnabled
+    ? []
+    : routeSpecs(env.MODEL_CP_V4_REVIEW_ROUTES, [
+        'codex-business-review=gpt-5.6-sol',
+        'gpt-5.6-sol',
+      ]);
+  const compatibilityImplementationRoutes = implementationSpecs.map((item) => item.route);
+  const compatibilityReviewRoutes = reviewSpecs.map((item) => item.route);
+  if (compatibilityImplementationRoutes.some((route) => compatibilityReviewRoutes.includes(route)))
     throw new V4Error('EXECUTION_ROUTE_ROLE_CONFLICT');
+  const implementationRoutes = resourceSelectorEnabled
+    ? DEFAULT_AFFINITY_POLICY.capabilities.IMPLEMENTATION.map((item) => item.modelFamily)
+    : compatibilityImplementationRoutes;
+  const reviewRoutes = resourceSelectorEnabled
+    ? DEFAULT_AFFINITY_POLICY.capabilities.REASONING.map((item) => item.modelFamily)
+    : compatibilityReviewRoutes;
 
   const common = {
     baseUrl: openHandsUrl,
@@ -416,7 +428,6 @@ async function buildExecutionAutomation(
       'OPENHANDS_ITERATION_LIMIT_INVALID',
     ),
   };
-  const resourceSelectorEnabled = env.MODEL_CP_V4_RESOURCE_SELECTOR_ENABLED === 'true';
   const liteLlmAdminBaseUrl = (
     env.MODEL_CP_V4_LITELLM_ADMIN_BASE_URL ??
     env.MODEL_CP_V3_LITELLM_URL ??
@@ -920,7 +931,13 @@ async function buildExecutionAutomation(
       10,
       'EXECUTION_STALL_RECOVERY_LIMIT_INVALID',
     ),
-    ...(resourceSelectorEnabled ? { providerFactory, resourceFeedback: resourceState } : {}),
+    ...(resourceSelectorEnabled
+      ? {
+          providerFactory,
+          resourceFeedback: resourceState,
+          requireResourceSelection: true,
+        }
+      : {}),
   });
   const maxParallelWorkItems = integerValue(
     env.MODEL_CP_V4_MAX_PARALLEL_WORK_ITEMS,
@@ -930,8 +947,12 @@ async function buildExecutionAutomation(
     'PLAN_AUTOMATION_LIMIT_INVALID',
   );
   const defaultPolicy: PlanAutomationPolicy = {
-    implementationRoutes,
-    reviewRoutes,
+    ...(resourceSelectorEnabled
+      ? {}
+      : {
+          implementationRoutes: compatibilityImplementationRoutes,
+          reviewRoutes: compatibilityReviewRoutes,
+        }),
     resourceSelection: {
       includeProviderNativeProfiles: false,
     },
@@ -1024,6 +1045,8 @@ async function buildExecutionAutomation(
     worker,
     plans,
     policy,
+    compatibilityImplementationRoutes,
+    compatibilityReviewRoutes,
     implementationRoutes,
     reviewRoutes,
     automationProjectKeys,
@@ -1360,8 +1383,11 @@ export async function buildControlPlane(
             implementationReady: 0,
             reviewReady: 0,
           },
-      compatibilityImplementationRoutes: automation?.implementationRoutes ?? [],
-      compatibilityReviewRoutes: automation?.reviewRoutes ?? [],
+      routingAuthority: automation?.resourceSelectorEnabled
+        ? 'RESOURCE_SELECTOR'
+        : 'LEGACY_ROUTE_LIST',
+      compatibilityImplementationRoutes: automation?.compatibilityImplementationRoutes ?? [],
+      compatibilityReviewRoutes: automation?.compatibilityReviewRoutes ?? [],
       implementationRoutes: automation?.implementationRoutes ?? [],
       reviewRoutes: automation?.reviewRoutes ?? [],
       automationProjectKeys: automation?.automationProjectKeys ?? [],

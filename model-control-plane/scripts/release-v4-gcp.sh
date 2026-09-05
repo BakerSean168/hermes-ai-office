@@ -343,8 +343,12 @@ if (!Number.isFinite(Number(storage.freeBytes)) || !Number.isFinite(Number(stora
 if (Number(storage.freeBytes) < Number(storage.minimumFreeBytes)) process.exit(1);
 if (runtime.enabled !== true || runtime.autonomousPolling !== true) process.exit(1);
 if (runtime.resourceSelectorEnabled !== true || Number(runtime.resourceCount) < 1) process.exit(1);
-if (Array.isArray(runtime.compatibilityReviewRoutes) && runtime.compatibilityReviewRoutes.includes('codex-auto-review')) process.exit(1);
-if (Array.isArray(runtime.reviewRoutes) && runtime.reviewRoutes.includes('codex-auto-review')) process.exit(1);
+if (runtime.routingAuthority !== 'RESOURCE_SELECTOR') process.exit(1);
+if (!Array.isArray(runtime.compatibilityImplementationRoutes) || runtime.compatibilityImplementationRoutes.length !== 0) process.exit(1);
+if (!Array.isArray(runtime.compatibilityReviewRoutes) || runtime.compatibilityReviewRoutes.length !== 0) process.exit(1);
+if (!Array.isArray(runtime.implementationRoutes) || runtime.implementationRoutes.length < 1) process.exit(1);
+if (!Array.isArray(runtime.reviewRoutes) || runtime.reviewRoutes.length < 1) process.exit(1);
+if (runtime.reviewRoutes.includes('codex-auto-review')) process.exit(1);
 if (runtime.requireDelivery !== true) process.exit(1);
 if (JSON.stringify(runtime.automationProjectKeys) !== JSON.stringify(['memoflow', 'digital-biome', 'bodysense'])) process.exit(1);
 const expectedSingle = process.env.EXPECTED_SINGLE_ACTIVE === 'true';

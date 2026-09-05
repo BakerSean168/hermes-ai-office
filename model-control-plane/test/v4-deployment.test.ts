@@ -192,11 +192,14 @@ test('V4 release uses an approved exact-SHA transient worktree and fails closed 
   assert.match(release, /await backup\(db, target\)/);
   assert.match(release, /runtime\.enabled !== true \|\| runtime\.autonomousPolling !== true/);
   assert.match(release, /runtime\.resourceSelectorEnabled !== true/);
+  assert.match(release, /runtime\.routingAuthority !== 'RESOURCE_SELECTOR'/);
+  assert.match(release, /runtime\.compatibilityImplementationRoutes\.length !== 0/);
+  assert.match(release, /runtime\.compatibilityReviewRoutes\.length !== 0/);
   assert.match(release, /storage\.lowCapacity !== false/);
   assert.match(release, /hostCacheMaintenance\?\.status === 'INVALID'/);
   assert.match(release, /storage\.freeBytes/);
   assert.match(release, /storage\.minimumFreeBytes/);
-  assert.match(release, /runtime\.compatibilityReviewRoutes.*codex-auto-review/);
+  assert.match(release, /runtime\.reviewRoutes\.includes\('codex-auto-review'\)/);
   assert.match(release, /runtime\.requireDelivery !== true/);
   assert.match(release, /runtime\.automationProjectKeys/);
   assert.match(release, /api\/v4\/plans\/__release_probe__/);
