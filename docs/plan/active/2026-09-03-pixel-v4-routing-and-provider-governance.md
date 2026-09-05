@@ -527,6 +527,8 @@ sudo /usr/local/sbin/hermes-litellm-providerctl \
 
 Generic `--unblock` is rejected for automatic-core bindings. The health check runs while the deployment remains blocked, reuses only the stored credential reference, and unblocks a route only after LiteLLM returns `status=success` and registry convergence is re-read successfully.
 
+A final stored-credential sweep on 2026-09-05 used the same secret-safe LiteLLM `/health/test_connection` mechanism to probe the exact approved Opus model ids without reading or printing upstream keys. The two known Opus credentials failed four exact-model probes, and the remaining 18 stored LiteLLM credentials failed another 36 probes: **40 / 40 probes returned unhealthy, 0 healthy Opus sources**. Therefore no third existing credential can currently close Row 5; a provider balance/entitlement recovery or a newly approved Opus credential is required.
+
 ## PVR-7103 — Canary rollout
 
 Status: **COMPLETE for selector rollout.** The production rollout is selector-authoritative for all trusted Pixel projects; the remaining Claude Opus acceptance row in PVR-7102 is an external resource-availability blocker, not a rollout blocker or a waived review.
