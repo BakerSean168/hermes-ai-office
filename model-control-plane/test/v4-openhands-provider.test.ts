@@ -426,7 +426,8 @@ test('model-native factory resolves selected backend, model and transport withou
     {
       selection: {
         backend: 'zcode-acp',
-        model: 'glm-5.2',
+        model: 'route-wechat-miniapp-free-glm-5.2',
+        modelFamily: 'glm-current',
         role: 'IMPLEMENTATION',
         transport: 'LITELLM_MANAGED',
       },
@@ -434,7 +435,9 @@ test('model-native factory resolves selected backend, model and transport withou
       expectedProvider: 'zcode-managed-coding',
       expectedCommand: ['/opt/hermes-ai-office-tools/harness_agent_launcher.sh', 'zcode-acp'],
       expectedSecrets: {
-        ZCODE_MODEL: 'glm-5.2',
+        ZCODE_MODEL: 'route-wechat-miniapp-free-glm-5.2',
+        ZCODE_MODEL_FAMILY: 'glm-current',
+        ZCODE_REASONING_EFFORT: 'high',
         ZCODE_API_KEY: secrets.liteLlmApiKey,
         ZCODE_BASE_URL: 'http://litellm.test/v1',
         GIT_AUTHOR_NAME: 'Pixel Agent',

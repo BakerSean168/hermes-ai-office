@@ -96,6 +96,8 @@ export type OpenHandsProviderCapability = 'IMPLEMENTATION' | 'REASONING';
 export interface OpenHandsProviderSelection {
   backend: OpenHandsAgentBackend;
   model: string;
+  /** Logical affinity family retained when model is a physical LiteLLM route. */
+  modelFamily?: string;
   transport: OpenHandsProviderTransport;
   /** Persisted selections may carry role, phase, or capability depending on schema version. */
   role?: OpenHandsProviderRole;
@@ -1011,6 +1013,7 @@ interface ModelNativeAcpConfig {
   provider: string;
   mode: 'IMPLEMENTATION' | 'REVIEW';
   model: string;
+  modelFamily?: string;
   driver: AcpDriver;
   transport: AcpTransport;
   acp: ResolvedAcpBackendOptions;
@@ -1022,6 +1025,7 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
   readonly provider: string;
   protected readonly mode: 'IMPLEMENTATION' | 'REVIEW';
   readonly selectedModel: string;
+  readonly modelFamily?: string;
   readonly transport: AcpTransport;
   readonly acp: ResolvedAcpBackendOptions;
   readonly driver: AcpDriver;
@@ -1033,6 +1037,9 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
     this.provider = config.provider;
     this.mode = config.mode;
     this.selectedModel = modelName(config.model);
+    this.modelFamily = config.modelFamily
+      ? modelName(config.modelFamily, 'OPENHANDS_MODEL_FAMILY_INVALID')
+      : undefined;
     this.transport = config.transport;
     this.acp = config.acp;
     this.driver = config.driver;
@@ -1264,6 +1271,12 @@ class OpenHandsModelNativeAcpProvider extends OpenHandsProviderBase {
         value: this.options.liteLlmBaseUrl,
       };
       secrets.ZCODE_MODEL = { kind: 'StaticSecret', value: this.selectedModel };
+      if (this.modelFamily)
+        secrets.ZCODE_MODEL_FAMILY = { kind: 'StaticSecret', value: this.modelFamily };
+      secrets.ZCODE_REASONING_EFFORT = {
+        kind: 'StaticSecret',
+        value: this.acp.reasoningEffort,
+      };
     }
 
     if (this.mode === 'IMPLEMENTATION') {
@@ -1464,11 +1477,16 @@ export class OpenHandsDshExecutionProvider extends OpenHandsModelNativeAcpProvid
 export const OpenHandsDSHExecutionProvider = OpenHandsDshExecutionProvider;
 
 export class OpenHandsZCodeExecutionProvider extends OpenHandsModelNativeAcpProvider {
-  constructor(options: OpenHandsProviderOptions, zcode: AcpBackendOptions = {}) {
+  constructor(
+    options: OpenHandsProviderOptions,
+    zcode: AcpBackendOptions = {},
+    modelFamily?: string,
+  ) {
     super(options, {
       provider: 'zcode-managed-coding',
       mode: 'IMPLEMENTATION',
       model: modelForRole(options, 'IMPLEMENTATION'),
+      ...(modelFamily ? { modelFamily } : {}),
       driver: 'zcode',
       transport: 'litellm-managed',
       acp: resolveAcpBackendOptions(
@@ -1596,7 +1614,11 @@ export function createOpenHandsProviderForSelection(
     case 'zcode-acp':
       failClosed(selection.transport === 'LITELLM_MANAGED', 'ZCODE_PROVIDER_NATIVE_UNSUPPORTED');
       failClosed(role === 'IMPLEMENTATION', 'ZCODE_REVIEW_UNSUPPORTED');
-      return new OpenHandsZCodeExecutionProvider(providerOptions, options.zcode);
+      return new OpenHandsZCodeExecutionProvider(
+        providerOptions,
+        options.zcode,
+        selection.modelFamily,
+      );
     case 'claude-code-acp':
       failClosed(selection.transport === 'LITELLM_MANAGED', 'CLAUDE_PROVIDER_NATIVE_UNSUPPORTED');
       failClosed(role === 'REVIEW', 'CLAUDE_IMPLEMENTATION_UNSUPPORTED');

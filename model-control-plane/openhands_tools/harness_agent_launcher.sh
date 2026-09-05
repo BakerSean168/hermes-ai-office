@@ -129,6 +129,8 @@ case "$mode" in
     zcode_key="${AI_OFFICE_LITELLM_API_KEY:-${ZCODE_API_KEY:-}}"
     zcode_base="${AI_OFFICE_LITELLM_BASE_URL:-${ZCODE_BASE_URL:-}}"
     zcode_model="${AI_OFFICE_AGENT_MODEL:-${ZCODE_MODEL:-}}"
+    zcode_model_family="${ZCODE_MODEL_FAMILY:-}"
+    zcode_reasoning_effort="${ZCODE_REASONING_EFFORT:-high}"
     if [[ -z "$zcode_key" || -z "$zcode_base" || -z "$zcode_model" ]]; then
       echo "zcode-acp launch requires LiteLLM key, base URL and model" >&2
       exit 2
@@ -140,6 +142,15 @@ case "$mode" in
     case "$zcode_model" in
       *[!a-zA-Z0-9._:/-]*) echo "zcode-acp launch received an invalid model" >&2; exit 2 ;;
     esac
+    case "$zcode_model_family" in
+      ""|*[!a-zA-Z0-9._:/-]*)
+        [[ -z "$zcode_model_family" ]] || { echo "zcode-acp launch received an invalid model family" >&2; exit 2; }
+        ;;
+    esac
+    case "$zcode_reasoning_effort" in
+      low|medium|high|xhigh) ;;
+      *) echo "zcode-acp launch received an invalid reasoning effort" >&2; exit 2 ;;
+    esac
     unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN
     unset OPENAI_API_KEY OPENAI_BASE_URL OPENAI_API_BASE ANTHROPIC_API_KEY
     export HOME="$zcode_home"
@@ -149,6 +160,8 @@ case "$mode" in
     export ZCODE_API_KEY="$zcode_key"
     export ZCODE_BASE_URL="$zcode_base"
     export ZCODE_MODEL="$zcode_model"
+    export ZCODE_MODEL_FAMILY="$zcode_model_family"
+    export ZCODE_REASONING_EFFORT="$zcode_reasoning_effort"
     export ZCODE_BIN="/openhands-state/zcode-cli/zcode.cjs"
     export ZCODE_NODE="/usr/local/bin/node"
     [[ -x "$ZCODE_BIN" ]] || { echo "zcode-acp backend runtime is missing: $ZCODE_BIN" >&2; exit 2; }
@@ -160,6 +173,25 @@ import sys
 
 target = pathlib.Path(sys.argv[1])
 model = os.environ["ZCODE_MODEL"]
+model_family = os.environ.get("ZCODE_MODEL_FAMILY", "")
+reasoning_effort = os.environ.get("ZCODE_REASONING_EFFORT", "high")
+model_config = {"name": model}
+if model_family == "glm-current":
+    # The physical LiteLLM route intentionally does not look like a native GLM
+    # model id. Carry the logical family metadata separately so ZCode preserves
+    # GLM-5.2's real reasoning levels instead of falling back to generic GLM
+    # defaults while the wire model remains the exact selected route.
+    thought = {
+        "xhigh": "max",
+        "high": "high",
+        "medium": "high",
+        "low": "nothink",
+    }[reasoning_effort]
+    model_config["reasoning"] = {
+        "enabled": True,
+        "variants": ["max", "high", "nothink"],
+        "defaultVariant": thought,
+    }
 target.write_text(json.dumps({
     "provider": {
         "pixel-litellm": {
@@ -173,7 +205,7 @@ target.write_text(json.dumps({
                 "apiKeyRequired": True,
             },
             "models": {
-                model: {"name": model},
+                model: model_config,
             },
         },
     },

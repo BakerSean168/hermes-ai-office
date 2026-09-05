@@ -720,6 +720,7 @@ async function buildExecutionAutomation(
     return openHandsProviderFactory({
       backend: selection.agentBackend as OpenHandsAgentBackend,
       model: selection.routeModel ?? selection.modelFamily,
+      modelFamily: selection.modelFamily,
       transport: selection.transport,
       phase: selection.phase as 'IMPLEMENT' | 'IMPLEMENT_FIX' | 'REVIEW',
       capability: selection.capability,

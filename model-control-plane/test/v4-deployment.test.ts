@@ -24,6 +24,10 @@ const literalWorktreeSmoke = fs.readFileSync(
   path.join(root, 'scripts/smoke-v4-literal-worktree.mjs'),
   'utf8',
 );
+const routingProfileSmoke = fs.readFileSync(
+  path.join(root, 'scripts/smoke-v4-routing-profile.mts'),
+  'utf8',
+);
 const atomicExchangePath = path.join(root, 'scripts/atomic-exchange-directories.py');
 const hostCacheScriptPath = path.join(root, 'scripts/prune-v4-host-cache.sh');
 const hostCacheScript = fs.readFileSync(hostCacheScriptPath, 'utf8');
@@ -366,6 +370,11 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
   assert.match(launcher, /zcode_key="\$\{AI_OFFICE_LITELLM_API_KEY:-\$\{ZCODE_API_KEY:-\}\}"/);
   assert.match(launcher, /zcode_base="\$\{AI_OFFICE_LITELLM_BASE_URL:-\$\{ZCODE_BASE_URL:-\}\}"/);
   assert.match(launcher, /zcode_model="\$\{AI_OFFICE_AGENT_MODEL:-\$\{ZCODE_MODEL:-\}\}"/);
+  assert.match(launcher, /zcode_model_family="\$\{ZCODE_MODEL_FAMILY:-\}"/);
+  assert.match(launcher, /zcode_reasoning_effort="\$\{ZCODE_REASONING_EFFORT:-high\}"/);
+  assert.match(launcher, /model_family == "glm-current"/);
+  assert.match(launcher, /"variants": \["max", "high", "nothink"\]/);
+  assert.match(launcher, /"defaultVariant": thought/);
   assert.match(
     launcher,
     /unset ZCODE_AUTH_TOKEN ZCODE_OAUTH_TOKEN ZCODE_ACCESS_TOKEN ZCODE_USER_TOKEN/,
@@ -378,6 +387,22 @@ test('V4 model-native ACP tooling exposes DSH, ZCode and safe execution-scoped Z
   assert.match(launcher, /"provider":/);
   assert.doesNotMatch(launcher, /\.config\/zcode/);
   execFileSync('bash', ['-n', path.join(root, 'openhands_tools/harness_agent_launcher.sh')]);
+});
+
+test('routing profile acceptance uses production admission and always disposes isolated runtime state', () => {
+  assert.match(routingProfileSmoke, /\/api\/v4\/runtime-admission/);
+  assert.match(routingProfileSmoke, /production target is not READY/);
+  assert.match(routingProfileSmoke, /dbFile: ':memory:'/);
+  assert.match(routingProfileSmoke, /canonical smoke repository HEAD changed/);
+  assert.match(routingProfileSmoke, /canonical smoke repository became dirty/);
+  assert.match(routingProfileSmoke, /\/interrupt/);
+  assert.match(routingProfileSmoke, /method: 'DELETE'/);
+  assert.match(routingProfileSmoke, /cleanupRoots/);
+  assert.match(routingProfileSmoke, /REVISION/);
+  assert.match(routingProfileSmoke, /TEST/);
+  assert.match(routingProfileSmoke, /REVIEW/);
+  assert.doesNotMatch(routingProfileSmoke, /SESSION_API_KEY\s*=\s*['"][^'"]+['"]/);
+  assert.doesNotMatch(routingProfileSmoke, /LITELLM_V3_KEY\s*=\s*['"][^'"]+['"]/);
 });
 
 test('OpenHands coding runtime is built and release-gated on Node 24', () => {
