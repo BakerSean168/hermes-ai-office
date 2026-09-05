@@ -6,6 +6,7 @@ Baseline: `a89ca77bf33616e401837d0d955070a3e4759b9d`
 Branch: `refactor/workspace-storage-v4-20260830`
 Worktree: `/home/dev/projects/pixel-agents-workspace-storage-v4`
 Supersession: normal new V4 execution now follows `docs/adr/ADR-004-single-active-plan-worktree-execution.md`; this plan remains the legacy/V3 isolation record.
+Archive note (2026-09-05): this document is no longer an active implementation authority. Normal V4 uses Plan-owned literal worktrees, same-WorkItem retry reuse, V4 workspace low-capacity protection, and host-level Docker/build-cache high-watermark governance. Canonical Git repack/gc remains an explicit quiescent operator maintenance action, not an autonomous worker task.
 
 ## Executive decision
 
@@ -373,12 +374,12 @@ Deployment gate:
 - MemoFlow canonical object sharing additionally requires the documented quiescent permission-preparation audit; otherwise the new runtime will safely fall back to private clones.
 - After deployment, resume the same MemoFlow Plan with plan-scoped `reconcile(auto)`; do not create a replacement Plan.
 
-Remaining planned follow-up:
+Historical follow-up disposition (2026-09-05):
 
-- **WS-1201 / WS-1202** — characterize and implement same-work-item transport retry workspace reuse. `IMPLEMENT_FIX` reuse already exists and remains unchanged.
-- **WS-1301** — add disk-pressure-triggered GC in addition to timer GC.
-- **WS-1302** — controlled MemoFlow canonical `git repack/gc` after legacy workspaces are safe; do not run while the current storage topology is still active.
-- **WS-1303** — reduce OpenHands container writable-layer/cache growth.
+- **WS-1201 / WS-1202** — superseded for normal V4 by ADR-004 WorkItem worktree reuse and durable retry ownership; no V4 action remains in this V3 plan.
+- **WS-1301** — superseded/closed for V4 by workspace low-capacity maintenance plus `hermes-pixel-v4-host-cache.timer` high-watermark governance.
+- **WS-1302** — canonical `git repack/gc` remains deliberately operator-only at a quiescent boundary as documented by the V4 worktree operations guide; it is not an active automation backlog item.
+- **WS-1303** — the former broad cache-cleanup idea is superseded by bounded host high-watermark governance. Running container writable layers are not automatically deleted; any future abnormal layer growth requires a new evidence-driven task rather than reviving this plan.
 
 ## Review/repair protocol
 

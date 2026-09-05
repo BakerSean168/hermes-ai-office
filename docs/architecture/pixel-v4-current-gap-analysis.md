@@ -84,14 +84,13 @@ PR intake and external-change review capabilities exist, but no long-lived `Main
 
 When a product plan exposes a Pixel/control-plane defect, the product worker cannot safely patch the running control plane. Today an external operator/ChatGPT conversation typically diagnoses and repairs Pixel, then reconciles the original plan. There is no explicit parent `WAITING_FOR_SYSTEM_REPAIR` state or governed child-plan deployment loop.
 
-### 8. Current provenance baseline still has known P1 work
+### 8. Provenance and release baseline is production-validated
 
-Before V4 autonomous effects are enabled, the current result/review provenance repair must:
+The result/review provenance baseline is now durable and fail-closed: exact workspace verification, exact result revision, independent review binding and delivery lineage are enforced by the V4 repositories/orchestration path. The BodySense recovery lineage exercised those invariants end-to-end without fabricating provider completion or review evidence.
 
-- re-run managed workspace verification for every legacy result attestation;
-- bind an approved review to the exact implementation execution/revision it reviewed.
+Release provenance is also decoupled from the mutable developer checkout. `refs/pixel-v4/release-approved` pins an explicit fast-forward-only exact SHA; release creates a detached transient worktree at that commit, validates common-dir identity and launcher provenance, then runs the full gate and atomic artifact publication from that tree. A production release completed while the canonical checkout was intentionally dirty with an unrelated tracked change.
 
-V4 action validation depends on these invariants.
+Host capacity is guarded at both workspace and Docker layers. Workspace provisioning fails closed below its minimum free-space floor; the host-cache timer starts reclaim only below 16 GiB, protects RUNNING Pixel executions and active releases, never prunes Docker volumes automatically, and exposes a sanitized maintenance projection in health.
 
 ### 9. V4 model-agent affinity is only partially migrated
 
