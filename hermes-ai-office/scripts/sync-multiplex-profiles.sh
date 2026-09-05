@@ -5,7 +5,7 @@ root="${HERMES_ROOT:-/opt/data}"
 plugin_name="hermes-ai-office"
 plugin_source="${AI_OFFICE_PLUGIN_SOURCE:-${root}/plugins/${plugin_name}}"
 hermes_bin="${HERMES_BIN:-/opt/hermes/.venv/bin/hermes}"
-required_profiles_csv="${AI_OFFICE_REQUIRED_PROFILES:-default,memoflow,bodysense}"
+required_profiles_csv="${AI_OFFICE_REQUIRED_PROFILES:-default,memoflow,bodysense,digital-biome}"
 
 is_required_profile() {
   local profile_name=$1
