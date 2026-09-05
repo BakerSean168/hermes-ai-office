@@ -1088,11 +1088,11 @@ export async function buildControlPlane(
   const projectPlanQueue = singleActivePlanEnabled
     ? new ProjectPlanQueueRuntime(repositories)
     : undefined;
+  const testTelemetryBaseUrl =
+    options.environment === 'test' || env.NODE_ENV === 'test' ? 'http://127.0.0.1:4000' : undefined;
   const executionTelemetry = new LiteLlmExecutionTelemetry({
     baseUrl: requiredText(
-      env.MODEL_CP_V3_LITELLM_URL ??
-        env.LITELLM_V3_BASE_URL ??
-        'https://oracle.taile92a8e.ts.net:10446',
+      env.MODEL_CP_V3_LITELLM_URL ?? env.LITELLM_V3_BASE_URL ?? testTelemetryBaseUrl,
       'LITELLM_TELEMETRY_URL_REQUIRED',
     ),
     envFile: env.MODEL_CP_LITELLM_ADMIN_ENV_FILE ?? '/srv/hermes-personal/secrets/litellm.env',
