@@ -341,6 +341,31 @@ export class LocalGitWorkspaceAdapter implements WorkspaceProviderPort {
     };
   }
 
+  async isRevisionAncestor(
+    repositoryPath: string,
+    ancestorRevision: string,
+    descendantRevision: string,
+  ): Promise<boolean> {
+    const root = await this.repositoryRoot(repositoryPath);
+    const repositoryIdentity = this.repositoryIdentity(root);
+    const ancestorExists = await this.gitSucceeds(
+      root,
+      ['cat-file', '-e', ancestorRevision + '^{commit}'],
+      repositoryIdentity,
+    );
+    const descendantExists = await this.gitSucceeds(
+      root,
+      ['cat-file', '-e', descendantRevision + '^{commit}'],
+      repositoryIdentity,
+    );
+    if (!ancestorExists || !descendantExists) return false;
+    return await this.gitSucceeds(
+      root,
+      ['merge-base', '--is-ancestor', ancestorRevision, descendantRevision],
+      repositoryIdentity,
+    );
+  }
+
   async provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor> {
     const executionId = executionComponent(input.executionId);
     const repositoryRoot = await this.repositoryRoot(input.repositoryPath);

@@ -362,6 +362,142 @@ test('supervisor runtime claims, asks typed model and releases lease', async () 
   db.close();
 });
 
+test('supervisor runtime replaces a corrupt persisted OpenHands conversation and continues the decision', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-conversation-recovery-plan');
+  seeded.repos.supervisors.attachConversation(
+    seeded.supervisor.supervisorId,
+    'conversation-corrupt',
+  );
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  scheduler.schedule({
+    supervisorId: seeded.supervisor.supervisorId,
+    observationCursor: 0,
+    reason: 'OPERATOR_REQUEST',
+    requestedAt: new Date().toISOString(),
+  });
+  let creates = 0;
+  let resumes = 0;
+  const host = new OpenHandsSupervisorAdapter({
+    createSupervisorConversation: () => {
+      creates += 1;
+      return { conversationId: 'conversation-replacement', replaced: false };
+    },
+    resumeSupervisorConversation: () => {
+      resumes += 1;
+      throw new Error('OPENHANDS_SUPERVISOR_HTTP_500');
+    },
+  });
+  const client = {
+    decide: async (input: {
+      projection: { cursor: number; digest: string };
+      supervisorId: string;
+      planId: string;
+      conversationId: string;
+    }) => {
+      assert.equal(input.conversationId, 'conversation-replacement');
+      return JSON.stringify({
+        version: 1,
+        decisionId: 'decision-recovered-conversation',
+        planId: input.planId,
+        supervisorId: input.supervisorId,
+        observationCursor: input.projection.cursor,
+        projectionDigest: input.projection.digest,
+        idempotencyKey: 'runtime-recovered-noop',
+        preconditionSnapshot: {},
+        action: {
+          type: 'NO_ACTION',
+          idempotencyKey: 'runtime-recovered-noop',
+          payload: { type: 'NO_ACTION', reason: 'recovered conversation' },
+        },
+      });
+    },
+  };
+  const runtime = new SupervisorRuntime(
+    db,
+    seeded.repos.supervisors,
+    scheduler,
+    host,
+    new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}),
+    client,
+    'runtime-conversation-recovery-owner',
+  );
+
+  const result = await runtime.runOnce();
+  assert.equal(result[0]?.status, 'SUCCEEDED');
+  assert.equal(resumes, 1);
+  assert.equal(creates, 1);
+  assert.equal(
+    seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).conversationId,
+    'conversation-replacement',
+  );
+  const events = db
+    .prepare('SELECT type,payload FROM events WHERE aggregate_id=? ORDER BY event_order')
+    .all(seeded.supervisor.supervisorId) as unknown as Array<{
+    type: string;
+    payload: string;
+  }>;
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'SUPERVISOR_CONVERSATION_REPLACED' &&
+        JSON.parse(event.payload).reason === 'OPENHANDS_SUPERVISOR_HTTP_500',
+    ),
+  );
+  db.close();
+});
+
+test('supervisor runtime closes a successful terminal plan without touching OpenHands', async () => {
+  const db = memory();
+  const seeded = seedPlan(db, 'runtime-terminal-plan');
+  seeded.repos.plans.updateStatus(seeded.plan.planId, 'RUNNING');
+  seeded.repos.plans.updateStatus(seeded.plan.planId, 'SUCCEEDED');
+  const scheduler = new SupervisorWakeScheduler(seeded.repos.supervisors, db);
+  scheduler.schedule({
+    supervisorId: seeded.supervisor.supervisorId,
+    observationCursor: 0,
+    reason: 'TERMINAL_RESULT',
+    requestedAt: new Date().toISOString(),
+  });
+  let hostCalls = 0;
+  let decisions = 0;
+  const host = new OpenHandsSupervisorAdapter({
+    createSupervisorConversation: () => {
+      hostCalls += 1;
+      return { conversationId: 'should-not-be-created', replaced: false };
+    },
+    resumeSupervisorConversation: () => {
+      hostCalls += 1;
+      return { conversationId: 'should-not-be-resumed', replaced: false };
+    },
+  });
+  const runtime = new SupervisorRuntime(
+    db,
+    seeded.repos.supervisors,
+    scheduler,
+    host,
+    new SupervisorActionExecutor(seeded.repos.actions, seeded.repos.decisions, {}),
+    {
+      decide: async () => {
+        decisions += 1;
+        return '{}';
+      },
+    },
+    'runtime-terminal-owner',
+  );
+
+  const result = await runtime.runOnce();
+  assert.equal(result[0]?.status, 'SUCCEEDED');
+  assert.equal(result[0]?.code, 'PLAN_TERMINAL_SUPERVISOR_CLOSED');
+  assert.equal(hostCalls, 0);
+  assert.equal(decisions, 0);
+  assert.equal(
+    seeded.repos.supervisors.getById(seeded.supervisor.supervisorId).status,
+    'COMPLETED',
+  );
+  db.close();
+});
+
 test('supervisor runtime coalesces durable and due wakes for one supervisor into one decision', async () => {
   const db = memory();
   const seeded = seedPlan(db, 'runtime-coalesce-plan');

@@ -69,6 +69,7 @@ class AutomationWorkspace implements WorkspaceProviderPort {
   repositoryClean = true;
   integrateCalls = 0;
   readonly workspaces = new Map<string, WorkspaceDescriptor>();
+  readonly ancestorPairs = new Set<string>();
 
   async observeRepository(repositoryPath: string, revision: string) {
     return {
@@ -79,6 +80,14 @@ class AutomationWorkspace implements WorkspaceProviderPort {
       commitExists: this.repositoryHead === revision,
       observedAt: now(),
     };
+  }
+
+  async isRevisionAncestor(
+    _repositoryPath: string,
+    ancestorRevision: string,
+    descendantRevision: string,
+  ): Promise<boolean> {
+    return this.ancestorPairs.has(ancestorRevision + '->' + descendantRevision);
   }
 
   async provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor> {
@@ -832,6 +841,190 @@ test('verified FOLLOW_UP child supersedes a stale parent delivery without anothe
   assert.equal(durable.delivery?.mergeSha, 'child-merge-sha');
   assert.equal(durable.delivery?.errorCode, undefined);
   assert.deepEqual(await automation.runOnce(), []);
+  seeded.db.close();
+});
+
+test('verified recovery sibling supersedes an older delivery only when its exact revision descends from the stale head', async () => {
+  const config: PlanDeliveryConfig = {
+    remote: 'origin',
+    branch: 'pixel/shared-recovery-delivery',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
+  };
+  const seeded = seed();
+  const commonParent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+
+  const prepareChild = (
+    childPlanId: string,
+    revision: string,
+    delivery: DeliveryObservation,
+    terminal: boolean,
+  ) => {
+    seeded.repositories.plans.createChildPlan({
+      parentPlanId: commonParent.planId,
+      childPlanId,
+      repositoryPath: commonParent.repositoryPath,
+      objective: 'recover the same pull request',
+      relation: 'FOLLOW_UP',
+    });
+    const graph = seeded.repositories.plans.createGraphVersion({
+      planId: childPlanId,
+      reason: 'sibling recovery graph',
+    }).value!;
+    const item = seeded.repositories.plans.appendGraphWorkItem({
+      graphVersionId: graph.graphVersionId,
+      itemKey: 'recover',
+      title: 'recover',
+      objective: 'recover exact delivery lineage',
+      acceptanceCriteria: ['review passes'],
+      dependencies: [],
+    }).value!;
+    seeded.repositories.plans.updateStatus(childPlanId, 'READY');
+    seeded.repositories.plans.updateStatus(childPlanId, 'RUNNING');
+    const child = seeded.repositories.plans.getPlan(childPlanId);
+    seeded.repositories.plans.advanceAcceptedRevision(
+      childPlanId,
+      child.currentRevision,
+      revision,
+      'test sibling accepted revision',
+    );
+    seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'RUNNING');
+    seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'SUCCEEDED');
+    seeded.repositories.plans.attachDelivery(childPlanId, config);
+    seeded.repositories.plans.recordDeliveryObservation(childPlanId, delivery);
+    if (terminal) seeded.repositories.plans.updateStatus(childPlanId, 'SUCCEEDED');
+  };
+
+  prepareChild(
+    'plan-stale-sibling',
+    'stale-sha',
+    {
+      status: 'CHECKS_PENDING',
+      headSha: 'stale-sha',
+      pullRequestNumber: 165,
+      pullRequestUrl: 'https://example.test/pull/165',
+      errorCode: 'DELIVERY_PR_HEAD_STALE',
+    },
+    false,
+  );
+  prepareChild(
+    'plan-verified-recovery-sibling',
+    'recovery-sha',
+    {
+      status: 'VERIFIED',
+      headSha: 'recovery-sha',
+      pullRequestNumber: 165,
+      pullRequestUrl: 'https://example.test/pull/165',
+      mergeSha: 'recovery-merge-sha',
+    },
+    true,
+  );
+
+  const workspace = new AutomationWorkspace();
+  workspace.ancestorPairs.add('stale-sha->recovery-sha');
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const delivery = new ScriptedDelivery();
+  const automation = runtime(seeded.repositories, runner, workspace, {
+    requireDelivery: true,
+    delivery,
+  });
+
+  const result = await automation.runPlan('plan-stale-sibling');
+  assert.equal(result.status, 'SUCCEEDED');
+  assert.equal(result.code, 'PLAN_DELIVERY_SUPERSEDED');
+  assert.deepEqual(delivery.calls, []);
+  const durable = seeded.repositories.plans.getPlan('plan-stale-sibling');
+  assert.equal(durable.status, 'SUCCEEDED');
+  assert.equal(durable.delivery?.status, 'SUPERSEDED');
+  assert.equal(durable.delivery?.supersededByPlanId, 'plan-verified-recovery-sibling');
+  assert.equal(durable.delivery?.mergeSha, 'recovery-merge-sha');
+  assert.equal(durable.delivery?.errorCode, undefined);
+  seeded.db.close();
+});
+
+test('recovery sibling cannot supersede a stale delivery without exact ancestry proof', async () => {
+  const config: PlanDeliveryConfig = {
+    remote: 'origin',
+    branch: 'pixel/shared-recovery-delivery-no-ancestry',
+    targetBranch: 'main',
+    autoMerge: true,
+    mergeMethod: 'merge',
+    requiredChecks: ['CI'],
+  };
+  const seeded = seed();
+  const commonParent = seeded.repositories.plans.getPlan(seeded.plan.planId);
+  const createChild = (
+    childPlanId: string,
+    revision: string,
+    status: 'CHECKS_PENDING' | 'VERIFIED',
+  ) => {
+    seeded.repositories.plans.createChildPlan({
+      parentPlanId: commonParent.planId,
+      childPlanId,
+      repositoryPath: commonParent.repositoryPath,
+      objective: 'same surface but unrelated revision',
+      relation: 'FOLLOW_UP',
+    });
+    const graph = seeded.repositories.plans.createGraphVersion({
+      planId: childPlanId,
+      reason: 'graph',
+    }).value!;
+    const item = seeded.repositories.plans.appendGraphWorkItem({
+      graphVersionId: graph.graphVersionId,
+      itemKey: 'item',
+      title: 'item',
+      objective: 'item',
+      acceptanceCriteria: ['done'],
+      dependencies: [],
+    }).value!;
+    seeded.repositories.plans.updateStatus(childPlanId, 'READY');
+    seeded.repositories.plans.updateStatus(childPlanId, 'RUNNING');
+    const child = seeded.repositories.plans.getPlan(childPlanId);
+    seeded.repositories.plans.advanceAcceptedRevision(
+      childPlanId,
+      child.currentRevision,
+      revision,
+      'test',
+    );
+    seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'RUNNING');
+    seeded.repositories.plans.updateWorkItemStatus(item.workItemId, 'SUCCEEDED');
+    seeded.repositories.plans.attachDelivery(childPlanId, config);
+    seeded.repositories.plans.recordDeliveryObservation(childPlanId, {
+      status,
+      headSha: revision,
+      pullRequestNumber: 166,
+      pullRequestUrl: 'https://example.test/pull/166',
+      ...(status === 'VERIFIED' ? { mergeSha: 'merge-unrelated' } : {}),
+    });
+    if (status === 'VERIFIED') seeded.repositories.plans.updateStatus(childPlanId, 'SUCCEEDED');
+  };
+  createChild('plan-stale-no-ancestry', 'stale-no-ancestry', 'CHECKS_PENDING');
+  createChild('plan-recovery-no-ancestry', 'unrelated-recovery', 'VERIFIED');
+
+  const workspace = new AutomationWorkspace();
+  const runner = new ScriptedRunner(seeded.repositories, workspace);
+  const delivery = new ScriptedDelivery();
+  delivery.observations = [
+    {
+      status: 'CHECKS_PENDING',
+      headSha: 'stale-no-ancestry',
+      pullRequestNumber: 166,
+      pullRequestUrl: 'https://example.test/pull/166',
+    },
+  ];
+  const automation = runtime(seeded.repositories, runner, workspace, {
+    requireDelivery: true,
+    delivery,
+  });
+  const result = await automation.runPlan('plan-stale-no-ancestry');
+  assert.equal(result.code, 'DELIVERY_CHECKS_PENDING');
+  assert.equal(delivery.calls.length, 1);
+  assert.equal(
+    seeded.repositories.plans.getPlan('plan-stale-no-ancestry').delivery?.status,
+    'CHECKS_PENDING',
+  );
   seeded.db.close();
 });
 

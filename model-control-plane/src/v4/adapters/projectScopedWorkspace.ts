@@ -56,6 +56,19 @@ export class ProjectScopedWorkspaceAdapter implements WorkspaceProviderPort {
     return await this.legacy.observeRepository(repositoryPath, revision);
   }
 
+  async isRevisionAncestor(
+    repositoryPath: string,
+    ancestorRevision: string,
+    descendantRevision: string,
+  ): Promise<boolean> {
+    if (!this.legacy.isRevisionAncestor) throw new V4Error('WORKSPACE_ANCESTRY_CHECK_UNAVAILABLE');
+    return await this.legacy.isRevisionAncestor(
+      repositoryPath,
+      ancestorRevision,
+      descendantRevision,
+    );
+  }
+
   async provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor> {
     return this.literalProjects.has(input.projectKey ?? '')
       ? await this.literal.provision(input)

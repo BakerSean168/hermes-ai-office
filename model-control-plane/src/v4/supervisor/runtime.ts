@@ -67,6 +67,12 @@ export interface SupervisorRunResult {
   code: string;
 }
 
+function recoverableSupervisorConversationError(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const match = /^OPENHANDS_SUPERVISOR_HTTP_(404|410|500)$/.exec(error.message);
+  return match?.[0];
+}
+
 export class SupervisorRuntime {
   private cycleRunning = false;
 
@@ -109,15 +115,41 @@ export class SupervisorRuntime {
     const claim = this.supervisors.claimLease(request.supervisorId, this.ownerId, this.leaseTtlMs);
     if (!claim.value || claim.status === 'rejected') return { supervisorId: request.supervisorId, status: 'SKIPPED', code: claim.reason ?? 'LEASE_HELD' };
     try {
-      const supervisor = this.supervisors.getById(request.supervisorId);
+      let supervisor = this.supervisors.getById(request.supervisorId);
       if (supervisor.lastDecisionAt && request.observationCursor <= supervisor.observationCursor) {
         return { supervisorId: request.supervisorId, status: 'SKIPPED', code: 'STALE_WAKE' };
+      }
+      const planState = this.db.prepare('SELECT status FROM plans WHERE plan_id=?').get(supervisor.planId) as { status: string } | undefined;
+      if (!planState) throw new V4Error('PLAN_NOT_FOUND');
+      if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(planState.status)) {
+        if (planState.status === 'SUCCEEDED' && ['CREATED', 'ACTIVE', 'SLEEPING', 'RECOVERING'].includes(supervisor.status)) {
+          if (supervisor.status === 'CREATED') {
+            this.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
+            supervisor = this.supervisors.getById(supervisor.supervisorId);
+          }
+          this.supervisors.updateStatus(supervisor.supervisorId, 'COMPLETED');
+        } else if (supervisor.status !== 'COMPLETED' && supervisor.status !== 'CANCELLED') {
+          this.supervisors.updateStatus(supervisor.supervisorId, 'CANCELLED');
+        }
+        return { supervisorId: request.supervisorId, status: 'SUCCEEDED', code: 'PLAN_TERMINAL_SUPERVISOR_CLOSED' };
       }
       if (supervisor.status === 'CREATED') this.supervisors.updateStatus(supervisor.supervisorId, 'ACTIVE');
       if (['ACTIVE', 'SLEEPING', 'WAITING_FOR_RESOURCE', 'WAITING_FOR_SYSTEM_REPAIR', 'WAITING_FOR_EXTERNAL_EVIDENCE'].includes(supervisor.status)) this.supervisors.updateStatus(supervisor.supervisorId, 'OBSERVING');
       const projection = buildBoundedProjection(this.db, supervisor.supervisorId);
-      const conversation = await this.host.startOrResume({ supervisorId: supervisor.supervisorId, planId: supervisor.planId, conversationId: supervisor.conversationId, projection });
-      this.supervisors.attachConversation(supervisor.supervisorId, conversation.conversationId);
+      let conversation;
+      try {
+        conversation = await this.host.startOrResume({ supervisorId: supervisor.supervisorId, planId: supervisor.planId, conversationId: supervisor.conversationId, projection });
+      } catch (error) {
+        const recoveryReason = recoverableSupervisorConversationError(error);
+        if (!supervisor.conversationId || !recoveryReason) throw error;
+        const replacement = await this.host.startOrResume({ supervisorId: supervisor.supervisorId, planId: supervisor.planId, projection });
+        const swapped = this.supervisors.replaceConversation(supervisor.supervisorId, supervisor.conversationId, replacement.conversationId, recoveryReason);
+        if (swapped.status === 'rejected') throw new V4Error('SUPERVISOR_CONVERSATION_RECOVERY_RACE');
+        conversation = replacement;
+      }
+      const persistedConversation = this.supervisors.getById(supervisor.supervisorId).conversationId;
+      if (!persistedConversation) this.supervisors.attachConversation(supervisor.supervisorId, conversation.conversationId);
+      else if (persistedConversation !== conversation.conversationId) throw new V4Error('SUPERVISOR_CONVERSATION_RECOVERY_RACE');
       if (!this.client) throw new V4Error('SUPERVISOR_MODEL_UNAVAILABLE');
       const raw = await this.client.decide({ conversationId: conversation.conversationId, supervisorId: supervisor.supervisorId, planId: supervisor.planId, projection });
       const decision = parseSupervisorDecision(raw);

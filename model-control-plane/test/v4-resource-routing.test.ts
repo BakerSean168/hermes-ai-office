@@ -28,6 +28,7 @@ import {
   ResourceSelector,
 } from '../src/v4/orchestration/resourceSelector.js';
 import { openV4Database, SCHEMA_VERSION } from '../src/v4/persistence/database.js';
+import { RuntimeAdmissionRegistry } from '../src/v4/orchestration/runtimeAdmission.js';
 import { createRepositories } from '../src/v4/persistence/repositories.js';
 
 const NOW = '2026-09-03T00:00:00.000Z';
@@ -272,6 +273,57 @@ test('selector uses tier, model rank, sequence and hard filters deterministicall
   assert.equal(
     selectExecutableProfile(candidates, { phase: 'FINALIZE' }).status,
     'WAITING_FOR_RESOURCE',
+  );
+});
+
+test('runtime admission retries transient OpenHands startup failures before the normal TTL', () => {
+  const resources = [
+    resource({
+      resourceId: 'transient-deepseek',
+      resourceTier: 'FREE',
+      resourceSequence: 1,
+      bindings: [binding('transient-deepseek-binding', 'deepseek-v4-flash')],
+    }),
+  ];
+  const selected = selectExecutableProfile(resources, { phase: 'IMPLEMENT' });
+  assert.equal(selected.status, 'SELECTED');
+  if (selected.status !== 'SELECTED') return;
+
+  const registry = new RuntimeAdmissionRegistry();
+  const checkedAt = Date.parse(NOW);
+  const normalTtlMs = 15 * 60_000;
+  const transientTtlMs = 15_000;
+  registry.record(selected.candidate, {
+    ready: false,
+    checkedAt: NOW,
+    errorCode: 'OPENHANDS_UNAVAILABLE',
+  });
+  assert.equal(
+    registry.isStale(
+      selected.candidate,
+      checkedAt + transientTtlMs - 1,
+      normalTtlMs,
+      transientTtlMs,
+    ),
+    false,
+  );
+  assert.equal(
+    registry.isStale(selected.candidate, checkedAt + transientTtlMs, normalTtlMs, transientTtlMs),
+    true,
+  );
+
+  registry.record(selected.candidate, {
+    ready: false,
+    checkedAt: NOW,
+    errorCode: 'RUNTIME_PROBE_TRANSPORT_ERROR',
+  });
+  assert.equal(
+    registry.isStale(selected.candidate, checkedAt + transientTtlMs, normalTtlMs, transientTtlMs),
+    false,
+  );
+  assert.equal(
+    registry.isStale(selected.candidate, checkedAt + normalTtlMs, normalTtlMs, transientTtlMs),
+    true,
   );
 });
 

@@ -386,6 +386,13 @@ async function buildExecutionAutomation(
     24 * 60 * 60_000,
     'RUNTIME_ADMISSION_TTL_INVALID',
   );
+  const runtimeAdmissionTransientFailureTtlMs = integerValue(
+    env.MODEL_CP_V4_RUNTIME_ADMISSION_TRANSIENT_FAILURE_TTL_MS,
+    15_000,
+    1_000,
+    runtimeAdmissionTtlMs,
+    'RUNTIME_ADMISSION_TRANSIENT_FAILURE_TTL_INVALID',
+  );
   const runtimeAdmission = new RuntimeAdmissionRegistry();
   const resourceStateEffect = new LiteLlmResourceStateEffect({
     baseUrl: liteLlmAdminBaseUrl,
@@ -765,7 +772,12 @@ async function buildExecutionAutomation(
     runtimeAdmissionCycle = (async () => {
       const now = Date.now();
       const queue = admissionCandidates().filter((candidate) =>
-        runtimeAdmission.isStale(candidate, now, runtimeAdmissionTtlMs),
+        runtimeAdmission.isStale(
+          candidate,
+          now,
+          runtimeAdmissionTtlMs,
+          runtimeAdmissionTransientFailureTtlMs,
+        ),
       );
       // Admission is a readiness gate, not a startup dependency or throughput path.
       // Probe serially so provider-native OAuth homes and ACP runtime caches are never

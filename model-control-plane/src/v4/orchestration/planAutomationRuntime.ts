@@ -1401,7 +1401,7 @@ export class PlanAutomationRuntime {
   ): Promise<PlanAutomationResult> {
     let current = this.repositories.plans.getPlan(plan.planId);
     if (this.workspace.assertPlanSafety) await this.workspace.assertPlanSafety(current.planId);
-    current = this.supersedeDeliveryFromVerifiedChild(current);
+    current = await this.supersedeDeliveryFromVerifiedLineage(current);
     if (current.delivery?.status === 'SUPERSEDED_PENDING_CHILD') {
       return {
         planId: current.planId,
@@ -1511,6 +1511,73 @@ export class PlanAutomationRuntime {
             : 'PLAN_SUCCEEDED_LOCAL_ONLY',
       revision: current.currentRevision,
     };
+  }
+
+  private async supersedeDeliveryFromVerifiedLineage(plan: Plan): Promise<Plan> {
+    const fromChild = this.supersedeDeliveryFromVerifiedChild(plan);
+    if (!fromChild.delivery || isDeliveryComplete(fromChild.delivery) || !fromChild.parentPlanId)
+      return fromChild;
+    if ((fromChild.delivery.headSha ?? fromChild.currentRevision) !== fromChild.currentRevision)
+      return fromChild;
+
+    const parent = this.repositories.plans.getPlan(fromChild.parentPlanId);
+    const candidates = parent.childPlanIds
+      .filter((siblingPlanId) => siblingPlanId !== fromChild.planId)
+      .map((siblingPlanId) => this.repositories.plans.getPlan(siblingPlanId))
+      .filter((sibling) => {
+        const siblingDelivery = sibling.delivery;
+        if (
+          sibling.parentPlanId !== fromChild.parentPlanId ||
+          sibling.projectKey !== fromChild.projectKey ||
+          sibling.repositoryPath !== fromChild.repositoryPath ||
+          sibling.status !== 'SUCCEEDED' ||
+          !siblingDelivery ||
+          !isDeliveryComplete(siblingDelivery) ||
+          siblingDelivery.headSha !== sibling.currentRevision ||
+          !siblingDelivery.mergeSha
+        )
+          return false;
+        if (
+          siblingDelivery.remote !== fromChild.delivery!.remote ||
+          siblingDelivery.branch !== fromChild.delivery!.branch ||
+          siblingDelivery.targetBranch !== fromChild.delivery!.targetBranch ||
+          siblingDelivery.autoMerge !== fromChild.delivery!.autoMerge ||
+          siblingDelivery.mergeMethod !== fromChild.delivery!.mergeMethod ||
+          JSON.stringify(siblingDelivery.requiredChecks) !==
+            JSON.stringify(fromChild.delivery!.requiredChecks)
+        )
+          return false;
+        return !(
+          siblingDelivery.pullRequestNumber !== undefined &&
+          fromChild.delivery!.pullRequestNumber !== undefined &&
+          siblingDelivery.pullRequestNumber !== fromChild.delivery!.pullRequestNumber
+        );
+      });
+    if (candidates.length === 0) return fromChild;
+    if (!this.workspace.isRevisionAncestor)
+      throw new V4Error('WORKSPACE_ANCESTRY_CHECK_UNAVAILABLE');
+
+    const descendants: Plan[] = [];
+    for (const sibling of candidates) {
+      if (
+        await this.workspace.isRevisionAncestor(
+          fromChild.repositoryPath,
+          fromChild.currentRevision,
+          sibling.currentRevision,
+        )
+      )
+        descendants.push(sibling);
+    }
+    if (descendants.length === 0) return fromChild;
+    if (descendants.length > 1) throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_AMBIGUOUS');
+    const sibling = descendants[0]!;
+    this.repositories.plans.supersedeDeliveryFromVerifiedSibling(
+      fromChild.planId,
+      sibling.planId,
+      fromChild.currentRevision,
+      sibling.currentRevision,
+    );
+    return this.repositories.plans.getPlan(fromChild.planId);
   }
 
   private supersedeDeliveryFromVerifiedChild(plan: Plan): Plan {

@@ -179,6 +179,31 @@ export class LiteralWorktreeWorkspaceAdapter implements WorkspaceProviderPort {
     };
   }
 
+  async isRevisionAncestor(
+    repositoryPath: string,
+    ancestorRevision: string,
+    descendantRevision: string,
+  ): Promise<boolean> {
+    const root = fs.realpathSync(repositoryPath);
+    const ancestorExists = await this.gitSucceeds(root, [
+      'cat-file',
+      '-e',
+      ancestorRevision + '^{commit}',
+    ]);
+    const descendantExists = await this.gitSucceeds(root, [
+      'cat-file',
+      '-e',
+      descendantRevision + '^{commit}',
+    ]);
+    if (!ancestorExists || !descendantExists) return false;
+    return await this.gitSucceeds(root, [
+      'merge-base',
+      '--is-ancestor',
+      ancestorRevision,
+      descendantRevision,
+    ]);
+  }
+
   async provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor> {
     const executionId = component(input.executionId, 'WORKSPACE_EXECUTION_ID_INVALID');
     const planId = component(input.planId ?? '', 'WORKSPACE_PLAN_ID_REQUIRED');

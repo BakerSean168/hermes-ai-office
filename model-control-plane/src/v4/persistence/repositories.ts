@@ -715,6 +715,95 @@ export class PlanRepository {
     });
   }
 
+  supersedeDeliveryFromVerifiedSibling(
+    planId: string,
+    siblingPlanId: string,
+    expectedPlanRevision: string,
+    expectedSiblingRevision: string,
+  ): MutationResult<PlanDelivery> {
+    return withTransaction(this.db, () => {
+      const plan = this.getPlan(planId);
+      const current = this.getDelivery(planId);
+      if (!current) throw new V4Error('PLAN_DELIVERY_REQUIRED');
+      if (current.status === 'VERIFIED') throw new V4Error('DELIVERY_ALREADY_VERIFIED');
+      if (current.status === 'SUPERSEDED') {
+        if (current.supersededByPlanId !== siblingPlanId)
+          throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
+        return { status: 'existing', value: current };
+      }
+      if (current.status === 'SUPERSEDED_PENDING_CHILD' || current.supersededByPlanId)
+        throw new V4Error('DELIVERY_SUPERSEDED_CHILD_CONFLICT');
+      if (!plan.parentPlanId) throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_PARENT_REQUIRED');
+      if (plan.currentRevision !== expectedPlanRevision)
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_STALE_PLAN_REVISION');
+      if ((current.headSha ?? plan.currentRevision) !== expectedPlanRevision)
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_DELIVERY_HEAD_MISMATCH');
+
+      const sibling = this.getPlan(siblingPlanId);
+      if (
+        sibling.planId === plan.planId ||
+        sibling.parentPlanId !== plan.parentPlanId ||
+        sibling.projectKey !== plan.projectKey ||
+        sibling.repositoryPath !== plan.repositoryPath
+      )
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_LINEAGE_MISMATCH');
+      if (sibling.currentRevision !== expectedSiblingRevision)
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_STALE_VERIFIED_REVISION');
+
+      const currentRelation = this.db
+        .prepare(
+          'SELECT relationship_id FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?',
+        )
+        .get(plan.parentPlanId, plan.planId) as { relationship_id: string } | undefined;
+      const siblingRelation = this.db
+        .prepare(
+          'SELECT relationship_id FROM plan_relationships WHERE parent_plan_id=? AND child_plan_id=?',
+        )
+        .get(plan.parentPlanId, sibling.planId) as { relationship_id: string } | undefined;
+      if (!currentRelation || !siblingRelation)
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_RELATION_REQUIRED');
+
+      const siblingDelivery = sibling.delivery;
+      if (
+        sibling.status !== 'SUCCEEDED' ||
+        !siblingDelivery ||
+        !isDeliveryComplete(siblingDelivery)
+      )
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_NOT_VERIFIED');
+      if (
+        siblingDelivery.headSha !== sibling.currentRevision ||
+        siblingDelivery.headSha !== expectedSiblingRevision ||
+        !siblingDelivery.mergeSha
+      )
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_EXACT_REVISION_REQUIRED');
+      if (!this.deliveryConfigEqual(current, siblingDelivery))
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_CONFIG_MISMATCH');
+      if (
+        current.pullRequestNumber !== undefined &&
+        siblingDelivery.pullRequestNumber !== undefined &&
+        current.pullRequestNumber !== siblingDelivery.pullRequestNumber
+      )
+        throw new V4Error('DELIVERY_SUPERSEDING_SIBLING_PR_MISMATCH');
+
+      const updatedAt = iso();
+      this.db
+        .prepare(
+          'UPDATE plan_deliveries SET status=?,superseded_by_plan_id=?,merge_sha=?,error_code=NULL,updated_at=? WHERE plan_id=?',
+        )
+        .run('SUPERSEDED', siblingPlanId, siblingDelivery.mergeSha, updatedAt, planId);
+      this.events.appendInTransaction(
+        makeEvent(planId, 'DELIVERY', 'PLAN_DELIVERY_SUPERSEDED_BY_SIBLING', {
+          siblingPlanId,
+          staleHeadSha: expectedPlanRevision,
+          verifiedHeadSha: expectedSiblingRevision,
+          mergeSha: siblingDelivery.mergeSha,
+          pullRequestNumber: siblingDelivery.pullRequestNumber ?? null,
+        }),
+      );
+      return { status: 'updated', value: this.getDelivery(planId)! };
+    });
+  }
+
   recordDeliveryError(planId: string, errorCode: string): MutationResult<PlanDelivery> {
     failClosed(
       errorCode.trim().length > 0 && errorCode.length <= 500,

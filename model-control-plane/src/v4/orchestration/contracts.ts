@@ -219,6 +219,11 @@ export interface WorkspaceProviderPort {
   assertPlanSafety?(planId: string): Promise<void>;
   deliveryWorkspace?(planId: string): Promise<string | undefined>;
   observeRepository(repositoryPath: string, revision: string): Promise<RepositoryObservation>;
+  isRevisionAncestor?(
+    repositoryPath: string,
+    ancestorRevision: string,
+    descendantRevision: string,
+  ): Promise<boolean>;
   provision(input: WorkspaceProvisionInput): Promise<WorkspaceDescriptor>;
   /** Cheap signal used by the worker before attempting evidence-verified finalization. */
   hasCompletionEvidence?(workspace: WorkspaceDescriptor): boolean;

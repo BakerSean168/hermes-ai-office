@@ -31,6 +31,15 @@ export function requiresAcpRuntimeAdmission(candidate: ResourceSelectionCandidat
   return candidate.profile.agentBackend.endsWith('-acp');
 }
 
+export function isTransientRuntimeAdmissionFailure(errorCode: string | undefined): boolean {
+  if (!errorCode) return false;
+  return (
+    errorCode === 'OPENHANDS_UNAVAILABLE' ||
+    errorCode === 'OPENHANDS_TIMEOUT' ||
+    /^OPENHANDS_HTTP_5\d\d$/.test(errorCode)
+  );
+}
+
 export class RuntimeAdmissionRegistry implements ResourceCandidateReadinessPort {
   private readonly statuses = new Map<string, RuntimeAdmissionStatus>();
 
@@ -63,11 +72,21 @@ export class RuntimeAdmissionRegistry implements ResourceCandidateReadinessPort 
     return status;
   }
 
-  isStale(candidate: ResourceSelectionCandidate, nowMs: number, ttlMs: number): boolean {
+  isStale(
+    candidate: ResourceSelectionCandidate,
+    nowMs: number,
+    ttlMs: number,
+    transientFailureTtlMs = ttlMs,
+  ): boolean {
     const status = this.get(candidate);
     if (!status) return true;
     const checkedAt = Date.parse(status.checkedAt);
-    return !Number.isFinite(checkedAt) || nowMs - checkedAt >= ttlMs;
+    if (!Number.isFinite(checkedAt)) return true;
+    const effectiveTtl =
+      !status.ready && isTransientRuntimeAdmissionFailure(status.errorCode)
+        ? Math.min(ttlMs, transientFailureTtlMs)
+        : ttlMs;
+    return nowMs - checkedAt >= effectiveTtl;
   }
 
   list(): RuntimeAdmissionStatus[] {
