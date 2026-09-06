@@ -74,10 +74,7 @@ test('V4 service enables durable execution with narrowly scoped writable paths',
   );
   assert.match(service, /MODEL_CP_EXECUTION_RUNTIME_ENABLED=true/);
   assert.match(service, /MODEL_CP_AUTOMATION_RUNTIME_ENABLED=true/);
-  assert.match(
-    service,
-    /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense,forgeflow/,
-  );
+  assert.match(service, /MODEL_CP_V4_AUTOMATION_PROJECTS=memoflow,digital-biome,bodysense/);
   assert.match(service, /MODEL_CP_V4_SINGLE_ACTIVE_PLAN_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREES_ENABLED=true/);
   assert.match(service, /MODEL_CP_V4_LITERAL_WORKTREE_PROJECTS=bodysense,forgeflow/);
@@ -220,7 +217,7 @@ test('V4 release uses an approved exact-SHA transient worktree and fails closed 
   assert.match(release, /runtime\.reviewRoutes\.includes\('codex-auto-review'\)/);
   assert.match(release, /runtime\.requireDelivery !== true/);
   assert.match(release, /runtime\.automationProjectKeys/);
-  assert.match(release, /\['memoflow', 'digital-biome', 'bodysense', 'forgeflow'\]/);
+  assert.match(release, /\['memoflow', 'digital-biome', 'bodysense'\]/);
   assert.match(
     release,
     /expectedLiteralProjects = expectedLiteral \? \['bodysense', 'forgeflow'\] : \[\]/,
