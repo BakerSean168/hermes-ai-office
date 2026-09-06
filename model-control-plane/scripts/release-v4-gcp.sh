@@ -398,7 +398,7 @@ const expectedSingle = process.env.EXPECTED_SINGLE_ACTIVE === 'true';
 const expectedLiteral = process.env.EXPECTED_LITERAL === 'true';
 if (Boolean(scheduling.singleActivePlanEnabled) !== expectedSingle) process.exit(1);
 if (Boolean(scheduling.literalWorktreesEnabled) !== expectedLiteral) process.exit(1);
-const expectedLiteralProjects = expectedLiteral ? ['bodysense', 'forgeflow'] : [];
+const expectedLiteralProjects = expectedLiteral ? ['bodysense'] : [];
 if (JSON.stringify(runtime.literalWorktreeProjectKeys) !== JSON.stringify(expectedLiteralProjects)) process.exit(1);
 NODE
     then
